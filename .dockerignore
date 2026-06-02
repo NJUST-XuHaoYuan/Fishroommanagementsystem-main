@@ -1,0 +1,8 @@
+.data
+.git
+.tools
+dist
+deploy/images
+node_modules
+npm-debug.log*
+.DS_Store

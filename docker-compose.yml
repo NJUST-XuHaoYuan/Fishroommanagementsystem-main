@@ -1,0 +1,23 @@
+services:
+  fishroom:
+    build: .
+    container_name: fishroom-management-local
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      POSTGRES_DB: fishroom
+      POSTGRES_USER: fishroom
+      POSTGRES_PASSWORD: fishroom_local_password
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "8787:8787"
+    volumes:
+      - fishroom-data:/app/.data
+      - fishroom-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  fishroom-data:
+    name: fishroom-data
+  fishroom-postgres-data:
+    name: fishroom-postgres-data

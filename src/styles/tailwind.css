@@ -1,0 +1,58 @@
+@import 'tailwindcss' source(none);
+@source '../**/*.{js,ts,jsx,tsx}';
+
+@import 'tw-animate-css';
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.fishroom-content {
+  scroll-padding-bottom: 5rem;
+}
+
+.fishroom-content .overflow-x-auto {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 640px) {
+  .fishroom-content .grid-cols-2,
+  .fishroom-content .grid-cols-3,
+  .fishroom-content .grid-cols-4,
+  .fishroom-content [class*="grid-cols-[260px_1fr]"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .fishroom-content .items-end.justify-between,
+  .fishroom-content .items-center.justify-between {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .fishroom-content input,
+  .fishroom-content textarea,
+  .fishroom-content select,
+  .fishroom-content button {
+    min-height: 2.5rem;
+  }
+
+  [data-slot="dialog-content"],
+  [data-slot="alert-dialog-content"] {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding-bottom: max(1rem, env(safe-area-inset-bottom)) !important;
+  }
+
+  [data-slot="dialog-footer"] > *,
+  [data-slot="alert-dialog-footer"] > * {
+    width: 100%;
+  }
+}

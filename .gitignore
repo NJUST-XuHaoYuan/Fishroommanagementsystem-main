@@ -1,0 +1,29 @@
+# Local dependencies and build output
+node_modules/
+dist/
+.data/
+
+# Local tooling bundles
+.tools/
+
+# Runtime uploads and generated backups
+uploads/
+backups/
+deploy/db-backup/
+deploy/images/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!deploy/.env.example
+
+# Logs and OS files
+*.log
+npm-debug.log*
+.DS_Store
+
+# Packaged archives and Docker image exports
+*.zip
+*.tar
+*.tar.gz

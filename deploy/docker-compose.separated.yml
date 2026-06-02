@@ -1,0 +1,65 @@
+name: fishroom-management
+
+services:
+  frontend:
+    image: fishroom-frontend:local
+    container_name: fishroom-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8787}:80"
+    restart: unless-stopped
+
+  backend:
+    image: fishroom-backend:local
+    container_name: fishroom-backend
+    environment:
+      # Backend HTTP service
+      HOST: 0.0.0.0
+      PORT: 8787
+
+      # Database connection. Change these in .env on the server.
+      PGHOST: database
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-fishroom}
+      PGUSER: ${POSTGRES_USER:-fishroom}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-fishroom_local_password}
+
+      # Optional single-string alternative. Leave empty when using PG* above.
+      DATABASE_URL: ${DATABASE_URL:-}
+      UPLOAD_DIR: /app/uploads
+
+      # Tencent Cloud COS. Leave empty to use local uploads.
+      COS_SECRET_ID: ${COS_SECRET_ID:-}
+      COS_SECRET_KEY: ${COS_SECRET_KEY:-}
+      COS_BUCKET: ${COS_BUCKET:-}
+      COS_REGION: ${COS_REGION:-}
+      COS_PUBLIC_BASE_URL: ${COS_PUBLIC_BASE_URL:-}
+      COS_PREFIX: ${COS_PREFIX:-fishroom}
+    volumes:
+      - ../uploads:/app/uploads
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+  database:
+    image: fishroom-database:local
+    container_name: fishroom-database
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fishroom}
+      POSTGRES_USER: ${POSTGRES_USER:-fishroom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fishroom_local_password}
+    volumes:
+      - fishroom-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  fishroom-postgres-data:
+    name: fishroom-split-postgres-data
