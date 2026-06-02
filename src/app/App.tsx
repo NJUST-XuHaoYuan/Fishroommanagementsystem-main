@@ -400,7 +400,11 @@ export default function App() {
       const lite = options.liteSpecies && keysToFetch.includes("species") ? "&lite=species" : "";
       const response = await fetch(`${API}/state/slice?keys=${query}${lite}`, { headers: authJsonHeaders() });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(result.error || `HTTP ${response.status}`);
+        (error as Error & { status?: number }).status = response.status;
+        throw error;
+      }
       const data = result.data ?? {};
       setStateBase((current) => {
         if (!current.user) return current;
@@ -420,6 +424,15 @@ export default function App() {
       return true;
     } catch (error) {
       console.error("Failed to load state slice:", error);
+      if ((error as Error & { status?: number })?.status === 401) {
+        clearAuthSession();
+        stateLoadStarted.current = false;
+        lastSavedState.current = null;
+        loadedKeysRef.current = new Set<PersistedKey>();
+        setLoadedKeys(new Set<PersistedKey>());
+        setStateLoaded(false);
+        setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, null));
+      }
       return false;
     } finally {
       if (options.showLoading) setViewLoading(false);
@@ -1141,9 +1154,7 @@ export default function App() {
     setView(nextView);
   };
 
-  const currentViewKeys = VIEW_STATE_KEYS[view] ?? [];
-  const currentViewMissing = state.user && stateLoaded && !hasLoadedKeys(currentViewKeys);
-  const loadingView = viewLoading || currentViewMissing;
+  const loadingView = viewLoading;
   const viewContent = loadingView ? (
     <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">
       正在加载当前页面数据…
