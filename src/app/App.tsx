@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DailyLog, OperationLog, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
+import { StoreContext, initialState, DailyLog, OperationLog, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
 import { Login } from "./components/Login";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
@@ -19,11 +19,10 @@ import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
-import { clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
+import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
 import { DEFAULT_SITE_ID, DEFAULT_SITES, getSites, matchesSite, normalizeSiteId } from "./utils/sites";
 
 const API = "/api";
-const HEADERS = { "Content-Type": "application/json" };
 const MAX_OPERATION_LOGS = 10000;
 
 const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
@@ -236,7 +235,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
       }))
     : migratedData.products;
   const migratedProductOrigins = mergeProductOrigins(migratedData.productOrigins, migratedProducts ?? migratedData.products);
-  const migratedPersonnel = Array.isArray(migratedData.personnel) && migratedData.personnel.length > 0
+  const migratedPersonnel = Array.isArray(migratedData.personnel)
     ? migratedData.personnel.map((person: Record<string, unknown>, index: number) => {
         const name = String(person.name ?? person.username ?? "");
         const username = String(person.username ?? name);
@@ -244,7 +243,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
           id: String(person.id ?? `person-${index + 1}`),
           name,
           username,
-          password: String(person.password ?? (username === "admin" ? "admin" : username === "staff" ? "staff" : "123456")),
+          password: typeof person.password === "string" ? person.password : "",
           accessRole: person.accessRole === "admin" || person.accessRole === "staff"
             ? person.accessRole
             : username === "admin" ? "admin" : "staff",
@@ -278,15 +277,10 @@ function normalizePersistedState(data: any, currentUser: User): Store {
   };
 }
 
-function restoreUserFromSession(personnel: Store["personnel"]): User {
+function restoreUserFromSession(): User {
   const session = getValidAuthSession();
   if (!session) return null;
-  const account = personnel.find((person) => person.username === session.username);
-  if (!account) {
-    clearAuthSession();
-    return null;
-  }
-  return { username: account.username, role: account.accessRole };
+  return { username: session.username, role: session.role };
 }
 
 function findChangedKeys(before: PersistedStore, after: PersistedStore): PersistedKey[] {
@@ -310,6 +304,14 @@ function mergeOperationLogs(
       return true;
     })
     .slice(0, MAX_OPERATION_LOGS);
+}
+
+function withServerOperationLog(log: OperationLog | undefined, currentLogs: OperationLog[] = []): OperationLog[] {
+  return log
+    ? [log, ...currentLogs]
+        .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
+        .slice(0, MAX_OPERATION_LOGS)
+    : currentLogs;
 }
 
 function hasActiveEditingSurface(): boolean {
@@ -396,7 +398,7 @@ export default function App() {
     try {
       const query = encodeURIComponent(keysToFetch.join(","));
       const lite = options.liteSpecies && keysToFetch.includes("species") ? "&lite=species" : "";
-      const response = await fetch(`${API}/state/slice?keys=${query}${lite}`, { headers: HEADERS });
+      const response = await fetch(`${API}/state/slice?keys=${query}${lite}`, { headers: authJsonHeaders() });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
       const data = result.data ?? {};
@@ -437,7 +439,7 @@ export default function App() {
   ): Promise<{ appliedOperationLogs?: OperationLog[] }> => {
     const response = await fetch(`${API}/state/patch`, {
       method: "POST",
-      headers: HEADERS,
+      headers: authJsonHeaders(),
       body: JSON.stringify({ patch, basePatch, operationLogs }),
     });
     const result = await response.json().catch(() => ({}));
@@ -609,7 +611,7 @@ export default function App() {
     try {
       const response = await fetch(`${API}/products/upsert`, {
         method: "POST",
-        headers: HEADERS,
+        headers: authJsonHeaders(),
         body: JSON.stringify({
           product,
           operator: state.user?.username ?? "system",
@@ -656,7 +658,7 @@ export default function App() {
     try {
       const response = await fetch(`${API}/stock/save`, {
         method: "POST",
-        headers: HEADERS,
+        headers: authJsonHeaders(),
         body: JSON.stringify({
           ...change,
           upsert: Array.isArray(change.upsert)
@@ -710,7 +712,7 @@ export default function App() {
 	    try {
 	      const response = await fetch(`${API}/maintenance/save`, {
 	        method: "POST",
-	        headers: HEADERS,
+	        headers: authJsonHeaders(),
 	        body: JSON.stringify({
 	          ...change,
 	          operator: state.user?.username ?? "system",
@@ -765,7 +767,7 @@ export default function App() {
 	    try {
 	      const response = await fetch(`${API}/tank-groups/save`, {
 	        method: "POST",
-	        headers: HEADERS,
+	        headers: authJsonHeaders(),
 	        body: JSON.stringify({
 	          ...change,
 	          group: change.group ? { ...change.group, siteId: normalizeSiteId(change.group.siteId ?? activeSiteId) } : change.group,
@@ -801,10 +803,10 @@ export default function App() {
 	    }
 	  };
 
-	  const saveDailyLog = async (change: { log?: DailyLog; deleteId?: string }): Promise<boolean> => {
-	    clearTimeout(saveTimer.current);
-	    if (saveAbort.current) {
-	      saveAbort.current.abort();
+		  const saveDailyLog = async (change: { log?: DailyLog; deleteId?: string }): Promise<boolean> => {
+		    clearTimeout(saveTimer.current);
+		    if (saveAbort.current) {
+		      saveAbort.current.abort();
 	      saveAbort.current = null;
 	    }
 
@@ -812,7 +814,7 @@ export default function App() {
 	    try {
 	      const response = await fetch(`${API}/daily-logs/save`, {
 	        method: "POST",
-	        headers: HEADERS,
+	        headers: authJsonHeaders(),
 	        body: JSON.stringify({
 	          ...change,
 	          operator: state.user?.username ?? "system",
@@ -844,9 +846,126 @@ export default function App() {
 	      console.error("Failed to save daily logs:", error);
 	      setSaveStatus("error");
 	      setTimeout(() => setSaveStatus("idle"), 3000);
-	      return false;
-	    }
-	  };
+		      return false;
+			    }
+			  };
+
+  const saveShipmentOutbound = async (change: {
+    orderId: string;
+    selectedItemIds: string[];
+    shipMethod: "express" | "pickup";
+    carrier?: string;
+    shipDate: string;
+    actualShippingFee?: number;
+    notes?: string;
+  }): Promise<boolean> => {
+    clearTimeout(saveTimer.current);
+    if (saveAbort.current) {
+      saveAbort.current.abort();
+      saveAbort.current = null;
+    }
+
+    setSaveStatus("saving");
+    try {
+      const response = await fetch(`${API}/shipments/outbound`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify({
+          ...change,
+          operator: state.user?.username ?? "system",
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+
+      setStateBase((current) => {
+        const next = {
+          ...current,
+          orders: Array.isArray(result.orders) ? result.orders : current.orders,
+          shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
+          operationLogs: result.operationLog
+            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
+                arr.findIndex((item) => item.id === log.id) === idx
+              ).slice(0, MAX_OPERATION_LOGS)
+            : current.operationLogs,
+        };
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+      return true;
+    } catch (error) {
+      console.error("Failed to save outbound shipment:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+      return false;
+    }
+  };
+
+  const postPersonnelMutation = async (path: string, body: unknown): Promise<boolean> => {
+    clearTimeout(saveTimer.current);
+    if (saveAbort.current) {
+      saveAbort.current.abort();
+      saveAbort.current = null;
+    }
+
+    setSaveStatus("saving");
+    try {
+      const response = await fetch(`${API}${path}`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(body),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+
+      setStateBase((current) => {
+        const next = normalizePersistedState(
+          {
+            ...withoutUser(current),
+            personnel: Array.isArray(result.personnel) ? result.personnel : current.personnel,
+            orders: Array.isArray(result.orders) ? result.orders : current.orders,
+            operationLogs: withServerOperationLog(result.operationLog, current.operationLogs),
+          },
+          current.user
+        );
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      setLoadedKeys((current) => {
+        const next = new Set(current);
+        next.add("personnel");
+        if (Array.isArray((result as any).orders)) next.add("orders");
+        loadedKeysRef.current = next;
+        return next;
+      });
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+      return true;
+    } catch (error) {
+      console.error("Failed to save personnel mutation:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+      return false;
+    }
+  };
+
+  const savePersonnelAccount = (personnel: Personnel): Promise<boolean> =>
+    postPersonnelMutation("/personnel/save", { personnel });
+
+  const deletePersonnelAccount = (id: string): Promise<boolean> =>
+    postPersonnelMutation("/personnel/delete", { id });
+
+  const savePersonnelPermissions = (id: string, permissions: PermissionSet): Promise<boolean> =>
+    postPersonnelMutation("/personnel/permissions", { id, permissions });
+
+  const changePersonnelPassword = (change: { targetId?: string; oldPassword?: string; newPassword: string }): Promise<boolean> =>
+    postPersonnelMutation("/personnel/password", change);
 
   const refreshBusinessState = async () => {
     const currentUser = stateRef.current.user;
@@ -866,10 +985,18 @@ export default function App() {
     }
   };
 
-	  // ── Load only login accounts on mount, so the login screen is not blocked by full inventory data. ──
+	  // ── Validate the saved backend session on mount; login credentials are checked by the server. ──
   useEffect(() => {
+    const sessionUser = restoreUserFromSession();
+    if (!sessionUser) {
+      setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, null));
+      setLoadedKeys(new Set<PersistedKey>());
+      setLoading(false);
+      return;
+    }
+
     const fetchWithRetry = (attempt = 0): Promise<Response> =>
-      fetch(`${API}/login-data`, { headers: HEADERS }).catch((err) => {
+      fetch(`${API}/auth/me`, { headers: authJsonHeaders() }).catch((err) => {
         if (attempt < 3) {
           return new Promise<Response>((resolve, reject) =>
             setTimeout(() => fetchWithRetry(attempt + 1).then(resolve, reject), 1000 * (attempt + 1))
@@ -879,24 +1006,26 @@ export default function App() {
       });
 
     fetchWithRetry()
-      .then((r) => r.json())
-      .then(({ personnel }) => {
-        const loginPersonnel = Array.isArray(personnel) && personnel.length > 0
-          ? personnel
-          : initialState.personnel;
+      .then(async (r) => {
+        const result = await r.json().catch(() => ({}));
+        if (!r.ok || !result.user) throw new Error(result.error || `HTTP ${r.status}`);
+        return result.user;
+      })
+      .then((userResult) => {
+        const restoredUser: User = {
+          username: String(userResult.username ?? sessionUser.username),
+          role: userResult.role === "admin" ? "admin" : "staff",
+        };
         setStateBase((s) => {
-          const restoredUser = s.user ?? restoreUserFromSession(loginPersonnel);
-          return normalizePersistedState({ ...EMPTY_PERSISTED_STATE, personnel: loginPersonnel }, restoredUser);
+          return normalizePersistedState(EMPTY_PERSISTED_STATE, s.user ?? restoredUser);
         });
-        setLoadedKeys(new Set<PersistedKey>(["personnel"]));
+        setLoadedKeys(new Set<PersistedKey>());
       })
       .catch((e) => {
-        console.error("Failed to load login data:", e);
-        setStateBase((s) => {
-          const restoredUser = s.user ?? restoreUserFromSession(initialState.personnel);
-          return normalizePersistedState({ ...EMPTY_PERSISTED_STATE, personnel: initialState.personnel }, restoredUser);
-        });
-        setLoadedKeys(new Set<PersistedKey>(["personnel"]));
+        console.error("Failed to validate auth session:", e);
+        clearAuthSession();
+        setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, null));
+        setLoadedKeys(new Set<PersistedKey>());
       })
       .finally(() => setLoading(false));
   }, []);
@@ -1037,7 +1166,7 @@ export default function App() {
   }
 
 	  return (
-	    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, savePersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {!state.user ? (
         <Login />
       ) : (

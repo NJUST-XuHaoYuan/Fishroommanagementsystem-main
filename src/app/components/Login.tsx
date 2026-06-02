@@ -8,25 +8,40 @@ import { toast } from "sonner";
 import { saveAuthSession } from "../utils/authSession";
 
 export function Login() {
-  const { state, setState } = useStore();
+  const { setState } = useStore();
   const [u, setU] = useState("admin");
   const [p, setP] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
 
-  const submit = () => {
+  const submit = async () => {
     const username = u.trim();
-    const account = (state.personnel ?? []).find(
-      (person) => person.username === username && person.password === p
-    );
-
-    if (!account) {
-      toast.error("用户名或密码错误");
+    if (!username || !p) {
+      toast.error("请输入用户名和密码");
       return;
     }
-
-    const user = { username: account.username, role: account.accessRole };
-    saveAuthSession(user);
-    setState((s) => ({ ...s, user }));
-    toast.success(`欢迎，${account.name || account.username}`);
+    setLoggingIn(true);
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password: p }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok || !result.user) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+      const user = {
+        username: String(result.user.username ?? ""),
+        role: result.user.role === "admin" ? "admin" as const : "staff" as const,
+      };
+      saveAuthSession(user, undefined, result.expiresAt);
+      setState((s) => ({ ...s, user }));
+      toast.success(`欢迎，${user.username}`);
+    } catch {
+      toast.error("用户名或密码错误");
+    } finally {
+      setLoggingIn(false);
+    }
   };
 
   return (
@@ -48,7 +63,9 @@ export function Login() {
             <Label htmlFor="p">密码</Label>
             <Input id="p" type="password" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           </div>
-          <Button onClick={submit} className="w-full">登录</Button>
+          <Button onClick={submit} className="w-full" disabled={loggingIn}>
+            {loggingIn ? "登录中…" : "登录"}
+          </Button>
           <div className="text-xs text-muted-foreground text-center leading-relaxed">
             请输入账号密码登录，账号可在人员管理中维护
           </div>

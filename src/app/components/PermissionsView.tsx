@@ -10,7 +10,7 @@ import { confirmWrite } from "../utils/writeConfirm";
 const ACTIONS: PermissionAction[] = ["create", "update", "delete"];
 
 export function PermissionsView() {
-  const { state, saveStateTransform } = useStore();
+  const { state, savePersonnelPermissions } = useStore();
   const accounts = state.personnel ?? [];
   const [selectedId, setSelectedId] = useState(accounts[0]?.id ?? "");
 
@@ -35,23 +35,14 @@ export function PermissionsView() {
       return;
     }
     if (!confirmWrite("修改", `将${checked ? "授予" : "取消"}「${selected.name || selected.username}」的权限。`)) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      personnel: (latest.personnel ?? []).map((person) => {
-        if (person.id !== selected.id) return person;
-        const next = normalizePermissions(person.permissions);
-        return {
-          ...person,
-          permissions: {
-            ...next,
-            [moduleKey]: {
-              ...next[moduleKey],
-              [action]: checked,
-            },
-          },
-        };
-      }),
-    }));
+    const next = normalizePermissions(selected.permissions);
+    const ok = await savePersonnelPermissions(selected.id, {
+      ...next,
+      [moduleKey]: {
+        ...next[moduleKey],
+        [action]: checked,
+      },
+    });
     if (!ok) return toast.error("保存失败，请重试");
     toast.success("权限已保存");
   };
@@ -67,12 +58,7 @@ export function PermissionsView() {
       next[mod.key] = { create: checked, update: checked, delete: checked };
     }
     if (!confirmWrite("修改", `将${checked ? "授予" : "清空"}「${selected.name || selected.username}」的全部权限。`)) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      personnel: (latest.personnel ?? []).map((person) =>
-        person.id === selected.id ? { ...person, permissions: next } : person
-      ),
-    }));
+    const ok = await savePersonnelPermissions(selected.id, next);
     if (!ok) return toast.error("保存失败，请重试");
     toast.success(checked ? "已授予全部权限" : "已清空全部权限");
   };

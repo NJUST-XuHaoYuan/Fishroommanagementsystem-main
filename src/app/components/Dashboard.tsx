@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Order, Product, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { Order, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download } from "lucide-react";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
+import { authJsonHeaders } from "../utils/authSession";
 
 function todayDateString(): string {
   const now = new Date();
@@ -71,6 +73,33 @@ type DailyFinancePoint = {
   refunded: number;
 };
 
+type DailyLossDetail = {
+  id: string;
+  stockItemId: string;
+  productName: string;
+  speciesName: string;
+  size: string;
+  origin: string;
+  tankName: string;
+  batchNo: string;
+  supplier: string;
+  arrivalDate: string;
+  reason: string;
+  estimatedValue: number;
+  code: string;
+};
+
+type DailyBatchArrival = {
+  id: string;
+  batchNo: string;
+  supplier: string;
+  arrivalDate: string;
+  stockedCount: number;
+  lossCount: number;
+  bioFee: number;
+  shippingFee: number;
+};
+
 type DailyLossPoint = {
   date: string;
   label: string;
@@ -78,6 +107,8 @@ type DailyLossPoint = {
   stockBase: number;
   lossRate: number;
   estimatedValue: number;
+  lossDetails?: DailyLossDetail[];
+  batchArrivals?: DailyBatchArrival[];
 };
 
 type DashboardSummary = {
@@ -223,6 +254,7 @@ export function Dashboard() {
   const [dashboardSiteId, setDashboardSiteId] = useState<string>(activeSiteId);
   const [hoveredFinanceIndex, setHoveredFinanceIndex] = useState<number | null>(null);
   const [hoveredLossIndex, setHoveredLossIndex] = useState<number | null>(null);
+  const [selectedLossPoint, setSelectedLossPoint] = useState<DailyLossPoint | null>(null);
   const [exportingFishList, setExportingFishList] = useState(false);
   const [focusMode, setFocusMode] = useState<FocusMode>("species");
   const [focusSearch, setFocusSearch] = useState("");
@@ -237,7 +269,8 @@ export function Dashboard() {
     let cancelled = false;
     setHoveredFinanceIndex(null);
     setHoveredLossIndex(null);
-    fetch(`/api/dashboard-summary?financeDays=${financeDays}&siteId=${encodeURIComponent(dashboardSiteId)}`)
+    setSelectedLossPoint(null);
+    fetch(`/api/dashboard-summary?financeDays=${financeDays}&siteId=${encodeURIComponent(dashboardSiteId)}`, { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
@@ -258,7 +291,7 @@ export function Dashboard() {
   useEffect(() => {
     let cancelled = false;
     setFocusLoading(true);
-    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords&lite=species")
+    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords&lite=species", { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
@@ -292,6 +325,19 @@ export function Dashboard() {
 
   const productById = new Map(state.products.map((product) => [product.id, product]));
   const speciesById = new Map(state.species.map((species) => [species.id, species]));
+  const batchById = new Map(state.batches.map((batch) => [batch.id, batch]));
+  const subTankNameById = new Map<string, string>();
+  for (const group of state.tankGroups) {
+    for (const subTank of group.subTanks ?? []) {
+      subTankNameById.set(subTank.id, `${group.name} / ${subTank.name}`);
+    }
+  }
+  const tankNameForLoss = (record: StockLossRecord, stockItem?: StockItem): string => {
+    if (record.tankName) return record.tankName;
+    const snapshotName = [record.tankGroupName, record.subTankName].filter(Boolean).join(" / ");
+    if (snapshotName) return snapshotName;
+    return stockItem ? subTankNameById.get(stockItem.subTankId) ?? "未知缸位" : "未知缸位";
+  };
   const inTankStock = state.stock.filter((s) => isPhysicallyInTank(s, shippedOutStockIds));
   const inTankFishStock = inTankStock.filter((stockItem) => {
     const product = productById.get(stockItem.productId);
@@ -363,6 +409,7 @@ export function Dashboard() {
       record,
       stockItem,
       product,
+      species: itemSpecies,
       date: String(record.date ?? stockItem?.lossDate ?? "").slice(0, 10),
       estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
       isFish: isFishCategory(itemSpecies?.category ?? ""),
@@ -413,6 +460,44 @@ export function Dashboard() {
       return true;
     }).length;
     const lostCount = rowsForDate.length;
+    const lossDetails = rowsForDate.map((row) => {
+      const stockItem = row.stockItem;
+      const batch = stockItem ? batchById.get(stockItem.batchId) : undefined;
+      return {
+        id: String(row.record.id ?? stockItem?.id ?? ""),
+        stockItemId: String(stockItem?.id ?? ""),
+        productName: row.product?.name ?? "未命名商品",
+        speciesName: row.species?.name ?? "",
+        size: row.product?.size ?? "",
+        origin: row.product?.origin ?? "",
+        tankName: tankNameForLoss(row.record, stockItem),
+        batchNo: batch?.batchNo ?? "",
+        supplier: batch?.supplier ?? "",
+        arrivalDate: batch?.arrivalDate ?? "",
+        reason: row.record.reason ?? stockItem?.lossReason ?? "",
+        estimatedValue: Number(row.estimatedValue || 0),
+        code: stockItem?.code ?? "",
+      };
+    });
+    const batchArrivals = state.batches
+      .filter((batch) => String(batch.arrivalDate ?? "").slice(0, 10) === date)
+      .map<DailyBatchArrival>((batch: PurchaseBatch) => {
+        const batchStock = fishStock.filter((item) => item.batchId === batch.id);
+        const lostStockIds = new Set(lossRows
+          .filter((row) => row.stockItem?.batchId === batch.id)
+          .map((row) => row.stockItem?.id)
+          .filter(Boolean));
+        return {
+          id: batch.id,
+          batchNo: batch.batchNo,
+          supplier: batch.supplier,
+          arrivalDate: batch.arrivalDate,
+          stockedCount: Number(batch.stockedCount || 0) || batchStock.length,
+          lossCount: Number(batch.lossCount || 0) || lostStockIds.size,
+          bioFee: Number(batch.bioFee || 0),
+          shippingFee: Number(batch.shippingFee || 0),
+        };
+      });
     return {
       date,
       label: shortDateLabel(date),
@@ -420,6 +505,8 @@ export function Dashboard() {
       stockBase,
       lossRate: stockBase > 0 ? lostCount / stockBase * 100 : 0,
       estimatedValue: rowsForDate.reduce((sum, row) => sum + Number(row.estimatedValue || 0), 0),
+      lossDetails,
+      batchArrivals,
     };
   });
   if (summary) {
@@ -476,6 +563,7 @@ export function Dashboard() {
   const lossRangeAvgRate = dailyLossData.length > 0
     ? dailyLossData.reduce((sum, point) => sum + point.lossRate, 0) / dailyLossData.length
     : 0;
+  const lossRangeBatchCount = dailyLossData.reduce((sum, point) => sum + (point.batchArrivals?.length ?? 0), 0);
   const financeTicks = [1, 0.75, 0.5, 0.25, 0].map((ratio) => ({
     ratio,
     value: maxFinanceValue * ratio,
@@ -691,7 +779,7 @@ export function Dashboard() {
       shipments: state.shipments,
     };
     try {
-      const response = await fetch("/api/state/slice?keys=species,products,tankGroups,stock,shipments&lite=species");
+      const response = await fetch("/api/state/slice?keys=species,products,tankGroups,stock,shipments&lite=species", { headers: authJsonHeaders() });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
       const data = result.data ?? {};
@@ -1336,6 +1424,9 @@ export function Dashboard() {
               <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
                 平均占比 {lossRangeAvgRate.toFixed(2)}%
               </span>
+              <span className="rounded-full bg-indigo-50 px-2 py-1 text-indigo-700">
+                到货 {lossRangeBatchCount} 批
+              </span>
             </div>
           </div>
           <div className="mb-3 flex flex-wrap items-center gap-4 text-xs">
@@ -1348,7 +1439,10 @@ export function Dashboard() {
             <span className="flex items-center gap-1.5 text-sky-700">
               <span className="size-2.5 rounded-full bg-sky-500" /> 预计销售价值
             </span>
-            <span className="text-muted-foreground">三条线独立缩放，悬停查看真实数值</span>
+            <span className="flex items-center gap-1.5 text-indigo-700">
+              <span className="h-3 w-2 rounded-sm bg-indigo-500" /> 到货批次
+            </span>
+            <span className="text-muted-foreground">三条线独立缩放，悬停查看真实数值，点击日期查看明细</span>
           </div>
           <div
             className="relative h-72"
@@ -1387,12 +1481,43 @@ export function Dashboard() {
                 <div className="mt-1 text-muted-foreground">
                   当日库存基数：{hoveredLossPoint.stockBase} 条
                 </div>
+                {(hoveredLossPoint.batchArrivals?.length ?? 0) > 0 && (
+                  <div className="mt-1 text-indigo-700">
+                    当日到货：{hoveredLossPoint.batchArrivals?.length ?? 0} 批
+                  </div>
+                )}
               </div>
             )}
             <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailyLossData.length}天损耗指标折线图`}>
               {[18, 67.5, 117, 166.5, 216].map((y) => (
                 <line key={y} x1="64" x2="940" y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="4 4" />
               ))}
+              {dailyLossData.map((point, index) => {
+                const arrivals = point.batchArrivals ?? [];
+                if (arrivals.length === 0) return null;
+                const x = chartX(index, dailyLossData.length);
+                return (
+                  <g key={`loss-arrival-${point.date}`} pointerEvents="none">
+                    <line
+                      x1={x}
+                      x2={x}
+                      y1="18"
+                      y2="216"
+                      stroke="#6366f1"
+                      strokeDasharray="3 5"
+                      strokeWidth="1.5"
+                      opacity="0.55"
+                    />
+                    <path d={`M ${x} 18 l -6 10 h 12 Z`} fill="#6366f1" opacity="0.9" />
+                    {arrivals.length > 1 && (
+                      <text x={x} y="43" textAnchor="middle" fontSize="11" fontWeight="700" fill="#4f46e5">
+                        {arrivals.length}
+                      </text>
+                    )}
+                    <title>{`${point.date} 到货 ${arrivals.length} 批`}</title>
+                  </g>
+                );
+              })}
               <polyline
                 points={metricLinePoints(dailyLossData, (point) => point.lostCount, maxLossCount)}
                 fill="none"
@@ -1467,8 +1592,10 @@ export function Dashboard() {
                     fill="transparent"
                     onMouseEnter={() => setHoveredLossIndex(index)}
                     onMouseMove={() => setHoveredLossIndex(index)}
+                    onClick={() => setSelectedLossPoint(point)}
+                    cursor="pointer"
                   >
-                    <title>{`${point.date}\n死鱼 ${point.lostCount} 条\n库存占比 ${point.lossRate.toFixed(2)}%\n预计价值 ${formatMoney(point.estimatedValue)}`}</title>
+                    <title>{`${point.date}\n死鱼 ${point.lostCount} 条\n库存占比 ${point.lossRate.toFixed(2)}%\n预计价值 ${formatMoney(point.estimatedValue)}\n到货 ${(point.batchArrivals ?? []).length} 批`}</title>
                   </rect>
                 );
               })}
@@ -1487,6 +1614,99 @@ export function Dashboard() {
           <li>在「订单管理」的订单详情中记录发货、签收、报损和补发。</li>
         </ul>
       </Card>
+      <Dialog
+        open={Boolean(selectedLossPoint)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedLossPoint(null);
+        }}
+      >
+        <DialogContent aria-describedby={undefined} className="max-h-[85vh] max-w-3xl overflow-y-auto">
+          {selectedLossPoint && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{selectedLossPoint.date} 损耗与到货明细</DialogTitle>
+              </DialogHeader>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <div className="rounded-lg border bg-red-50 px-3 py-2">
+                  <div className="text-xs text-red-700">死鱼数量</div>
+                  <div className="text-xl font-semibold text-red-700">{selectedLossPoint.lostCount} 条</div>
+                </div>
+                <div className="rounded-lg border bg-amber-50 px-3 py-2">
+                  <div className="text-xs text-amber-700">库存占比</div>
+                  <div className="text-xl font-semibold text-amber-700">{selectedLossPoint.lossRate.toFixed(2)}%</div>
+                </div>
+                <div className="rounded-lg border bg-sky-50 px-3 py-2">
+                  <div className="text-xs text-sky-700">预计价值</div>
+                  <div className="text-xl font-semibold text-sky-700">{formatMoney(selectedLossPoint.estimatedValue)}</div>
+                </div>
+                <div className="rounded-lg border bg-indigo-50 px-3 py-2">
+                  <div className="text-xs text-indigo-700">到货批次</div>
+                  <div className="text-xl font-semibold text-indigo-700">{selectedLossPoint.batchArrivals?.length ?? 0} 批</div>
+                </div>
+              </div>
+              <section className="space-y-2">
+                <h4 className="text-sm font-semibold">当天到货批次</h4>
+                {(selectedLossPoint.batchArrivals ?? []).length > 0 ? (
+                  <div className="grid gap-2">
+                    {(selectedLossPoint.batchArrivals ?? []).map((batch) => (
+                      <div key={batch.id} className="rounded-lg border px-3 py-2 text-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold">{batch.batchNo || "未编号批次"}</span>
+                          <span className="text-xs text-muted-foreground">{batch.arrivalDate}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          供应商：{batch.supplier || "未填写"} · 入库 {batch.stockedCount} 条 · 已损耗 {batch.lossCount} 条 · 费用 {formatMoney(batch.bioFee + batch.shippingFee)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+                    当天没有采购批次到货。
+                  </div>
+                )}
+              </section>
+              <section className="space-y-2">
+                <h4 className="text-sm font-semibold">当天损耗记录</h4>
+                {(selectedLossPoint.lossDetails ?? []).length > 0 ? (
+                  <div className="overflow-hidden rounded-lg border">
+                    <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr] gap-3 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground">
+                      <span>商品</span>
+                      <span>缸位</span>
+                      <span>批次</span>
+                      <span className="text-right">预计价值</span>
+                    </div>
+                    {(selectedLossPoint.lossDetails ?? []).map((detail) => (
+                      <div key={`${detail.id}-${detail.stockItemId}`} className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr] gap-3 border-t px-3 py-2 text-sm">
+                        <div>
+                          <div className="font-semibold">
+                            {detail.productName}
+                            {detail.code ? <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">编号 {detail.code}</span> : null}
+                          </div>
+                          <div className="mt-0.5 text-xs text-muted-foreground">
+                            {[detail.speciesName, detail.size, detail.origin].filter(Boolean).join(" · ") || "商品信息未填写完整"}
+                          </div>
+                          {detail.reason ? <div className="mt-0.5 text-xs text-red-700">原因：{detail.reason}</div> : null}
+                        </div>
+                        <div className="text-muted-foreground">{detail.tankName || "未知缸位"}</div>
+                        <div className="text-muted-foreground">
+                          <div>{detail.batchNo || "未关联批次"}</div>
+                          <div className="text-xs">{[detail.supplier, detail.arrivalDate].filter(Boolean).join(" · ")}</div>
+                        </div>
+                        <div className="text-right font-semibold">{formatMoney(detail.estimatedValue)}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+                    当天没有损耗记录。
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

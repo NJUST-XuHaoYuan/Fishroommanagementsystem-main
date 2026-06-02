@@ -7,6 +7,7 @@ type AuthSession = {
   username: string;
   role: Role;
   expiresAt: number;
+  token?: string;
 };
 
 function readSession(): AuthSession | null {
@@ -29,12 +30,13 @@ function readSession(): AuthSession | null {
   }
 }
 
-export function saveAuthSession(user: NonNullable<User>) {
+export function saveAuthSession(user: NonNullable<User>, token?: string, expiresAt?: number) {
   const session: AuthSession = {
     username: user.username,
     role: user.role,
-    expiresAt: Date.now() + AUTH_SESSION_TTL_MS,
+    expiresAt: expiresAt ?? Date.now() + AUTH_SESSION_TTL_MS,
   };
+  if (token) session.token = token;
   window.localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
 }
 
@@ -54,4 +56,16 @@ export function getValidAuthSession(): AuthSession | null {
 
 export function getAuthSessionExpiresAt() {
   return getValidAuthSession()?.expiresAt ?? null;
+}
+
+export function authHeaders(): Record<string, string> {
+  const token = getValidAuthSession()?.token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export function authJsonHeaders(): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    ...authHeaders(),
+  };
 }

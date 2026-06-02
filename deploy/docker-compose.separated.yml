@@ -18,6 +18,7 @@ services:
       # Backend HTTP service
       HOST: 0.0.0.0
       PORT: 8787
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
 
       # Database connection. Change these in .env on the server.
       PGHOST: database
@@ -37,6 +38,21 @@ services:
       COS_REGION: ${COS_REGION:-}
       COS_PUBLIC_BASE_URL: ${COS_PUBLIC_BASE_URL:-}
       COS_PREFIX: ${COS_PREFIX:-fishroom}
+
+      # AI assistant. AI_API_BASE_URL can point to any OpenAI-compatible API.
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.2}
+
+      # Feishu integration. Webhook is used for push notifications; app credentials
+      # are used to reply to Feishu message events.
+      FEISHU_WEBHOOK_URL: ${FEISHU_WEBHOOK_URL:-}
+      FEISHU_WEBHOOK_SECRET: ${FEISHU_WEBHOOK_SECRET:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_DEFAULT_SITE_ID: ${FEISHU_DEFAULT_SITE_ID:-all}
     volumes:
       - ../uploads:/app/uploads
     depends_on:

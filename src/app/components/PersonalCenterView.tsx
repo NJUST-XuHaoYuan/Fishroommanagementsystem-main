@@ -53,7 +53,7 @@ function formatDateTime(value: string): string {
 }
 
 export function PersonalCenterView() {
-  const { state, saveStateTransform } = useStore();
+  const { state, changePersonnelPassword } = useStore();
   const user = state.user;
   const currentAccount = useMemo(
     () => (state.personnel ?? []).find((person) => person.username === user?.username),
@@ -105,18 +105,12 @@ export function PersonalCenterView() {
   const changeOwnPassword = async () => {
     if (!currentAccount) return toast.error("找不到当前账户");
     if (!oldPassword) return toast.error("请输入原密码");
-    if (oldPassword !== currentAccount.password) return toast.error("原密码不正确");
     if (!newPassword.trim()) return toast.error("请输入新密码");
     if (newPassword.length < 6) return toast.error("新密码至少 6 位");
     if (newPassword !== confirmPassword) return toast.error("两次输入的新密码不一致");
 
     if (!confirmWrite("修改", "将修改当前登录账户的密码。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      personnel: (latest.personnel ?? []).map((person) =>
-        person.id === currentAccount.id ? { ...person, password: newPassword } : person
-      ),
-    }));
+    const ok = await changePersonnelPassword({ oldPassword, newPassword });
     if (!ok) return toast.error("保存失败，请重试");
     setOldPassword("");
     setNewPassword("");
@@ -133,12 +127,7 @@ export function PersonalCenterView() {
     if (adminPassword !== adminConfirmPassword) return toast.error("两次输入的新密码不一致");
 
     if (!confirmWrite("修改", `将修改「${target.name || target.username}」的密码。`)) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      personnel: (latest.personnel ?? []).map((person) =>
-        person.id === target.id ? { ...person, password: adminPassword } : person
-      ),
-    }));
+    const ok = await changePersonnelPassword({ targetId: target.id, newPassword: adminPassword });
     if (!ok) return toast.error("保存失败，请重试");
     setAdminPassword("");
     setAdminConfirmPassword("");

@@ -44,10 +44,31 @@ Edit `.env`, especially:
 
 ```env
 FRONTEND_PORT=8787
+AUTH_SESSION_SECRET=replace_with_long_random_session_secret
 POSTGRES_DB=fishroom
 POSTGRES_USER=fishroom
 POSTGRES_PASSWORD=please_change_this_password
 ```
+
+`AUTH_SESSION_SECRET` is required. Generate a high-entropy value before deployment, for example:
+
+```bash
+openssl rand -base64 48
+```
+
+Optional AI assistant and Feishu integration variables are also in `.env.example`:
+
+```env
+AI_API_KEY=
+AI_API_BASE_URL=https://api.openai.com/v1
+AI_MODEL=gpt-4o-mini
+FEISHU_WEBHOOK_URL=
+FEISHU_APP_ID=
+FEISHU_APP_SECRET=
+FEISHU_VERIFICATION_TOKEN=
+```
+
+Configure the Feishu app event subscription URL as `/api/assistant/feishu/events` on the public backend/frontend domain.
 
 The backend database connection is configured in `docker-compose.separated.yml`
 under `backend.environment`:
@@ -55,6 +76,7 @@ under `backend.environment`:
 ```yaml
 PGHOST: database
 PGPORT: 5432
+AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
 PGDATABASE: ${POSTGRES_DB:-fishroom}
 PGUSER: ${POSTGRES_USER:-fishroom}
 PGPASSWORD: ${POSTGRES_PASSWORD:-fishroom_local_password}

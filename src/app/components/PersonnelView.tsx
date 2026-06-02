@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { emptyPermissions, fullPermissions, useStore, Personnel, Role, uid } from "../store";
+import { emptyPermissions, fullPermissions, useStore, Personnel, Role } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -25,7 +25,7 @@ const ACCESS_ROLE_LABEL: Record<Role, string> = {
 };
 
 export function PersonnelView() {
-  const { state, saveStateTransform } = useStore();
+  const { state, savePersonnelAccount, deletePersonnelAccount } = useStore();
   const [editing, setEditing] = useState<Personnel | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<Personnel | null>(null);
@@ -74,7 +74,8 @@ export function PersonnelView() {
     };
     if (!next.name) return toast.error("请填写人员姓名");
     if (!next.username) return toast.error("请填写登录账号");
-    if (!next.password) return toast.error("请填写登录密码");
+    if (!next.id && !next.password) return toast.error("请填写登录密码");
+    if (next.password && next.password.length < 6) return toast.error("登录密码至少 6 位");
     if ((state.personnel ?? []).some((p) => p.id !== next.id && p.username === next.username))
       return toast.error("登录账号不能重复");
     const existing = (state.personnel ?? []).find((p) => p.id === next.id);
@@ -84,19 +85,7 @@ export function PersonnelView() {
       return toast.error("至少需要保留一个管理员账号");
 
     if (!confirmWrite(next.id ? "修改" : "新增", next.id ? "将保存人员账号的修改。" : "将新增一个人员账号。")) return;
-    const ok = await saveStateTransform((latest) => {
-      const exists = (latest.personnel ?? []).find((p) => p.id === next.id);
-      const oldName = exists?.name;
-      const personnel = exists
-        ? latest.personnel.map((p) => (p.id === next.id ? next : p))
-        : [...(latest.personnel ?? []), { ...next, id: uid() }];
-      const orders = oldName && oldName !== next.name
-        ? latest.orders.map((order) =>
-            order.contactPerson === oldName ? { ...order, contactPerson: next.name } : order
-          )
-        : latest.orders;
-      return { ...latest, personnel, orders };
-    });
+    const ok = await savePersonnelAccount(next);
     if (!ok) return toast.error("保存失败，请重试");
     setOpen(false);
     toast.success("人员已保存");
@@ -110,10 +99,7 @@ export function PersonnelView() {
     if (orderCount(del.name) > 0) return toast.error("该人员已有订单关联，不能删除");
     const deleteId = del.id;
     setDeleting(true);
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      personnel: (latest.personnel ?? []).filter((p) => p.id !== deleteId),
-    }));
+    const ok = await deletePersonnelAccount(deleteId);
     setDeleting(false);
     if (!ok) return toast.error("删除失败，请重试");
     setDel(null);
@@ -200,13 +186,15 @@ export function PersonnelView() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-2">
-                  <Label>登录密码<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    type="password"
-                    value={editing.password}
-                    onChange={(e) => setEditing({ ...editing, password: e.target.value })}
-                    placeholder="必填"
-                  />
+	                  <Label>
+	                    登录密码{!editing.id && <span className="text-red-500 ml-0.5">*</span>}
+	                  </Label>
+	                  <Input
+	                    type="password"
+	                    value={editing.password}
+	                    onChange={(e) => setEditing({ ...editing, password: e.target.value })}
+	                    placeholder={editing.id ? "留空则不修改" : "必填，至少 6 位"}
+	                  />
                 </div>
                 <div className="grid gap-2">
                   <Label>系统权限<span className="text-red-500 ml-0.5">*</span></Label>

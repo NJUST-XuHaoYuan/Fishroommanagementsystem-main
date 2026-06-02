@@ -1,6 +1,6 @@
 import { ComponentType, ReactNode, useState } from "react";
 import { useStore } from "../store";
-import { clearAuthSession } from "../utils/authSession";
+import { authJsonHeaders, clearAuthSession } from "../utils/authSession";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import {
@@ -26,6 +26,7 @@ import {
   MapPin,
 } from "lucide-react";
 import { getSites, normalizeSiteId, siteName } from "../utils/sites";
+import { AIAssistantPanel } from "./AIAssistantPanel";
 
 export type ViewKey =
   | "dashboard"
@@ -262,6 +263,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             variant="ghost"
             size="icon"
             onClick={() => {
+              void fetch("/api/auth/logout", { method: "POST", headers: authJsonHeaders() }).catch(() => undefined);
               clearAuthSession();
               setState((s) => ({ ...s, user: null }));
             }}
@@ -357,6 +359,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           {children}
         </div>
       </main>
+      <AIAssistantPanel />
     </div>
   );
 }

@@ -33,6 +33,7 @@ import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
+import { authJsonHeaders } from "../utils/authSession";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -67,12 +68,10 @@ type OrderPickerItem = {
   commissionRate: number;
 };
 
-const JSON_HEADERS = { "Content-Type": "application/json" };
-
 async function postOrderApi(path: string, body: Record<string, unknown>) {
   const response = await fetch(`/api/${path}`, {
     method: "POST",
-    headers: JSON_HEADERS,
+    headers: authJsonHeaders(),
     body: JSON.stringify(body),
   });
   const result = await response.json().catch(() => ({}));
@@ -2534,7 +2533,7 @@ function StockItemDetailDialog({
   useEffect(() => {
     if (!open || !stockItemId) return;
     let cancelled = false;
-    fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`)
+    fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`, { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
@@ -2738,7 +2737,7 @@ function StockPickerBioDialog({
   useEffect(() => {
     if (!open || !stockItemId) return;
     let cancelled = false;
-    fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`)
+    fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`, { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;

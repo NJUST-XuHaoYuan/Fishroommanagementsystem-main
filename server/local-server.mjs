@@ -1,7 +1,7 @@
 import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createGzip } from "node:zlib";
@@ -26,6 +26,57 @@ const DEFAULT_SITES = [
   { id: "jiangyin", name: "江阴" },
   { id: "nanjing", name: "南京" },
 ];
+const AUTH_SESSION_TTL_MS = numberFromEnv(process.env.AUTH_SESSION_TTL_MS, 4 * 60 * 60 * 1000);
+const AUTH_COOKIE_NAME = "fishroom_auth";
+const configuredAuthTokenSecret = process.env.AUTH_SESSION_SECRET || process.env.SESSION_SECRET || "";
+if (process.env.NODE_ENV === "production" && !configuredAuthTokenSecret) {
+  throw new Error("AUTH_SESSION_SECRET or SESSION_SECRET must be set in production");
+}
+const authTokenSecret = configuredAuthTokenSecret || randomBytes(32).toString("hex");
+const BOOTSTRAP_AUTH_ACCOUNTS = [
+  { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin" },
+  { id: "person-staff", name: "staff", username: "staff", password: process.env.BOOTSTRAP_STAFF_PASSWORD || "", accessRole: "staff" },
+  { id: "person-staff-a", name: "员工A", username: "staff-a", password: process.env.BOOTSTRAP_STAFF_A_PASSWORD || "", accessRole: "staff" },
+].filter((account) => account.password);
+const DEFAULT_CREDENTIAL_DIGESTS = new Set([
+  "8da193366e1554c08b2870c50f737b9587c3372b656151c4a96028af26f51334",
+  "6a49d425846a4d91e07e1ed9ea784e28a9a51381f53189bae64cbd53491e37b4",
+  "58624d00f23ec46db114b446abf858d4310b88a970c69782ff3d3723b1fa2eec",
+  "f5aeab35700ff0aa77236eb296bd9e4e7b9b55cda1b790718f14d712184d8909",
+]);
+const PERMISSION_MODULE_KEYS = [
+  "species",
+  "products",
+  "tankGroups",
+  "batches",
+  "stockIn",
+  "daily",
+  "lossRecords",
+  "customers",
+  "orders",
+  "accounts",
+];
+const PERMISSION_ACTIONS = ["create", "update", "delete"];
+const STATE_PATCH_PERMISSION_MODULES = {
+  sites: "accounts",
+  species: "species",
+  speciesCategories: "species",
+  products: "products",
+  productOrigins: "products",
+  tankGroups: "tankGroups",
+  batches: "batches",
+  stock: "stockIn",
+  logs: "daily",
+  checks: "daily",
+  bioRecords: "daily",
+  lossRecords: "lossRecords",
+  customers: "customers",
+  customerSources: "customers",
+  orders: "orders",
+  shipments: "orders",
+};
+const DISALLOWED_STATE_PATCH_KEYS = new Set(["personnel"]);
+const PASSWORD_HASH_PREFIX = "scrypt$1$";
 const cosConfig = {
   secretId: process.env.COS_SECRET_ID || "",
   secretKey: process.env.COS_SECRET_KEY || "",
@@ -35,6 +86,27 @@ const cosConfig = {
   prefix: String(process.env.COS_PREFIX || "fishroom").replace(/^\/+|\/+$/g, ""),
 };
 let cosClient;
+
+const aiConfig = {
+  apiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "",
+  apiBaseUrl: String(process.env.AI_API_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
+  chatPath: `/${String(process.env.AI_CHAT_COMPLETIONS_PATH || "chat/completions").replace(/^\/+/, "")}`,
+  model: process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  temperature: numberFromEnv(process.env.AI_TEMPERATURE, 0.2),
+  timeoutMs: numberFromEnv(process.env.AI_TIMEOUT_MS, 25000),
+  maxContextRows: numberFromEnv(process.env.AI_MAX_CONTEXT_ROWS, 80),
+};
+
+const feishuConfig = {
+  webhookUrl: process.env.FEISHU_WEBHOOK_URL || "",
+  webhookSecret: process.env.FEISHU_WEBHOOK_SECRET || "",
+  appId: process.env.FEISHU_APP_ID || "",
+  appSecret: process.env.FEISHU_APP_SECRET || "",
+  verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || "",
+  openApiBaseUrl: String(process.env.FEISHU_OPEN_API_BASE_URL || "https://open.feishu.cn").replace(/\/+$/, ""),
+  defaultSiteId: process.env.FEISHU_DEFAULT_SITE_ID || ALL_SITE_ID,
+};
+let feishuTenantTokenCache = { token: "", expiresAt: 0 };
 const STATE_KEYS = [
   "sites",
   "personnel",
@@ -96,11 +168,12 @@ function acceptsGzip(req) {
   return /\bgzip\b/i.test(req.headers["accept-encoding"] || "");
 }
 
-function sendJson(req, res, status, body) {
+function sendJson(req, res, status, body, extraHeaders = {}) {
   const payload = Buffer.from(JSON.stringify(body));
   if (acceptsGzip(req) && payload.length > 1024) {
     res.writeHead(status, {
       ...jsonHeaders,
+      ...extraHeaders,
       "Content-Encoding": "gzip",
       "Vary": "Accept-Encoding",
     });
@@ -110,7 +183,7 @@ function sendJson(req, res, status, body) {
     return;
   }
 
-  res.writeHead(status, jsonHeaders);
+  res.writeHead(status, { ...jsonHeaders, ...extraHeaders });
   res.end(payload);
 }
 
@@ -375,6 +448,43 @@ function mergeIncomingState(current = {}, incoming = {}) {
   return next;
 }
 
+function buildStatePatch(current = {}, patch = {}, basePatch = {}, incomingLogs = [], req) {
+  const nextState = { ...current, ...patch };
+
+  for (const key of Object.keys(patch)) {
+    if (
+      key !== "operationLogs" &&
+      Array.isArray(current[key]) &&
+      Array.isArray(patch[key]) &&
+      (hasObjectIds(current[key]) || hasObjectIds(basePatch[key]) || hasObjectIds(patch[key]))
+    ) {
+      nextState[key] = Array.isArray(basePatch[key])
+        ? mergeIdArrayPatch(current[key], basePatch[key], patch[key])
+        : key === "stock"
+          ? mergeStockFromGenericPost(current[key], patch[key])
+          : mergeIdArrayPreserveMissing(current[key], patch[key]);
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "stock") && Array.isArray(current.stock) && Array.isArray(patch.stock)) {
+    nextState.batches = refreshBatchStockCounts(nextState.batches, nextState.stock);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "tankGroups") && Array.isArray(current.tankGroups)) {
+    nextState.tankGroups = current.tankGroups;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "logs") && Array.isArray(current.logs)) {
+    nextState.logs = current.logs;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "lossRecords") && Array.isArray(current.lossRecords)) {
+    nextState.lossRecords = current.lossRecords;
+  }
+  nextState.operationLogs = mergeOperationLogsForGenericPost(
+    current.operationLogs,
+    [...incomingLogs, ...sanitizeOperationLogsForAuth(patch.operationLogs, req)]
+  );
+  return nextState;
+}
+
 function shippedOutStockIds(state = {}) {
   return new Set(
     (Array.isArray(state.shipments) ? state.shipments : [])
@@ -450,6 +560,8 @@ function buildLossRows(state = {}, productById = new Map(), speciesById = new Ma
 function buildDailyLossData(state = {}, dates = [], productById = new Map(), speciesById = new Map()) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+  const batches = Array.isArray(state.batches) ? state.batches : [];
+  const batchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
   const lossRows = buildLossRows(state, productById, speciesById);
   const lossDateByStockId = new Map();
   for (const row of lossRows) {
@@ -484,6 +596,34 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
     return isFishCategory(itemSpecies?.category ?? "");
   });
+  const fishStockByBatchId = new Map();
+  for (const item of fishStock) {
+    const batchId = String(item?.batchId ?? "");
+    if (!batchId) continue;
+    if (!fishStockByBatchId.has(batchId)) fishStockByBatchId.set(batchId, []);
+    fishStockByBatchId.get(batchId).push(item);
+  }
+  const lossStockIdsByBatchId = new Map();
+  for (const row of lossRows) {
+    const batchId = String(row.stockItem?.batchId ?? "");
+    const stockId = String(row.stockItem?.id ?? "");
+    if (!batchId || !stockId) continue;
+    if (!lossStockIdsByBatchId.has(batchId)) lossStockIdsByBatchId.set(batchId, new Set());
+    lossStockIdsByBatchId.get(batchId).add(stockId);
+  }
+
+  function tankNameForLossRow(row = {}) {
+    const record = row.record ?? {};
+    const explicitTankName = String(record?.tankName ?? "").trim();
+    if (explicitTankName) return explicitTankName;
+    const snapshotName = [record?.tankGroupName, record?.subTankName]
+      .map((part) => String(part ?? "").trim())
+      .filter(Boolean)
+      .join(" / ");
+    if (snapshotName) return snapshotName;
+    const subTankId = String(row.stockItem?.subTankId ?? "").trim();
+    return subTankId ? subTankDisplayName(state, subTankId) : "未知缸位";
+  }
 
   return dates.map((date) => {
     const seenLossIds = new Set();
@@ -505,6 +645,49 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
     }).length;
     const lostCount = rowsForDate.length;
     const estimatedValue = rowsForDate.reduce((sum, row) => sum + Number(row.estimatedValue || 0), 0);
+    const lossDetails = rowsForDate.map((row) => {
+      const stockItem = row.stockItem ?? {};
+      const product = row.product ?? {};
+      const species = row.species ?? {};
+      const batch = batchById.get(String(stockItem?.batchId ?? "")) ?? {};
+      return {
+        id: String(row.record?.id ?? stockItem?.id ?? ""),
+        stockItemId: String(stockItem?.id ?? ""),
+        productName: String(product?.name ?? "未命名商品"),
+        speciesName: String(species?.name ?? ""),
+        size: String(product?.size ?? ""),
+        origin: String(product?.origin ?? ""),
+        tankName: tankNameForLossRow(row),
+        batchNo: String(batch?.batchNo ?? ""),
+        supplier: String(batch?.supplier ?? ""),
+        arrivalDate: String(batch?.arrivalDate ?? ""),
+        reason: String(row.record?.reason ?? stockItem?.lossReason ?? ""),
+        estimatedValue: Number(row.estimatedValue || 0),
+        code: String(stockItem?.code ?? ""),
+      };
+    });
+    const batchArrivals = batches
+      .filter((batch) => String(batch?.arrivalDate ?? "").slice(0, 10) === date)
+      .map((batch) => {
+        const batchId = String(batch?.id ?? "");
+        const batchStock = fishStockByBatchId.get(batchId) ?? [];
+        const reportedStockedCount = Number(batch?.stockedCount);
+        const reportedLossCount = Number(batch?.lossCount);
+        return {
+          id: batchId,
+          batchNo: String(batch?.batchNo ?? ""),
+          supplier: String(batch?.supplier ?? ""),
+          arrivalDate: String(batch?.arrivalDate ?? ""),
+          stockedCount: Number.isFinite(reportedStockedCount) && reportedStockedCount > 0
+            ? reportedStockedCount
+            : batchStock.length,
+          lossCount: Number.isFinite(reportedLossCount) && reportedLossCount > 0
+            ? reportedLossCount
+            : (lossStockIdsByBatchId.get(batchId)?.size ?? 0),
+          bioFee: Number(batch?.bioFee || 0),
+          shippingFee: Number(batch?.shippingFee || 0),
+        };
+      });
     return {
       date,
       label: date.slice(5).replace("-", "/"),
@@ -512,6 +695,8 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
       stockBase,
       lossRate: stockBase > 0 ? lostCount / stockBase * 100 : 0,
       estimatedValue,
+      lossDetails,
+      batchArrivals,
     };
   });
 }
@@ -591,6 +776,759 @@ function buildDashboardSummary(state = {}, options = {}) {
     siteId,
     dailyFinanceData,
     dailyLossData,
+  };
+}
+
+function numberFromEnv(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function signAuthPayload(payload) {
+  return createHmac("sha256", authTokenSecret).update(payload).digest("base64url");
+}
+
+function fullPermissionsValue() {
+  return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
+    module,
+    Object.fromEntries(PERMISSION_ACTIONS.map((action) => [action, true])),
+  ]));
+}
+
+function normalizePermissionsForStorage(permissions) {
+  const full = fullPermissionsValue();
+  return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
+    module,
+    Object.fromEntries(PERMISSION_ACTIONS.map((action) => [
+      action,
+      permissions?.[module]?.[action] ?? full[module][action],
+    ])),
+  ]));
+}
+
+function hashPassword(password) {
+  const salt = randomBytes(16).toString("base64url");
+  const hash = scryptSync(String(password), salt, 32).toString("base64url");
+  return `${PASSWORD_HASH_PREFIX}${salt}$${hash}`;
+}
+
+function constantTimeStringEqual(a = "", b = "") {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function verifyPassword(storedPassword, candidatePassword) {
+  const stored = String(storedPassword ?? "");
+  const candidate = String(candidatePassword ?? "");
+  if (!stored || !candidate) return false;
+  if (stored.startsWith(PASSWORD_HASH_PREFIX)) {
+    const parts = stored.split("$");
+    if (parts.length !== 4) return false;
+    const [, version, salt, expectedHash] = parts;
+    if (version !== "1" || !salt || !expectedHash) return false;
+    const actualHash = scryptSync(candidate, salt, 32).toString("base64url");
+    return constantTimeStringEqual(actualHash, expectedHash);
+  }
+  return constantTimeStringEqual(stored, candidate);
+}
+
+function passwordNeedsRehash(storedPassword) {
+  return !String(storedPassword ?? "").startsWith(PASSWORD_HASH_PREFIX);
+}
+
+function credentialDigest(username, password) {
+  return createHash("sha256").update(`${String(username ?? "").trim()}:${String(password ?? "")}`).digest("hex");
+}
+
+function isDefaultCredential(username, password) {
+  return DEFAULT_CREDENTIAL_DIGESTS.has(credentialDigest(username, password));
+}
+
+function publicUserFromAccount(account = {}) {
+  const username = String(account.username ?? "").trim();
+  const role = account.accessRole === "admin" ? "admin" : "staff";
+  return username ? { username, role } : null;
+}
+
+function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
+  if (!person || typeof person !== "object") return person;
+  const username = String(person.username ?? "");
+  const isAdmin = req?.auth?.account?.accessRole === "admin";
+  const isCurrentUser = username && username === req?.auth?.user?.username;
+  const { password, ...safePerson } = person;
+  if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
+  if (options.includePermissions || isAdmin || isCurrentUser) {
+    safePerson.permissions = normalizePermissionsForStorage(safePerson.permissions);
+  } else {
+    delete safePerson.permissions;
+  }
+  return safePerson;
+}
+
+function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
+  return (Array.isArray(personnel) ? personnel : []).map((person) =>
+    sanitizePersonnelRecordForResponse(person, req, options)
+  );
+}
+
+function sanitizeStateForResponse(data = {}, req) {
+  if (!data || typeof data !== "object") return data;
+  const next = { ...data };
+  if (Array.isArray(next.personnel)) {
+    next.personnel = sanitizePersonnelForResponse(next.personnel, req);
+  }
+  return next;
+}
+
+function sanitizePersonnelForLoginData(personnel = [], req) {
+  return (Array.isArray(personnel) ? personnel : []).map((person) => {
+    if (!person || typeof person !== "object") return person;
+    return sanitizePersonnelRecordForResponse(person, req, { includePermissions: false });
+  });
+}
+
+function createAuthToken(user) {
+  const expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
+  const payload = base64UrlJson({
+    username: user.username,
+    role: user.role,
+    exp: expiresAt,
+  });
+  const signature = signAuthPayload(payload);
+  return { token: `${payload}.${signature}`, expiresAt };
+}
+
+function verifyAuthToken(token) {
+  const [payload, signature] = String(token ?? "").split(".");
+  if (!payload || !signature) return null;
+  const expected = signAuthPayload(payload);
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (typeof parsed.username !== "string" || (parsed.role !== "admin" && parsed.role !== "staff")) return null;
+    if (typeof parsed.exp !== "number" || parsed.exp <= Date.now()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bearerTokenFromRequest(req) {
+  const header = String(req.headers.authorization ?? "");
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (match) return match[1].trim();
+  return cookieValue(req, AUTH_COOKIE_NAME);
+}
+
+function cookieValue(req, name) {
+  const rawCookie = String(req.headers.cookie ?? "");
+  const prefix = `${name}=`;
+  const found = rawCookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+  return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+}
+
+function authCookieHeader(token, expiresAt) {
+  const maxAge = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+  const parts = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    "Path=/",
+    `Max-Age=${maxAge}`,
+  ];
+  if (process.env.AUTH_COOKIE_SECURE === "true" || process.env.NODE_ENV === "production") parts.push("Secure");
+  return parts.join("; ");
+}
+
+function clearAuthCookieHeader() {
+  const parts = [`${AUTH_COOKIE_NAME}=`, "HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=0"];
+  if (process.env.AUTH_COOKIE_SECURE === "true" || process.env.NODE_ENV === "production") parts.push("Secure");
+  return parts.join("; ");
+}
+
+function authenticatedOperator(req) {
+  return req.auth?.user?.username || "system";
+}
+
+function sanitizeOperationLogsForAuth(logs = [], req) {
+  const operator = authenticatedOperator(req);
+  return (Array.isArray(logs) ? logs : []).map((log) =>
+    log && typeof log === "object" ? { ...log, operator } : log
+  );
+}
+
+function hasModulePermission(account = {}, module, action = "update") {
+  if (account?.accessRole === "admin") return true;
+  if (!PERMISSION_MODULE_KEYS.includes(module) || !PERMISSION_ACTIONS.includes(action)) return false;
+  return normalizePermissionsForStorage(account?.permissions)?.[module]?.[action] === true;
+}
+
+function requireModulePermissionForAuth(req, module, action = "update") {
+  if (!hasModulePermission(req.auth?.account, module, action)) {
+    throw new Error("当前账户没有执行该操作的权限");
+  }
+}
+
+function validateStatePatchAuthorization(req, patch = {}) {
+  for (const key of Object.keys(patch || {})) {
+    if (!STATE_KEY_SET.has(key)) {
+      throw new Error(`不支持的状态字段：${key}`);
+    }
+    if (DISALLOWED_STATE_PATCH_KEYS.has(key)) {
+      throw new Error("人员账号和权限必须通过专用接口修改");
+    }
+    if (key === "operationLogs") continue;
+    const module = STATE_PATCH_PERMISSION_MODULES[key];
+    if (module) requireModulePermissionForAuth(req, module, "update");
+  }
+}
+
+function normalizePersonnelInput(input = {}, existing = null) {
+  const source = input && typeof input === "object" ? input : {};
+  const id = String(source.id || existing?.id || uid("person"));
+  const name = String(source.name ?? existing?.name ?? "").trim();
+  const username = String(source.username ?? existing?.username ?? "").trim();
+  const accessRole = source.accessRole === "admin" ? "admin" : "staff";
+  const role = String(source.role ?? existing?.role ?? "").trim();
+  const phone = String(source.phone ?? existing?.phone ?? "").trim();
+  const notes = String(source.notes ?? existing?.notes ?? "").trim();
+  const plainPassword = String(source.password ?? "");
+  if (!name) throw new Error("请填写人员姓名");
+  if (!username) throw new Error("请填写登录账号");
+  if (!existing && !plainPassword) throw new Error("新增人员必须设置登录密码");
+  if (plainPassword && plainPassword.length < 6) throw new Error("登录密码至少 6 位");
+  return {
+    id,
+    name,
+    username,
+    password: plainPassword ? hashPassword(plainPassword) : existing?.password,
+    accessRole,
+    permissions: accessRole === "admin"
+      ? fullPermissionsValue()
+      : normalizePermissionsForStorage(source.permissions ?? existing?.permissions),
+    role,
+    phone,
+    notes,
+  };
+}
+
+function countAdmins(personnel = [], excludeId = "") {
+  return (Array.isArray(personnel) ? personnel : [])
+    .filter((person) => String(person?.id ?? "") !== String(excludeId) && person?.accessRole === "admin")
+    .length;
+}
+
+function createOperationLog(req, module, action, detail) {
+  return {
+    id: uid("log"),
+    time: new Date().toISOString(),
+    operator: authenticatedOperator(req),
+    module,
+    action,
+    detail,
+  };
+}
+
+async function readAuthAccounts() {
+  const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel FROM app_state WHERE id = $1", [stateId]);
+  const personnel = Array.isArray(rows[0]?.personnel) ? rows[0].personnel : [];
+  if (personnel.length > 0) return personnel;
+  return process.env.NODE_ENV === "production" ? [] : BOOTSTRAP_AUTH_ACCOUNTS;
+}
+
+async function rehashStoredPasswordIfNeeded(username, plainPassword) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data ?? {};
+    const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+    const targetIndex = personnel.findIndex((person) => String(person?.username ?? "") === String(username ?? ""));
+    if (targetIndex < 0 || !passwordNeedsRehash(personnel[targetIndex]?.password)) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const nextPersonnel = personnel.map((person, index) =>
+      index === targetIndex ? { ...person, password: hashPassword(plainPassword) } : person
+    );
+    await client.query(
+      "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify({ ...state, personnel: nextPersonnel })]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function rehashPlaintextPersonnelPasswords() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data ?? {};
+    const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+    let rehashedCount = 0;
+    const nextPersonnel = personnel.map((person) => {
+      if (!person || typeof person !== "object" || !person.password || !passwordNeedsRehash(person.password)) {
+        return person;
+      }
+      rehashedCount += 1;
+      return { ...person, password: hashPassword(person.password) };
+    });
+    if (rehashedCount > 0) {
+      await client.query(
+        "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+        [stateId, JSON.stringify({ ...state, personnel: nextPersonnel })]
+      );
+    }
+    await client.query("COMMIT");
+    if (rehashedCount > 0) {
+      console.log(`Rehashed ${rehashedCount} plaintext personnel password(s)`);
+    }
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function authenticateApiRequest(req) {
+  const payload = verifyAuthToken(bearerTokenFromRequest(req));
+  if (!payload) return null;
+  const accounts = await readAuthAccounts();
+  const account = accounts.find((person) => String(person?.username ?? "") === payload.username);
+  const user = account ? publicUserFromAccount(account) : null;
+  if (!user || user.role !== payload.role) return null;
+  return { user, account };
+}
+
+function isPublicApiRoute(req, url) {
+  if (req.method === "OPTIONS") return true;
+  if (url.pathname === "/api/health" && req.method === "GET") return true;
+  if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
+  if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
+  if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") return true;
+  return false;
+}
+
+function aiReady() {
+  return Boolean(aiConfig.apiKey && aiConfig.model);
+}
+
+function feishuWebhookReady() {
+  return Boolean(feishuConfig.webhookUrl);
+}
+
+function feishuAppReady() {
+  return Boolean(feishuConfig.appId && feishuConfig.appSecret);
+}
+
+function clampText(value, maxLength = 1800) {
+  const text = String(value ?? "").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function indexById(items = []) {
+  return new Map((Array.isArray(items) ? items : [])
+    .map((item) => [String(item?.id ?? ""), item])
+    .filter(([id]) => id));
+}
+
+function subTankIndex(state = {}) {
+  const entries = [];
+  for (const group of Array.isArray(state.tankGroups) ? state.tankGroups : []) {
+    for (const tank of Array.isArray(group?.subTanks) ? group.subTanks : []) {
+      const id = String(tank?.id ?? "");
+      if (!id) continue;
+      entries.push([id, {
+        tankGroupId: String(group?.id ?? ""),
+        tankGroupName: String(group?.name ?? ""),
+        subTankId: id,
+        subTankName: String(tank?.name ?? ""),
+        location: String(group?.location ?? ""),
+        siteId: normalizeSiteId(group?.siteId),
+      }]);
+    }
+  }
+  return new Map(entries);
+}
+
+function orderAmount(order = {}, shipments = []) {
+  return {
+    due: calcAmountDueForOrder(order, shipments),
+    paid: calcAmountPaidForOrder(order),
+    balance: getOrderFinancialStateForOrder(order, shipments),
+  };
+}
+
+function buildAssistantSnapshot(state = {}, options = {}) {
+  const siteId = normalizeSiteScope(options.siteId ?? ALL_SITE_ID);
+  const scopedState = siteFilteredState(state, siteId);
+  const maxRows = Math.max(20, Math.min(200, Number(options.maxRows ?? aiConfig.maxContextRows)));
+  const productsById = indexById(scopedState.products);
+  const speciesById = indexById(scopedState.species);
+  const batchesById = indexById(scopedState.batches);
+  const customersById = indexById(scopedState.customers);
+  const tanksById = subTankIndex(scopedState);
+  const shippedIds = shippedOutStockIds(scopedState);
+  const summary = buildDashboardSummary(state, { siteId, financeDays: DEFAULT_FINANCE_DAYS });
+  const sites = getSitesFromState(state);
+  const siteName = siteId === ALL_SITE_ID
+    ? "全部场地"
+    : sites.find((site) => site.id === siteId)?.name ?? siteId;
+
+  const stockRows = (Array.isArray(scopedState.stock) ? scopedState.stock : [])
+    .filter((item) => isPhysicallyInTank(item, shippedIds))
+    .slice(0, maxRows)
+    .map((item) => {
+      const product = productsById.get(String(item?.productId ?? ""));
+      const species = product ? speciesById.get(String(product?.speciesId ?? "")) : null;
+      const tank = tanksById.get(String(item?.subTankId ?? ""));
+      const batch = batchesById.get(String(item?.batchId ?? ""));
+      return {
+        code: String(item?.code ?? ""),
+        product: String(product?.name ?? item?.productId ?? ""),
+        species: String(species?.name ?? ""),
+        tank: tank ? `${tank.tankGroupName}/${tank.subTankName}` : String(item?.subTankId ?? ""),
+        status: item?.status ?? "healthy",
+        sold: Boolean(item?.sold),
+        inDate: String(item?.inDate ?? ""),
+        batchNo: String(batch?.batchNo ?? ""),
+        notes: clampText(item?.notes ?? "", 120),
+      };
+    });
+
+  const orderRows = (Array.isArray(scopedState.orders) ? scopedState.orders : [])
+    .slice()
+    .sort((a, b) => String(b?.date ?? b?.createdAt ?? "").localeCompare(String(a?.date ?? a?.createdAt ?? "")))
+    .slice(0, maxRows)
+    .map((order) => {
+      const customer = customersById.get(String(order?.customerId ?? ""));
+      const amount = orderAmount(order, Array.isArray(scopedState.shipments) ? scopedState.shipments : []);
+      return {
+        orderNo: String(order?.orderNo ?? ""),
+        date: String(order?.date ?? ""),
+        plannedShipDate: String(order?.plannedShipDate ?? ""),
+        customer: String(customer?.name ?? order?.customerId ?? ""),
+        status: String(order?.status ?? ""),
+        itemCount: Array.isArray(order?.items) ? order.items.length : 0,
+        due: amount.due,
+        paid: amount.paid,
+        balance: amount.balance,
+        notes: clampText(order?.notes ?? "", 120),
+      };
+    });
+
+  const shipmentRows = (Array.isArray(scopedState.shipments) ? scopedState.shipments : [])
+    .slice()
+    .sort((a, b) => String(b?.shipDate ?? b?.createdAt ?? "").localeCompare(String(a?.shipDate ?? a?.createdAt ?? "")))
+    .slice(0, maxRows)
+    .map((shipment) => {
+      const order = (Array.isArray(scopedState.orders) ? scopedState.orders : [])
+        .find((item) => String(item?.id ?? "") === String(shipment?.orderId ?? ""));
+      return {
+        orderNo: String(order?.orderNo ?? shipment?.orderId ?? ""),
+        shipDate: String(shipment?.shipDate ?? shipment?.outboundDate ?? ""),
+        carrier: String(shipment?.carrier ?? ""),
+        trackingNo: String(shipment?.trackingNo ?? ""),
+        status: String(shipment?.status ?? ""),
+        itemCount: Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.length : 0,
+      };
+    });
+
+  const dailyRows = (Array.isArray(scopedState.logs) ? scopedState.logs : [])
+    .slice()
+    .sort((a, b) => String(b?.date ?? "").localeCompare(String(a?.date ?? "")))
+    .slice(0, Math.min(maxRows, 40))
+    .map((log) => {
+      const tank = tanksById.get(String(log?.subTankId ?? "")) ||
+        (Array.isArray(scopedState.tankGroups) ? scopedState.tankGroups : [])
+          .find((group) => String(group?.id ?? "") === String(log?.tankGroupId ?? ""));
+      return {
+        date: String(log?.date ?? ""),
+        tank: tank?.tankGroupName ? `${tank.tankGroupName}/${tank.subTankName}` : String(tank?.name ?? log?.tankGroupId ?? log?.subTankId ?? ""),
+        action: String(log?.action ?? ""),
+        operator: String(log?.operator ?? ""),
+        notes: clampText(log?.notes ?? "", 120),
+      };
+    });
+
+  const lossRows = buildLossRows(scopedState, productsById, speciesById)
+    .slice()
+    .sort((a, b) => String(b?.date ?? "").localeCompare(String(a?.date ?? "")))
+    .slice(0, Math.min(maxRows, 40))
+    .map((row) => ({
+      date: row.date,
+      product: String(row.product?.name ?? ""),
+      species: String(row.species?.name ?? ""),
+      reason: clampText(row.record?.reason ?? row.stockItem?.lossReason ?? "", 120),
+      estimatedValue: row.estimatedValue,
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    siteId,
+    siteName,
+    dashboard: {
+      today: summary.today,
+      todayReceived: summary.todayReceived,
+      todayRefunded: summary.todayRefunded,
+      todayShippedOut: summary.todayShippedOut,
+      inFishStock: summary.inFishStock,
+      inTankNormal: summary.inTankNormal,
+      inTankSold: summary.inTankSold,
+      inTankSick: summary.inTankSick,
+      tankGroupCount: summary.tankGroupCount,
+      subTankCount: summary.subTankCount,
+      activeOrders: summary.activeOrders,
+      pendingShipments: summary.pendingShipments,
+      totalRevenue: summary.totalRevenue,
+    },
+    rows: {
+      stock: stockRows,
+      orders: orderRows,
+      shipments: shipmentRows,
+      recentDailyLogs: dailyRows,
+      recentLosses: lossRows,
+    },
+    rowLimits: {
+      maxRows,
+      stockTotal: Array.isArray(scopedState.stock) ? scopedState.stock.length : 0,
+      ordersTotal: Array.isArray(scopedState.orders) ? scopedState.orders.length : 0,
+      shipmentsTotal: Array.isArray(scopedState.shipments) ? scopedState.shipments.length : 0,
+    },
+  };
+}
+
+function getSitesFromState(state = {}) {
+  const sites = Array.isArray(state.sites) && state.sites.length > 0 ? state.sites : DEFAULT_SITES;
+  return sites
+    .map((site) => ({ id: normalizeSiteId(site?.id), name: String(site?.name ?? site?.id ?? "") }))
+    .filter((site) => site.id && site.name);
+}
+
+function assistantSystemPrompt(source = "web") {
+  return [
+    "你是鱼房管理系统里的 AI 助手，只能基于用户提供的业务数据快照回答。",
+    "回答使用中文，简洁、可执行，必要时列出订单号、缸位、日期或数量。",
+    "不要编造数据；数据快照里没有的信息要明确说当前系统未提供。",
+    "你不能直接修改库存、订单、客户或人员数据；涉及操作时给出建议步骤。",
+    source === "feishu" ? "回复来自飞书机器人，适合短消息阅读。" : "回复来自系统内助手，可适当分点说明。",
+  ].join("\n");
+}
+
+function assistantFallbackAnswer(message, snapshot) {
+  return [
+    "AI 服务尚未配置。请在后端环境变量里设置 AI_API_KEY（或 OPENAI_API_KEY）和 AI_MODEL 后重试。",
+    "",
+    `当前${snapshot.siteName}摘要：在缸鱼 ${snapshot.dashboard.inFishStock} 条，病鱼 ${snapshot.dashboard.inTankSick} 条，进行中订单 ${snapshot.dashboard.activeOrders} 单，待处理发货 ${snapshot.dashboard.pendingShipments} 单。`,
+    message ? `你刚才的问题是：「${clampText(message, 120)}」。` : "",
+  ].filter(Boolean).join("\n");
+}
+
+async function answerAssistantQuestion({ message, state, siteId = ALL_SITE_ID, source = "web" }) {
+  const question = clampText(message, 2000);
+  const snapshot = buildAssistantSnapshot(state, { siteId });
+  if (!question) throw new Error("请输入要询问 AI 助手的问题");
+  if (!aiReady()) {
+    return {
+      answer: assistantFallbackAnswer(question, snapshot),
+      aiConfigured: false,
+      model: null,
+      snapshot,
+    };
+  }
+
+  const payload = {
+    model: aiConfig.model,
+    temperature: aiConfig.temperature,
+    messages: [
+      { role: "system", content: assistantSystemPrompt(source) },
+      {
+        role: "user",
+        content: [
+          "业务数据快照如下：",
+          JSON.stringify(snapshot, null, 2),
+          "",
+          `用户问题：${question}`,
+        ].join("\n"),
+      },
+    ],
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), aiConfig.timeoutMs);
+  try {
+    const response = await fetch(`${aiConfig.apiBaseUrl}${aiConfig.chatPath}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${aiConfig.apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`AI request failed: HTTP ${response.status} ${clampText(raw, 500)}`);
+    }
+    const result = raw ? JSON.parse(raw) : {};
+    const answer = String(result?.choices?.[0]?.message?.content ?? "").trim();
+    if (!answer) throw new Error("AI response did not include an answer");
+    return {
+      answer,
+      aiConfigured: true,
+      model: aiConfig.model,
+      usage: result?.usage ?? null,
+      snapshot,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function feishuWebhookSign(timestamp) {
+  const stringToSign = `${timestamp}\n${feishuConfig.webhookSecret}`;
+  return createHmac("sha256", feishuConfig.webhookSecret)
+    .update(stringToSign)
+    .digest("base64");
+}
+
+async function sendFeishuWebhookText(text) {
+  if (!feishuWebhookReady()) {
+    return { ok: false, error: "FEISHU_WEBHOOK_URL is not configured" };
+  }
+  const body = {
+    msg_type: "text",
+    content: { text: clampText(text, 3900) },
+  };
+  if (feishuConfig.webhookSecret) {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    body.timestamp = timestamp;
+    body.sign = feishuWebhookSign(timestamp);
+  }
+  const response = await fetch(feishuConfig.webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || (result.code !== undefined && result.code !== 0)) {
+    return {
+      ok: false,
+      error: result.msg || result.message || `Feishu webhook failed: HTTP ${response.status}`,
+    };
+  }
+  return { ok: true };
+}
+
+async function getFeishuTenantAccessToken() {
+  if (!feishuAppReady()) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET are not configured");
+  if (feishuTenantTokenCache.token && feishuTenantTokenCache.expiresAt > Date.now() + 60_000) {
+    return feishuTenantTokenCache.token;
+  }
+  const response = await fetch(`${feishuConfig.openApiBaseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      app_id: feishuConfig.appId,
+      app_secret: feishuConfig.appSecret,
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.code !== 0 || !result.tenant_access_token) {
+    throw new Error(result.msg || result.message || `Failed to fetch Feishu tenant_access_token: HTTP ${response.status}`);
+  }
+  feishuTenantTokenCache = {
+    token: result.tenant_access_token,
+    expiresAt: Date.now() + Math.max(60, Number(result.expire ?? 7200) - 120) * 1000,
+  };
+  return feishuTenantTokenCache.token;
+}
+
+async function replyFeishuMessage(messageId, text) {
+  const token = await getFeishuTenantAccessToken();
+  const response = await fetch(`${feishuConfig.openApiBaseUrl}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      msg_type: "text",
+      content: JSON.stringify({ text: clampText(text, 3900) }),
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.code !== 0) {
+    throw new Error(result.msg || result.message || `Failed to reply Feishu message: HTTP ${response.status}`);
+  }
+  return result;
+}
+
+function verifyFeishuEventToken(payload = {}) {
+  if (!feishuConfig.verificationToken) return false;
+  const token = payload?.header?.token ?? payload?.token ?? payload?.event?.token ?? "";
+  return token === feishuConfig.verificationToken;
+}
+
+function feishuChallenge(payload = {}) {
+  if (payload?.type === "url_verification" && payload?.challenge) return String(payload.challenge);
+  if (payload?.header?.event_type === "url_verification" && payload?.challenge) return String(payload.challenge);
+  if (payload?.challenge && !payload?.event?.message) return String(payload.challenge);
+  return "";
+}
+
+function parseJsonText(value) {
+  if (value && typeof value === "object") return value;
+  try {
+    return JSON.parse(String(value ?? "{}"));
+  } catch {
+    return {};
+  }
+}
+
+function extractFeishuTextEvent(payload = {}) {
+  const event = payload?.event ?? {};
+  const message = event?.message ?? {};
+  const messageId = String(message?.message_id ?? event?.message_id ?? "");
+  const messageType = String(message?.message_type ?? message?.msg_type ?? "");
+  if (messageType && messageType !== "text") return { messageId, text: "", ignoredReason: "non-text message" };
+  const content = parseJsonText(message?.content ?? event?.content);
+  const rawText = String(content?.text ?? content?.content ?? "");
+  const text = rawText
+    .replace(/<at\s+[^>]*>.*?<\/at>/gi, "")
+    .replace(/@_user_\d+/g, "")
+    .trim();
+  return { messageId, text, ignoredReason: text ? "" : "empty text" };
+}
+
+function assistantPublicConfig() {
+  return {
+    aiConfigured: aiReady(),
+    aiModel: aiReady() ? aiConfig.model : null,
+    feishuWebhookConfigured: feishuWebhookReady(),
+    feishuAppConfigured: feishuAppReady(),
+    feishuEventPath: "/api/assistant/feishu/events",
+    defaultFeishuSiteId: feishuConfig.defaultSiteId,
   };
 }
 
@@ -921,17 +1859,13 @@ function getOrderFinancialStateForOrder(order = {}, shipments = []) {
   return { kind: "paid", amount: 0 };
 }
 
-function orderPermissionAllowed(state = {}, operator = "system", action = "update") {
-  if (!operator || operator === "system") return true;
-  const account = (Array.isArray(state.personnel) ? state.personnel : [])
-    .find((person) => person?.username === operator || person?.name === operator);
-  if (!account) return true;
-  if (account.accessRole === "admin") return true;
-  return account.permissions?.orders?.[action] !== false;
+function orderPermissionAllowedForAccount(account = {}, action = "update") {
+  if (account?.accessRole === "admin") return true;
+  return account?.permissions?.orders?.[action] !== false;
 }
 
-function requireOrderPermission(state = {}, operator = "system", action = "update") {
-  if (!orderPermissionAllowed(state, operator, action)) {
+function requireOrderPermissionForAuth(req, action = "update") {
+  if (!orderPermissionAllowedForAccount(req.auth?.account, action)) {
     throw new Error("当前账号没有订单模块的操作权限");
   }
 }
@@ -1041,6 +1975,279 @@ function deletedIdsByKey(current = [], next = []) {
   return (Array.isArray(current) ? current : [])
     .map((item) => String(item?.id ?? ""))
     .filter((id) => id && !nextIds.has(id));
+}
+
+function mapRecordsById(items = []) {
+  return new Map((Array.isArray(items) ? items : [])
+    .map((item) => [String(item?.id ?? ""), item])
+    .filter(([id]) => id));
+}
+
+function paymentChangeAction(currentPayments = [], nextPayments = []) {
+  const currentById = mapRecordsById(currentPayments);
+  const nextById = mapRecordsById(nextPayments);
+  if ([...nextById.keys()].some((id) => !currentById.has(id))) return "create";
+  if ([...currentById.keys()].some((id) => !nextById.has(id))) return "delete";
+  if ([...nextById.entries()].some(([id, payment]) => stableJson(currentById.get(id)) !== stableJson(payment))) return "update";
+  return null;
+}
+
+function countsAsCompletionShipment(shipment = {}) {
+  return shipment?.status !== "preparing" && !(shipment?.status === "damaged" && shipment?.damageResolution === "reship");
+}
+
+function validateOrderCanComplete(order = {}, shipments = []) {
+  const financialState = getOrderFinancialStateForOrder(order, shipments);
+  if (financialState.kind !== "paid") {
+    throw new Error("订单资金未结清，不能标记完成");
+  }
+  const activeShipments = shipments.filter((shipment) =>
+    String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
+  );
+  const shippedIds = new Set(activeShipments.flatMap((shipment) =>
+    Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.map((id) => String(id)) : []
+  ));
+  const orderItems = Array.isArray(order.items) ? order.items : [];
+  if (orderItems.length === 0 || !orderItems.every((item) => shippedIds.has(String(item?.stockItemId ?? "")))) {
+    throw new Error("订单尚有商品未发货，不能标记完成");
+  }
+  const allShipmentsResolved = activeShipments.length > 0 && activeShipments.every((shipment) =>
+    shipment?.status === "delivered" ||
+    (shipment?.status === "damaged" && shipment?.damageResolution === "refund")
+  );
+  if (!allShipmentsResolved) {
+    throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
+  }
+}
+
+const ORDER_STATUS_VALUES = new Set(["pending", "shipped", "completed", "cancelled", "damaged"]);
+const ORDER_MUTABLE_FIELD_KEYS = new Set([
+  "siteId",
+  "customerId",
+  "date",
+  "plannedShipDate",
+  "contactPerson",
+  "items",
+  "shippingFee",
+  "packagingFee",
+  "discount",
+  "notes",
+]);
+
+function orderMutableFieldsComparable(order = {}) {
+  return {
+    siteId: normalizeSiteId(order.siteId),
+    customerId: String(order.customerId ?? "").trim(),
+    date: String(order.date ?? "").trim(),
+    plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
+    contactPerson: String(order.contactPerson ?? "").trim(),
+    items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
+      stockItemId: String(item?.stockItemId ?? "").trim(),
+      productId: String(item?.productId ?? "").trim(),
+      price: normalizeMoney(item?.price, "Order item price"),
+      commissionRate: normalizeCommissionRate(item?.commissionRate),
+    })),
+    shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
+    packagingFee: normalizeMoney(order.packagingFee, "Packaging fee"),
+    discount: normalizeMoney(order.discount, "Discount"),
+    notes: String(order.notes ?? ""),
+  };
+}
+
+function orderProtectedFieldsComparable(order = {}) {
+  return Object.fromEntries(
+    Object.entries(order && typeof order === "object" ? order : {})
+      .filter(([key]) => !ORDER_MUTABLE_FIELD_KEYS.has(key) && key !== "payments" && key !== "status")
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+}
+
+function shipmentBlocksOrderItemRemoval(shipment = {}) {
+  return shipmentBlocksInventory(shipment) && !(shipment?.status === "damaged" && shipment?.damageResolution === "reship");
+}
+
+function validateOrderBusinessFieldsForPatch(currentOrder = {}, nextOrder = {}, nextState = {}) {
+  const normalized = normalizeOrderMutationInput(nextState, nextOrder, currentOrder);
+  if (stableJson(normalized) !== stableJson(orderMutableFieldsComparable(nextOrder))) {
+    throw new Error("订单字段必须符合订单专用接口的服务端校验结果");
+  }
+  if (stableJson(orderProtectedFieldsComparable(currentOrder)) !== stableJson(orderProtectedFieldsComparable(nextOrder))) {
+    throw new Error("订单编号、创建时间等系统字段不能通过状态补丁修改");
+  }
+
+  const nextItemIds = new Set((Array.isArray(nextOrder.items) ? nextOrder.items : [])
+    .map((item) => String(item?.stockItemId ?? ""))
+    .filter(Boolean));
+  const removedItemIds = (Array.isArray(currentOrder.items) ? currentOrder.items : [])
+    .map((item) => String(item?.stockItemId ?? ""))
+    .filter((id) => id && !nextItemIds.has(id));
+  if (removedItemIds.length === 0) return;
+  const blockedItemIds = new Set();
+  for (const shipment of Array.isArray(nextState.shipments) ? nextState.shipments : []) {
+    if (!shipmentBlocksOrderItemRemoval(shipment)) continue;
+    for (const id of Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds : []) {
+      const stockId = String(id ?? "");
+      if (stockId) blockedItemIds.add(stockId);
+    }
+  }
+  if (removedItemIds.some((id) => blockedItemIds.has(id))) {
+    throw new Error("已出库或发货的商品不能直接从订单中删除");
+  }
+}
+
+function validateOrderStatusForPatch(req, currentOrder = {}, nextOrder = {}, nextShipments = []) {
+  const currentStatus = String(currentOrder.status ?? "pending");
+  const nextStatus = String(nextOrder.status ?? "pending");
+  if (!ORDER_STATUS_VALUES.has(nextStatus)) throw new Error(`不支持的订单状态：${nextStatus || "unknown"}`);
+  if (currentStatus === nextStatus) return;
+
+  requireOrderPermissionForAuth(req, "update");
+  if (nextStatus === "cancelled") {
+    throw new Error("取消订单必须通过订单专用接口");
+  }
+  if (nextStatus === "completed") {
+    validateOrderCanComplete(nextOrder, nextShipments);
+    return;
+  }
+
+  const relatedShipments = nextShipments.filter((shipment) =>
+    String(shipment?.orderId ?? "") === String(nextOrder.id ?? "") && shipmentBlocksInventory(shipment)
+  );
+  if (nextStatus === "pending") {
+    if (relatedShipments.length > 0) throw new Error("订单仍有关联发货记录，不能直接改回待处理");
+    return;
+  }
+  if (nextStatus === "shipped") {
+    if (relatedShipments.length === 0) throw new Error("没有有效发货记录，不能直接改为已发货");
+    const financialState = getOrderFinancialStateForOrder(nextOrder, nextShipments);
+    if (financialState.kind !== "paid") throw new Error("订单未结清或存在待退款，不能改为已发货");
+    return;
+  }
+  if (nextStatus === "damaged") {
+    const hasDamagedShipment = relatedShipments.some((shipment) => shipment?.status === "damaged");
+    if (!hasDamagedShipment) throw new Error("没有报损发货记录，不能直接改为报损");
+  }
+}
+
+function validateShipmentPatchTransition(currentShipment = {}, nextShipment = {}) {
+  const from = String(currentShipment.status ?? "");
+  const to = String(nextShipment.status ?? "");
+  const shipMethod = String(nextShipment.shipMethod ?? currentShipment.shipMethod ?? "express");
+  const proof = Array.isArray(nextShipment.packingProof) ? nextShipment.packingProof : [];
+  const allowed = new Set([
+    "outbound:outbound",
+    "outbound:shipped",
+    "outbound:delivered",
+    "shipped:shipped",
+    "shipped:delivered",
+    "shipped:damaged",
+    "delivered:delivered",
+    "damaged:damaged",
+  ]);
+  if (!allowed.has(`${from}:${to}`)) {
+    throw new Error(`不允许的发货状态流转：${from || "unknown"} -> ${to || "unknown"}`);
+  }
+  if (to === "damaged" && !["refund", "reship"].includes(String(nextShipment.damageResolution ?? ""))) {
+    throw new Error("发货报损必须选择退款或补发处理方式");
+  }
+  if (from === "outbound" && to === "delivered") {
+    if (shipMethod !== "pickup") throw new Error("快递发货必须先确认发货，不能直接签收");
+    if (proof.length < 2) throw new Error("确认自取完成必须上传至少 2 张打包凭证");
+  }
+  if (from !== "delivered" && to === "delivered" && proof.length < 2) {
+    throw new Error("确认签收前必须已有至少 2 张打包凭证");
+  }
+  if (to === "shipped" && shipMethod !== "pickup") {
+    if (proof.length < 2) throw new Error("确认发货必须上传至少 2 张打包凭证");
+  }
+}
+
+function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = []) {
+  const changed = new Set(changedKeys);
+  if (!changed.has("orders") && !changed.has("shipments") && !changed.has("stock")) return;
+
+  const currentOrders = Array.isArray(current.orders) ? current.orders : [];
+  const nextOrders = Array.isArray(next.orders) ? next.orders : [];
+  const currentShipments = Array.isArray(current.shipments) ? current.shipments : [];
+  const nextShipments = Array.isArray(next.shipments) ? next.shipments : [];
+  const currentOrdersById = mapRecordsById(currentOrders);
+  const nextOrdersById = mapRecordsById(nextOrders);
+  const currentShipmentsById = mapRecordsById(currentShipments);
+  const nextShipmentsById = mapRecordsById(nextShipments);
+
+  for (const order of nextOrders) {
+    for (const payment of Array.isArray(order?.payments) ? order.payments : []) {
+      normalizePaymentRecord(payment);
+    }
+  }
+
+  for (const [orderId, nextOrder] of nextOrdersById.entries()) {
+    const currentOrder = currentOrdersById.get(orderId);
+    if (!currentOrder) throw new Error("新建订单必须通过订单专用接口");
+    if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
+    if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
+    if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
+
+    validateOrderBusinessFieldsForPatch(currentOrder, nextOrder, next);
+    validateOrderStatusForPatch(req, currentOrder, nextOrder, nextShipments);
+
+    const paymentAction = paymentChangeAction(currentOrder.payments ?? [], nextOrder.payments ?? []);
+    if (paymentAction) {
+      requireOrderPermissionForAuth(req, paymentAction);
+      if (nextOrder.status === "completed" || nextOrder.status === "cancelled") {
+        throw new Error("已完成或已取消订单不能修改资金记录");
+      }
+    }
+
+    if (nextOrder.status === "completed" && currentOrder.status !== "completed") {
+      requireOrderPermissionForAuth(req, "update");
+      validateOrderCanComplete(nextOrder, nextShipments);
+    }
+  }
+
+  for (const orderId of currentOrdersById.keys()) {
+    if (!nextOrdersById.has(orderId)) throw new Error("删除订单必须通过订单专用接口");
+  }
+
+  for (const [shipmentId, nextShipment] of nextShipmentsById.entries()) {
+    const currentShipment = currentShipmentsById.get(shipmentId);
+    if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
+    if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    requireOrderPermissionForAuth(req, "update");
+    const relatedOrder = nextOrdersById.get(String(nextShipment.orderId ?? ""));
+    if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
+      throw new Error("已完成或已取消订单不能修改发货状态");
+    }
+    validateShipmentPatchTransition(currentShipment, nextShipment);
+  }
+
+  for (const [shipmentId, currentShipment] of currentShipmentsById.entries()) {
+    if (nextShipmentsById.has(shipmentId)) continue;
+    requireOrderPermissionForAuth(req, "update");
+    if (!["outbound", "shipped"].includes(String(currentShipment.status ?? ""))) {
+      throw new Error("只能取消已出库或运输中的发货单");
+    }
+    const relatedOrder = nextOrdersById.get(String(currentShipment.orderId ?? ""));
+    if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
+      throw new Error("已完成或已取消订单不能取消发货");
+    }
+  }
+
+  if (changed.has("stock")) {
+    const activeOrderStockIds = new Set();
+    for (const order of nextOrders) {
+      if (!order || order.status === "cancelled") continue;
+      for (const item of Array.isArray(order.items) ? order.items : []) {
+        const stockId = String(item?.stockItemId ?? "");
+        if (stockId) activeOrderStockIds.add(stockId);
+      }
+    }
+    for (const stockItem of Array.isArray(next.stock) ? next.stock : []) {
+      if (activeOrderStockIds.has(String(stockItem?.id ?? "")) && stockItem?.sold !== true) {
+        throw new Error("订单关联库存不能被直接改回未售出");
+      }
+    }
+  }
 }
 
 function validateReferenceIntegrity(current = {}, next = {}, changedKeys = []) {
@@ -1404,6 +2611,7 @@ async function ensureSchema() {
       )
     `);
     await importLegacyStateIfPresent();
+    await rehashPlaintextPersonnelPasswords();
     await externalizePersistedUploads();
     await backfillDailyLogBioRecords();
   })();
@@ -1414,6 +2622,79 @@ async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
     res.end();
+    return;
+  }
+
+  if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") {
+    try {
+      const rawBody = await readBody(req);
+      const payload = JSON.parse(rawBody || "{}");
+      if (!verifyFeishuEventToken(payload)) {
+        sendJson(req, res, 403, { ok: false, error: "Invalid Feishu verification token" });
+        return;
+      }
+
+      const challenge = feishuChallenge(payload);
+      if (challenge) {
+        sendJson(req, res, 200, { challenge });
+        return;
+      }
+
+      if (payload.encrypt) {
+        sendJson(req, res, 400, {
+          ok: false,
+          error: "Encrypted Feishu callbacks are not supported. Disable callback encryption or add decryption support.",
+        });
+        return;
+      }
+
+      const event = extractFeishuTextEvent(payload);
+      if (!event.text) {
+        sendJson(req, res, 200, { ok: true, ignored: true, reason: event.ignoredReason || "No text message" });
+        return;
+      }
+
+      await ensureSchema();
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const result = await answerAssistantQuestion({
+        message: event.text,
+        state: rows[0]?.data ?? {},
+        siteId: feishuConfig.defaultSiteId,
+        source: "feishu",
+      });
+
+      let replied = false;
+      let replyError = null;
+      if (event.messageId && feishuAppReady()) {
+        try {
+          await replyFeishuMessage(event.messageId, result.answer);
+          replied = true;
+        } catch (error) {
+          replyError = error.message || "Failed to reply Feishu message";
+        }
+      } else if (!feishuAppReady()) {
+        replyError = "FEISHU_APP_ID and FEISHU_APP_SECRET are not configured";
+      }
+
+      sendJson(req, res, 200, {
+        ok: true,
+        replied,
+        replyError,
+        aiConfigured: result.aiConfigured,
+      });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "Failed to handle Feishu event" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+    sendJson(req, res, 200, { ok: true }, { "Set-Cookie": clearAuthCookieHeader() });
+    return;
+  }
+
+  if (!isPublicApiRoute(req, url) && !bearerTokenFromRequest(req)) {
+    sendJson(req, res, 401, { ok: false, error: "Authentication required" });
     return;
   }
 
@@ -1435,7 +2716,348 @@ async function handleApi(req, res, url) {
         region: cosConfig.region || null,
         publicBaseUrl: cosReady() ? cosBaseUrl() : null,
       },
+      assistant: assistantPublicConfig(),
     });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/login" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const username = String(body.username ?? "").trim();
+      const password = String(body.password ?? "");
+      if (!username || !password) {
+        sendJson(req, res, 400, { ok: false, error: "用户名和密码不能为空" });
+        return;
+      }
+      const accounts = await readAuthAccounts();
+      const account = accounts.find((person) =>
+        String(person?.username ?? "") === username &&
+        verifyPassword(person?.password, password)
+      );
+      const user = account ? publicUserFromAccount(account) : null;
+	      if (!user || (process.env.NODE_ENV === "production" && isDefaultCredential(username, password))) {
+	        sendJson(req, res, 401, { ok: false, error: "用户名或密码错误" });
+	        return;
+	      }
+	      if (passwordNeedsRehash(account.password)) {
+	        await rehashStoredPasswordIfNeeded(username, password);
+	      }
+	      const session = createAuthToken(user);
+      sendJson(req, res, 200, {
+        ok: true,
+        user,
+        expiresAt: session.expiresAt,
+      }, { "Set-Cookie": authCookieHeader(session.token, session.expiresAt) });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "登录失败" });
+    }
+    return;
+  }
+
+  if (!isPublicApiRoute(req, url)) {
+    const auth = await authenticateApiRequest(req);
+    if (!auth) {
+      sendJson(req, res, 401, { ok: false, error: "Authentication required" });
+      return;
+    }
+    req.auth = auth;
+  }
+
+  if (url.pathname === "/api/auth/me" && req.method === "GET") {
+    sendJson(req, res, 200, { ok: true, user: req.auth.user });
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/save" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const incoming = body.personnel && typeof body.personnel === "object" ? body.personnel : body;
+      const incomingId = String(incoming?.id ?? "").trim();
+      requireModulePermissionForAuth(req, "accounts", incomingId ? "update" : "create");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const existing = incomingId
+        ? personnel.find((person) => String(person?.id ?? "") === incomingId)
+        : null;
+      if (incomingId && !existing) throw new Error("人员不存在或已被删除");
+      const nextPerson = normalizePersonnelInput(incoming, existing);
+      const duplicate = personnel.find((person) =>
+        String(person?.id ?? "") !== nextPerson.id &&
+        String(person?.username ?? "").trim() === nextPerson.username
+      );
+      if (duplicate) throw new Error("登录账号不能重复");
+      if (existing?.username === req.auth.user.username && nextPerson.accessRole !== "admin") {
+        throw new Error("不能把当前管理员改为店员");
+      }
+      if (existing?.accessRole === "admin" && nextPerson.accessRole !== "admin" && countAdmins(personnel, existing.id) === 0) {
+        throw new Error("至少需要保留一个管理员账号");
+      }
+
+      const nextPersonnel = existing
+        ? personnel.map((person) => String(person?.id ?? "") === nextPerson.id ? nextPerson : person)
+        : [...personnel, nextPerson];
+      const nextOrders = existing?.name && existing.name !== nextPerson.name
+        ? orders.map((order) =>
+            order?.contactPerson === existing.name ? { ...order, contactPerson: nextPerson.name } : order
+          )
+        : orders;
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        existing ? "修改记录" : "添加记录",
+        `${existing ? "修改" : "新增"}人员账号「${nextPerson.name}」（${nextPerson.username}）`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        orders: nextOrders,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        orders: nextOrders,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "保存人员失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/delete" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "accounts", "delete");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const deleteId = String(body.id ?? body.deleteId ?? "").trim();
+      if (!deleteId) throw new Error("缺少人员 ID");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const target = personnel.find((person) => String(person?.id ?? "") === deleteId);
+      if (!target) throw new Error("人员不存在或已被删除");
+      if (target.username === req.auth.user.username) throw new Error("当前登录人员不能删除");
+      if (target.accessRole === "admin" && countAdmins(personnel, target.id) === 0) {
+        throw new Error("至少需要保留一个管理员账号");
+      }
+      if (orders.some((order) => order?.contactPerson === target.name)) {
+        throw new Error("该人员已有订单关联，不能删除");
+      }
+      const nextPersonnel = personnel.filter((person) => String(person?.id ?? "") !== deleteId);
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "删除记录",
+        `删除人员账号「${target.name || target.username}」（${target.username}）`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "删除人员失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/permissions" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "accounts", "update");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const targetId = String(body.id ?? body.personnelId ?? "").trim();
+      if (!targetId) throw new Error("缺少人员 ID");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const target = personnel.find((person) => String(person?.id ?? "") === targetId);
+      if (!target) throw new Error("人员不存在或已被删除");
+      const nextPermissions = target.accessRole === "admin"
+        ? fullPermissionsValue()
+        : normalizePermissionsForStorage(body.permissions);
+      const nextPersonnel = personnel.map((person) =>
+        String(person?.id ?? "") === targetId ? { ...person, permissions: nextPermissions } : person
+      );
+      const operationLog = createOperationLog(
+        req,
+        "权限管理",
+        "修改记录",
+        `修改「${target.name || target.username}」的模块权限`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "保存权限失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/password" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const targetId = String(body.targetId ?? body.id ?? "").trim();
+      const newPassword = String(body.newPassword ?? "");
+      if (!newPassword) throw new Error("请输入新密码");
+      if (newPassword.length < 6) throw new Error("新密码至少 6 位");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const target = targetId
+        ? personnel.find((person) => String(person?.id ?? "") === targetId)
+        : personnel.find((person) => String(person?.username ?? "") === req.auth.user.username);
+      if (!target) throw new Error("人员不存在或已被删除");
+      const adminReset = Boolean(targetId) && req.auth.account?.accessRole === "admin";
+      if (adminReset) {
+        requireModulePermissionForAuth(req, "accounts", "update");
+      } else {
+        if (target.username !== req.auth.user.username) throw new Error("只能修改自己的密码");
+        if (!verifyPassword(target.password, String(body.oldPassword ?? ""))) throw new Error("原密码不正确");
+      }
+      const nextPersonnel = personnel.map((person) =>
+        String(person?.id ?? "") === String(target.id ?? "")
+          ? { ...person, password: hashPassword(newPassword) }
+          : person
+      );
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "修改记录",
+        adminReset
+          ? `管理员重置「${target.name || target.username}」的登录密码`
+          : `修改自己的登录密码`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "修改密码失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/assistant/config" && req.method === "GET") {
+    sendJson(req, res, 200, assistantPublicConfig());
+    return;
+  }
+
+  if (url.pathname === "/api/assistant/chat" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const message = String(body.message ?? "").trim();
+      const siteId = normalizeSiteScope(body.siteId ?? ALL_SITE_ID);
+      const operator = authenticatedOperator(req);
+      const notifyFeishu = Boolean(body.notifyFeishu);
+      if (!message) {
+        sendJson(req, res, 400, { ok: false, error: "请输入要询问 AI 助手的问题" });
+        return;
+      }
+
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const result = await answerAssistantQuestion({
+        message,
+        state: rows[0]?.data ?? {},
+        siteId,
+        source: "web",
+      });
+
+      let feishu = { ok: false, skipped: true };
+      if (notifyFeishu) {
+        feishu = await sendFeishuWebhookText([
+          `鱼房 AI 助手（${operator}）`,
+          `问题：${message}`,
+          "",
+          result.answer,
+        ].join("\n"));
+      }
+
+      sendJson(req, res, 200, {
+        ok: true,
+        answer: result.answer,
+        aiConfigured: result.aiConfigured,
+        model: result.model,
+        usage: result.usage ?? null,
+        feishuNotified: Boolean(feishu.ok),
+        feishuError: feishu.ok || feishu.skipped ? null : feishu.error,
+      });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "AI assistant request failed" });
+    }
     return;
   }
 
@@ -1470,7 +3092,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/login-data" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel FROM app_state WHERE id = $1", [stateId]);
-    sendJson(req, res, 200, { personnel: rows[0]?.personnel ?? null });
+    sendJson(req, res, 200, { personnel: sanitizePersonnelForLoginData(rows[0]?.personnel ?? [], req) });
     return;
   }
 
@@ -1487,7 +3109,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/state" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-    sendJson(req, res, 200, { data: rows[0]?.data ?? null });
+    sendJson(req, res, 200, { data: sanitizeStateForResponse(rows[0]?.data ?? null, req) });
     return;
   }
 
@@ -1500,8 +3122,9 @@ async function handleApi(req, res, url) {
       }
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
       const lite = new Set(String(url.searchParams.get("lite") ?? "").split(",").map((item) => item.trim()).filter(Boolean));
+      const data = sanitizeStateForResponse(rows[0]?.data ?? {}, req);
       sendJson(req, res, 200, {
-        data: pickState(rows[0]?.data ?? {}, keys, { liteSpecies: lite.has("species") }),
+        data: pickState(data, keys, { liteSpecies: lite.has("species") }),
       });
     } catch (error) {
       sendJson(req, res, 400, { error: error.message });
@@ -1540,11 +3163,11 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
-      const operator = String(body.operator ?? "system");
+      const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      requireOrderPermission(state, operator, "create");
+      requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
       const payments = Array.isArray(body.payments) ? body.payments.map(normalizePaymentRecord) : [];
       const order = {
@@ -1587,11 +3210,11 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
-      const operator = String(body.operator ?? "system");
+      const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      requireOrderPermission(state, operator, "update");
+      requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? body.id ?? "");
       const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
@@ -1643,11 +3266,11 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = JSON.parse(await readBody(req));
-      const operator = String(body.operator ?? "system");
+      const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      requireOrderPermission(state, operator, "delete");
+      requireOrderPermissionForAuth(req, "delete");
       const orderId = String(body.orderId ?? "");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const order = orders.find((item) => String(item?.id ?? "") === orderId);
@@ -1689,11 +3312,11 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
-      const operator = String(body.operator ?? "system");
+      const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      requireOrderPermission(state, operator, "update");
+      requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? "");
       const order = orders.find((item) => String(item?.id ?? "") === orderId);
@@ -1779,50 +3402,22 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = await readBody(req);
-      const parsed = JSON.parse(body);
-      const patch = await externalizeDataUrls(parsed?.patch ?? {});
-      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
-      const incomingLogs = Array.isArray(parsed?.operationLogs) ? parsed.operationLogs : [];
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const current = rows[0]?.data ?? {};
-      const nextState = { ...current, ...patch };
+	      const parsed = JSON.parse(body);
+	      const rawPatch = parsed?.patch && typeof parsed.patch === "object" ? parsed.patch : {};
+	      validateStatePatchAuthorization(req, rawPatch);
+	      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
+	      const incomingLogs = sanitizeOperationLogsForAuth(parsed?.operationLogs, req);
+	      await client.query("BEGIN");
+	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+	      const current = rows[0]?.data ?? {};
+	      const validationState = buildStatePatch(current, rawPatch, basePatch, incomingLogs, req);
 
-      for (const key of Object.keys(patch)) {
-        if (
-          key !== "operationLogs" &&
-          Array.isArray(current[key]) &&
-          Array.isArray(patch[key]) &&
-          (hasObjectIds(current[key]) || hasObjectIds(basePatch[key]) || hasObjectIds(patch[key]))
-        ) {
-          nextState[key] = Array.isArray(basePatch[key])
-            ? mergeIdArrayPatch(current[key], basePatch[key], patch[key])
-            : key === "stock"
-              ? mergeStockFromGenericPost(current[key], patch[key])
-              : mergeIdArrayPreserveMissing(current[key], patch[key]);
-        }
-      }
+	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
+	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
+	      const patch = await externalizeDataUrls(rawPatch);
+	      const nextState = buildStatePatch(current, patch, basePatch, incomingLogs, req);
 
-      if (Object.prototype.hasOwnProperty.call(patch, "stock") && Array.isArray(current.stock) && Array.isArray(patch.stock)) {
-        nextState.batches = refreshBatchStockCounts(nextState.batches, nextState.stock);
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, "tankGroups") && Array.isArray(current.tankGroups)) {
-        nextState.tankGroups = current.tankGroups;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, "logs") && Array.isArray(current.logs)) {
-        nextState.logs = current.logs;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, "lossRecords") && Array.isArray(current.lossRecords)) {
-        nextState.lossRecords = current.lossRecords;
-      }
-      nextState.operationLogs = mergeOperationLogsForGenericPost(
-        current.operationLogs,
-        [...incomingLogs, ...(Array.isArray(patch.operationLogs) ? patch.operationLogs : [])]
-      );
-
-      validateReferenceIntegrity(current, nextState, Object.keys(patch));
-
-      await client.query(
+	      await client.query(
         `INSERT INTO app_state (id, data, updated_at)
          VALUES ($1, $2::jsonb, now())
          ON CONFLICT (id)
@@ -1840,33 +3435,42 @@ async function handleApi(req, res, url) {
     return;
   }
 
-	  if (url.pathname === "/api/stock/save" && req.method === "POST") {
-	    try {
-	      const body = await readBody(req);
-      const {
-        upsert = [],
-        deleteIds = [],
-        operator = "system",
-      } = await externalizeDataUrls(JSON.parse(body));
-      const upsertItems = Array.isArray(upsert) ? upsert.map(normalizeStockItem) : [];
-      const deleteIdSet = new Set(Array.isArray(deleteIds) ? deleteIds.map((id) => String(id)) : []);
-      if (upsertItems.length === 0 && deleteIdSet.size === 0) {
-        sendJson(req, res, 400, { error: "No stock changes provided" });
-        return;
-      }
+		  if (url.pathname === "/api/stock/save" && req.method === "POST") {
+		    try {
+		      const body = await readBody(req);
+		      const rawChange = JSON.parse(body);
+		      const rawUpsert = Array.isArray(rawChange?.upsert) ? rawChange.upsert : [];
+		      const rawDeleteIds = Array.isArray(rawChange?.deleteIds) ? rawChange.deleteIds : [];
+	      const operator = authenticatedOperator(req);
+	      if (rawUpsert.length === 0 && rawDeleteIds.length === 0) {
+	        sendJson(req, res, 400, { error: "No stock changes provided" });
+	        return;
+	      }
 
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-        const state = rows[0]?.data ?? {};
-        const stock = Array.isArray(state.stock) ? state.stock : [];
-        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-        const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
-        const existingIds = new Set(stock.map((item) => item?.id).filter(Boolean));
-        const nextStock = stock
-          .filter((item) => !deleteIdSet.has(item?.id))
-          .map((item) => upsertById.get(item.id) ?? item);
+	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+	        const state = rows[0]?.data ?? {};
+	        const stock = Array.isArray(state.stock) ? state.stock : [];
+	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+	        const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
+	        const rawUpsertIds = rawUpsert.map((item) => String(item?.id ?? "")).filter(Boolean);
+	        const hasCreates = rawUpsert.some((item) => !existingIds.has(String(item?.id ?? "")));
+	        const hasUpdates = rawUpsertIds.some((id) => existingIds.has(id));
+	        if (rawDeleteIds.length > 0) requireModulePermissionForAuth(req, "stockIn", "delete");
+	        if (hasCreates) requireModulePermissionForAuth(req, "stockIn", "create");
+	        if (hasUpdates) requireModulePermissionForAuth(req, "stockIn", "update");
+	        const {
+	          upsert = [],
+	          deleteIds = [],
+	        } = await externalizeDataUrls(rawChange);
+	        const upsertItems = Array.isArray(upsert) ? upsert.map(normalizeStockItem) : [];
+	        const deleteIdSet = new Set(Array.isArray(deleteIds) ? deleteIds.map((id) => String(id)) : []);
+	        const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
+	        const nextStock = stock
+	          .filter((item) => !deleteIdSet.has(item?.id))
+	          .map((item) => upsertById.get(item.id) ?? item);
         for (const item of upsertItems) {
           if (!existingIds.has(item.id)) nextStock.push(item);
         }
@@ -1910,11 +3514,16 @@ async function handleApi(req, res, url) {
 	    return;
 	  }
 
-	  if (url.pathname === "/api/maintenance/save" && req.method === "POST") {
-	    try {
-	      const body = await readBody(req);
-	      const {
-	        mode,
+		  if (url.pathname === "/api/maintenance/save" && req.method === "POST") {
+		    try {
+		      const body = await readBody(req);
+		      const rawChange = JSON.parse(body);
+		      const rawMode = String(rawChange?.mode ?? "");
+		      if (rawMode === "record") requireModulePermissionForAuth(req, "daily", "create");
+		      else if (rawMode === "move") requireModulePermissionForAuth(req, "daily", "update");
+		      else if (rawMode === "loss") requireModulePermissionForAuth(req, "lossRecords", "create");
+		      const {
+		        mode,
 	        itemIds = [],
 	        stockItemId,
 	        targetSubTankId,
@@ -1927,8 +3536,8 @@ async function handleApi(req, res, url) {
 	        lossDate,
 	        lossReason = "",
 	        lossProof = [],
-	        operator = "system",
-	      } = await externalizeDataUrls(JSON.parse(body));
+		      } = await externalizeDataUrls(rawChange);
+	      const operator = authenticatedOperator(req);
 	      if (!mode) {
 	        sendJson(req, res, 400, { error: "Missing maintenance save mode" });
 	        return;
@@ -2124,18 +3733,13 @@ async function handleApi(req, res, url) {
 	    return;
 	  }
 
-	  if (url.pathname === "/api/tank-groups/save" && req.method === "POST") {
-	    try {
-	      const body = await readBody(req);
-	      const {
-	        mode,
-	        group,
-	        groupId,
-	        subTank,
-	        subTankId,
-	        operator = "system",
-	      } = await externalizeDataUrls(JSON.parse(body));
-	      if (!mode) {
+		  if (url.pathname === "/api/tank-groups/save" && req.method === "POST") {
+		    try {
+		      const body = await readBody(req);
+		      const rawChange = JSON.parse(body);
+		      const rawMode = String(rawChange?.mode ?? "");
+	      const operator = authenticatedOperator(req);
+	      if (!rawMode) {
 	        sendJson(req, res, 400, { error: "Missing tank group save mode" });
 	        return;
 	      }
@@ -2147,6 +3751,30 @@ async function handleApi(req, res, url) {
 	        const state = rows[0]?.data ?? {};
 	        const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
 	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+	        if (rawMode === "deleteGroup" || rawMode === "deleteSubTank") {
+	          requireModulePermissionForAuth(req, "tankGroups", "delete");
+	        } else if (rawMode === "upsertGroup") {
+	          const rawGroup = rawChange.group && typeof rawChange.group === "object" ? rawChange.group : {};
+	          const groupExists = rawGroup.id && tankGroups.some((item) => String(item?.id ?? "") === String(rawGroup.id));
+	          requireModulePermissionForAuth(req, "tankGroups", groupExists ? "update" : "create");
+	        } else if (rawMode === "upsertSubTank") {
+	          const targetGroupId = String(rawChange.groupId ?? "");
+	          const targetGroup = tankGroups.find((item) => String(item?.id ?? "") === targetGroupId);
+	          if (!targetGroup) throw new Error("缸组不存在或已被删除");
+	          const rawSubTank = rawChange.subTank && typeof rawChange.subTank === "object" ? rawChange.subTank : {};
+	          const subTankExists = rawSubTank.id && (Array.isArray(targetGroup.subTanks) ? targetGroup.subTanks : [])
+	            .some((item) => String(item?.id ?? "") === String(rawSubTank.id));
+	          requireModulePermissionForAuth(req, "tankGroups", subTankExists ? "update" : "create");
+	        } else {
+	          throw new Error("Unsupported tank group save mode");
+	        }
+	        const {
+	          mode,
+	          group,
+	          groupId,
+	          subTank,
+	          subTankId,
+	        } = await externalizeDataUrls(rawChange);
 	        let nextTankGroups = tankGroups;
 	        let operationLog;
 
@@ -2282,10 +3910,12 @@ async function handleApi(req, res, url) {
 	    return;
 	  }
 
-	  if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
-	    try {
-	      const body = await readBody(req);
-	      const { log, deleteId, operator = "system" } = await externalizeDataUrls(JSON.parse(body));
+		  if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
+		    try {
+		      const body = await readBody(req);
+		      const rawChange = JSON.parse(body);
+		      const { log, deleteId } = await externalizeDataUrls(rawChange);
+		      const operator = authenticatedOperator(req);
 	      if (!log && !deleteId) {
 	        sendJson(req, res, 400, { error: "No daily log change provided" });
 	        return;
@@ -2297,10 +3927,17 @@ async function handleApi(req, res, url) {
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
 	        const logs = Array.isArray(state.logs) ? state.logs : [];
-	        const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
-	        const bioRecords = Array.isArray(state.bioRecords) ? state.bioRecords : [];
-	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-	        let nextLogs = logs;
+		        const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
+		        const bioRecords = Array.isArray(state.bioRecords) ? state.bioRecords : [];
+		        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+		        if (deleteId) {
+		          requireModulePermissionForAuth(req, "daily", "delete");
+		        } else {
+		          const logId = String(log?.id ?? "").trim();
+		          const exists = logId && logs.some((item) => String(item?.id ?? "") === logId);
+		          requireModulePermissionForAuth(req, "daily", exists ? "update" : "create");
+		        }
+		        let nextLogs = logs;
 	        let nextBioRecords = bioRecords;
 	        let operationLog;
 
@@ -2324,9 +3961,10 @@ async function handleApi(req, res, url) {
 	            action: "删除记录",
 	            detail: `删除养护日志「${target.action}」（${target.date}，缸组：${groupName}/${targetGroupId || "未知"}）`,
 	          };
-	        } else {
-	          const normalizedLog = normalizeDailyLog(log);
-	          const group = tankGroups.find((item) => item.id === normalizedLog.tankGroupId);
+		        } else {
+		          const normalizedLog = normalizeDailyLog(log);
+		          normalizedLog.operator = operator;
+		          const group = tankGroups.find((item) => item.id === normalizedLog.tankGroupId);
 	          if (!group) throw new Error("缸组不存在或已被删除");
 	          const previousLog = logs.find((item) => item.id === normalizedLog.id) ?? null;
 	          const exists = !!previousLog;
@@ -2383,7 +4021,8 @@ async function handleApi(req, res, url) {
 	  if (url.pathname === "/api/products/upsert" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const { product, operator = "system" } = JSON.parse(body);
+      const { product } = JSON.parse(body);
+      const operator = authenticatedOperator(req);
       if (!product || typeof product !== "object") {
         sendJson(req, res, 400, { error: "Missing product" });
         return;
@@ -2401,12 +4040,14 @@ async function handleApi(req, res, url) {
       try {
         await client.query("BEGIN");
         const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-        const state = rows[0]?.data ?? {};
-        const products = Array.isArray(state.products) ? state.products : [];
-        const productOrigins = Array.isArray(state.productOrigins) ? state.productOrigins : [];
-        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+	        const state = rows[0]?.data ?? {};
+	        const products = Array.isArray(state.products) ? state.products : [];
+	        const productOrigins = Array.isArray(state.productOrigins) ? state.productOrigins : [];
+	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+	        const productExists = products.some((item) => String(item?.id ?? "") === String(product.id ?? ""));
+	        requireModulePermissionForAuth(req, "products", productExists ? "update" : "create");
 
-        const normalizedProduct = await externalizeDataUrls({
+	        const normalizedProduct = await externalizeDataUrls({
           ...product,
           name: String(product.name).trim(),
           size: String(product.size).trim(),

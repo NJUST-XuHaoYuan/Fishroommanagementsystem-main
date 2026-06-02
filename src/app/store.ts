@@ -321,6 +321,19 @@ export type StoreContextType = {
     subTankId?: string;
   }) => Promise<boolean>;
   saveDailyLog: (change: { log?: DailyLog; deleteId?: string }) => Promise<boolean>;
+  saveShipmentOutbound: (change: {
+    orderId: string;
+    selectedItemIds: string[];
+    shipMethod: "express" | "pickup";
+    carrier?: string;
+    shipDate: string;
+    actualShippingFee?: number;
+    notes?: string;
+  }) => Promise<boolean>;
+  savePersonnelAccount: (personnel: Personnel) => Promise<boolean>;
+  deletePersonnelAccount: (id: string) => Promise<boolean>;
+  savePersonnelPermissions: (id: string, permissions: PermissionSet) => Promise<boolean>;
+  changePersonnelPassword: (change: { targetId?: string; oldPassword?: string; newPassword: string }) => Promise<boolean>;
   saveStateTransform: (
     transform: (latest: Omit<Store, "user">) => Omit<Store, "user">
   ) => Promise<boolean>;
@@ -361,9 +374,9 @@ export const initialState: Store = {
     { id: "nanjing", name: "南京" },
   ],
   personnel: [
-    { id: "person-admin", name: "admin", username: "admin", password: "admin", accessRole: "admin", permissions: fullPermissions(), role: "管理员", phone: "", notes: "系统默认管理员账户" },
-    { id: "person-staff", name: "staff", username: "staff", password: "staff", accessRole: "staff", permissions: fullPermissions(), role: "店员", phone: "", notes: "系统默认店员账户" },
-    { id: "person-a", name: "店员A", username: "staff-a", password: "123456", accessRole: "staff", permissions: fullPermissions(), role: "养护", phone: "", notes: "" },
+    { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), role: "管理员", phone: "", notes: "系统默认管理员账户" },
+    { id: "person-staff", name: "staff", username: "staff", password: "", accessRole: "staff", permissions: fullPermissions(), role: "店员", phone: "", notes: "系统默认店员账户" },
+    { id: "person-a", name: "店员A", username: "staff-a", password: "", accessRole: "staff", permissions: fullPermissions(), role: "养护", phone: "", notes: "" },
   ],
   operationLogs: [],
   speciesCategories: [
@@ -504,6 +517,11 @@ export const StoreContext = createContext<StoreContextType>({
   saveMaintenanceAction: async () => false,
   saveTankGroupChange: async () => false,
   saveDailyLog: async () => false,
+  saveShipmentOutbound: async () => false,
+  savePersonnelAccount: async () => false,
+  deletePersonnelAccount: async () => false,
+  savePersonnelPermissions: async () => false,
+  changePersonnelPassword: async () => false,
   saveStateTransform: async () => false,
 });
 

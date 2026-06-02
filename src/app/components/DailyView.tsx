@@ -19,6 +19,7 @@ import { readAndCompressImage } from "../utils/imageUtils";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
+import { authJsonHeaders } from "../utils/authSession";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -598,7 +599,7 @@ export function DailyView() {
   // Open bio detail dialog
   const loadBioRecords = async (stockItemId: string) => {
     try {
-      const response = await fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`);
+      const response = await fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`, { headers: authJsonHeaders() });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
       const records = Array.isArray(result.bioRecords) ? result.bioRecords : [];

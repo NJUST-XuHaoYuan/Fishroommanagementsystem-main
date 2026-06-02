@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useStore, Order, Shipment, uid } from "../store";
+import { useStore, Order, Shipment } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -35,12 +35,6 @@ function todayDateString(): string {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
-}
-
-function nowDatetimeLocal(): string {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
 }
 
 function formatLocalDateTimeMinute(value?: string): string {
@@ -209,7 +203,7 @@ function EditShipmentDialog({
 // ─── Main View ────────────────────────────────────────────────────────────────
 
 export function ShipmentsView() {
-  const { state, saveStateTransform } = useStore();
+  const { state, saveStateTransform, saveShipmentOutbound } = useStore();
 
   const [shipOrder, setShipOrder] = useState<Order | null>(null);
   const [deliverShipment, setDeliverShipment] = useState<Shipment | null>(null);
@@ -285,31 +279,14 @@ export function ShipmentsView() {
 
   const doShip = async (order: Order, data: ShipFormData) => {
     if (!confirmWrite("出库", `将记录订单 ${order.orderNo} 出库，后续需在订单详情上传打包凭证后确认发货。`)) return false;
-    const shipmentStatus = "outbound" as const;
-    const newShipment: Shipment = {
-      id: uid(),
+    const ok = await saveShipmentOutbound({
       orderId: order.id,
-      createdAt: nowDatetimeLocal(),
-      outboundDate: data.shipDate,
-      shipDate: data.shipDate,
-      carrier: data.carrier,
-      trackingNo: "",
-      status: shipmentStatus,
-      notes: data.notes,
+      selectedItemIds: data.selectedItemIds,
       shipMethod: data.shipMethod,
+      carrier: data.carrier,
+      shipDate: data.shipDate,
       actualShippingFee: data.shipMethod === "pickup" ? 0 : data.actualShippingFee,
-      itemStockIds: data.selectedItemIds,
-    };
-
-    const ok = await saveStateTransform((latest) => {
-      const shipments = [...latest.shipments, newShipment];
-      return {
-        ...latest,
-        shipments,
-        orders: latest.orders.map((o) =>
-          o.id === order.id ? { ...o, status: "shipped" as const } : o
-        ),
-      };
+      notes: data.notes,
     });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
 

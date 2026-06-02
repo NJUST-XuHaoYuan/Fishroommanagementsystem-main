@@ -5,10 +5,20 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8787
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
       POSTGRES_DB: fishroom
       POSTGRES_USER: fishroom
       POSTGRES_PASSWORD: fishroom_local_password
       PGDATA: /var/lib/postgresql/data
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      FEISHU_WEBHOOK_URL: ${FEISHU_WEBHOOK_URL:-}
+      FEISHU_WEBHOOK_SECRET: ${FEISHU_WEBHOOK_SECRET:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_DEFAULT_SITE_ID: ${FEISHU_DEFAULT_SITE_ID:-all}
     ports:
       - "8787:8787"
     volumes:
