@@ -33,6 +33,7 @@ if (process.env.NODE_ENV === "production" && !configuredAuthTokenSecret) {
   throw new Error("AUTH_SESSION_SECRET or SESSION_SECRET must be set in production");
 }
 const authTokenSecret = configuredAuthTokenSecret || randomBytes(32).toString("hex");
+const allowDefaultCredentials = process.env.ALLOW_DEFAULT_CREDENTIALS === "true";
 const BOOTSTRAP_AUTH_ACCOUNTS = [
   { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin" },
   { id: "person-staff", name: "staff", username: "staff", password: process.env.BOOTSTRAP_STAFF_PASSWORD || "", accessRole: "staff" },
@@ -2736,7 +2737,7 @@ async function handleApi(req, res, url) {
         verifyPassword(person?.password, password)
       );
       const user = account ? publicUserFromAccount(account) : null;
-	      if (!user || (process.env.NODE_ENV === "production" && isDefaultCredential(username, password))) {
+	      if (!user || (process.env.NODE_ENV === "production" && !allowDefaultCredentials && isDefaultCredential(username, password))) {
 	        sendJson(req, res, 401, { ok: false, error: "用户名或密码错误" });
 	        return;
 	      }
@@ -2747,6 +2748,7 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, {
         ok: true,
         user,
+        token: session.token,
         expiresAt: session.expiresAt,
       }, { "Set-Cookie": authCookieHeader(session.token, session.expiresAt) });
     } catch (error) {

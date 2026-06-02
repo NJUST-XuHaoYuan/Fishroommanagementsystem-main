@@ -34,7 +34,7 @@ export function Login() {
         username: String(result.user.username ?? ""),
         role: result.user.role === "admin" ? "admin" as const : "staff" as const,
       };
-      saveAuthSession(user, undefined, result.expiresAt);
+      saveAuthSession(user, typeof result.token === "string" ? result.token : undefined, result.expiresAt);
       setState((s) => ({ ...s, user }));
       toast.success(`欢迎，${user.username}`);
     } catch {

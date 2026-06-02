@@ -19,6 +19,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
+      ALLOW_DEFAULT_CREDENTIALS: ${ALLOW_DEFAULT_CREDENTIALS:-false}
 
       # Database connection. Change these in .env on the server.
       PGHOST: database
