@@ -330,6 +330,12 @@ export type StoreContextType = {
     actualShippingFee?: number;
     notes?: string;
   }) => Promise<boolean>;
+  saveOrderPaymentChange: (change: {
+    orderId: string;
+    action: "add" | "update" | "delete";
+    payment?: PaymentRecord;
+    paymentId?: string;
+  }) => Promise<boolean>;
   savePersonnelAccount: (personnel: Personnel) => Promise<boolean>;
   deletePersonnelAccount: (id: string) => Promise<boolean>;
   savePersonnelPermissions: (id: string, permissions: PermissionSet) => Promise<boolean>;
@@ -518,6 +524,7 @@ export const StoreContext = createContext<StoreContextType>({
   saveTankGroupChange: async () => false,
   saveDailyLog: async () => false,
   saveShipmentOutbound: async () => false,
+  saveOrderPaymentChange: async () => false,
   savePersonnelAccount: async () => false,
   deletePersonnelAccount: async () => false,
   savePersonnelPermissions: async () => false,

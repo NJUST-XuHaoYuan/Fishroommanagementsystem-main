@@ -3594,7 +3594,7 @@ type DamageResult =
 function OrderDetailDialog({
   order, open, onOpenChange,
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, setState, saveStateTransform } = useStore();
+  const { state, setState, saveStateTransform, saveOrderPaymentChange } = useStore();
   const permission = usePermission("orders");
   const isAdmin = state.user?.role === "admin";
   const today = todayDateString();
@@ -3806,15 +3806,9 @@ function OrderDetailDialog({
     if (!order) return false;
     if (!permission.requirePermission("create")) return false;
     if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
+    if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
     if (!confirmWrite("新增", "将新增一条资金往来记录。")) return false;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      orders: latest.orders.map((o) =>
-        o.id === order.id
-          ? { ...o, payments: [...(o.payments ?? []), record] }
-          : o
-      ),
-    }));
+    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "add", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
     toast.success("记录已添加");
     return true;
@@ -3823,6 +3817,7 @@ function OrderDetailDialog({
   const openAddPayment = () => {
     if (!permission.requirePermission("create")) return;
     if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
+    if (order?.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
     setEditingPayment(null);
     setAddPayOpen(true);
   };
@@ -3838,18 +3833,9 @@ function OrderDetailDialog({
     if (!order) return false;
     if (!permission.requirePermission("update")) return false;
     if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
+    if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
     if (!confirmWrite("修改", "将保存资金往来记录的修改。")) return false;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      orders: latest.orders.map((o) =>
-        o.id === order.id
-          ? {
-              ...o,
-              payments: (o.payments ?? []).map((p) => p.id === record.id ? record : p),
-            }
-          : o
-      ),
-    }));
+    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "update", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
     toast.success("资金记录已更新");
     return true;
@@ -3869,14 +3855,7 @@ function OrderDetailDialog({
     if (order.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
     if (!confirmWrite("删除", "将删除这条资金往来记录。")) return;
     const deletePaymentId = deletingPayment.id;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      orders: latest.orders.map((o) =>
-        o.id === order.id
-          ? { ...o, payments: (o.payments ?? []).filter((p) => p.id !== deletePaymentId) }
-          : o
-      ),
-    }));
+    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "delete", paymentId: deletePaymentId });
     if (!ok) return toast.error("删除失败，请重试");
     setDeletingPayment(null);
     toast.success("资金记录已删除");

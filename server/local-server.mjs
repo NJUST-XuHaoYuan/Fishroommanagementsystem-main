@@ -1790,6 +1790,18 @@ function normalizePaymentRecord(record = {}) {
   };
 }
 
+const PAYMENT_TYPE_LABELS = {
+  deposit: "定金",
+  balance: "尾款",
+  shipping_fee: "运费",
+  refund: "退款",
+  other: "其他",
+};
+
+function paymentTypeLabel(type = "") {
+  return PAYMENT_TYPE_LABELS[type] || String(type || "资金记录");
+}
+
 function normalizeOrderNoValue(value) {
   const match = String(value ?? "").match(/(\d+)$/);
   return match ? Number(match[1]) || 0 : 0;
@@ -3255,6 +3267,81 @@ async function handleApi(req, res, url) {
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
       sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, stock: nextStock, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/payment" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
+      const operator = authenticatedOperator(req);
+      const action = String(body.action ?? "").trim();
+      const permissionAction = action === "add" ? "create" : action === "update" ? "update" : action === "delete" ? "delete" : "";
+      if (!permissionAction) throw new Error("不支持的资金记录操作");
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      requireOrderPermissionForAuth(req, permissionAction);
+
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const orderId = String(body.orderId ?? "");
+      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
+      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑资金记录");
+      if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再编辑资金记录");
+
+      const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
+      let nextPayments = currentPayments;
+      let detail = "";
+
+      if (action === "add") {
+        const payment = normalizePaymentRecord(body.payment ?? {});
+        if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
+          throw new Error("资金记录已存在，请刷新后重试");
+        }
+        nextPayments = [...currentPayments, payment];
+        detail = `订单「${currentOrder.orderNo}」新增${paymentTypeLabel(payment.type)} ¥${payment.amount.toFixed(2)}`;
+      } else if (action === "update") {
+        const payment = normalizePaymentRecord(body.payment ?? {});
+        if (!currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
+          throw new Error("资金记录不存在，请刷新后重试");
+        }
+        nextPayments = currentPayments.map((item) => String(item?.id ?? "") === payment.id ? payment : item);
+        detail = `订单「${currentOrder.orderNo}」修改${paymentTypeLabel(payment.type)}记录 ¥${payment.amount.toFixed(2)}`;
+      } else {
+        const paymentId = String(body.paymentId ?? body.payment?.id ?? "");
+        const deletingPayment = currentPayments.find((item) => String(item?.id ?? "") === paymentId);
+        if (!deletingPayment) throw new Error("资金记录不存在，请刷新后重试");
+        nextPayments = currentPayments.filter((item) => String(item?.id ?? "") !== paymentId);
+        detail = `订单「${currentOrder.orderNo}」删除${paymentTypeLabel(deletingPayment.type)}记录 ¥${Number(deletingPayment.amount ?? 0).toFixed(2)}`;
+      }
+
+      const nextOrder = { ...currentOrder, payments: nextPayments };
+      const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: action === "add" ? "添加记录" : action === "update" ? "修改记录" : "删除记录",
+        detail,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message });

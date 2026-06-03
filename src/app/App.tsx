@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DailyLog, OperationLog, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
+import { StoreContext, initialState, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
 import { Login } from "./components/Login";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
@@ -918,6 +918,59 @@ export default function App() {
     }
   };
 
+  const saveOrderPaymentChange = async (change: {
+    orderId: string;
+    action: "add" | "update" | "delete";
+    payment?: PaymentRecord;
+    paymentId?: string;
+  }): Promise<boolean> => {
+    clearTimeout(saveTimer.current);
+    if (saveAbort.current) {
+      saveAbort.current.abort();
+      saveAbort.current = null;
+    }
+
+    setSaveStatus("saving");
+    try {
+      const response = await fetch(`${API}/orders/payment`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(change),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+
+      setStateBase((current) => {
+        const next = normalizePersistedState(
+          {
+            ...withoutUser(current),
+            orders: Array.isArray(result.orders) ? result.orders : current.orders,
+            operationLogs: withServerOperationLog(result.operationLog, current.operationLogs),
+          },
+          current.user
+        );
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      setLoadedKeys((current) => {
+        const next = new Set(current);
+        next.add("orders");
+        loadedKeysRef.current = next;
+        return next;
+      });
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+      return true;
+    } catch (error) {
+      console.error("Failed to save order payment:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+      return false;
+    }
+  };
+
   const postPersonnelMutation = async (path: string, body: unknown): Promise<boolean> => {
     clearTimeout(saveTimer.current);
     if (saveAbort.current) {
@@ -1177,7 +1230,7 @@ export default function App() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, savePersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {!state.user ? (
         <Login />
       ) : (
