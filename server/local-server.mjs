@@ -499,6 +499,31 @@ function isPhysicallyInTank(item, shippedIds) {
   return item && !item.lost && !shippedIds.has(String(item.id));
 }
 
+function normalizePickupShipmentRecord(shipment = {}) {
+  if (shipment?.shipMethod !== "pickup") return shipment;
+  const next = {
+    ...shipment,
+    carrier: String(shipment.carrier ?? "").trim() || "上门自取",
+    status: "delivered",
+    actualShippingFee: 0,
+  };
+  if (!next.shippedAt) {
+    next.shippedAt = String(shipment.createdAt ?? shipment.shipDate ?? shipment.outboundDate ?? nowDatetimeInChina());
+  }
+  return stableJson(next) === stableJson(shipment) ? shipment : next;
+}
+
+function normalizePickupShipmentsForState(state = {}) {
+  if (!state || typeof state !== "object" || !Array.isArray(state.shipments)) return state;
+  let changed = false;
+  const shipments = state.shipments.map((shipment) => {
+    const normalized = normalizePickupShipmentRecord(shipment);
+    if (normalized !== shipment) changed = true;
+    return normalized;
+  });
+  return changed ? { ...state, shipments } : state;
+}
+
 function todayInChina() {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
@@ -879,7 +904,7 @@ function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
 
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
-  const next = { ...data };
+  const next = { ...normalizePickupShipmentsForState(data) };
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
   }
@@ -2792,7 +2817,7 @@ async function handleApi(req, res, url) {
       requireModulePermissionForAuth(req, "accounts", incomingId ? "update" : "create");
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const state = rows[0]?.data ?? {};
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       const personnel = Array.isArray(state.personnel) ? state.personnel : [];
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const existing = incomingId
@@ -3404,7 +3429,7 @@ async function handleApi(req, res, url) {
       const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const state = rows[0]?.data ?? {};
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? "");
@@ -3440,20 +3465,23 @@ async function handleApi(req, res, url) {
       if (shipMethod === "express" && !carrier) throw new Error("请选择快递公司");
       const shipDate = String(body.shipDate ?? "").trim();
       if (!shipDate) throw new Error("请选择出库日期");
+      const isPickup = shipMethod === "pickup";
+      const createdAt = nowDatetimeInChina();
       const shipment = {
         id: String(body.id || uid("ship")),
         siteId: normalizeSiteId(order.siteId),
         orderId: order.id,
-        createdAt: nowDatetimeInChina(),
+        createdAt,
         outboundDate: shipDate,
         shipDate,
-        carrier,
+        carrier: isPickup ? "上门自取" : carrier,
         trackingNo: "",
-        status: "outbound",
+        status: isPickup ? "delivered" : "outbound",
         notes: String(body.notes ?? ""),
         shipMethod,
-        actualShippingFee: shipMethod === "pickup" ? 0 : normalizeMoney(body.actualShippingFee, "Actual shipping fee"),
+        actualShippingFee: isPickup ? 0 : normalizeMoney(body.actualShippingFee, "Actual shipping fee"),
         itemStockIds: selectedItemIds,
+        ...(isPickup ? { shippedAt: createdAt } : {}),
       };
       const nextShipments = [...(Array.isArray(state.shipments) ? state.shipments : []), shipment];
       const nextOrders = orders.map((item) =>
@@ -3467,7 +3495,9 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `订单「${order.orderNo}」出库 ${selectedItemIds.length} 条商品`,
+        detail: isPickup
+          ? `订单「${order.orderNo}」上门自取签收 ${selectedItemIds.length} 条商品`
+          : `订单「${order.orderNo}」出库 ${selectedItemIds.length} 条商品`,
       };
       const nextState = {
         ...state,
@@ -3498,7 +3528,7 @@ async function handleApi(req, res, url) {
 	      const incomingLogs = sanitizeOperationLogsForAuth(parsed?.operationLogs, req);
 	      await client.query("BEGIN");
 	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-	      const current = rows[0]?.data ?? {};
+	      const current = normalizePickupShipmentsForState(rows[0]?.data ?? {});
 	      const validationState = buildStatePatch(current, rawPatch, basePatch, incomingLogs, req);
 
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));

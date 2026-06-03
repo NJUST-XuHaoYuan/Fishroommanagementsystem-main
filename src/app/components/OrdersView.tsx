@@ -4062,7 +4062,10 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return false;
     const lostSelected = data.selectedItemIds.filter((id) => state.stock.find((stock) => stock.id === id)?.lost);
     if (lostSelected.length > 0) { toast.error("已损耗商品不能出库，请先从订单中删除"); return false; }
-    if (!confirmWrite("出库", `将出库 ${data.selectedItemIds.length} 条商品，后续需上传打包凭证再确认发货。`)) return false;
+    const confirmDetail = data.shipMethod === "pickup"
+      ? `将确认 ${data.selectedItemIds.length} 条商品上门自取并直接签收。`
+      : `将出库 ${data.selectedItemIds.length} 条商品，后续需上传打包凭证再确认发货。`;
+    if (!confirmWrite("出库", confirmDetail)) return false;
     try {
       const result = await postOrderApi("shipments/outbound", {
         orderId: order.id,
@@ -4083,7 +4086,7 @@ function OrderDetailDialog({
     const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
     const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
     if (data.shipMethod === "pickup") {
-      toast.success("已出库，请上传打包凭证后确认自取完成");
+      toast.success("已确认上门自取签收");
     } else if (Math.abs(feeDiff) > 0.005) {
       if (feeDiff > 0)
         toast.success(`已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
