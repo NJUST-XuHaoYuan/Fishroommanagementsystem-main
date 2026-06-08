@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from "react";
-import { useStore, Customer, uid } from "../store";
+import { useStore, Customer, CustomerType, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -21,6 +21,7 @@ import {
 } from "./ui/alert-dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { toast } from "sonner";
 import { usePermission } from "../utils/permissions";
 import { Phone, MessageCircle, Video, MapPin, Settings2, Pencil, Trash2, ChevronDown, Check, Plus } from "lucide-react";
@@ -37,6 +38,32 @@ const SOURCE_COLORS = [
   "bg-teal-500 text-white",
   "bg-orange-500 text-white",
 ];
+
+const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }[] = [
+  { value: "B", label: "B端（批发）" },
+  { value: "C", label: "C端（零售）" },
+];
+
+function customerTypeLabel(type?: CustomerType) {
+  if (type === "B") return "B端（批发）";
+  if (type === "C") return "C端（零售）";
+  return "未设置";
+}
+
+function CustomerTypeBadge({ type }: { type?: CustomerType }) {
+  const cls = type === "B"
+    ? "bg-indigo-100 text-indigo-700"
+    : type === "C"
+      ? "bg-emerald-100 text-emerald-700"
+      : "bg-muted text-muted-foreground";
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+      {customerTypeLabel(type)}
+    </span>
+  );
+}
+
+type CustomerRow = Customer & { customerTypeText: string };
 
 function SourceBadge({ source, sourceList }: { source: string; sourceList: string[] }) {
   if (!source) return <span className="text-muted-foreground text-xs">—</span>;
@@ -367,13 +394,18 @@ export function CustomersView() {
     [state.customerSources]
   );
 
-  const customers = useMemo(
-    () => [...(state.customers ?? [])].sort((a, b) => b.addedDate.localeCompare(a.addedDate)),
+  const customers = useMemo<CustomerRow[]>(
+    () => [...(state.customers ?? [])]
+      .map((customer) => ({
+        ...customer,
+        customerTypeText: customerTypeLabel(customer.customerType),
+      }))
+      .sort((a, b) => b.addedDate.localeCompare(a.addedDate)),
     [state.customers]
   );
 
   const empty = (): Customer => ({
-    id: "", name: "", addedDate: today,
+    id: "", name: "", customerType: "C", addedDate: today,
     phone: "", wechat: "", douyin: "",
     source: "", address: "", notes: "",
   });
@@ -388,21 +420,33 @@ export function CustomersView() {
     if (!permission.requirePermission(editing.id ? "update" : "create")) return;
     if (!editing.name.trim()) return toast.error("客户名称不可为空");
     if (editing.addedDate && editing.addedDate > today) return toast.error("客户添加时间不能晚于今天");
+    const normalizedEditing: Customer = {
+      id: editing.id,
+      name: editing.name.trim(),
+      customerType: editing.customerType ?? "",
+      addedDate: editing.addedDate,
+      phone: editing.phone.trim(),
+      wechat: editing.wechat.trim(),
+      douyin: editing.douyin.trim(),
+      source: editing.source.trim(),
+      address: editing.address.trim(),
+      notes: editing.notes.trim(),
+    };
     if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存客户信息的修改。" : "将新增一个客户。")) return;
     const ok = await saveStateTransform((latest) => {
       // 保存时若来源不在列表，自动加入
       const list = latest.customerSources ?? [];
-      const newSources = editing.source && !list.includes(editing.source)
-        ? [...list, editing.source]
+      const newSources = normalizedEditing.source && !list.includes(normalizedEditing.source)
+        ? [...list, normalizedEditing.source]
         : list;
       const customers = latest.customers ?? [];
-      const exists = customers.find((c) => c.id === editing.id);
+      const exists = customers.find((c) => c.id === normalizedEditing.id);
       return {
         ...latest,
         customerSources: newSources,
         customers: exists
-          ? customers.map((c) => (c.id === editing.id ? editing : c))
-          : [...customers, { ...editing, id: uid() }],
+          ? customers.map((c) => (c.id === normalizedEditing.id ? normalizedEditing : c))
+          : [...customers, { ...normalizedEditing, id: uid() }],
       };
     });
     if (!ok) return toast.error("保存失败，请重试");
@@ -440,8 +484,8 @@ export function CustomersView() {
 
       <DataTable
         data={customers}
-        searchKeys={["name", "phone", "wechat", "douyin", "address"]}
-        searchPlaceholder="搜索客户名、手机号、微信号、地址..."
+        searchKeys={["name", "customerType", "customerTypeText", "phone", "wechat", "douyin", "address", "notes"]}
+        searchPlaceholder="搜索客户名、类型、手机号、微信号、地址、备注..."
         onAdd={permission.canCreate ? () => { setEditing(empty()); setOpen(true); } : undefined}
         addLabel="新增客户"
         columns={[
@@ -454,6 +498,11 @@ export function CustomersView() {
             key: "source",
             title: "来源",
             render: (r) => <SourceBadge source={r.source} sourceList={sources} />,
+          },
+          {
+            key: "customerType",
+            title: "类型",
+            render: (r) => <CustomerTypeBadge type={r.customerType} />,
           },
           {
             key: "contact",
@@ -511,7 +560,7 @@ export function CustomersView() {
         actions={(row) => (
           <div className="flex justify-end gap-2">
             {permission.canUpdate && (
-              <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row }); setOpen(true); }}>
+              <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row, customerType: row.customerType ?? "" }); setOpen(true); }}>
                 编辑
               </Button>
             )}
@@ -533,8 +582,8 @@ export function CustomersView() {
 
           {editing && (
             <div className="grid gap-4 py-2">
-              {/* 名称 + 来源 */}
-              <div className="grid grid-cols-2 gap-3">
+              {/* 名称 + 类型 + 来源 */}
+              <div className="grid gap-3 md:grid-cols-3">
                 <div className="grid gap-2">
                   <Label>客户名称<span className="text-red-500 ml-0.5">*</span></Label>
                   <Input
@@ -542,6 +591,22 @@ export function CustomersView() {
                     onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                     placeholder="请输入客户名称"
                   />
+                </div>
+                <div className="grid gap-2">
+                  <Label>类型</Label>
+                  <Select
+                    value={editing.customerType || undefined}
+                    onValueChange={(value) => setEditing({ ...editing, customerType: value as CustomerType })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="请选择类型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CUSTOMER_TYPE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid gap-2">
                   <Label>来源</Label>

@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
-  PaymentRecord, PaymentType, Customer, Personnel, ShipmentStatus, Store, uid,
+  PaymentRecord, PaymentType, Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
 } from "../store";
 import { readAndCompressImage } from "../utils/imageUtils";
 import { DataTable } from "./common";
@@ -60,6 +60,16 @@ const SHIP_METHOD_LABEL: Record<NonNullable<Shipment["shipMethod"]>, string> = {
   express: "物流发货",
   pickup: "上门自取",
 };
+const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }[] = [
+  { value: "B", label: "B端（批发）" },
+  { value: "C", label: "C端（零售）" },
+];
+
+function customerTypeLabel(type?: CustomerType) {
+  if (type === "B") return "B端（批发）";
+  if (type === "C") return "C端（零售）";
+  return "未设置";
+}
 
 type OrderPickerItem = {
   stockItemId: string;
@@ -1201,6 +1211,7 @@ function CreateCustomerDialog({
   const emptyCustomer = (): Customer => ({
     id: uid(),
     name: "",
+    customerType: "C",
     addedDate: today,
     phone: "",
     wechat: "",
@@ -1220,8 +1231,10 @@ function CreateCustomerDialog({
     if (!name) return toast.error("请输入客户名称");
     if (form.addedDate && form.addedDate > today) return toast.error("客户添加时间不能晚于今天");
     const customer: Customer = {
-      ...form,
+      id: form.id,
       name,
+      customerType: form.customerType ?? "",
+      addedDate: form.addedDate,
       phone: form.phone.trim(),
       wechat: form.wechat.trim(),
       douyin: form.douyin.trim(),
@@ -1242,7 +1255,7 @@ function CreateCustomerDialog({
         </DialogHeader>
 
         <div className="grid gap-4 py-2">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 md:grid-cols-3">
             <div className="grid gap-2">
               <Label>客户名称<span className="text-red-500 ml-0.5">*</span></Label>
               <Input
@@ -1250,6 +1263,22 @@ function CreateCustomerDialog({
                 onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))}
                 placeholder="请输入客户名称"
               />
+            </div>
+            <div className="grid gap-2">
+              <Label>类型</Label>
+              <Select
+                value={form.customerType || undefined}
+                onValueChange={(value) => setForm((current) => ({ ...current, customerType: value as CustomerType }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="请选择类型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {CUSTOMER_TYPE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="grid gap-2">
               <Label>来源</Label>
@@ -1412,6 +1441,7 @@ function CustomerDetailDialog({
             </div>
 
             <div className="grid gap-3 md:grid-cols-2">
+              {field("类型", customerTypeLabel(customer.customerType))}
               {field("来源", customer.source)}
               {field("添加时间", customer.addedDate)}
               <div className="rounded-lg border bg-muted/20 px-3 py-2">

@@ -239,10 +239,12 @@ export type Shipment = {
 };
 
 export type CustomerSource = "抖音" | "微信" | "线下" | "鱼友介绍";
+export type CustomerType = "" | "B" | "C";
 
 export type Customer = {
   id: string;
   name: string;
+  customerType?: CustomerType;
   addedDate: string;
   phone: string;
   wechat: string;
@@ -500,6 +502,7 @@ export const initialState: Store = {
     {
       id: "c1",
       name: "李四",
+      customerType: "C",
       addedDate: "2026-04-20",
       phone: "13900139001",
       wechat: "lisi123",
