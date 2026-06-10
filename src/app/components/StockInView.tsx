@@ -269,6 +269,12 @@ export function StockInView() {
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
   const product = (id: string) => state.products.find((p) => p.id === id);
   const batch = (id: string) => state.batches.find((b) => b.id === id);
+  const isSpecialPrice = (item: StockItem) => {
+    const defaultPrice = Number(product(item.productId)?.defaultPrice ?? 0);
+    const itemPrice = Number(item.basePrice ?? 0);
+    return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
+  };
+  const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
   const batchCommissionMultiplier = (batchId: string) => Number(batch(batchId)?.commissionMultiplier ?? 100);
   const defaultCommissionRate = (productId: string, batchId: string) => {
     const productRate = Number(product(productId)?.commissionRate ?? 0);
@@ -297,12 +303,12 @@ export function StockInView() {
       batchId: latestBatchId(),
       subTankId,
       status: "healthy",
-	      inDate: today,
-	      basePrice: defaultProduct?.defaultPrice ?? 0,
-	      commissionRate: defaultCommissionRate(defaultProduct?.id ?? "", latestBatchId()),
-	      code: "",
-	      notes: "",
-	    };
+      inDate: today,
+      basePrice: defaultProduct?.defaultPrice ?? 0,
+      commissionRate: defaultCommissionRate(defaultProduct?.id ?? "", latestBatchId()),
+      code: "",
+      notes: "",
+    };
   };
 
   const changeProduct = (productId: string) => {
@@ -417,7 +423,7 @@ export function StockInView() {
     if (editing.inDate > today) return toast.error("入库日期不能晚于今天");
     const currentBatch = batch(editing.batchId);
     if (currentBatch && editing.inDate < currentBatch.arrivalDate) return toast.error("入库日期不能早于采购批次到货日期");
-    if (!editing.basePrice || editing.basePrice <= 0) return toast.error("请填写销售默认价");
+    if (!editing.basePrice || editing.basePrice <= 0) return toast.error("请填写单条售价");
     const commissionRate = Number(editing.commissionRate ?? 0);
     if (Number.isNaN(commissionRate) || commissionRate < 0) return toast.error("提成比例不能小于 0");
     if (!fromSubTank && !selectedGroupId) return toast.error("请选择缸组");
@@ -796,7 +802,7 @@ export function StockInView() {
                                     className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
                                       selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
                                     } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
-                                    title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
+                                    title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
                                   >
                                     {p?.imageUrl ? (
                                       <ImageWithFallback src={p.imageUrl} alt={p?.name ?? ""} className="size-full object-cover" />
@@ -806,6 +812,11 @@ export function StockInView() {
                                     {s.code && (
                                       <span className="absolute inset-x-0 bottom-0 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
                                         {s.code}
+                                      </span>
+                                    )}
+                                    {isSpecialPrice(s) && (
+                                      <span className="absolute left-0 top-0 z-10 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
+                                        {priceBadgeText(s)}
                                       </span>
                                     )}
                                     <StatusBadge sold={s.sold} />
@@ -919,14 +930,17 @@ export function StockInView() {
                   />
                 </div>
                 <div className="grid gap-2">
-	                  <Label><span className="text-red-500">*</span> 销售默认价(¥)</Label>
-	                  <Input
-	                    type="number"
-	                    min={0}
-	                    value={editing.basePrice === 0 ? "" : editing.basePrice}
-	                    onChange={(e) => setEditing({ ...editing, basePrice: e.target.value === "" ? 0 : Number(e.target.value) })}
-	                    placeholder="0.00"
-	                  />
+                  <Label><span className="text-red-500">*</span> 单条售价(¥)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={editing.basePrice === 0 ? "" : editing.basePrice}
+                    onChange={(e) => setEditing({ ...editing, basePrice: e.target.value === "" ? 0 : Number(e.target.value) })}
+                    placeholder="0.00"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    每条鱼可单独编辑售价；与商品默认售价不一致时，会在鱼图标上显示黄色价格标识。
+                  </span>
                 </div>
               </div>
 
