@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useStore, PurchaseBatch, uid } from "../store";
+import { useStore, Order, PurchaseBatch, Shipment, StockItem, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -17,6 +17,43 @@ import { readAndCompressImage } from "../utils/imageUtils";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
+
+function countsAsActiveShipment(shipment: Shipment): boolean {
+  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
+}
+
+function calcBatchPaymentAmount(order: Order): number {
+  return (Array.isArray(order.payments) ? order.payments : []).reduce(
+    (sum, payment) => payment.type === "refund"
+      ? sum - Number(payment.amount || 0)
+      : sum + Number(payment.amount || 0),
+    0
+  );
+}
+
+function getBatchBillableShippingFee(order: Order, shipments: Shipment[]): number {
+  const activeShipments = shipments.filter((shipment) =>
+    shipment.orderId === order.id && countsAsActiveShipment(shipment)
+  );
+  if (activeShipments.length === 0) return Number(order.shippingFee || 0);
+  return activeShipments.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee || 0), 0);
+}
+
+function collectDamageRefundShareByStockId(shipments: Shipment[]): Map<string, number> {
+  const refundShareByStockId = new Map<string, number>();
+  for (const shipment of shipments) {
+    if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") continue;
+    const itemIds = (shipment.damageItemStockIds?.length ? shipment.damageItemStockIds : shipment.itemStockIds) ?? [];
+    if (itemIds.length === 0) continue;
+    const refundAmount = Number(shipment.damageRefundAmount ?? 0);
+    if (!(refundAmount > 0)) continue;
+    const share = refundAmount / itemIds.length;
+    for (const stockItemId of itemIds) {
+      refundShareByStockId.set(stockItemId, (refundShareByStockId.get(stockItemId) ?? 0) + share);
+    }
+  }
+  return refundShareByStockId;
+}
 
 export function BatchesView() {
   const { state, saveStateTransform } = useStore();
@@ -66,21 +103,11 @@ export function BatchesView() {
   const lossProofs = (batch: PurchaseBatch | null) =>
     Array.isArray(batch?.lossProof) ? batch.lossProof : [];
   const batchSalesStats = useMemo(() => {
-    const stockById = new Map(state.stock.map((item) => [item.id, item]));
-    const refundShareByStockId = new Map<string, number>();
-
-    for (const shipment of state.shipments ?? []) {
-      if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") continue;
-      const itemIds = (shipment.damageItemStockIds?.length ? shipment.damageItemStockIds : shipment.itemStockIds) ?? [];
-      if (itemIds.length === 0) continue;
-      const refundAmount = Number(shipment.damageRefundAmount ?? 0);
-      if (!(refundAmount > 0)) continue;
-      const share = refundAmount / itemIds.length;
-      for (const stockItemId of itemIds) {
-        refundShareByStockId.set(stockItemId, (refundShareByStockId.get(stockItemId) ?? 0) + share);
-      }
-    }
-
+    const stockList = Array.isArray(state.stock) ? state.stock : [];
+    const orderList = Array.isArray(state.orders) ? state.orders : [];
+    const shipmentList = Array.isArray(state.shipments) ? state.shipments : [];
+    const stockById = new Map<string, StockItem>(stockList.map((item) => [item.id, item]));
+    const refundShareByStockId = collectDamageRefundShareByStockId(shipmentList);
     const map = new Map<string, {
       gross: number;
       discount: number;
@@ -91,14 +118,36 @@ export function BatchesView() {
       orderIds: Set<string>;
     }>();
 
-    for (const order of state.orders ?? []) {
+    for (const order of orderList) {
       if (order.status === "cancelled") continue;
       const items = Array.isArray(order.items) ? order.items : [];
       if (items.length === 0) continue;
       const discountPerItem = Number(order.discount ?? 0) / items.length;
+      const adjustedItems = items.map((item) => {
+        const gross = Number(item.price ?? 0);
+        const refundAdjustment = refundShareByStockId.get(item.stockItemId) ?? 0;
+        return {
+          item,
+          stockItem: stockById.get(item.stockItemId),
+          gross,
+          discount: discountPerItem,
+          refundAdjustment,
+          adjustedAmount: Math.max(0, gross - discountPerItem - refundAdjustment),
+        };
+      });
+      const productDue = adjustedItems.reduce((sum, item) => sum + item.adjustedAmount, 0);
+      if (productDue <= 0) continue;
 
-      for (const item of items) {
-        const stockItem = stockById.get(item.stockItemId);
+      const orderDue = productDue +
+        getBatchBillableShippingFee(order, shipmentList) +
+        Number(order.packagingFee ?? 0);
+      const netPaid = Math.max(0, calcBatchPaymentAmount(order));
+      const paidProductPool = orderDue > 0
+        ? Math.min(productDue, netPaid * (productDue / orderDue))
+        : 0;
+
+      for (const itemStats of adjustedItems) {
+        const stockItem = itemStats.stockItem;
         if (!stockItem?.batchId) continue;
         const current = map.get(stockItem.batchId) ?? {
           gross: 0,
@@ -109,12 +158,10 @@ export function BatchesView() {
           orderCount: 0,
           orderIds: new Set<string>(),
         };
-        const gross = Number(item.price ?? 0);
-        const refundAdjustment = refundShareByStockId.get(item.stockItemId) ?? 0;
-        current.gross += gross;
-        current.discount += discountPerItem;
-        current.refundAdjustment += refundAdjustment;
-        current.received += Math.max(0, gross - discountPerItem - refundAdjustment);
+        current.gross += itemStats.gross;
+        current.discount += itemStats.discount;
+        current.refundAdjustment += itemStats.refundAdjustment;
+        current.received += paidProductPool * (itemStats.adjustedAmount / productDue);
         current.itemCount += 1;
         current.orderIds.add(order.id);
         current.orderCount = current.orderIds.size;
