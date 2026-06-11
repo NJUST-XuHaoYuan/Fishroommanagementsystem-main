@@ -247,6 +247,372 @@ function safeFilename(value: string): string {
   return value.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
 }
 
+const FISH_LIST_CATEGORY_ORDER = [
+  "吊类",
+  "盖刺鱼科",
+  "蝶类",
+  "狐狸鱼",
+  "隆头类",
+  "海金鱼",
+  "雀鲷科",
+  "其他",
+  "一物一价",
+];
+
+function fishListCategoryName(category?: string, speciesName?: string): string {
+  const text = `${category ?? ""} ${speciesName ?? ""}`;
+  if (/(吊|刺尾|Acanthur|Zebrasoma|Paracanthurus)/i.test(text)) return "吊类";
+  if (/(盖刺|神仙|棘蝶|Pomacanth)/i.test(text)) return "盖刺鱼科";
+  if (/(蝶|蝴蝶|Chaetodont)/i.test(text)) return "蝶类";
+  if (/(狐狸|篮子|兔子|Sigan)/i.test(text)) return "狐狸鱼";
+  if (/(隆头|龙|鹦鹉|飘飘|Labr|Halichoeres|Cirrhilabrus)/i.test(text)) return "隆头类";
+  if (/(海金鱼|宝石|紫罗兰|Anthias|Pseudanthias)/i.test(text)) return "海金鱼";
+  if (/(雀鲷|小丑|Pomacentr|Amphiprion)/i.test(text)) return "雀鲷科";
+  return "其他";
+}
+
+function fishListCategoryRank(category: string): number {
+  const index = FISH_LIST_CATEGORY_ORDER.indexOf(category);
+  return index >= 0 ? index : FISH_LIST_CATEGORY_ORDER.length;
+}
+
+function formatFishListDate(dateString: string): string {
+  const [, , month = "", day = ""] = dateString.match(/^(\d{4})-(\d{2})-(\d{2})$/) ?? [];
+  return `${Number(month)} 月 ${Number(day)} 日`;
+}
+
+function formatFishListPrice(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "一物一价";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function isSpecialFishListPrice(stock: StockItem, product?: Product): boolean {
+  const itemPrice = Number(stock.basePrice ?? 0);
+  const defaultPrice = Number(product?.defaultPrice ?? 0);
+  return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
+}
+
+function uniqueText(parts: Array<unknown>): string {
+  const seen = new Set<string>();
+  const values = parts
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean)
+    .filter((part) => {
+      if (part === "—" || seen.has(part)) return false;
+      seen.add(part);
+      return true;
+    });
+  return values.length ? values.join("；") : "";
+}
+
+function fishListStatusNote(stocks: StockItem[]): string {
+  const feeding = stocks.filter((stock) => stock.status === "feeding").length;
+  if (feeding === stocks.length && stocks.length > 0) return "开口颗粒";
+  if (feeding > 0) return "部分颗粒";
+  return "";
+}
+
+type FishListItemRow = {
+  type: "item";
+  categoryName: string;
+  productName: string;
+  size: string;
+  origin: string;
+  stockCount: number;
+  priceText: string;
+  priceValue: number;
+  notes: string;
+  special?: boolean;
+};
+type FishListDisplayRow = FishListItemRow | { type: "category"; categoryName: string };
+
+const FISH_LIST_TEMPLATE_URL = "/assets/fish-list-template-bg.png";
+const FISH_LIST_PDF_WIDTH = 595;
+const FISH_LIST_PDF_HEIGHT = 842;
+const FISH_LIST_TABLE = {
+  x: 48,
+  y: 171,
+  width: 499,
+  height: 558,
+  headerHeight: 48,
+  rowHeight: 31,
+  columns: [92, 96, 60, 85, 166],
+};
+
+function loadFishListImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`无法加载鱼单模板：${src}`));
+    image.src = src;
+  });
+}
+
+function fitFontSize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, startSize: number, minSize: number): number {
+  let size = startSize;
+  while (size > minSize) {
+    ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+    if (ctx.measureText(text).width <= maxWidth) return size;
+    size -= 1;
+  }
+  return minSize;
+}
+
+function splitTextByWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
+  const normalized = String(text || "—").replace(/\s+/g, " ").trim();
+  const lines: string[] = [];
+  let current = "";
+  for (const char of normalized) {
+    const next = `${current}${char}`;
+    if (ctx.measureText(next).width <= maxWidth || current.length === 0) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = char;
+      if (lines.length === maxLines - 1) break;
+    }
+  }
+  if (current) lines.push(current);
+  if (lines.length > maxLines) return lines.slice(0, maxLines);
+  if (lines.length === maxLines && ctx.measureText(lines[lines.length - 1]).width > maxWidth) {
+    let last = lines[lines.length - 1];
+    while (last.length > 1 && ctx.measureText(`${last}…`).width > maxWidth) {
+      last = last.slice(0, -1);
+    }
+    lines[lines.length - 1] = `${last}…`;
+  }
+  return lines;
+}
+
+function drawCenteredText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, width: number, fontSize: number, color = "#ffffff") {
+  const size = fitFontSize(ctx, text, width, fontSize, Math.max(10, fontSize - 5));
+  ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + width / 2, y);
+}
+
+function drawWrappedCellText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  centerY: number,
+  width: number,
+  options: { align?: CanvasTextAlign; fontSize?: number; maxLines?: number; color?: string } = {},
+) {
+  const fontSize = options.fontSize ?? 15;
+  const maxLines = options.maxLines ?? 2;
+  ctx.font = `800 ${fontSize}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+  ctx.fillStyle = options.color ?? "#ffffff";
+  ctx.textAlign = options.align ?? "center";
+  ctx.textBaseline = "middle";
+  const lines = splitTextByWidth(ctx, text, width, maxLines);
+  const lineHeight = fontSize * 1.15;
+  const startY = centerY - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, index) => {
+    const tx = options.align === "left" ? x : x + width / 2;
+    ctx.fillText(line, tx, startY + index * lineHeight);
+  });
+}
+
+function drawFishListNameCell(ctx: CanvasRenderingContext2D, row: FishListItemRow, x: number, centerY: number, width: number) {
+  const lines = row.origin ? [row.productName, row.origin] : splitTextByWidth(ctx, row.productName, width, 2);
+  const fontSize = row.origin ? 14 : 15;
+  const lineHeight = fontSize * 1.16;
+  const startY = centerY - ((lines.length - 1) * lineHeight) / 2;
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  lines.slice(0, 2).forEach((line, index) => {
+    const size = fitFontSize(ctx, line, width, fontSize, 10);
+    ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+    ctx.fillText(line, x, startY + index * lineHeight);
+  });
+}
+
+function coverTemplateDateAndPage(ctx: CanvasRenderingContext2D, dateLabel: string, pageNumber: number) {
+  ctx.fillStyle = "#120626";
+  ctx.fillRect(228, 40, 142, 55);
+  drawCenteredText(ctx, dateLabel, 228, 68, 142, 22);
+  ctx.fillStyle = "#07031a";
+  ctx.fillRect(280, 775, 35, 22);
+  ctx.font = '400 12px Georgia, "Times New Roman", serif';
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(pageNumber), FISH_LIST_PDF_WIDTH / 2, 784);
+}
+
+function createFishListPageCanvas(template: HTMLImageElement, dateLabel: string, pageNumber: number): CanvasRenderingContext2D {
+  const canvas = document.createElement("canvas");
+  canvas.width = template.naturalWidth || 1190;
+  canvas.height = template.naturalHeight || 1684;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("浏览器不支持 Canvas 导出");
+  ctx.drawImage(template, 0, 0, canvas.width, canvas.height);
+  ctx.setTransform(canvas.width / FISH_LIST_PDF_WIDTH, 0, 0, canvas.height / FISH_LIST_PDF_HEIGHT, 0, 0);
+  coverTemplateDateAndPage(ctx, dateLabel, pageNumber);
+  return ctx;
+}
+
+function drawFishListTable(ctx: CanvasRenderingContext2D, rows: FishListDisplayRow[]) {
+  const table = FISH_LIST_TABLE;
+  const [nameW, sizeW, countW, priceW, notesW] = table.columns;
+  const x1 = table.x + nameW;
+  const x2 = x1 + sizeW;
+  const x3 = x2 + countW;
+  const x4 = x3 + priceW;
+  const bodyY = table.y + table.headerHeight;
+
+  ctx.save();
+  ctx.fillStyle = "#08031d";
+  ctx.fillRect(table.x, table.y, table.width, table.height);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(table.x, table.y, table.width, table.height);
+
+  ctx.fillStyle = "#b8cae8";
+  ctx.fillRect(table.x + 2, table.y + 2, table.width - 4, table.headerHeight - 2);
+  ctx.strokeStyle = "rgba(43, 59, 86, 0.38)";
+  ctx.lineWidth = 0.7;
+  [x1, x2, x3, x4].forEach((x) => {
+    ctx.beginPath();
+    ctx.moveTo(x, table.y + 2);
+    ctx.lineTo(x, bodyY);
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = "#000000";
+  ctx.font = '800 18px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("尺寸（cm）", x1 + sizeW / 2, table.y + table.headerHeight / 2);
+  ctx.fillText("库存", x2 + countW / 2, table.y + table.headerHeight / 2);
+  ctx.fillText("价格", x3 + priceW / 2, table.y + table.headerHeight / 2);
+  ctx.fillText("备注", x4 + notesW / 2, table.y + table.headerHeight / 2);
+
+  let y = bodyY + 16;
+  for (const row of rows) {
+    if (row.type === "category") {
+      drawCenteredText(ctx, row.categoryName, table.x, y, table.width, 15);
+      y += table.rowHeight;
+      continue;
+    }
+    const centerY = y;
+    drawFishListNameCell(ctx, row, table.x + 25, centerY, nameW - 34);
+    drawWrappedCellText(ctx, row.size, x1, centerY, sizeW, { fontSize: 15, maxLines: 1 });
+    drawWrappedCellText(ctx, String(row.stockCount), x2, centerY, countW, { fontSize: 15, maxLines: 1 });
+    drawWrappedCellText(ctx, row.priceText, x3, centerY, priceW, { fontSize: 15, maxLines: 1 });
+    drawWrappedCellText(ctx, row.notes || "—", x4 + 10, centerY, notesW - 20, { fontSize: 14, maxLines: 2 });
+    y += table.rowHeight;
+  }
+  ctx.restore();
+}
+
+function drawFishListRules(ctx: CanvasRenderingContext2D) {
+  ctx.save();
+  ctx.fillStyle = "#08031d";
+  ctx.fillRect(58, 170, 479, 570);
+  ctx.font = '800 17px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  let y = 212;
+  const center = FISH_LIST_PDF_WIDTH / 2;
+  const centered = (text: string, size = 17, gap = 24) => {
+    ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+    ctx.fillText(text, center, y);
+    y += gap;
+  };
+  centered("【包装费运费规则】", 17, 22);
+  centered("江浙沪皖满三件包邮", 16, 20);
+  centered("包装费统一 15 元", 16, 20);
+  centered("满 500 免包装费，满 1000 包邮", 16, 36);
+  centered("【一般生物收货、报损规则】", 16, 24);
+  centered("亲爱的顾客，感谢您的支持，下单即默认同意以下报损规则，请知悉！", 13, 32);
+
+  ctx.textAlign = "left";
+  ctx.font = '800 13px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  const paragraphs = [
+    "【快递说明】本工作室会根据默认要求进行打包，包装费统一 15 元。若有更高规格运输需求，请提前联系，我们会加收一部分打包费。可以陆运次日达的发顺丰标快，其他地区发顺丰特快，运费实发实收。",
+    "【报损规则】一、运输包损承诺：我们承诺在揽收至签收≤36 小时内的运输安全。超出此时限或到店自提离店后，不再承担包损责任。",
+    "二、收货验收要求：签收后请立即录制开箱视频。从未拆封外箱开始连续拍摄，不得中断，清晰展示完整面单、密封袋完好性和生物实际状态。如需报损或到货状态不好，请在签收 5 小时内向客服提交视频，逾期不受理。",
+    "三、赔付标准：运输时长≤24 小时赔付 100% 货值；运输时长 24-48 小时赔付 50% 货值；运输时长≥48 小时不予赔付。死亡确认需提供鱼类剪尾视频或珊瑚开水浇灌视频。",
+    "四、特别说明：仅赔付生物货值，不含运费及包装费；仅支持退款，不支持退货。轻微运输损伤属正常现象，不在赔付范围。活动赠品及标注“不包损”商品不参与报损。",
+    "温馨提示：收到活体后请尽快过温过水，妥善安置。我们与您的共同目标是让每一个生物安全到家，感谢您的理解与配合！",
+    "【挑鱼规则】挑鱼需要额外增加费用，费用高低根据品种有所不同，详情咨询客服。",
+  ];
+  for (const paragraph of paragraphs) {
+    const lines = splitTextByWidth(ctx, paragraph, 430, 4);
+    for (const line of lines) {
+      ctx.fillText(line, 82, y);
+      y += 19;
+    }
+    y += 8;
+  }
+  ctx.restore();
+}
+
+function canvasToJpegBytes(canvas: HTMLCanvasElement): Uint8Array {
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  const encoded = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function asciiBytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function buildPdfFromJpegs(images: Array<{ bytes: Uint8Array; width: number; height: number }>): Blob {
+  const chunks: Uint8Array[] = [];
+  const offsets: number[] = [0];
+  let byteLength = 0;
+  const push = (chunk: string | Uint8Array) => {
+    const bytes = typeof chunk === "string" ? asciiBytes(chunk) : chunk;
+    chunks.push(bytes);
+    byteLength += bytes.length;
+  };
+  const beginObject = (id: number) => {
+    offsets[id] = byteLength;
+    push(`${id} 0 obj\n`);
+  };
+
+  push("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+  const pageObjectIds = images.map((_, index) => 3 + index * 3);
+  beginObject(1);
+  push("<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+  beginObject(2);
+  push(`<< /Type /Pages /Count ${images.length} /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] >>\nendobj\n`);
+
+  images.forEach((image, index) => {
+    const pageId = 3 + index * 3;
+    const contentId = pageId + 1;
+    const imageId = pageId + 2;
+    const name = `Im${index + 1}`;
+    const content = `q\n${FISH_LIST_PDF_WIDTH} 0 0 ${FISH_LIST_PDF_HEIGHT} 0 0 cm\n/${name} Do\nQ\n`;
+    beginObject(pageId);
+    push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${FISH_LIST_PDF_WIDTH} ${FISH_LIST_PDF_HEIGHT}] /Resources << /XObject << /${name} ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>\nendobj\n`);
+    beginObject(contentId);
+    push(`<< /Length ${asciiBytes(content).length} >>\nstream\n${content}endstream\nendobj\n`);
+    beginObject(imageId);
+    push(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.bytes.length} >>\nstream\n`);
+    push(image.bytes);
+    push("\nendstream\nendobj\n");
+  });
+
+  const xrefOffset = byteLength;
+  push(`xref\n0 ${offsets.length}\n0000000000 65535 f \n`);
+  for (let i = 1; i < offsets.length; i += 1) {
+    push(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+  }
+  push(`trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+  return new Blob(chunks, { type: "application/pdf" });
+}
+
 export function Dashboard() {
   const { state, activeSiteId } = useStore();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -319,15 +685,23 @@ export function Dashboard() {
       cancelled = true;
     };
   }, []);
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const dashboardSpecies = Array.isArray(state.species) ? state.species : [];
+  const dashboardProducts = Array.isArray(state.products) ? state.products : [];
+  const dashboardBatches = Array.isArray(state.batches) ? state.batches : [];
+  const dashboardTankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
+  const dashboardStock = Array.isArray(state.stock) ? state.stock : [];
+  const dashboardOrders = Array.isArray(state.orders) ? state.orders : [];
+  const dashboardShipments = Array.isArray(state.shipments) ? state.shipments : [];
+  const dashboardLossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
+  const shippedOutStockIds = getShippedOutStockIds(dashboardShipments);
   const today = todayDateString();
   const todayDate = new Date(`${today}T00:00:00`);
 
-  const productById = new Map(state.products.map((product) => [product.id, product]));
-  const speciesById = new Map(state.species.map((species) => [species.id, species]));
-  const batchById = new Map(state.batches.map((batch) => [batch.id, batch]));
+  const productById = new Map(dashboardProducts.map((product) => [product.id, product]));
+  const speciesById = new Map(dashboardSpecies.map((species) => [species.id, species]));
+  const batchById = new Map(dashboardBatches.map((batch) => [batch.id, batch]));
   const subTankNameById = new Map<string, string>();
-  for (const group of state.tankGroups) {
+  for (const group of dashboardTankGroups) {
     for (const subTank of group.subTanks ?? []) {
       subTankNameById.set(subTank.id, `${group.name} / ${subTank.name}`);
     }
@@ -338,7 +712,7 @@ export function Dashboard() {
     if (snapshotName) return snapshotName;
     return stockItem ? subTankNameById.get(stockItem.subTankId) ?? "未知缸位" : "未知缸位";
   };
-  const inTankStock = state.stock.filter((s) => isPhysicallyInTank(s, shippedOutStockIds));
+  const inTankStock = dashboardStock.filter((s) => isPhysicallyInTank(s, shippedOutStockIds));
   const inTankFishStock = inTankStock.filter((stockItem) => {
     const product = productById.get(stockItem.productId);
     const species = product ? speciesById.get(product.speciesId) : undefined;
@@ -349,9 +723,9 @@ export function Dashboard() {
   let inTankSold = inTankFishStock.filter((s) => s.sold).length;
   let inTankSick = inTankFishStock.filter((s) => !s.sold && s.status === "sick").length;
   let inTankNormal = inTankFishStock.filter((s) => !s.sold && s.status !== "sick").length;
-  let tankGroupCount = state.tankGroups.length;
-  let subTankCount = state.tankGroups.reduce((n, g) => n + g.subTanks.length, 0);
-  const todayPayments = state.orders.flatMap((order) =>
+  let tankGroupCount = dashboardTankGroups.length;
+  let subTankCount = dashboardTankGroups.reduce((n, g) => n + (g.subTanks?.length ?? 0), 0);
+  const todayPayments = dashboardOrders.flatMap((order) =>
     (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === today)
   );
   let todayReceived = todayPayments
@@ -360,19 +734,19 @@ export function Dashboard() {
   let todayRefunded = todayPayments
     .filter((payment) => payment.type === "refund")
     .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-  let todayShippedOut = state.shipments
+  let todayShippedOut = dashboardShipments
     .filter((shipment) => shipment.shipDate === today && shipment.status !== "preparing")
     .reduce((sum, shipment) => sum + (shipment.itemStockIds?.length ?? 0), 0);
 
-  let activeOrders = state.orders.filter((o) => !["cancelled", "completed", "damaged"].includes(o.status)).length;
-  let totalRevenue = state.orders
+  let activeOrders = dashboardOrders.filter((o) => !["cancelled", "completed", "damaged"].includes(o.status)).length;
+  let totalRevenue = dashboardOrders
     .filter((o) => o.status !== "cancelled" && o.status !== "damaged")
     .reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.price, 0), 0);
-  let pendingShipments = state.shipments.filter((s) => s.status === "preparing" || s.status === "outbound" || s.status === "shipped").length;
+  let pendingShipments = dashboardShipments.filter((s) => s.status === "preparing" || s.status === "outbound" || s.status === "shipped").length;
 
   let dailyFinanceData = Array.from({ length: financeDays }, (_, index) => {
     const date = toLocalDateString(addDays(todayDate, index - financeDays + 1));
-    const payments = state.orders.flatMap((order) =>
+    const payments = dashboardOrders.flatMap((order) =>
       (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === date)
     );
     return {
@@ -387,11 +761,11 @@ export function Dashboard() {
     };
   });
   const dailyDates = dailyFinanceData.map((point) => point.date);
-  const stockById = new Map(state.stock.map((item) => [item.id, item]));
-  const explicitLossIds = new Set((state.lossRecords ?? []).map((record) => record.stockItemId));
+  const stockById = new Map(dashboardStock.map((item) => [item.id, item]));
+  const explicitLossIds = new Set(dashboardLossRecords.map((record) => record.stockItemId));
   const lossRows = [
-    ...(state.lossRecords ?? []),
-    ...state.stock
+    ...dashboardLossRecords,
+    ...dashboardStock
       .filter((item) => item.lost && !explicitLossIds.has(item.id))
       .map<StockLossRecord>((item) => ({
         id: `loss-${item.id}`,
@@ -421,14 +795,14 @@ export function Dashboard() {
     const current = lossDateByStockId.get(row.stockItem.id);
     if (!current || row.date < current) lossDateByStockId.set(row.stockItem.id, row.date);
   }
-  for (const item of state.stock) {
+  for (const item of dashboardStock) {
     const itemLossDate = String(item.lossDate ?? "").slice(0, 10);
     if (!itemLossDate) continue;
     const current = lossDateByStockId.get(item.id);
     if (!current || itemLossDate < current) lossDateByStockId.set(item.id, itemLossDate);
   }
   const shippedDateByStockId = new Map<string, string>();
-  for (const shipment of state.shipments) {
+  for (const shipment of dashboardShipments) {
     if (shipment.status === "preparing") continue;
     const date = String(shipment.shipDate ?? shipment.outboundDate ?? shipment.createdAt ?? "").slice(0, 10);
     if (!date) continue;
@@ -437,7 +811,7 @@ export function Dashboard() {
       if (!current || date < current) shippedDateByStockId.set(stockItemId, date);
     }
   }
-  const fishStock = state.stock.filter((item) => {
+  const fishStock = dashboardStock.filter((item) => {
     const product = productById.get(item.productId);
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
     return isFishCategory(itemSpecies?.category ?? "");
@@ -479,7 +853,7 @@ export function Dashboard() {
         code: stockItem?.code ?? "",
       };
     });
-    const batchArrivals = state.batches
+    const batchArrivals = dashboardBatches
       .filter((batch) => String(batch.arrivalDate ?? "").slice(0, 10) === date)
       .map<DailyBatchArrival>((batch: PurchaseBatch) => {
         const batchStock = fishStock.filter((item) => item.batchId === batch.id);
@@ -523,7 +897,7 @@ export function Dashboard() {
     activeOrders = summary.activeOrders;
     totalRevenue = summary.totalRevenue;
     pendingShipments = summary.pendingShipments;
-    dailyFinanceData = summary.dailyFinanceData;
+    dailyFinanceData = Array.isArray(summary.dailyFinanceData) ? summary.dailyFinanceData : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
   const maxFinanceValue = Math.max(
@@ -589,12 +963,12 @@ export function Dashboard() {
 
   const focusSource = useMemo<FocusData>(() => {
     const source: FocusData = {
-      species: focusData?.species ?? state.species,
-      products: focusData?.products ?? state.products,
-      stock: focusData?.stock ?? state.stock,
-      orders: focusData?.orders ?? state.orders,
-      shipments: focusData?.shipments ?? state.shipments,
-      lossRecords: focusData?.lossRecords ?? state.lossRecords,
+      species: focusData?.species ?? dashboardSpecies,
+      products: focusData?.products ?? dashboardProducts,
+      stock: focusData?.stock ?? dashboardStock,
+      orders: focusData?.orders ?? dashboardOrders,
+      shipments: focusData?.shipments ?? dashboardShipments,
+      lossRecords: focusData?.lossRecords ?? dashboardLossRecords,
     };
     const scope = normalizeSiteScope(dashboardSiteId);
     if (scope === ALL_SITE_ID) return source;
@@ -609,7 +983,7 @@ export function Dashboard() {
       shipments: source.shipments.filter((shipment) => matchesSite(shipment, scope) || orderIds.has(shipment.orderId)),
       lossRecords: source.lossRecords.filter((record) => matchesSite(record, scope) || stockIds.has(record.stockItemId)),
     };
-  }, [dashboardSiteId, focusData, state.species, state.products, state.stock, state.orders, state.shipments, state.lossRecords]);
+  }, [dashboardSiteId, focusData, dashboardSpecies, dashboardProducts, dashboardStock, dashboardOrders, dashboardShipments, dashboardLossRecords]);
 
   const focusAnalysis = useMemo(() => {
     const products = focusSource.products;
@@ -772,11 +1146,11 @@ export function Dashboard() {
   const exportAvailableFishList = async () => {
     setExportingFishList(true);
     let exportData = {
-      species: state.species,
-      products: state.products,
-      tankGroups: state.tankGroups,
-      stock: state.stock,
-      shipments: state.shipments,
+      species: dashboardSpecies,
+      products: dashboardProducts,
+      tankGroups: dashboardTankGroups,
+      stock: dashboardStock,
+      shipments: dashboardShipments,
     };
     try {
       const response = await fetch("/api/state/slice?keys=species,products,tankGroups,stock,shipments&lite=species", { headers: authJsonHeaders() });
@@ -823,7 +1197,7 @@ export function Dashboard() {
 
     const sellableRows = exportData.stock
       .filter((stock) => {
-        if (stock.sold || stock.status === "sick") return false;
+        if (stock.sold || stock.lost || stock.status === "sick") return false;
         if (!isPhysicallyInTank(stock, exportShippedOutStockIds)) return false;
         const product = exportProductById.get(stock.productId);
         const species = product ? exportSpeciesById.get(product.speciesId) : undefined;
@@ -838,11 +1212,14 @@ export function Dashboard() {
           species,
           speciesId: species?.id ?? product?.speciesId ?? "unknown",
           speciesName: species?.name ?? "未归类",
-          statusLabel: stock.status === "feeding" ? "开口" : "正常",
-          price: stock.basePrice || product?.defaultPrice || 0,
+          categoryName: fishListCategoryName(species?.category, species?.name),
+          price: Number(stock.basePrice || product?.defaultPrice || 0),
+          defaultPrice: Number(product?.defaultPrice || 0),
+          specialPrice: isSpecialFishListPrice(stock, product),
         };
       })
       .sort((a, b) =>
+        fishListCategoryRank(a.categoryName) - fishListCategoryRank(b.categoryName) ||
         a.speciesName.localeCompare(b.speciesName, "zh-Hans-CN") ||
         (a.product?.name ?? "").localeCompare(b.product?.name ?? "", "zh-Hans-CN") ||
         exportTankName(a.stock.subTankId).localeCompare(exportTankName(b.stock.subTankId), "zh-Hans-CN") ||
@@ -855,109 +1232,135 @@ export function Dashboard() {
       return;
     }
 
-    const speciesGroups = new Map<string, typeof sellableRows>();
-    for (const row of sellableRows) {
-      speciesGroups.set(row.speciesId, [...(speciesGroups.get(row.speciesId) ?? []), row]);
+    const regularGroups = new Map<string, {
+      categoryName: string;
+      productName: string;
+      size: string;
+      origin: string;
+      price: number;
+      productNotes: string;
+      stocks: StockItem[];
+    }>();
+
+    for (const row of sellableRows.filter((row) => !row.specialPrice)) {
+      const productName = row.product?.name ?? row.stock.productId;
+      const size = row.product?.size || "—";
+      const origin = row.product?.origin || "";
+      const price = Number(row.defaultPrice || row.price || 0);
+      const key = [row.categoryName, row.product?.id ?? row.stock.productId, size, origin, price].join("__");
+      const existing = regularGroups.get(key);
+      if (existing) {
+        existing.stocks.push(row.stock);
+      } else {
+        regularGroups.set(key, {
+          categoryName: row.categoryName,
+          productName,
+          size,
+          origin,
+          price,
+          productNotes: row.product?.notes ?? "",
+          stocks: [row.stock],
+        });
+      }
     }
 
-    const pages = [...speciesGroups.entries()].map(([, rows], speciesIndex) => {
-      const first = rows[0];
-      const productCount = new Set(rows.map((row) => row.product?.id ?? row.stock.productId)).size;
-      return `
-        <section class="species-page ${speciesIndex > 0 ? "page-break" : ""}">
-          <div class="species-head">
-            <div>
-              <h2>${escapeHtml(first.speciesName)}</h2>
-              <div class="muted">
-                ${first.species?.scientificName ? `中文学名：${escapeHtml(first.species.scientificName)} · ` : ""}
-                ${first.species?.commonNames?.length ? `俗名：${escapeHtml(first.species.commonNames.join("、"))}` : ""}
-              </div>
-            </div>
-            <div class="count-box">
-              <div class="count">${rows.length}</div>
-              <div class="muted">可售条数</div>
-            </div>
-          </div>
-          <div class="summary">商品规格 ${productCount} 种 · 仅包含未售、未损耗、未出库、非疾病状态的鱼</div>
-          <table>
-            <thead>
-              <tr>
-                <th class="idx">#</th>
-                <th>商品</th>
-                <th class="size">尺寸</th>
-                <th>产地</th>
-                <th>缸位</th>
-                <th>编号</th>
-                <th>状态</th>
-                <th class="price">售价</th>
-                <th>备注</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rows.map((row, index) => `
-                <tr>
-                  <td class="idx">${index + 1}</td>
-                  <td>${escapeHtml(row.product?.name ?? row.stock.productId)}</td>
-                  <td class="size">${escapeHtml(row.product?.size || "—")}</td>
-                  <td>${escapeHtml(row.product?.origin || "—")}</td>
-                  <td>${escapeHtml(exportTankName(row.stock.subTankId))}</td>
-                  <td>${escapeHtml(row.stock.code || "—")}</td>
-                  <td>${escapeHtml(row.statusLabel)}</td>
-                  <td class="price">¥${Number(row.price || 0).toFixed(2)}</td>
-                  <td>${escapeHtml(row.stock.notes || row.product?.notes || "—")}</td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </section>
-      `;
-    }).join("");
+    const regularItemRows: FishListItemRow[] = [...regularGroups.values()]
+      .map((group) => ({
+        type: "item" as const,
+        categoryName: group.categoryName,
+        productName: group.productName,
+        size: group.size,
+        origin: group.origin,
+        stockCount: group.stocks.length,
+        priceText: formatFishListPrice(group.price),
+        priceValue: group.price,
+        notes: uniqueText([
+          fishListStatusNote(group.stocks),
+          group.productNotes,
+          ...group.stocks.map((stock) => stock.notes),
+        ]),
+      }))
+      .sort((a, b) =>
+        fishListCategoryRank(a.categoryName) - fishListCategoryRank(b.categoryName) ||
+        a.productName.localeCompare(b.productName, "zh-Hans-CN") ||
+        a.size.localeCompare(b.size, "zh-Hans-CN") ||
+        a.priceValue - b.priceValue
+      );
 
-    const html = `<!doctype html>
-      <html>
-        <head>
-          <meta charset="utf-8" />
-          <style>
-            @page { size: A4 portrait; margin: 12mm 10mm; }
-            body { font-family: Arial, "Microsoft YaHei", sans-serif; color: #111827; font-size: 9.5pt; }
-            h1 { margin: 0 0 4pt; font-size: 18pt; }
-            h2 { margin: 0; font-size: 16pt; }
-            .doc-head { margin-bottom: 12pt; border-bottom: 2px solid #0f70a8; padding-bottom: 8pt; }
-            .muted { color: #64748b; font-size: 9pt; }
-            .species-page { page-break-inside: avoid; break-inside: avoid; }
-            .page-break { page-break-before: always; }
-            .species-head { display: flex; justify-content: space-between; gap: 12pt; align-items: flex-start; margin-bottom: 6pt; }
-            .count-box { min-width: 64pt; border: 1px solid #cbd5e1; background: #f8fafc; text-align: center; padding: 5pt 8pt; }
-            .count { font-size: 18pt; font-weight: 700; color: #0f70a8; }
-            .summary { margin-bottom: 8pt; color: #475569; font-size: 9pt; }
-            table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-bottom: 8pt; }
-            th, td { border: 1px solid #cbd5e1; padding: 5pt 5pt; vertical-align: top; word-break: break-word; }
-            th { background: #eef6fb; font-weight: 700; text-align: left; }
-            .idx { width: 20pt; text-align: center; }
-            .size { width: 42pt; text-align: center; }
-            .price { width: 48pt; text-align: right; white-space: nowrap; }
-          </style>
-        </head>
-        <body>
-          <div class="doc-head">
-            <h1>可售鱼单</h1>
-            <div class="muted">共 ${sellableRows.length} 条 · ${speciesGroups.size} 个物种 · 导出时间 ${new Date().toLocaleString("zh-CN", { hour12: false })}</div>
-          </div>
-          ${pages}
-        </body>
-      </html>`;
+    const specialItemRows: FishListItemRow[] = sellableRows
+      .filter((row) => row.specialPrice)
+      .map((row) => ({
+        type: "item" as const,
+        categoryName: "一物一价",
+        productName: row.product?.name ?? row.stock.productId,
+        size: row.product?.size || "—",
+        origin: row.product?.origin || "",
+        stockCount: 1,
+        priceText: "一物一价",
+        priceValue: row.price,
+        notes: uniqueText([
+          row.stock.code ? `编号：${row.stock.code}` : "",
+          row.stock.notes,
+          row.product?.notes,
+        ]),
+        special: true,
+      }))
+      .sort((a, b) =>
+        a.productName.localeCompare(b.productName, "zh-Hans-CN") ||
+        a.size.localeCompare(b.size, "zh-Hans-CN") ||
+        a.notes.localeCompare(b.notes, "zh-Hans-CN")
+      );
 
-    const blob = new Blob(["\ufeff", html], { type: "application/msword;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${safeFilename(today)}_可售鱼单.doc`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    toast.success(`已导出可售鱼单：${sellableRows.length} 条`);
-    setExportingFishList(false);
+    const groupedByCategory = new Map<string, FishListItemRow[]>();
+    for (const row of regularItemRows) {
+      groupedByCategory.set(row.categoryName, [...(groupedByCategory.get(row.categoryName) ?? []), row]);
+    }
+    if (specialItemRows.length > 0) groupedByCategory.set("一物一价", specialItemRows);
+
+    const displayRows: FishListDisplayRow[] = [...groupedByCategory.entries()]
+      .sort(([a], [b]) => fishListCategoryRank(a) - fishListCategoryRank(b) || a.localeCompare(b, "zh-Hans-CN"))
+      .flatMap(([categoryName, rows]) => [{ type: "category" as const, categoryName }, ...rows]);
+
+    const rowsPerPage = 15;
+    const pageRows: FishListDisplayRow[][] = [];
+    for (let i = 0; i < displayRows.length; i += rowsPerPage) {
+      pageRows.push(displayRows.slice(i, i + rowsPerPage));
+    }
+
+    const fishListDateLabel = formatFishListDate(today);
+    try {
+      const template = await loadFishListImage(FISH_LIST_TEMPLATE_URL);
+      const pdfImages = pageRows.map((rows, index) => {
+        const ctx = createFishListPageCanvas(template, fishListDateLabel, index + 1);
+        drawFishListTable(ctx, rows);
+        const canvas = ctx.canvas;
+        return { bytes: canvasToJpegBytes(canvas), width: canvas.width, height: canvas.height };
+      });
+      const rulesCtx = createFishListPageCanvas(template, fishListDateLabel, pageRows.length + 1);
+      drawFishListRules(rulesCtx);
+      pdfImages.push({
+        bytes: canvasToJpegBytes(rulesCtx.canvas),
+        width: rulesCtx.canvas.width,
+        height: rulesCtx.canvas.height,
+      });
+      const blob = buildPdfFromJpegs(pdfImages);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const exportNamePrefix = dashboardSiteId === ALL_SITE_ID ? "海洋森林" : `${siteName(state, dashboardSiteId)}海洋森林`;
+      const exportDateName = `${Number(today.slice(5, 7))}月${Number(today.slice(8, 10))}日`;
+      link.download = `${safeFilename(`${exportNamePrefix}鱼单${exportDateName}`)}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`已导出可售鱼单：${sellableRows.length} 条`);
+    } catch (error) {
+      console.error("Failed to export fish list:", error);
+      toast.error("导出鱼单失败，请刷新后重试");
+    } finally {
+      setExportingFishList(false);
+    }
   };
 
   const cards = [
