@@ -1,4 +1,4 @@
-import { useMemo, useState, ReactNode } from "react";
+import { useMemo, useRef, useState, ReactNode } from "react";
 import { Input } from "../../app/components/ui/input";
 import { Button } from "../../app/components/ui/button";
 import {
@@ -44,6 +44,7 @@ export function DataTable<T extends { id: string }>({
 }: Props<T>) {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const tableRootRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
     if (!q.trim()) return data;
@@ -80,8 +81,30 @@ export function DataTable<T extends { id: string }>({
     return tokens;
   }, [current, totalPages]);
 
+  const scrollTableToTop = () => {
+    window.requestAnimationFrame(() => {
+      const root = tableRootRef.current;
+      if (!root) return;
+      const scrollContainer = root.closest(".fishroom-content") as HTMLElement | null;
+      if (scrollContainer) {
+        const rootRect = root.getBoundingClientRect();
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const rootTop = scrollContainer.scrollTop + rootRect.top - containerRect.top - 16;
+        scrollContainer.scrollTo({ top: Math.max(0, rootTop), left: 0, behavior: "auto" });
+        return;
+      }
+      root.scrollIntoView({ block: "start", behavior: "auto" });
+    });
+  };
+
+  const changePage = (nextPage: number) => {
+    const normalized = Math.max(1, Math.min(totalPages, nextPage));
+    setPage(normalized);
+    scrollTableToTop();
+  };
+
   return (
-    <div className="flex flex-col gap-4">
+    <div ref={tableRootRef} className="flex flex-col gap-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
@@ -89,7 +112,7 @@ export function DataTable<T extends { id: string }>({
             value={q}
             onChange={(e) => {
               setQ(e.target.value);
-              setPage(1);
+              changePage(1);
             }}
             placeholder={searchPlaceholder}
             className="pl-9"
@@ -203,7 +226,7 @@ export function DataTable<T extends { id: string }>({
                 href="#"
                 onClick={(e) => {
                   e.preventDefault();
-                  setPage(Math.max(1, current - 1));
+                  changePage(current - 1);
                 }}
               />
             </PaginationItem>
@@ -219,7 +242,7 @@ export function DataTable<T extends { id: string }>({
                     isActive={current === token}
                     onClick={(e) => {
                       e.preventDefault();
-                      setPage(token);
+                      changePage(token);
                     }}
                   >
                     {token}
@@ -232,7 +255,7 @@ export function DataTable<T extends { id: string }>({
                 href="#"
                 onClick={(e) => {
                   e.preventDefault();
-                  setPage(Math.min(totalPages, current + 1));
+                  changePage(current + 1);
                 }}
               />
             </PaginationItem>
