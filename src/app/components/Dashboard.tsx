@@ -9,6 +9,7 @@ import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
+import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 
 function todayDateString(): string {
   const now = new Date();
@@ -285,12 +286,6 @@ function formatFishListDate(dateString: string): string {
 function formatFishListPrice(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "一物一价";
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
-}
-
-function isSpecialFishListPrice(stock: StockItem, product?: Product): boolean {
-  const itemPrice = Number(stock.basePrice ?? 0);
-  const defaultPrice = Number(product?.defaultPrice ?? 0);
-  return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
 }
 
 function uniqueText(parts: Array<unknown>): string {
@@ -1224,14 +1219,17 @@ export function Dashboard() {
       return "—";
     };
 
-    const sellableRows = exportData.stock
+    const sellableStock = exportData.stock
       .filter((stock) => {
         if (stock.sold || stock.lost || stock.status === "sick") return false;
         if (!isPhysicallyInTank(stock, exportShippedOutStockIds)) return false;
         const product = exportProductById.get(stock.productId);
         const species = product ? exportSpeciesById.get(product.speciesId) : undefined;
         return isFishCategory(species?.category ?? "");
-      })
+      });
+    const fishListPriceBaselines = buildStockPriceBaselines(sellableStock, exportData.products);
+
+    const sellableRows = sellableStock
       .map((stock) => {
         const product = exportProductById.get(stock.productId);
         const species = product ? exportSpeciesById.get(product.speciesId) : undefined;
@@ -1242,9 +1240,9 @@ export function Dashboard() {
           speciesId: species?.id ?? product?.speciesId ?? "unknown",
           speciesName: species?.name ?? "未归类",
           categoryName: fishListCategoryName(species?.category, species?.name),
-          price: Number(stock.basePrice || product?.defaultPrice || 0),
+          price: stockSalePrice(stock, product),
           defaultPrice: Number(product?.defaultPrice || 0),
-          specialPrice: isSpecialFishListPrice(stock, product),
+          specialPrice: isStockSpecialPrice(stock, product, fishListPriceBaselines),
         };
       })
       .sort((a, b) =>
@@ -1275,8 +1273,8 @@ export function Dashboard() {
       const productName = row.product?.name ?? row.stock.productId;
       const size = row.product?.size || "—";
       const origin = row.product?.origin || "";
-      const price = Number(row.defaultPrice || row.price || 0);
-      const key = [row.categoryName, row.product?.id ?? row.stock.productId, size, origin, price].join("__");
+      const price = Number(row.price || row.defaultPrice || 0);
+      const key = [row.categoryName, productName, size, origin, price].join("__");
       const existing = regularGroups.get(key);
       if (existing) {
         existing.stocks.push(row.stock);

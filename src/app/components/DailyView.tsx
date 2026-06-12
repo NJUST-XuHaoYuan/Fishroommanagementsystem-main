@@ -23,6 +23,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
 import { downloadMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
+import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -129,10 +130,15 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
   const canBatchSelect = permission.canCreate || permission.canUpdate || permission.canDelete;
   const product = (id: string) => state.products.find((p) => p.id === id);
+  const priceBaselineByProduct = useMemo(
+    () => buildStockPriceBaselines(
+      state.stock.filter((item) => !item.lost && isPhysicallyInTank(item, shippedOutStockIds)),
+      state.products,
+    ),
+    [state.stock, state.products, shippedOutStockIds],
+  );
   const isSpecialPrice = (item: StockItem) => {
-    const defaultPrice = Number(product(item.productId)?.defaultPrice ?? 0);
-    const itemPrice = Number(item.basePrice ?? 0);
-    return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
+    return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
   const batch = (id: string) => state.batches.find((b) => b.id === id);
@@ -758,9 +764,18 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     const normalizedPrice = Number(price.toFixed(2));
     const ok = await saveStateTransform((latest) => ({
       ...latest,
-      stock: latest.stock.map((x) =>
-        x.id === bioItemId ? { ...x, status: bioStatus, basePrice: normalizedPrice, code: bioCode.trim(), notes: bioNotes } : x
-      ),
+      stock: latest.stock.map((x) => {
+        if (x.id !== bioItemId) return x;
+        const currentPrice = Number(x.basePrice ?? 0);
+        return {
+          ...x,
+          status: bioStatus,
+          basePrice: normalizedPrice,
+          priceOverridden: Math.abs(normalizedPrice - currentPrice) > 0.005 ? true : x.priceOverridden,
+          code: bioCode.trim(),
+          notes: bioNotes,
+        };
+      }),
     }));
     if (!ok) return toast.error("保存失败，请重试");
     setBioOpen(false);

@@ -99,6 +99,8 @@ export type StockItem = {
   inDate: string;
   /** 这条鱼进入销售订单时默认带出的售价。 */
   basePrice: number;
+  /** 是否在日常管理中手工改过单条售价。 */
+  priceOverridden?: boolean;
   /** 这条鱼下单时默认带出的提成比例，单位为百分比。 */
   commissionRate?: number;
   /** 店内给单条鱼手工标记的展示编号。 */

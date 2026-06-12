@@ -18,6 +18,7 @@ import { Search, ChevronDown, Trash2, Check, ArrowRightLeft } from "lucide-react
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
+import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 
 function buildStockItems(item: StockItem, quantity: number): StockItem[] {
   return item.id
@@ -269,10 +270,15 @@ export function StockInView() {
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
   const product = (id: string) => state.products.find((p) => p.id === id);
   const batch = (id: string) => state.batches.find((b) => b.id === id);
+  const priceBaselineByProduct = useMemo(
+    () => buildStockPriceBaselines(
+      state.stock.filter((item) => !item.lost && isPhysicallyInTank(item, shippedOutStockIds)),
+      state.products,
+    ),
+    [state.stock, state.products, shippedOutStockIds],
+  );
   const isSpecialPrice = (item: StockItem) => {
-    const defaultPrice = Number(product(item.productId)?.defaultPrice ?? 0);
-    const itemPrice = Number(item.basePrice ?? 0);
-    return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
+    return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
   const batchCommissionMultiplier = (batchId: string) => Number(batch(batchId)?.commissionMultiplier ?? 100);
