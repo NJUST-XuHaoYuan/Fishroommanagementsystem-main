@@ -1202,7 +1202,7 @@ export default function App() {
       case "tankGroups": return <TankGroupsView />;
       case "batches":    return <BatchesView />;
       case "stockIn":    return <StockInView />;
-      case "daily":      return <DailyView />;
+      case "daily":      return <DailyView allTankGroups={state.tankGroups} />;
       case "lossRecords": return <LossRecordsView />;
       case "customers":  return <CustomersView />;
       case "orders":     return <OrdersView />;

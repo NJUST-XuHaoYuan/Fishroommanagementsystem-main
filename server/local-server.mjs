@@ -3740,8 +3740,6 @@ async function handleApi(req, res, url) {
 	          if (movingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
 	          const invalidItem = movingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能移缸");
-	          const crossSiteItem = movingItems.find((item) => stockSiteId(state, item) !== targetSiteId);
-	          if (crossSiteItem) throw new Error("不能跨场地移缸，请选择同一场地内的目标子缸");
 	          if (movingItems.every((item) => item.subTankId === targetId)) throw new Error("目标子缸与当前子缸相同");
 	          const notes = String(moveNotes ?? "").trim();
 	          const date = String(moveDate ?? new Date().toISOString().slice(0, 10)).trim();
