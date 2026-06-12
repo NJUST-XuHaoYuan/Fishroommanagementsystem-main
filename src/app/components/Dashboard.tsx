@@ -417,8 +417,8 @@ function drawWrappedCellText(
 }
 
 function drawFishListNameCell(ctx: CanvasRenderingContext2D, row: FishListItemRow, x: number, centerY: number, width: number) {
-  const lines = row.origin ? [row.productName, row.origin] : splitTextByWidth(ctx, row.productName, width, 2);
-  const fontSize = row.origin ? 14 : 15;
+  const lines = splitTextByWidth(ctx, row.productName, width, 2);
+  const fontSize = 15;
   const lineHeight = fontSize * 1.16;
   const startY = centerY - ((lines.length - 1) * lineHeight) / 2;
   ctx.fillStyle = "#ffffff";
@@ -1294,14 +1294,13 @@ export function Dashboard() {
         categoryName: "一物一价",
         productName: row.product?.name ?? row.stock.productId,
         size: row.product?.size || "—",
-        origin: row.product?.origin || "",
+        origin: "",
         stockCount: 1,
-        priceText: "一物一价",
+        priceText: formatFishListPrice(row.price),
         priceValue: row.price,
         notes: uniqueText([
-          row.stock.code ? `编号：${row.stock.code}` : "",
           row.stock.notes,
-          row.product?.notes,
+          row.stock.code ? `编号：${row.stock.code}` : "",
         ]),
         special: true,
       }))
