@@ -33,7 +33,7 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "productOrigins", module: "商品产地" },
   { key: "tankGroups", module: "缸组管理" },
   { key: "batches", module: "采购批次" },
-  { key: "stock", module: "商品入库" },
+  { key: "stock", module: "库存明细" },
   { key: "lossRecords", module: "损耗记录" },
   { key: "logs", module: "日常管理" },
   { key: "checks", module: "盘库管理" },

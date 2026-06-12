@@ -62,7 +62,7 @@ const NAV: NavSection[] = [
     items: [
       { key: "tankGroups", label: "缸组管理" },
       { key: "batches", label: "采购批次" },
-      { key: "stockIn", label: "商品入库" },
+      { key: "stockIn", label: "库存明细" },
     ],
   },
   {

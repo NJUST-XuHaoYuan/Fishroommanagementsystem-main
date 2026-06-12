@@ -7,7 +7,7 @@ export const PERMISSION_MODULES: { key: PermissionModule; label: string; group: 
   { key: "products", label: "商品管理", group: "品名管理" },
   { key: "tankGroups", label: "缸组管理", group: "库存管理" },
   { key: "batches", label: "采购批次", group: "库存管理" },
-  { key: "stockIn", label: "商品入库", group: "库存管理" },
+  { key: "stockIn", label: "库存明细", group: "库存管理" },
   { key: "daily", label: "日常管理", group: "维护管理" },
   { key: "lossRecords", label: "损耗记录", group: "维护管理" },
   { key: "customers", label: "客户管理", group: "销售管理" },

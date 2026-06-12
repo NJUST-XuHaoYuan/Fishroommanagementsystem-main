@@ -592,8 +592,8 @@ export function StockInView() {
     <div className="flex flex-col gap-4">
       <div className="flex items-end justify-between gap-3">
         <div>
-          <h2>商品入库管理</h2>
-          <p className="text-sm text-muted-foreground">将采购批次中的商品分配到具体子缸</p>
+          <h2>库存明细</h2>
+          <p className="text-sm text-muted-foreground">查看和管理每个子缸内的库存商品</p>
         </div>
         <div className="flex items-center gap-2">
           {permission.canDelete && (
@@ -857,7 +857,7 @@ export function StockInView() {
                       }
                       return "";
                     })()}`
-                  : "商品入库"}
+                  : "新增入库"}
             </DialogTitle>
           </DialogHeader>
           {editing && (

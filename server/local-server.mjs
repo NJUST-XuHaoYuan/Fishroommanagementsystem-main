@@ -3598,7 +3598,7 @@ async function handleApi(req, res, url) {
           id: uid("log"),
           time: new Date().toISOString(),
           operator,
-          module: "商品入库",
+          module: "库存明细",
           action: deleteIdSet.size > 0 ? "删除记录" : upsertItems.some((item) => existingIds.has(item.id)) ? "修改记录" : "添加记录",
           detail: deleteIdSet.size > 0
             ? `删除入库记录 ${deleteIdSet.size} 条`

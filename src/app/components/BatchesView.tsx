@@ -206,7 +206,7 @@ export function BatchesView() {
     <div className="flex flex-col gap-4">
       <div>
         <h2>采购批次管理</h2>
-        <p className="text-sm text-muted-foreground">记录每次采购的批次信息，作为商品入库的来源</p>
+        <p className="text-sm text-muted-foreground">记录每次采购的批次信息，作为库存明细的来源</p>
       </div>
       <DataTable
         data={state.batches}
