@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, DailyLog, StockStatus, StockItem, uid } from "../store";
+import { useStore, DailyLog, StockStatus, StockItem, TankGroup, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -20,7 +20,7 @@ import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
-import { normalizeSiteId } from "../utils/sites";
+import { normalizeSiteId, siteName } from "../utils/sites";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -51,7 +51,11 @@ function formatBioRecordTime(value: string): string {
   return normalized.includes("T") ? normalized.replace("T", " ") : normalized;
 }
 
-export function DailyView() {
+type DailyViewProps = {
+  allTankGroups?: TankGroup[];
+};
+
+export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const { state, setState, saveStateTransform, saveDailyLog, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
   const [q, setQ] = useState("");
@@ -366,10 +370,7 @@ export function DailyView() {
   const movingItems = moveItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
-  const movingSiteId = siteIdForStockItem(movingItems[0]);
-  const moveTargetGroups = movingSiteId
-    ? state.tankGroups.filter((group) => normalizeSiteId(group.siteId) === movingSiteId)
-    : state.tankGroups;
+  const moveTargetGroups = allTankGroups?.length ? allTankGroups : state.tankGroups;
   const targetSubTanks = moveTargetGroups.find((g) => g.id === targetGroupId)?.subTanks ?? [];
   const batchRecordItems = batchRecordItemIds
     .map((id) => stockItem(id))
@@ -428,13 +429,13 @@ export function DailyView() {
       ? state.tankGroups.find((g) => g.subTanks.some((t) => t.id === first.subTankId))?.id
       : "";
     const sourceSiteId = siteIdForStockItem(first);
-    const sourceSiteGroups = state.tankGroups.filter((group) => normalizeSiteId(group.siteId) === sourceSiteId);
-    const crossSiteItem = validIds
-      .map((id) => stockItem(id))
-      .find((item) => item && siteIdForStockItem(item) !== sourceSiteId);
-    if (crossSiteItem) return toast.error("不能同时选择不同场地的鱼移缸");
-    const defaultGroup = sourceSiteGroups.find((g) => g.id !== currentGroupId) ?? sourceSiteGroups[0];
-    if (!defaultGroup) return toast.error("当前场地没有可选择的目标缸组");
+    const sameSiteGroups = moveTargetGroups.filter((group) => normalizeSiteId(group.siteId) === sourceSiteId);
+    const defaultGroup =
+      sameSiteGroups.find((g) => g.id !== currentGroupId) ??
+      sameSiteGroups[0] ??
+      moveTargetGroups.find((g) => g.id !== currentGroupId) ??
+      moveTargetGroups[0];
+    if (!defaultGroup) return toast.error("没有可选择的目标缸组");
     setMoveItemIds(validIds);
     setTargetGroupId(defaultGroup?.id ?? "");
     setTargetSubTankId("");
@@ -452,10 +453,7 @@ export function DailyView() {
     const targetGroup = moveTargetGroups.find((group) =>
       group.subTanks.some((tank) => tank.id === targetSubTankId)
     );
-    const targetSiteId = targetGroup ? normalizeSiteId(targetGroup.siteId) : "";
-    if (!targetSiteId || movingItems.some((item) => siteIdForStockItem(item) !== targetSiteId)) {
-      return toast.error("不能跨场地移缸，请选择同一场地内的目标子缸");
-    }
+    if (!targetGroup) return toast.error("目标子缸不存在或已被删除");
     if (!confirmWrite("移缸", `将移动 ${moveItemIds.length} 条鱼到目标子缸。`)) return;
     setMoveSaving(true);
     const ok = await saveMaintenanceAction({
@@ -1965,7 +1963,9 @@ export function DailyView() {
 	                  <SelectTrigger><SelectValue placeholder="选择缸组" /></SelectTrigger>
 	                  <SelectContent>
                     {moveTargetGroups.map((group) => (
-	                      <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
+	                      <SelectItem key={group.id} value={group.id}>
+	                        {siteName(state, group.siteId)} / {group.name}
+	                      </SelectItem>
 	                    ))}
 	                  </SelectContent>
 	                </Select>
