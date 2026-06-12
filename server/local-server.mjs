@@ -3530,6 +3530,88 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/shipments/confirm" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const rawBody = JSON.parse(await readBody(req) || "{}");
+      const body = await externalizeDataUrls(rawBody);
+      const operator = authenticatedOperator(req);
+      const shipmentId = String(body.shipmentId ?? "").trim();
+      const packingProof = Array.isArray(body.packingProof)
+        ? body.packingProof.map((item) => String(item ?? "")).filter(Boolean)
+        : [];
+      if (!shipmentId) throw new Error("缺少发货单信息，请刷新后重试");
+      if (packingProof.length < 2) throw new Error("请至少上传 2 张打包凭证");
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      requireOrderPermissionForAuth(req, "update");
+
+      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
+      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      if (shipment.status !== "outbound") throw new Error("只有已出库的发货单可以确认发货");
+
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
+      if (!order) throw new Error("订单不存在，请刷新后重试");
+      if (order.status === "completed") throw new Error("已完成订单不能再确认发货");
+      if (order.status === "cancelled") throw new Error("已取消订单不能再确认发货");
+
+      const now = nowDatetimeInChina();
+      const shipMethod = shipment.shipMethod === "pickup" ? "pickup" : "express";
+      const updatedShipment = {
+        ...shipment,
+        status: shipMethod === "pickup" ? "delivered" : "shipped",
+        packingProof,
+        shippedAt: now,
+        shipDate: todayInChina(),
+        actualShippingFee: shipMethod === "pickup" ? 0 : shipment.actualShippingFee,
+      };
+      const nextShipments = shipments.map((item) =>
+        String(item?.id ?? "") === shipmentId ? updatedShipment : item
+      );
+      const nextOrders = orders.map((item) =>
+        String(item?.id ?? "") === String(order.id ?? "") &&
+        item.status !== "cancelled" &&
+        item.status !== "completed" &&
+        item.status !== "damaged"
+          ? { ...item, status: "shipped" }
+          : item
+      );
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: `订单「${order.orderNo}」确认发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        shipments: nextShipments,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        shipment: updatedShipment,
+        orders: nextOrders,
+        shipments: nextShipments,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "确认发货失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/state/patch" && req.method === "POST") {
     const client = await pool.connect();
     try {

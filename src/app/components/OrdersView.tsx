@@ -1522,7 +1522,7 @@ function ProofUploader({
     const results: string[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue;
-      try { results.push(await readAndCompressImage(file)); }
+      try { results.push(await readAndCompressImage(file, 1.2 * 1024 * 1024, 0.82, 1600)); }
       catch { toast.error("图片处理失败"); }
     }
     onChange([...images, ...results]);
@@ -1803,11 +1803,12 @@ function ReturnItemDialog({
 // ─── Shipment Status Actions ─────────────────────────────────────────────────
 
 function ShipmentActionDialog({
-  shipment, orderNo, open, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
+  shipment, orderNo, open, saving = false, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
 }: {
   shipment: Shipment | null;
   orderNo?: string;
   open: boolean;
+  saving?: boolean;
   onOpenChange: (o: boolean) => void;
   onDelivered: (shipment: Shipment) => void;
   onDamage: (shipment: Shipment) => void;
@@ -1860,18 +1861,19 @@ function ShipmentActionDialog({
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>关闭</Button>
             <Button
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
               onClick={() => onCancelShipment(shipment)}
+              disabled={saving}
             >
               <RotateCcw className="size-4 mr-1" />
               取消出库
             </Button>
-            <Button onClick={confirmShipment}>
+            <Button onClick={confirmShipment} disabled={saving}>
               <Truck className="size-4 mr-1" />
-              确认发货
+              {saving ? "保存中..." : "确认发货"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3663,6 +3665,7 @@ function OrderDetailDialog({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
+  const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
   const [damageShipment, setDamageShipment] = useState<Shipment | null>(null);
   const [returnItem, setReturnItem] = useState<OrderItem | null>(null);
   const personnel = state.personnel ?? [];
@@ -3675,6 +3678,7 @@ function OrderDetailDialog({
       setEditForm(null);
       setShipDialogOpen(false);
       setShipmentAction(null);
+      setShipmentConfirmSaving(false);
       setDamageShipment(null);
       setReturnItem(null);
       setAddPayOpen(false);
@@ -3995,37 +3999,25 @@ function OrderDetailDialog({
   const confirmOutboundShipment = async (shipment: Shipment, packingProof: string[]) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
+    if (shipmentConfirmSaving) return;
     if (order.status === "completed") return toast.error("已完成订单不能再确认发货");
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
-    const now = nowDatetimeLocal();
-    const ok = await saveStateTransform((latest) => {
-      const shipments = latest.shipments.map((sh) =>
-        sh.id === shipment.id
-          ? {
-              ...sh,
-              status: sh.shipMethod === "pickup" ? "delivered" as const : "shipped" as const,
-              packingProof,
-              shippedAt: now,
-              shipDate: todayDateString(),
-              actualShippingFee: sh.shipMethod === "pickup" ? 0 : sh.actualShippingFee,
-            }
-          : sh
-      );
-      return {
-        ...latest,
-        shipments,
-        orders: latest.orders.map((o) =>
-          o.id === order.id && o.status !== "cancelled" && o.status !== "completed" && o.status !== "damaged"
-            ? { ...o, status: "shipped" as const }
-            : o
-        ),
-      };
-    });
-    if (!ok) return toast.error("保存失败，请重试");
-    setShipmentAction(null);
-    toast.success(shipment.shipMethod === "pickup" ? "已上传凭证并确认自取完成" : "已上传凭证并确认发货");
+    setShipmentConfirmSaving(true);
+    try {
+      const result = await postOrderApi("shipments/confirm", {
+        shipmentId: shipment.id,
+        packingProof,
+      });
+      applyOrderApiResult(setState, result);
+      setShipmentAction(null);
+      toast.success(shipment.shipMethod === "pickup" ? "已上传凭证并确认自取完成" : "已上传凭证并确认发货");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+    } finally {
+      setShipmentConfirmSaving(false);
+    }
   };
 
   const cancelShipment = async (shipment: Shipment) => {
@@ -4628,6 +4620,7 @@ function OrderDetailDialog({
         shipment={shipmentAction}
         orderNo={order.orderNo}
         open={!!shipmentAction}
+        saving={shipmentConfirmSaving}
         onOpenChange={(o) => { if (!o) setShipmentAction(null); }}
         onDelivered={markShipmentDelivered}
         onDamage={(shipment) => {
