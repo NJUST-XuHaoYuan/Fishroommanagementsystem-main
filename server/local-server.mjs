@@ -2442,6 +2442,8 @@ function extensionForMime(mime) {
   if (normalized === "image/gif") return ".gif";
   if (normalized === "video/mp4") return ".mp4";
   if (normalized === "video/webm") return ".webm";
+  if (normalized === "video/quicktime") return ".mov";
+  if (normalized === "video/x-m4v") return ".m4v";
   return ".bin";
 }
 
@@ -2453,6 +2455,8 @@ function mimeForExtension(ext) {
   if (normalized === ".gif") return "image/gif";
   if (normalized === ".mp4") return "video/mp4";
   if (normalized === ".webm") return "video/webm";
+  if (normalized === ".mov") return "video/quicktime";
+  if (normalized === ".m4v") return "video/x-m4v";
   return "application/octet-stream";
 }
 

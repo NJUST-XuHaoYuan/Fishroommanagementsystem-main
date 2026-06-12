@@ -21,6 +21,8 @@ import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
+import { downloadMedia } from "../utils/media";
+import { MediaVideo } from "./MediaVideo";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -1647,15 +1649,21 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                               {ev.photos.map((src, pi) => (
                                 <div key={pi} className="group relative size-16 rounded border overflow-hidden cursor-pointer">
                                   <ImageWithFallback src={src} alt={`照片${pi + 1}`} className="size-full object-cover" />
-                                  <a
-                                    href={src}
-                                    download={`photo-${pi + 1}.jpg`}
-                                    onClick={(e) => e.stopPropagation()}
+                                  <button
+                                    type="button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      try {
+                                        await downloadMedia(src, `photo-${pi + 1}.jpg`);
+                                      } catch {
+                                        toast.error("照片下载失败，请刷新后重试");
+                                      }
+                                    }}
                                     className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                                     title="下载照片"
                                   >
                                     <Download className="size-4 text-white" />
-                                  </a>
+                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -1664,16 +1672,22 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                             <div className="flex flex-wrap gap-2 mt-2">
                               {(ev.videos ?? []).map((src, vi) => (
                                 <div key={vi} className="group relative rounded border overflow-hidden" style={{ width: "120px" }}>
-                                  <video src={src} className="w-full" controls />
-                                  <a
-                                    href={src}
-                                    download={`video-${vi + 1}.mp4`}
-                                    onClick={(e) => e.stopPropagation()}
+                                  <MediaVideo src={src} className="w-full" controls />
+                                  <button
+                                    type="button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      try {
+                                        await downloadMedia(src, `video-${vi + 1}.mp4`);
+                                      } catch {
+                                        toast.error("视频下载失败，请刷新后重试");
+                                      }
+                                    }}
                                     className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                                     title="下载视频"
                                   >
                                     <Download className="size-3.5 text-white" />
-                                  </a>
+                                  </button>
                                 </div>
                               ))}
                             </div>

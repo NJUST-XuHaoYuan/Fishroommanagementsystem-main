@@ -33,6 +33,8 @@ import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
+import { downloadMedia } from "../utils/media";
+import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -3172,10 +3174,22 @@ function StockPickerBioDialog({
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.photos.map((src, photoIndex) => (
                                 <div key={photoIndex} className="group relative size-16 cursor-pointer overflow-hidden rounded border">
-                                  <img src={src} alt={`照片${photoIndex + 1}`} className="size-full object-cover" />
-                                  <a href={src} download={`photo-${photoIndex + 1}.jpg`} onClick={(e) => e.stopPropagation()} className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100" title="下载照片">
+                                  <ImageWithFallback src={src} alt={`照片${photoIndex + 1}`} className="size-full object-cover" />
+                                  <button
+                                    type="button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      try {
+                                        await downloadMedia(src, `photo-${photoIndex + 1}.jpg`);
+                                      } catch {
+                                        toast.error("照片下载失败，请刷新后重试");
+                                      }
+                                    }}
+                                    className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100"
+                                    title="下载照片"
+                                  >
                                     <Download className="size-4 text-white" />
-                                  </a>
+                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -3184,10 +3198,22 @@ function StockPickerBioDialog({
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.videos.map((src, videoIndex) => (
                                 <div key={videoIndex} className="group relative overflow-hidden rounded border" style={{ width: "120px" }}>
-                                  <video src={src} className="w-full" controls />
-                                  <a href={src} download={`video-${videoIndex + 1}.mp4`} onClick={(e) => e.stopPropagation()} className="absolute right-1 top-1 rounded bg-black/60 p-0.5 opacity-0 transition-opacity group-hover:opacity-100" title="下载视频">
+                                  <MediaVideo src={src} className="w-full" controls />
+                                  <button
+                                    type="button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      try {
+                                        await downloadMedia(src, `video-${videoIndex + 1}.mp4`);
+                                      } catch {
+                                        toast.error("视频下载失败，请刷新后重试");
+                                      }
+                                    }}
+                                    className="absolute right-1 top-1 rounded bg-black/60 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                                    title="下载视频"
+                                  >
                                     <Download className="size-3.5 text-white" />
-                                  </a>
+                                  </button>
                                 </div>
                               ))}
                             </div>

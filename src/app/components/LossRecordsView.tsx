@@ -16,6 +16,7 @@ import {
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { Check, ChevronDown, Eye, Image as ImageIcon, Search, X } from "lucide-react";
 import { toast } from "sonner";
+import { resolveMediaUrl } from "../utils/media";
 
 type SearchOption = {
   value: string;
@@ -689,15 +690,24 @@ export function LossRecordsView() {
                 ) : (
                   <div className="grid grid-cols-4 gap-3">
                     {viewing.photos.map((src, index) => (
-                      <a
+                      <button
                         key={index}
-                        href={src}
-                        target="_blank"
-                        rel="noreferrer"
+                        type="button"
+                        onClick={async () => {
+                          const preview = window.open("about:blank", "_blank", "noopener,noreferrer");
+                          try {
+                            const url = await resolveMediaUrl(src);
+                            if (preview && url) preview.location.href = url;
+                            else if (url) window.open(url, "_blank", "noopener,noreferrer");
+                          } catch {
+                            preview?.close();
+                            toast.error("照片打开失败，请刷新后重试");
+                          }
+                        }}
                         className="block aspect-square overflow-hidden rounded-md border bg-muted"
                       >
                         <ImageWithFallback src={src} alt={`损耗凭证 ${index + 1}`} className="size-full object-cover" />
-                      </a>
+                      </button>
                     ))}
                   </div>
                 )}
