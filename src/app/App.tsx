@@ -141,6 +141,14 @@ function fillMissingSiteFields<T extends Partial<PersistedStore>>(data: T, siteI
   return next;
 }
 
+function stockMatchesSite(state: Store, item: StockItem, siteId: string): boolean {
+  const tankGroup = state.tankGroups.find((group) =>
+    group.subTanks.some((tank) => tank.id === item.subTankId)
+  );
+  if (tankGroup) return normalizeSiteId(tankGroup.siteId) === siteId;
+  return matchesSite(item, siteId);
+}
+
 function scopedStoreForSite(state: Store, siteId: string): Store {
   const normalizedSiteId = normalizeSiteId(siteId);
   const tankGroups = state.tankGroups.filter((item) => matchesSite(item, normalizedSiteId));
@@ -149,9 +157,7 @@ function scopedStoreForSite(state: Store, siteId: string): Store {
   );
   const orders = state.orders.filter((item) => matchesSite(item, normalizedSiteId));
   const orderIds = new Set(orders.map((order) => order.id));
-  const stock = state.stock.filter((item) =>
-    matchesSite(item, normalizedSiteId) || subTankIds.has(item.subTankId)
-  );
+  const stock = state.stock.filter((item) => stockMatchesSite(state, item, normalizedSiteId));
   const stockIds = new Set(stock.map((item) => item.id));
   return {
     ...state,

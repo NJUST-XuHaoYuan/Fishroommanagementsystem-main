@@ -220,6 +220,13 @@ function matchesSite(item, siteId) {
   return normalizeSiteId(item?.siteId) === siteId;
 }
 
+function stockMatchesSite(state = {}, item = {}, siteId = ALL_SITE_ID) {
+  if (siteId === ALL_SITE_ID) return true;
+  const tankSiteId = findSubTank(state, item?.subTankId)?.group?.siteId;
+  if (tankSiteId) return normalizeSiteId(tankSiteId) === siteId;
+  return matchesSite(item, siteId);
+}
+
 function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
   const scope = normalizeSiteScope(siteId);
   if (scope === ALL_SITE_ID) return state;
@@ -229,9 +236,7 @@ function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
   ));
   const orders = (Array.isArray(state.orders) ? state.orders : []).filter((item) => matchesSite(item, scope));
   const orderIds = new Set(orders.map((order) => String(order?.id ?? "")).filter(Boolean));
-  const stock = (Array.isArray(state.stock) ? state.stock : []).filter((item) =>
-    matchesSite(item, scope) || subTankIds.has(String(item?.subTankId ?? ""))
-  );
+  const stock = (Array.isArray(state.stock) ? state.stock : []).filter((item) => stockMatchesSite(state, item, scope));
   const stockIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
   return {
     ...state,
@@ -1757,9 +1762,11 @@ function findActiveOrderForStock(state = {}, stockItemId) {
 }
 
 function stockSiteId(state = {}, stockItem = {}) {
+  const tankSiteId = findSubTank(state, stockItem?.subTankId)?.group?.siteId;
+  if (tankSiteId) return normalizeSiteId(tankSiteId);
   const explicit = String(stockItem?.siteId ?? "").trim();
   if (explicit) return normalizeSiteId(explicit);
-  return normalizeSiteId(findSubTank(state, stockItem?.subTankId)?.group?.siteId);
+  return normalizeSiteId();
 }
 
 function orderActiveStockIds(state = {}, excludeOrderId = "") {
@@ -3721,22 +3728,26 @@ async function handleApi(req, res, url) {
 	          };
 	        } else if (mode === "move") {
 	          const targetId = String(targetSubTankId ?? "");
-	          if (!findSubTank(state, targetId)) throw new Error("目标子缸不存在或已被删除");
+	          const targetTank = findSubTank(state, targetId);
+	          if (!targetTank) throw new Error("目标子缸不存在或已被删除");
+	          const targetSiteId = normalizeSiteId(targetTank.group?.siteId);
 	          const targetName = subTankDisplayName(state, targetId);
 	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
 	          const idSet = new Set(requestedIds);
 	          if (idSet.size === 0) throw new Error("请选择要移缸的鱼");
 	          const shippedIds = shippedOutStockIds(state);
 	          const movingItems = stock.filter((item) => idSet.has(item.id));
-	          if (movingItems.length === 0) throw new Error("没有找到要移缸的库存鱼");
+	          if (movingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
 	          const invalidItem = movingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能移缸");
+	          const crossSiteItem = movingItems.find((item) => stockSiteId(state, item) !== targetSiteId);
+	          if (crossSiteItem) throw new Error("不能跨场地移缸，请选择同一场地内的目标子缸");
 	          if (movingItems.every((item) => item.subTankId === targetId)) throw new Error("目标子缸与当前子缸相同");
 	          const notes = String(moveNotes ?? "").trim();
 	          const date = String(moveDate ?? new Date().toISOString().slice(0, 10)).trim();
 	          const moveRecords = movingItems.map((item) => ({
 	            id: uid("bio"),
-	            siteId: normalizeSiteId(item.siteId),
+	            siteId: targetSiteId,
 	            stockItemId: item.id,
 	            date,
 	            text: `移缸：${subTankDisplayName(state, item.subTankId)} → ${targetName}${notes ? `。备注：${notes}` : ""}`,
@@ -3744,7 +3755,7 @@ async function handleApi(req, res, url) {
 	            videos: [],
 	          }));
 	          nextStock = stock.map((item) =>
-	            idSet.has(item.id) ? { ...item, subTankId: targetId } : item
+	            idSet.has(item.id) ? { ...item, siteId: targetSiteId, subTankId: targetId } : item
 	          );
 	          nextBioRecords = [...bioRecords, ...moveRecords];
 	          operationLog = {

@@ -20,6 +20,7 @@ import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
+import { normalizeSiteId } from "../utils/sites";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -226,6 +227,11 @@ export function DailyView() {
     }
     return null;
   };
+  const siteIdForStockItem = (item?: StockItem | null) => {
+    if (!item) return "";
+    const tankSiteId = tankContextBySubId(item.subTankId)?.group.siteId;
+    return normalizeSiteId(tankSiteId ?? item.siteId);
+  };
 
   // 是否有任何过滤条件激活
   const term = normalizeSearchText(q);
@@ -357,10 +363,14 @@ export function DailyView() {
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
 
-  const targetSubTanks = state.tankGroups.find((g) => g.id === targetGroupId)?.subTanks ?? [];
   const movingItems = moveItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
+  const movingSiteId = siteIdForStockItem(movingItems[0]);
+  const moveTargetGroups = movingSiteId
+    ? state.tankGroups.filter((group) => normalizeSiteId(group.siteId) === movingSiteId)
+    : state.tankGroups;
+  const targetSubTanks = moveTargetGroups.find((g) => g.id === targetGroupId)?.subTanks ?? [];
   const batchRecordItems = batchRecordItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
@@ -417,7 +427,14 @@ export function DailyView() {
     const currentGroupId = first
       ? state.tankGroups.find((g) => g.subTanks.some((t) => t.id === first.subTankId))?.id
       : "";
-    const defaultGroup = state.tankGroups.find((g) => g.id !== currentGroupId) ?? state.tankGroups[0];
+    const sourceSiteId = siteIdForStockItem(first);
+    const sourceSiteGroups = state.tankGroups.filter((group) => normalizeSiteId(group.siteId) === sourceSiteId);
+    const crossSiteItem = validIds
+      .map((id) => stockItem(id))
+      .find((item) => item && siteIdForStockItem(item) !== sourceSiteId);
+    if (crossSiteItem) return toast.error("不能同时选择不同场地的鱼移缸");
+    const defaultGroup = sourceSiteGroups.find((g) => g.id !== currentGroupId) ?? sourceSiteGroups[0];
+    if (!defaultGroup) return toast.error("当前场地没有可选择的目标缸组");
     setMoveItemIds(validIds);
     setTargetGroupId(defaultGroup?.id ?? "");
     setTargetSubTankId("");
@@ -432,6 +449,13 @@ export function DailyView() {
     if (!targetSubTankId) return toast.error("请选择目标子缸");
     if (movingItems.length > 0 && movingItems.every((item) => item.subTankId === targetSubTankId))
       return toast.error("目标子缸与当前子缸相同");
+    const targetGroup = moveTargetGroups.find((group) =>
+      group.subTanks.some((tank) => tank.id === targetSubTankId)
+    );
+    const targetSiteId = targetGroup ? normalizeSiteId(targetGroup.siteId) : "";
+    if (!targetSiteId || movingItems.some((item) => siteIdForStockItem(item) !== targetSiteId)) {
+      return toast.error("不能跨场地移缸，请选择同一场地内的目标子缸");
+    }
     if (!confirmWrite("移缸", `将移动 ${moveItemIds.length} 条鱼到目标子缸。`)) return;
     setMoveSaving(true);
     const ok = await saveMaintenanceAction({
@@ -1940,7 +1964,7 @@ export function DailyView() {
 	                >
 	                  <SelectTrigger><SelectValue placeholder="选择缸组" /></SelectTrigger>
 	                  <SelectContent>
-	                    {state.tankGroups.map((group) => (
+                    {moveTargetGroups.map((group) => (
 	                      <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
 	                    ))}
 	                  </SelectContent>
