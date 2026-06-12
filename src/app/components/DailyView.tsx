@@ -122,6 +122,12 @@ export function DailyView() {
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
   const canBatchSelect = permission.canCreate || permission.canUpdate || permission.canDelete;
   const product = (id: string) => state.products.find((p) => p.id === id);
+  const isSpecialPrice = (item: StockItem) => {
+    const defaultPrice = Number(product(item.productId)?.defaultPrice ?? 0);
+    const itemPrice = Number(item.basePrice ?? 0);
+    return itemPrice > 0 && defaultPrice > 0 && Math.abs(itemPrice - defaultPrice) > 0.005;
+  };
+  const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
   const batch = (id: string) => state.batches.find((b) => b.id === id);
   const stockItem = (id: string) => state.stock.find((s) => s.id === id);
   const relatedOrderForStock = (stockItemId: string) =>
@@ -1242,7 +1248,7 @@ export function DailyView() {
 	                                          className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
 	                                            selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
 	                                          }`}
-		                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
+		                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
 	                                        >
 	                                          {iconUrl ? (
 	                                            <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
@@ -1254,6 +1260,11 @@ export function DailyView() {
 		                                          {s.code && (
 		                                            <span className="absolute inset-x-0 bottom-0 z-20 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
 		                                              {s.code}
+		                                            </span>
+		                                          )}
+		                                          {isSpecialPrice(s) && (
+		                                            <span className="absolute left-0 top-0 z-20 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
+		                                              {priceBadgeText(s)}
 		                                            </span>
 		                                          )}
 		                                          <StatusBadge sold={s.sold} />
