@@ -59,6 +59,7 @@ const PERMISSION_MODULE_KEYS = [
 ];
 const PERMISSION_ACTIONS = ["create", "update", "delete"];
 const STATE_PATCH_PERMISSION_MODULES = {
+  systemSettings: "accounts",
   sites: "accounts",
   species: "species",
   speciesCategories: "species",
@@ -109,6 +110,7 @@ const feishuConfig = {
 };
 let feishuTenantTokenCache = { token: "", expiresAt: 0 };
 const STATE_KEYS = [
+  "systemSettings",
   "sites",
   "personnel",
   "operationLogs",

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
 import { Login } from "./components/Login";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
@@ -26,6 +26,7 @@ const API = "/api";
 const MAX_OPERATION_LOGS = 10000;
 
 const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
+  { key: "systemSettings", module: "系统设置" },
   { key: "sites", module: "场地管理" },
   { key: "species", module: "物种管理" },
   { key: "speciesCategories", module: "物种分类" },
@@ -56,7 +57,7 @@ const PERSISTED_KEYS = AUDIT_COLLECTIONS
   );
 
 const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
-  dashboard: ["sites"],
+  dashboard: ["sites", "systemSettings"],
   species: ["species", "speciesCategories", "products"],
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
@@ -79,6 +80,9 @@ function withoutUser(state: Store): PersistedStore {
 
 const EMPTY_PERSISTED_STATE: PersistedStore = {
   ...withoutUser(initialState),
+  systemSettings: {
+    fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
+  },
   sites: DEFAULT_SITES.map((site) => ({ ...site })),
   personnel: [],
   operationLogs: [],
@@ -261,10 +265,15 @@ function normalizePersistedState(data: any, currentUser: User): Store {
           : shipment
       )
     : migratedData.shipments;
+  const migratedSystemSettings = {
+    ...initialState.systemSettings,
+    ...(migratedData.systemSettings && typeof migratedData.systemSettings === "object" ? migratedData.systemSettings : {}),
+  };
 
   return {
     ...initialState,
     ...migratedData,
+    systemSettings: migratedSystemSettings,
     sites: getSites(migratedData),
     personnel: migratedPersonnel,
     operationLogs: Array.isArray(migratedData.operationLogs) ? migratedData.operationLogs : [],

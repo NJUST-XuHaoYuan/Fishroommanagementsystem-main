@@ -280,8 +280,28 @@ export type Site = {
   name: string;
 };
 
+export const DEFAULT_FISH_LIST_FOOTER_TEXT = `【包装费运费规则】
+江浙沪皖满三件包邮
+包装费统一 15 元
+满 500 免包装费，满 1000 包邮
+
+【一般生物收货、报损规则】
+亲爱的顾客，感谢您的支持，下单即默认同意以下报损规则，请知悉！
+【快递说明】本工作室会根据默认要求进行打包，包装费统一 15 元。若有更高规格运输需求，请提前联系，我们会加收一部分打包费。可以陆运次日达的发顺丰标快，其他地区发顺丰特快，运费实发实收。
+【报损规则】一、运输包损承诺：我们承诺在揽收至签收≤36 小时内的运输安全。超出此时限或到店自提离店后，不再承担包损责任。
+二、收货验收要求：签收后请立即录制开箱视频。从未拆封外箱开始连续拍摄，不得中断，清晰展示完整面单、密封袋完好性和生物实际状态。如需报损或到货状态不好，请在签收 5 小时内向客服提交视频，逾期不受理。
+三、赔付标准：运输时长≤24 小时赔付 100% 货值；运输时长 24-48 小时赔付 50% 货值；运输时长≥48 小时不予赔付。死亡确认需提供鱼类剪尾视频或珊瑚开水浇灌视频。
+四、特别说明：仅赔付生物货值，不含运费及包装费；仅支持退款，不支持退货。轻微运输损伤属正常现象，不在赔付范围。活动赠品及标注“不包损”商品不参与报损。
+温馨提示：收到活体后请尽快过温过水，妥善安置。我们与您的共同目标是让每一个生物安全到家，感谢您的理解与配合！
+【挑鱼规则】挑鱼需要额外增加费用，费用高低根据品种有所不同，详情咨询客服。`;
+
+export type SystemSettings = {
+  fishListFooterText: string;
+};
+
 export type Store = {
   user: User;
+  systemSettings: SystemSettings;
   sites: Site[];
   personnel: Personnel[];
   operationLogs: OperationLog[];
@@ -377,6 +397,9 @@ export const emptyPermissions = (): PermissionSet => ({
 
 export const initialState: Store = {
   user: null,
+  systemSettings: {
+    fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
+  },
   sites: [
     { id: "jiangyin", name: "江阴" },
     { id: "nanjing", name: "南京" },

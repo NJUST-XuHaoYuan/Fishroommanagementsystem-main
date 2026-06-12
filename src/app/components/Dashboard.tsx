@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Order, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { DEFAULT_FISH_LIST_FOOTER_TEXT, Order, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
-import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download } from "lucide-react";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
+import { Textarea } from "./ui/textarea";
+import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2 } from "lucide-react";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
@@ -384,6 +385,24 @@ function splitTextByWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth:
   return lines;
 }
 
+function wrapTextByWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  const lines: string[] = [];
+  let current = "";
+  for (const char of normalized) {
+    const next = `${current}${char}`;
+    if (ctx.measureText(next).width <= maxWidth || current.length === 0) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = char;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
 function drawCenteredText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, width: number, fontSize: number, color = "#ffffff") {
   const size = fitFontSize(ctx, text, width, fontSize, Math.max(10, fontSize - 5));
   ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
@@ -510,42 +529,43 @@ function drawFishListTable(ctx: CanvasRenderingContext2D, rows: FishListDisplayR
   ctx.restore();
 }
 
-function drawFishListRules(ctx: CanvasRenderingContext2D) {
+function drawFishListRules(ctx: CanvasRenderingContext2D, footerText: string) {
   ctx.save();
   ctx.fillStyle = "#08031d";
   ctx.fillRect(58, 170, 479, 570);
-  ctx.font = '800 17px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
   ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  let y = 212;
+  let y = 208;
   const center = FISH_LIST_PDF_WIDTH / 2;
   const centered = (text: string, size = 17, gap = 24) => {
     ctx.font = `800 ${size}px "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+    ctx.textAlign = "center";
     ctx.fillText(text, center, y);
     y += gap;
   };
-  centered("【包装费运费规则】", 17, 22);
-  centered("江浙沪皖满三件包邮", 16, 20);
-  centered("包装费统一 15 元", 16, 20);
-  centered("满 500 免包装费，满 1000 包邮", 16, 36);
-  centered("【一般生物收货、报损规则】", 16, 24);
-  centered("亲爱的顾客，感谢您的支持，下单即默认同意以下报损规则，请知悉！", 13, 32);
 
-  ctx.textAlign = "left";
-  ctx.font = '800 13px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
-  const paragraphs = [
-    "【快递说明】本工作室会根据默认要求进行打包，包装费统一 15 元。若有更高规格运输需求，请提前联系，我们会加收一部分打包费。可以陆运次日达的发顺丰标快，其他地区发顺丰特快，运费实发实收。",
-    "【报损规则】一、运输包损承诺：我们承诺在揽收至签收≤36 小时内的运输安全。超出此时限或到店自提离店后，不再承担包损责任。",
-    "二、收货验收要求：签收后请立即录制开箱视频。从未拆封外箱开始连续拍摄，不得中断，清晰展示完整面单、密封袋完好性和生物实际状态。如需报损或到货状态不好，请在签收 5 小时内向客服提交视频，逾期不受理。",
-    "三、赔付标准：运输时长≤24 小时赔付 100% 货值；运输时长 24-48 小时赔付 50% 货值；运输时长≥48 小时不予赔付。死亡确认需提供鱼类剪尾视频或珊瑚开水浇灌视频。",
-    "四、特别说明：仅赔付生物货值，不含运费及包装费；仅支持退款，不支持退货。轻微运输损伤属正常现象，不在赔付范围。活动赠品及标注“不包损”商品不参与报损。",
-    "温馨提示：收到活体后请尽快过温过水，妥善安置。我们与您的共同目标是让每一个生物安全到家，感谢您的理解与配合！",
-    "【挑鱼规则】挑鱼需要额外增加费用，费用高低根据品种有所不同，详情咨询客服。",
-  ];
-  for (const paragraph of paragraphs) {
-    const lines = splitTextByWidth(ctx, paragraph, 430, 4);
+  const paragraphs = footerText.split(/\r?\n/);
+  for (const rawParagraph of paragraphs) {
+    if (y > 720) break;
+    const paragraph = rawParagraph.trim();
+    if (!paragraph) {
+      y += 10;
+      continue;
+    }
+    const isHeading = /^【[^】]+】$/.test(paragraph);
+    const isShortCentered = !isHeading && y < 300 && paragraph.length <= 24 && !/[，。；：]/.test(paragraph);
+    if (isHeading || isShortCentered) {
+      centered(paragraph, isHeading ? 17 : 16, isHeading ? 24 : 20);
+      continue;
+    }
+    ctx.textAlign = "left";
+    ctx.font = '800 13px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+    const lines = wrapTextByWidth(ctx, paragraph, 430);
     for (const line of lines) {
+      if (y > 720) {
+        ctx.fillText("……", 82, y);
+        break;
+      }
       ctx.fillText(line, 82, y);
       y += 19;
     }
@@ -614,7 +634,7 @@ function buildPdfFromJpegs(images: Array<{ bytes: Uint8Array; width: number; hei
 }
 
 export function Dashboard() {
-  const { state, activeSiteId } = useStore();
+  const { state, activeSiteId, saveStateTransform } = useStore();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [financeDays, setFinanceDays] = useState<FinanceDays>(DEFAULT_FINANCE_DAYS);
   const [dashboardSiteId, setDashboardSiteId] = useState<string>(activeSiteId);
@@ -622,12 +642,18 @@ export function Dashboard() {
   const [hoveredLossIndex, setHoveredLossIndex] = useState<number | null>(null);
   const [selectedLossPoint, setSelectedLossPoint] = useState<DailyLossPoint | null>(null);
   const [exportingFishList, setExportingFishList] = useState(false);
+  const [fishListSettingsOpen, setFishListSettingsOpen] = useState(false);
+  const [fishListFooterDraft, setFishListFooterDraft] = useState("");
+  const [savingFishListSettings, setSavingFishListSettings] = useState(false);
   const [focusMode, setFocusMode] = useState<FocusMode>("species");
   const [focusSearch, setFocusSearch] = useState("");
   const [focusId, setFocusId] = useState("");
   const [focusData, setFocusData] = useState<FocusData | null>(null);
   const [focusLoading, setFocusLoading] = useState(false);
   const sites = getSites(state);
+  const fishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
+    ? state.systemSettings.fishListFooterText
+    : DEFAULT_FISH_LIST_FOOTER_TEXT;
   useEffect(() => {
     setDashboardSiteId((current) => current === ALL_SITE_ID ? current : activeSiteId);
   }, [activeSiteId]);
@@ -685,6 +711,9 @@ export function Dashboard() {
       cancelled = true;
     };
   }, []);
+  useEffect(() => {
+    if (fishListSettingsOpen) setFishListFooterDraft(fishListFooterText);
+  }, [fishListSettingsOpen, fishListFooterText]);
   const dashboardSpecies = Array.isArray(state.species) ? state.species : [];
   const dashboardProducts = Array.isArray(state.products) ? state.products : [];
   const dashboardBatches = Array.isArray(state.batches) ? state.batches : [];
@@ -1336,7 +1365,7 @@ export function Dashboard() {
         return { bytes: canvasToJpegBytes(canvas), width: canvas.width, height: canvas.height };
       });
       const rulesCtx = createFishListPageCanvas(template, fishListDateLabel, pageRows.length + 1);
-      drawFishListRules(rulesCtx);
+      drawFishListRules(rulesCtx, fishListFooterText);
       pdfImages.push({
         bytes: canvasToJpegBytes(rulesCtx.canvas),
         width: rulesCtx.canvas.width,
@@ -1359,6 +1388,26 @@ export function Dashboard() {
       toast.error("导出鱼单失败，请刷新后重试");
     } finally {
       setExportingFishList(false);
+    }
+  };
+
+  const saveFishListFooterText = async () => {
+    if (!window.confirm("确认保存鱼单表格后的文字设置？")) return;
+    setSavingFishListSettings(true);
+    const nextText = fishListFooterDraft;
+    const ok = await saveStateTransform((latest) => ({
+      ...latest,
+      systemSettings: {
+        ...(latest.systemSettings ?? { fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT }),
+        fishListFooterText: nextText,
+      },
+    }));
+    setSavingFishListSettings(false);
+    if (ok) {
+      toast.success("鱼单文字设置已保存");
+      setFishListSettingsOpen(false);
+    } else {
+      toast.error("保存失败，请刷新后重试");
     }
   };
 
@@ -1401,8 +1450,44 @@ export function Dashboard() {
             <Download className="size-4 mr-1.5" />
             {exportingFishList ? "导出中..." : "导出鱼单"}
           </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            title="设置鱼单表格后的文字"
+            onClick={() => setFishListSettingsOpen(true)}
+          >
+            <Settings2 className="size-4" />
+          </Button>
         </div>
       </div>
+      <Dialog open={fishListSettingsOpen} onOpenChange={setFishListSettingsOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>设置鱼单表格后的文字</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              这段文字会显示在导出鱼单的表格页之后，适合填写包装费、运费、报损规则等说明。
+            </p>
+            <Textarea
+              rows={16}
+              value={fishListFooterDraft}
+              onChange={(event) => setFishListFooterDraft(event.target.value)}
+              placeholder="请输入鱼单表格后的说明文字"
+              className="min-h-[360px] font-mono text-sm"
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setFishListSettingsOpen(false)} disabled={savingFishListSettings}>
+              取消
+            </Button>
+            <Button type="button" onClick={saveFishListFooterText} disabled={savingFishListSettings}>
+              {savingFishListSettings ? "保存中..." : "保存设置"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {cards.map((c) => {
           const Icon = c.icon;
