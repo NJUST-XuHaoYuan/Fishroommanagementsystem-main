@@ -423,7 +423,8 @@ export function StockInView() {
     if (editing.inDate > today) return toast.error("入库日期不能晚于今天");
     const currentBatch = batch(editing.batchId);
     if (currentBatch && editing.inDate < currentBatch.arrivalDate) return toast.error("入库日期不能早于采购批次到货日期");
-    if (!editing.basePrice || editing.basePrice <= 0) return toast.error("请填写单条售价");
+    const basePrice = Number(editing.basePrice || product(editing.productId)?.defaultPrice || 0);
+    if (!basePrice || basePrice <= 0) return toast.error("请填写单条售价");
     const commissionRate = Number(editing.commissionRate ?? 0);
     if (Number.isNaN(commissionRate) || commissionRate < 0) return toast.error("提成比例不能小于 0");
     if (!fromSubTank && !selectedGroupId) return toast.error("请选择缸组");
@@ -433,7 +434,7 @@ export function StockInView() {
       return toast.error("请填写大于 0 的入库数量");
     }
     const qty = fromSubTank && !editing.id ? parsedQty : 1;
-    const stockItems = buildStockItems({ ...editing, commissionRate: Number(commissionRate.toFixed(4)) }, qty);
+    const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: Number(commissionRate.toFixed(4)) }, qty);
     setSaveConfirm({ stockItems, qty, isEdit: Boolean(editing.id) });
   };
 
@@ -918,7 +919,7 @@ export function StockInView() {
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
+              {editing.id ? (
                 <div className="grid gap-2">
                   <Label>入库日期</Label>
                   <Input
@@ -929,20 +930,33 @@ export function StockInView() {
                     onChange={(e) => changeInDate(e.target.value)}
                   />
                 </div>
-                <div className="grid gap-2">
-                  <Label><span className="text-red-500">*</span> 单条售价(¥)</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={editing.basePrice === 0 ? "" : editing.basePrice}
-                    onChange={(e) => setEditing({ ...editing, basePrice: e.target.value === "" ? 0 : Number(e.target.value) })}
-                    placeholder="0.00"
-                  />
-                  <span className="text-xs text-muted-foreground">
-                    每条鱼可单独编辑售价；与商品默认售价不一致时，会在鱼图标上显示黄色价格标识。
-                  </span>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="grid gap-2">
+                    <Label>入库日期</Label>
+                    <Input
+                      type="date"
+                      value={editing.inDate}
+                      min={editingBatch?.arrivalDate}
+                      max={today}
+                      onChange={(e) => changeInDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label><span className="text-red-500">*</span> 单条售价(¥)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={editing.basePrice === 0 ? "" : editing.basePrice}
+                      onChange={(e) => setEditing({ ...editing, basePrice: e.target.value === "" ? 0 : Number(e.target.value) })}
+                      placeholder="0.00"
+                    />
+                    <span className="text-xs text-muted-foreground">
+                      入库时设置基础售价；已入库后的单条改价请到日常管理的鱼详情里操作。
+                    </span>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="grid gap-2">
                 <Label>销售提成比例(%)</Label>

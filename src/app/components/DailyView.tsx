@@ -62,6 +62,7 @@ export function DailyView() {
   const [bioOpen, setBioOpen] = useState(false);
   const [bioItemId, setBioItemId] = useState<string | null>(null);
   const [bioStatus, setBioStatus] = useState<StockStatus>("healthy");
+  const [bioBasePrice, setBioBasePrice] = useState("");
   const [bioCode, setBioCode] = useState("");
   const [bioNotes, setBioNotes] = useState("");
   const [newRecord, setNewRecord] = useState<RecordDraft>({
@@ -622,6 +623,7 @@ export function DailyView() {
   const openBio = (item: StockItem) => {
     setBioItemId(item.id);
     setBioStatus(item.status);
+    setBioBasePrice(item.basePrice && item.basePrice > 0 ? String(item.basePrice) : "");
     setBioCode(item.code ?? "");
     setBioNotes(item.notes ?? "");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
@@ -718,16 +720,21 @@ export function DailyView() {
   const saveBio = async () => {
     if (!bioItemId) return;
     if (!permission.requirePermission("update")) return;
-    if (!confirmWrite("修改", "将保存鱼的状态、编号和备注。")) return;
+    const price = Number(bioBasePrice);
+    if (!bioBasePrice.trim() || Number.isNaN(price) || price <= 0) {
+      return toast.error("请填写大于 0 的销售默认价");
+    }
+    if (!confirmWrite("修改", "将保存鱼的状态、售价、编号和备注。")) return;
+    const normalizedPrice = Number(price.toFixed(2));
     const ok = await saveStateTransform((latest) => ({
       ...latest,
       stock: latest.stock.map((x) =>
-        x.id === bioItemId ? { ...x, status: bioStatus, code: bioCode.trim(), notes: bioNotes } : x
+        x.id === bioItemId ? { ...x, status: bioStatus, basePrice: normalizedPrice, code: bioCode.trim(), notes: bioNotes } : x
       ),
     }));
     if (!ok) return toast.error("保存失败，请重试");
     setBioOpen(false);
-    toast.success("状态已更新");
+    toast.success("鱼的信息已更新");
   };
 
   // Add bio record
@@ -1434,7 +1441,7 @@ export function DailyView() {
 
           <div className="overflow-y-auto flex-1 min-h-0 flex flex-col gap-5 pr-1">
             {/* 状态 & 备注 */}
-            <div className="grid gap-3 p-4 bg-muted/30 rounded-lg border md:grid-cols-3">
+            <div className="grid gap-3 p-4 bg-muted/30 rounded-lg border md:grid-cols-4">
               <div className="grid gap-2">
                 <Label className="flex items-center gap-2">
                   当前状态
@@ -1455,6 +1462,17 @@ export function DailyView() {
                     <SelectItem value="sick">疾病</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label><span className="text-red-500">*</span> 销售默认价(¥)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={bioBasePrice}
+                  onChange={(e) => setBioBasePrice(e.target.value)}
+                  placeholder="0.00"
+                />
               </div>
               <div className="grid gap-2">
                 <Label>编号</Label>
@@ -1764,7 +1782,7 @@ export function DailyView() {
 		              )}
 		            </div>
 		            <Button variant="outline" onClick={() => setBioOpen(false)}>关闭</Button>
-		            {permission.canUpdate && <Button onClick={saveBio}>保存状态</Button>}
+		            {permission.canUpdate && <Button onClick={saveBio}>保存信息</Button>}
 		          </DialogFooter>
         </DialogContent>
 	      </Dialog>
