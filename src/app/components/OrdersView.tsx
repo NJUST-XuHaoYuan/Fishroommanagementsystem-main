@@ -375,6 +375,29 @@ function getDefaultContactPerson(personnel: Personnel[], username?: string): str
   return personnel[0]?.name ?? "";
 }
 
+function normalizeContactPersonName(value?: string): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function getCurrentContactAliases(personnel: Personnel[], username?: string): Set<string> {
+  const aliases = new Set<string>();
+  const add = (value?: string) => {
+    const normalized = normalizeContactPersonName(value);
+    if (normalized) aliases.add(normalized);
+  };
+  add(username);
+  const currentAccount = username
+    ? personnel.find((person) => person.username === username || person.name === username)
+    : undefined;
+  add(currentAccount?.name);
+  add(currentAccount?.username);
+  return aliases;
+}
+
+function isActiveOrder(order: Order): boolean {
+  return order.status !== "completed" && order.status !== "cancelled";
+}
+
 function getContactPersonOptions(personnel: Personnel[], current: string): Personnel[] {
   const names = new Set(personnel.map((person) => person.name));
   if (current && !names.has(current)) {
@@ -5459,6 +5482,7 @@ export function OrdersView() {
   const [dateTo, setDateTo] = useState("");
   const [todayShipOnly, setTodayShipOnly] = useState(false);
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
+  const [myActiveOnly, setMyActiveOnly] = useState(false);
   const today = todayDateString();
 
   const customers = state.customers ?? [];
@@ -5493,6 +5517,12 @@ export function OrdersView() {
     () => [...state.orders].sort(compareOrdersByCreatedDesc),
     [state.orders]
   );
+  const currentContactAliases = useMemo(
+    () => getCurrentContactAliases(state.personnel ?? [], state.user?.username),
+    [state.personnel, state.user?.username]
+  );
+  const isCurrentUserContactOrder = (order: Order) =>
+    currentContactAliases.has(normalizeContactPersonName(order.contactPerson));
 
   type OrderListRow = Order & { searchText: string };
   const orderRows = useMemo<OrderListRow[]>(() => {
@@ -5574,13 +5604,14 @@ export function OrdersView() {
 	    return orderRows.filter((o) => {
 	      if (todayShipOnly && !hasPlannedShipPlanOnDate(o, today)) return false;
 	      if (pendingTrackingOnly && !hasPendingTrackingShipmentOrder(o, state.shipments)) return false;
-	      if (statusFilter === "active" && (o.status === "completed" || o.status === "cancelled")) return false;
+	      if (statusFilter === "active" && !isActiveOrder(o)) return false;
       if (statusFilter === "completed" && o.status !== "completed") return false;
+      if (myActiveOnly && (!isActiveOrder(o) || !isCurrentUserContactOrder(o))) return false;
       if (dateFrom && o.date < dateFrom) return false;
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, dateFrom, dateTo]);
+	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
 
   useEffect(() => {
     setSelectedOrderIds((prev) => {
@@ -5648,8 +5679,12 @@ export function OrdersView() {
     { key: "completed", label: "已完成" },
   ] as const;
 
-  const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly;
+  const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly || myActiveOnly;
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
+  const myActiveOrderCount = useMemo(
+    () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
+    [orderList, currentContactAliases]
+  );
   const todayShipCount = useMemo(
     () => orderList.filter((order) => hasPlannedShipPlanOnDate(order, today)).length,
     [orderList, today]
@@ -5674,7 +5709,10 @@ export function OrdersView() {
           {STATUS_FILTERS.map(({ key, label }) => (
             <button
               key={key}
-              onClick={() => setStatusFilter(key)}
+              onClick={() => {
+                setStatusFilter(key);
+                if (key !== "active") setMyActiveOnly(false);
+              }}
               className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
                 statusFilter === key
                   ? "bg-sky-600 text-white"
@@ -5686,6 +5724,29 @@ export function OrdersView() {
           ))}
         </div>
         <div className="flex items-center gap-2 ml-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={myActiveOnly ? "default" : "outline"}
+            className={myActiveOnly
+              ? "h-7 bg-sky-600 hover:bg-sky-700 text-white"
+              : "h-7 border-sky-200 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
+            }
+            onClick={() => {
+              const next = !myActiveOnly;
+              setMyActiveOnly(next);
+              if (next) {
+                setStatusFilter("active");
+                setDateFrom("");
+                setDateTo("");
+                setTodayShipOnly(false);
+                setPendingTrackingOnly(false);
+              }
+            }}
+          >
+            <UserRound className="size-3.5 mr-1" />
+            我的未完成{myActiveOrderCount > 0 ? ` ${myActiveOrderCount}` : ""}
+          </Button>
           <span className="text-xs text-muted-foreground shrink-0">日期</span>
           <Input
             type="date"
@@ -5716,6 +5777,7 @@ export function OrdersView() {
               setTodayShipOnly(next);
               if (next) {
                 setPendingTrackingOnly(false);
+                setMyActiveOnly(false);
                 setStatusFilter("all");
                 setDateFrom("");
                 setDateTo("");
@@ -5738,6 +5800,7 @@ export function OrdersView() {
               setPendingTrackingOnly(next);
               if (next) {
                 setTodayShipOnly(false);
+                setMyActiveOnly(false);
                 setStatusFilter("all");
                 setDateFrom("");
                 setDateTo("");
@@ -5754,7 +5817,7 @@ export function OrdersView() {
           </Button>
           {hasDateFilter && (
             <button
-              onClick={() => { setDateFrom(""); setDateTo(""); setTodayShipOnly(false); setPendingTrackingOnly(false); }}
+              onClick={() => { setDateFrom(""); setDateTo(""); setTodayShipOnly(false); setPendingTrackingOnly(false); setMyActiveOnly(false); }}
               className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
             >
               清除
