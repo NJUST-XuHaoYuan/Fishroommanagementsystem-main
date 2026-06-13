@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DEFAULT_FISH_LIST_FOOTER_TEXT, Order, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { DEFAULT_FISH_LIST_FOOTER_TEXT, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -113,6 +113,34 @@ type DailyLossPoint = {
   batchArrivals?: DailyBatchArrival[];
 };
 
+type DailySalespersonOrderDetail = {
+  orderId: string;
+  orderNo: string;
+  customerName: string;
+  contactPerson: string;
+  amount: number;
+  itemCount: number;
+  status: string;
+  notes: string;
+};
+
+type DailySalespersonBreakdown = {
+  salesperson: string;
+  amount: number;
+  orderCount: number;
+  itemCount: number;
+  orders: DailySalespersonOrderDetail[];
+};
+
+type DailySalespersonPoint = {
+  date: string;
+  label: string;
+  total: number;
+  orderCount: number;
+  itemCount: number;
+  breakdowns: DailySalespersonBreakdown[];
+};
+
 type DashboardSummary = {
   siteId?: string;
   todayReceived: number;
@@ -204,6 +232,76 @@ function chartX(index: number, total: number): number {
 
 function chartY(value: number, maxValue: number): number {
   return 18 + (1 - Number(value || 0) / Math.max(maxValue, 1)) * 198;
+}
+
+const SALESPERSON_COLORS = [
+  "#0ea5e9",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#8b5cf6",
+  "#14b8a6",
+  "#f97316",
+  "#64748b",
+  "#ec4899",
+  "#22c55e",
+];
+
+const ORDER_STATUS_TEXT: Record<string, string> = {
+  pending: "未完成",
+  confirmed: "已确认",
+  shipped: "发货中",
+  completed: "已完成",
+  cancelled: "已取消",
+  damaged: "已报损",
+};
+
+function normalizeSalespersonName(value?: string): string {
+  return String(value ?? "").trim() || "未指定";
+}
+
+function countsAsActiveShipmentForAmount(shipment: Shipment): boolean {
+  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
+}
+
+function calcAmountRefundedForOrder(order: Order): number {
+  return (order.payments ?? [])
+    .filter((payment) => payment.type === "refund")
+    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+}
+
+function calcBillableShippingFeeForOrder(order: Order, shipments: Shipment[]): number {
+  const activeShipments = shipments.filter((shipment) =>
+    shipment.orderId === order.id && countsAsActiveShipmentForAmount(shipment)
+  );
+  if (activeShipments.length === 0) return Number(order.shippingFee || 0);
+  return activeShipments.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee || 0), 0);
+}
+
+function calcDamageRefundAdjustmentForOrder(order: Order, shipments: Shipment[]): number {
+  const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
+  const explicitAdjustment = orderShipments.reduce((sum, shipment) => {
+    if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") return sum;
+    return sum + Number(shipment.damageRefundAmount || 0);
+  }, 0);
+  if (explicitAdjustment > 0.005) return explicitAdjustment;
+  const hasLegacyDamageRefund = orderShipments.some((shipment) =>
+    shipment.status === "damaged" &&
+    shipment.damageResolution === "refund" &&
+    shipment.damageRefundAmount == null
+  );
+  return hasLegacyDamageRefund ? calcAmountRefundedForOrder(order) : 0;
+}
+
+function calcOrderDealAmount(order: Order, shipments: Shipment[]): number {
+  const itemTotal = (order.items ?? []).reduce((sum, item) => sum + Number(item.price || 0), 0);
+  return Number(Math.max(0,
+    itemTotal +
+    calcBillableShippingFeeForOrder(order, shipments) +
+    Number(order.packagingFee || 0) -
+    Number(order.discount || 0) -
+    calcDamageRefundAdjustmentForOrder(order, shipments)
+  ).toFixed(2));
 }
 
 function polarToCartesian(cx: number, cy: number, radius: number, angleInDegrees: number) {
@@ -634,6 +732,9 @@ export function Dashboard() {
   const [financeDays, setFinanceDays] = useState<FinanceDays>(DEFAULT_FINANCE_DAYS);
   const [dashboardSiteId, setDashboardSiteId] = useState<string>(activeSiteId);
   const [hoveredFinanceIndex, setHoveredFinanceIndex] = useState<number | null>(null);
+  const [hoveredSalespersonIndex, setHoveredSalespersonIndex] = useState<number | null>(null);
+  const [selectedSalespersonPoint, setSelectedSalespersonPoint] = useState<DailySalespersonPoint | null>(null);
+  const [selectedSalespeople, setSelectedSalespeople] = useState<Set<string>>(new Set());
   const [hoveredLossIndex, setHoveredLossIndex] = useState<number | null>(null);
   const [selectedLossPoint, setSelectedLossPoint] = useState<DailyLossPoint | null>(null);
   const [exportingFishList, setExportingFishList] = useState(false);
@@ -655,6 +756,8 @@ export function Dashboard() {
   useEffect(() => {
     let cancelled = false;
     setHoveredFinanceIndex(null);
+    setHoveredSalespersonIndex(null);
+    setSelectedSalespersonPoint(null);
     setHoveredLossIndex(null);
     setSelectedLossPoint(null);
     fetch(`/api/dashboard-summary?financeDays=${financeDays}&siteId=${encodeURIComponent(dashboardSiteId)}`, { headers: authJsonHeaders() })
@@ -717,6 +820,8 @@ export function Dashboard() {
   const dashboardOrders = Array.isArray(state.orders) ? state.orders : [];
   const dashboardShipments = Array.isArray(state.shipments) ? state.shipments : [];
   const dashboardLossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
+  const dashboardPersonnel = Array.isArray(state.personnel) ? state.personnel : [];
+  const dashboardCustomers = Array.isArray(state.customers) ? state.customers : [];
   const shippedOutStockIds = getShippedOutStockIds(dashboardShipments);
   const today = todayDateString();
   const todayDate = new Date(`${today}T00:00:00`);
@@ -724,6 +829,7 @@ export function Dashboard() {
   const productById = new Map(dashboardProducts.map((product) => [product.id, product]));
   const speciesById = new Map(dashboardSpecies.map((species) => [species.id, species]));
   const batchById = new Map(dashboardBatches.map((batch) => [batch.id, batch]));
+  const customerById = new Map(dashboardCustomers.map((customer) => [customer.id, customer]));
   const subTankNameById = new Map<string, string>();
   for (const group of dashboardTankGroups) {
     for (const subTank of group.subTanks ?? []) {
@@ -924,6 +1030,116 @@ export function Dashboard() {
     dailyFinanceData = Array.isArray(summary.dailyFinanceData) ? summary.dailyFinanceData : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
+  const salesScope = normalizeSiteScope(dashboardSiteId);
+  const scopedSalesOrders = dashboardOrders.filter((order) =>
+    order.status !== "cancelled" && (salesScope === ALL_SITE_ID || matchesSite(order, salesScope))
+  );
+  const scopedSalesOrderIds = new Set(scopedSalesOrders.map((order) => order.id));
+  const scopedSalesShipments = dashboardShipments.filter((shipment) =>
+    salesScope === ALL_SITE_ID || matchesSite(shipment, salesScope) || scopedSalesOrderIds.has(shipment.orderId)
+  );
+  const salespersonOptions = (() => {
+    const seen = new Set<string>();
+    const options: Array<{ name: string; person?: Personnel; orderCount: number; amount: number }> = [];
+    const addOption = (name: string, person?: Personnel) => {
+      const normalized = normalizeSalespersonName(name);
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      const personOrders = scopedSalesOrders.filter((order) => normalizeSalespersonName(order.contactPerson) === normalized);
+      options.push({
+        name: normalized,
+        person,
+        orderCount: personOrders.length,
+        amount: personOrders.reduce((sum, order) => sum + calcOrderDealAmount(order, scopedSalesShipments), 0),
+      });
+    };
+    dashboardPersonnel
+      .filter((person) => String(person.name ?? "").trim())
+      .forEach((person) => addOption(person.name, person));
+    scopedSalesOrders.forEach((order) => addOption(order.contactPerson));
+    return options.sort((a, b) =>
+      b.amount - a.amount ||
+      b.orderCount - a.orderCount ||
+      a.name.localeCompare(b.name, "zh-Hans-CN")
+    );
+  })();
+  const selectedSalespersonNames = salespersonOptions
+    .map((option) => option.name)
+    .filter((name) => selectedSalespeople.size === 0 || selectedSalespeople.has(name));
+  const selectedSalespersonSet = new Set(selectedSalespersonNames);
+  const dailySalespersonData: DailySalespersonPoint[] = dailyFinanceData.map((financePoint) => {
+    const rowsByPerson = new Map<string, DailySalespersonBreakdown>();
+    const ordersForDate = scopedSalesOrders.filter((order) => String(order.date ?? "").slice(0, 10) === financePoint.date);
+    for (const order of ordersForDate) {
+      const salesperson = normalizeSalespersonName(order.contactPerson);
+      if (!selectedSalespersonSet.has(salesperson)) continue;
+      const amount = calcOrderDealAmount(order, scopedSalesShipments);
+      const customer = customerById.get(order.customerId);
+      const detail: DailySalespersonOrderDetail = {
+        orderId: order.id,
+        orderNo: order.orderNo,
+        customerName: customer?.name ?? order.customerId,
+        contactPerson: salesperson,
+        amount,
+        itemCount: order.items?.length ?? 0,
+        status: ORDER_STATUS_TEXT[order.status] ?? order.status,
+        notes: order.notes ?? "",
+      };
+      const current = rowsByPerson.get(salesperson) ?? {
+        salesperson,
+        amount: 0,
+        orderCount: 0,
+        itemCount: 0,
+        orders: [],
+      };
+      current.amount = Number((current.amount + amount).toFixed(2));
+      current.orderCount += 1;
+      current.itemCount += detail.itemCount;
+      current.orders.push(detail);
+      rowsByPerson.set(salesperson, current);
+    }
+    const breakdowns = [...rowsByPerson.values()]
+      .map((row) => ({
+        ...row,
+        orders: row.orders.sort((a, b) => b.amount - a.amount || a.orderNo.localeCompare(b.orderNo, "zh-Hans-CN")),
+      }))
+      .sort((a, b) => b.amount - a.amount || a.salesperson.localeCompare(b.salesperson, "zh-Hans-CN"));
+    return {
+      date: financePoint.date,
+      label: financePoint.label,
+      total: Number(breakdowns.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
+      orderCount: breakdowns.reduce((sum, row) => sum + row.orderCount, 0),
+      itemCount: breakdowns.reduce((sum, row) => sum + row.itemCount, 0),
+      breakdowns,
+    };
+  });
+  const maxSalespersonValue = Math.max(
+    1,
+    ...dailySalespersonData.flatMap((point) => point.breakdowns.map((row) => row.amount))
+  );
+  const hoveredSalespersonPoint =
+    hoveredSalespersonIndex !== null && hoveredSalespersonIndex < dailySalespersonData.length
+      ? dailySalespersonData[hoveredSalespersonIndex]
+      : null;
+  const hoveredSalespersonX = hoveredSalespersonIndex !== null
+    ? chartX(hoveredSalespersonIndex, dailySalespersonData.length)
+    : 64;
+  const hoveredSalespersonTransform = hoveredSalespersonIndex === 0
+    ? "translateX(0)"
+    : hoveredSalespersonIndex === dailySalespersonData.length - 1
+      ? "translateX(-100%)"
+      : "translateX(-50%)";
+  const salespersonLabelStep = Math.max(1, Math.ceil(dailySalespersonData.length / 8));
+  const salespersonRangeTotal = dailySalespersonData.reduce((sum, point) => sum + point.total, 0);
+  const salespersonRangeOrders = dailySalespersonData.reduce((sum, point) => sum + point.orderCount, 0);
+  const toggleSalesperson = (name: string) => {
+    setSelectedSalespeople((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
   const maxFinanceValue = Math.max(
     1,
     ...dailyFinanceData.flatMap((point) => [point.received, point.refunded])
@@ -1884,11 +2100,208 @@ export function Dashboard() {
 	            </div>
 	          </div>
           <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-            {stockStatusSegments.map((segment) => (
+          {stockStatusSegments.map((segment) => (
               <div key={segment.key} className={`rounded-md ${segment.bgColor} px-2 py-2 ${segment.textColor}`}>
                 {segment.label} {segment.value} 条
               </div>
             ))}
+          </div>
+        </Card>
+        <Card className="p-5 xl:col-span-2">
+          <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h3 className="text-base font-semibold">每日销售人员成交额</h3>
+              <p className="text-xs text-muted-foreground">
+                最近 {dailySalespersonData.length} 天按订单下单日期和对接人统计成交总额
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
+                合计 {formatMoney(salespersonRangeTotal)}
+              </span>
+              <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
+                订单 {salespersonRangeOrders} 单
+              </span>
+              <label className="flex items-center gap-1.5 text-muted-foreground">
+                <span>范围</span>
+                <select
+                  value={financeDays}
+                  onChange={(event) => setFinanceDays(normalizeFinanceDays(Number(event.target.value)))}
+                  className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:border-sky-400"
+                >
+                  {FINANCE_DAY_OPTIONS.map((days) => (
+                    <option key={days} value={days}>近 {days} 天</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedSalespeople(new Set())}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                selectedSalespeople.size === 0
+                  ? "border-sky-500 bg-sky-50 text-sky-700"
+                  : "bg-white text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              所有人
+            </button>
+            {salespersonOptions.map((option, index) => {
+              const active = selectedSalespeople.has(option.name);
+              const color = SALESPERSON_COLORS[index % SALESPERSON_COLORS.length];
+              return (
+                <button
+                  key={option.name}
+                  type="button"
+                  onClick={() => toggleSalesperson(option.name)}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    active
+                      ? "border-sky-500 bg-sky-50 text-sky-700"
+                      : "bg-white text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={`${option.name}：${option.orderCount} 单，${formatMoney(option.amount)}`}
+                >
+                  <span className="size-2.5 rounded-full" style={{ backgroundColor: color }} />
+                  {option.name}
+                  <span className="text-muted-foreground">{option.orderCount}</span>
+                </button>
+              );
+            })}
+            {salespersonOptions.length === 0 && (
+              <span className="text-xs text-muted-foreground">暂无销售人员或订单数据</span>
+            )}
+          </div>
+          <div
+            className="relative h-80"
+            onMouseLeave={() => setHoveredSalespersonIndex(null)}
+          >
+            {hoveredSalespersonPoint && (
+              <div
+                className="pointer-events-none absolute top-2 z-10 min-w-64 rounded-lg border bg-white/95 px-3 py-2 text-xs shadow-lg"
+                style={{
+                  left: `${(hoveredSalespersonX / 960) * 100}%`,
+                  transform: hoveredSalespersonTransform,
+                }}
+              >
+                <div className="mb-1 flex items-center justify-between gap-4 font-semibold text-slate-900">
+                  <span>{hoveredSalespersonPoint.date}</span>
+                  <span>{formatMoney(hoveredSalespersonPoint.total)}</span>
+                </div>
+                <div className="mb-1 text-muted-foreground">
+                  {hoveredSalespersonPoint.orderCount} 单 · {hoveredSalespersonPoint.itemCount} 条商品
+                </div>
+                <div className="space-y-1">
+                  {hoveredSalespersonPoint.breakdowns.slice(0, 6).map((row) => {
+                    const colorIndex = Math.max(0, salespersonOptions.findIndex((option) => option.name === row.salesperson));
+                    return (
+                      <div key={row.salesperson} className="flex items-center justify-between gap-5">
+                        <span className="flex items-center gap-1.5 text-slate-700">
+                          <span className="size-2 rounded-full" style={{ backgroundColor: SALESPERSON_COLORS[colorIndex % SALESPERSON_COLORS.length] }} />
+                          {row.salesperson}
+                        </span>
+                        <span className="font-mono font-semibold">{formatMoney(row.amount)}</span>
+                      </div>
+                    );
+                  })}
+                  {hoveredSalespersonPoint.breakdowns.length > 6 && (
+                    <div className="text-muted-foreground">还有 {hoveredSalespersonPoint.breakdowns.length - 6} 人，点击日期查看全部</div>
+                  )}
+                  {hoveredSalespersonPoint.breakdowns.length === 0 && (
+                    <div className="text-muted-foreground">当天没有成交订单</div>
+                  )}
+                </div>
+              </div>
+            )}
+            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailySalespersonData.length}天销售人员成交额折线图`}>
+              {[1, 0.75, 0.5, 0.25, 0].map((ratio) => {
+                const y = 18 + (1 - ratio) * 198;
+                return (
+                  <g key={ratio}>
+                    <line x1="64" x2="940" y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="4 4" />
+                    <text x="10" y={y + 4} fontSize="12" fill="#64748b">¥{formatCompactMoney(maxSalespersonValue * ratio)}</text>
+                  </g>
+                );
+              })}
+              {selectedSalespersonNames.map((name, index) => {
+                const colorIndex = Math.max(0, salespersonOptions.findIndex((option) => option.name === name));
+                const color = SALESPERSON_COLORS[colorIndex % SALESPERSON_COLORS.length];
+                return (
+                  <polyline
+                    key={name}
+                    points={metricLinePoints(
+                      dailySalespersonData,
+                      (point) => point.breakdowns.find((row) => row.salesperson === name)?.amount ?? 0,
+                      maxSalespersonValue
+                    )}
+                    fill="none"
+                    stroke={color}
+                    strokeWidth={selectedSalespersonNames.length > 6 ? "2.2" : "3.2"}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={selectedSalespersonNames.length > 10 ? 0.78 : 0.95}
+                  >
+                    <title>{name}</title>
+                  </polyline>
+                );
+              })}
+              {hoveredSalespersonPoint && (
+                <g pointerEvents="none">
+                  <line x1={hoveredSalespersonX} x2={hoveredSalespersonX} y1="18" y2="216" stroke="#94a3b8" strokeDasharray="4 4" />
+                  {hoveredSalespersonPoint.breakdowns.map((row) => {
+                    const colorIndex = Math.max(0, salespersonOptions.findIndex((option) => option.name === row.salesperson));
+                    return (
+                      <circle
+                        key={row.salesperson}
+                        cx={hoveredSalespersonX}
+                        cy={chartY(row.amount, maxSalespersonValue)}
+                        r="5"
+                        fill={SALESPERSON_COLORS[colorIndex % SALESPERSON_COLORS.length]}
+                        stroke="#fff"
+                        strokeWidth="2"
+                      />
+                    );
+                  })}
+                </g>
+              )}
+              {dailySalespersonData.map((point, index) => {
+                const x = chartX(index, dailySalespersonData.length);
+                return (
+                  <g key={point.date}>
+                    {(index % salespersonLabelStep === 0 || index === dailySalespersonData.length - 1) && (
+                      <text x={x} y="246" textAnchor="middle" fontSize="12" fill="#64748b">{point.label}</text>
+                    )}
+                  </g>
+                );
+              })}
+              {dailySalespersonData.map((point, index) => {
+                const divisor = Math.max(dailySalespersonData.length - 1, 1);
+                const bandWidth = 876 / divisor;
+                const x = chartX(index, dailySalespersonData.length);
+                const x1 = Math.max(64, x - bandWidth / 2);
+                const x2 = Math.min(940, x + bandWidth / 2);
+                return (
+                  <rect
+                    key={`salesperson-hover-${point.date}`}
+                    x={x1}
+                    y="18"
+                    width={Math.max(1, x2 - x1)}
+                    height="228"
+                    fill="transparent"
+                    onMouseEnter={() => setHoveredSalespersonIndex(index)}
+                    onMouseMove={() => setHoveredSalespersonIndex(index)}
+                    onClick={() => setSelectedSalespersonPoint(point)}
+                    cursor="pointer"
+                  >
+                    <title>{`${point.date}\n成交 ${formatMoney(point.total)}\n订单 ${point.orderCount} 单`}</title>
+                  </rect>
+                );
+              })}
+            </svg>
+          </div>
+          <div className="mt-2 text-xs text-muted-foreground">
+            统计有效订单的调整后应付金额；取消订单不计入，报损退款调整会从成交额中扣除。
           </div>
         </Card>
         <Card className="p-5 xl:col-span-2">
@@ -2099,6 +2512,76 @@ export function Dashboard() {
           <li>在「订单管理」的订单详情中记录发货、签收、报损和补发。</li>
         </ul>
       </Card>
+      <Dialog
+        open={Boolean(selectedSalespersonPoint)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedSalespersonPoint(null);
+        }}
+      >
+        <DialogContent aria-describedby={undefined} className="max-h-[85vh] max-w-4xl overflow-y-auto">
+          {selectedSalespersonPoint && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{selectedSalespersonPoint.date} 销售人员成交明细</DialogTitle>
+              </DialogHeader>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border bg-sky-50 px-3 py-2">
+                  <div className="text-xs text-sky-700">成交总额</div>
+                  <div className="text-xl font-semibold text-sky-700">{formatMoney(selectedSalespersonPoint.total)}</div>
+                </div>
+                <div className="rounded-lg border bg-emerald-50 px-3 py-2">
+                  <div className="text-xs text-emerald-700">订单数</div>
+                  <div className="text-xl font-semibold text-emerald-700">{selectedSalespersonPoint.orderCount} 单</div>
+                </div>
+                <div className="rounded-lg border bg-indigo-50 px-3 py-2">
+                  <div className="text-xs text-indigo-700">商品数</div>
+                  <div className="text-xl font-semibold text-indigo-700">{selectedSalespersonPoint.itemCount} 条</div>
+                </div>
+              </div>
+              {selectedSalespersonPoint.breakdowns.length > 0 ? (
+                <div className="space-y-3">
+                  {selectedSalespersonPoint.breakdowns.map((row) => {
+                    const colorIndex = Math.max(0, salespersonOptions.findIndex((option) => option.name === row.salesperson));
+                    return (
+                      <section key={row.salesperson} className="overflow-hidden rounded-lg border">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="size-2.5 rounded-full" style={{ backgroundColor: SALESPERSON_COLORS[colorIndex % SALESPERSON_COLORS.length] }} />
+                            <span className="font-semibold">{row.salesperson}</span>
+                          </div>
+                          <div className="text-sm text-muted-foreground">
+                            {row.orderCount} 单 · {row.itemCount} 条商品 · <span className="font-semibold text-sky-700">{formatMoney(row.amount)}</span>
+                          </div>
+                        </div>
+                        <div className="divide-y">
+                          {row.orders.map((order) => (
+                            <div key={order.orderId} className="grid gap-2 px-3 py-2 text-sm md:grid-cols-[1fr_1fr_0.8fr_0.8fr] md:items-center">
+                              <div>
+                                <div className="font-semibold">{order.orderNo}</div>
+                                <div className="text-xs text-muted-foreground">{order.status}</div>
+                              </div>
+                              <div>
+                                <div>{order.customerName || "未命名客户"}</div>
+                                {order.notes ? <div className="line-clamp-1 text-xs text-muted-foreground">备注：{order.notes}</div> : null}
+                              </div>
+                              <div className="text-muted-foreground">{order.itemCount} 条商品</div>
+                              <div className="text-right font-semibold text-sky-700">{formatMoney(order.amount)}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed px-3 py-8 text-center text-sm text-muted-foreground">
+                  当天没有符合当前人员筛选的成交订单。
+                </div>
+              )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={Boolean(selectedLossPoint)}
         onOpenChange={(open) => {

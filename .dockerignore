@@ -1,8 +1,10 @@
 .data
 .git
 .tools
+backups
 dist
 deploy/images
 node_modules
 npm-debug.log*
 .DS_Store
+*.tgz
