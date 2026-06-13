@@ -15,13 +15,12 @@ import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
 import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
-import { readAndCompressImage } from "../utils/imageUtils";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
-import { downloadMedia } from "../utils/media";
+import { downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 
@@ -497,34 +496,28 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
       try {
-        const needsCompress = file.size > 10 * 1024 * 1024;
-        if (needsCompress) toast.info("图片较大，正在压缩…");
-        const url = await readAndCompressImage(file);
-        if (needsCompress) toast.success("压缩完成");
+        toast.info("照片原图上传中…");
+        const url = await uploadOriginalMedia(file);
         setBatchRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-      } catch {
-        toast.error("图片处理失败，请重试");
+        toast.success("照片已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
       }
     });
   };
 
   const handleBatchVideoUpload = (files: FileList | null) => {
     if (!files) return;
-    Array.from(files).forEach((file) => {
+    Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
-      if (file.size > 50 * 1024 * 1024) {
-        toast.error("视频文件超过 50 MB 限制，请剪短后重试");
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) toast.info("视频较大，读取中…");
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const url = ev.target?.result as string;
+      try {
+        toast.info("视频原文件上传中…");
+        const url = await uploadOriginalMedia(file);
         setBatchRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已就绪");
-      };
-      reader.onerror = () => toast.error("视频读取失败，请重试");
-      reader.readAsDataURL(file);
+        toast.success("视频已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
+      }
     });
   };
 
@@ -579,13 +572,12 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
       try {
-        const needsCompress = file.size > 10 * 1024 * 1024;
-        if (needsCompress) toast.info("图片较大，正在压缩…");
-        const url = await readAndCompressImage(file);
-        if (needsCompress) toast.success("压缩完成");
+        toast.info("损耗凭证原图上传中…");
+        const url = await uploadOriginalMedia(file);
         setLossProof((prev) => [...prev, url]);
-      } catch {
-        toast.error("图片处理失败，请重试");
+        toast.success("损耗凭证已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "损耗凭证上传失败，请重试");
       }
     });
   };
@@ -862,13 +854,12 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
       try {
-        const needsCompress = file.size > 10 * 1024 * 1024;
-        if (needsCompress) toast.info("图片较大，正在压缩…");
-        const url = await readAndCompressImage(file);
-        if (needsCompress) toast.success("压缩完成");
+        toast.info("照片原图上传中…");
+        const url = await uploadOriginalMedia(file);
         setNewRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-      } catch {
-        toast.error("图片处理失败，请重试");
+        toast.success("照片已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
       }
     });
   };
@@ -876,21 +867,16 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   // Handle video upload for new record
   const handleVideoUpload = (files: FileList | null) => {
     if (!files) return;
-    Array.from(files).forEach((file) => {
+    Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
-      if (file.size > 50 * 1024 * 1024) {
-        toast.error("视频文件超过 50 MB 限制，请剪短后重试");
-        return;
-      }
-      if (file.size > 10 * 1024 * 1024) toast.info("视频较大，读取中…");
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const url = ev.target?.result as string;
+      try {
+        toast.info("视频原文件上传中…");
+        const url = await uploadOriginalMedia(file);
         setNewRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已就绪");
-      };
-      reader.onerror = () => toast.error("视频读取失败，请重试");
-      reader.readAsDataURL(file);
+        toast.success("视频已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
+      }
     });
   };
 

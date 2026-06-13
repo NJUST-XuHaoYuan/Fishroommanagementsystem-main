@@ -3,6 +3,9 @@ import { authHeaders } from "./authSession";
 
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 
+export const MAX_ORIGINAL_IMAGE_BYTES = 50 * 1024 * 1024;
+export const MAX_ORIGINAL_VIDEO_BYTES = 300 * 1024 * 1024;
+
 export function cosProxyUrl(src?: string) {
   if (typeof src !== "string") return undefined;
   try {
@@ -40,6 +43,33 @@ export async function resolveMediaUrl(src?: string) {
     expiresAt: Date.now() + Math.max(60, Number(data?.expiresIn ?? 3600) - 60) * 1000,
   });
   return signedUrl;
+}
+
+export async function uploadOriginalMedia(file: File): Promise<string> {
+  if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) {
+    throw new Error("只支持上传图片或视频文件");
+  }
+  const maxBytes = file.type.startsWith("video/") ? MAX_ORIGINAL_VIDEO_BYTES : MAX_ORIGINAL_IMAGE_BYTES;
+  if (file.size > maxBytes) {
+    throw new Error(
+      `文件超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制，请压缩或剪短后重试`
+    );
+  }
+
+  const response = await fetch("/api/media/upload", {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "Content-Type": file.type || "application/octet-stream",
+      "X-File-Name": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data?.url !== "string") {
+    throw new Error(data?.error || `HTTP ${response.status}`);
+  }
+  return data.url;
 }
 
 export function useResolvedMediaUrl(src?: string) {

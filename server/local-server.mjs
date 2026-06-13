@@ -20,6 +20,8 @@ const MAX_OPERATION_LOGS = 10000;
 const DEFAULT_FINANCE_DAYS = 30;
 const MIN_FINANCE_DAYS = 7;
 const MAX_FINANCE_DAYS = 730;
+const MAX_IMAGE_UPLOAD_BYTES = numberFromEnv(process.env.MAX_IMAGE_UPLOAD_BYTES, 50 * 1024 * 1024);
+const MAX_VIDEO_UPLOAD_BYTES = numberFromEnv(process.env.MAX_VIDEO_UPLOAD_BYTES, 300 * 1024 * 1024);
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -2440,6 +2442,8 @@ function extensionForMime(mime) {
   if (normalized === "image/png") return ".png";
   if (normalized === "image/webp") return ".webp";
   if (normalized === "image/gif") return ".gif";
+  if (normalized === "image/heic") return ".heic";
+  if (normalized === "image/heif") return ".heif";
   if (normalized === "video/mp4") return ".mp4";
   if (normalized === "video/webm") return ".webm";
   if (normalized === "video/quicktime") return ".mov";
@@ -2453,6 +2457,8 @@ function mimeForExtension(ext) {
   if (normalized === ".png") return "image/png";
   if (normalized === ".webp") return "image/webp";
   if (normalized === ".gif") return "image/gif";
+  if (normalized === ".heic") return "image/heic";
+  if (normalized === ".heif") return "image/heif";
   if (normalized === ".mp4") return "video/mp4";
   if (normalized === ".webm") return "video/webm";
   if (normalized === ".mov") return "video/quicktime";
@@ -2534,6 +2540,33 @@ async function externalizeLocalUploadUrl(value) {
     console.warn(`Failed to migrate local upload to COS: ${value} (${error.message})`);
     return value;
   }
+}
+
+function normalizeUploadMime(value) {
+  return String(value ?? "").split(";", 1)[0].trim().toLowerCase();
+}
+
+async function uploadOriginalMedia(buffer, mime) {
+  const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 24);
+  const ext = extensionForMime(mime);
+  const typeFolder = mime.startsWith("video/") ? "videos" : "images";
+  const fileName = `${hash}${ext}`;
+  if (cosReady()) {
+    const cosUrl = await uploadBufferToCos(
+      buffer,
+      mime,
+      prefixedCosKey("original", typeFolder, fileName)
+    );
+    if (cosUrl) return cosUrl;
+  }
+
+  const folder = join(uploadDir, "original", typeFolder);
+  const filePath = join(folder, fileName);
+  await mkdir(folder, { recursive: true });
+  if (!existsSync(filePath)) {
+    await writeFile(filePath, buffer);
+  }
+  return `/uploads/original/${typeFolder}/${fileName}`;
 }
 
 async function externalizeDataUrls(value) {
@@ -2632,10 +2665,24 @@ async function backfillDailyLogBioRecords() {
   }
 }
 
-async function readBody(req) {
+async function readRawBody(req, maxBytes = Number.POSITIVE_INFINITY) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      const error = new Error("上传文件过大");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readBody(req) {
+  const buffer = await readRawBody(req);
+  return buffer.toString("utf8");
 }
 
 async function importLegacyStateIfPresent() {
@@ -3109,6 +3156,41 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       sendJson(req, res, 400, { ok: false, error: error.message || "AI assistant request failed" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/media/upload" && req.method === "POST") {
+    try {
+      const mime = normalizeUploadMime(req.headers["content-type"]);
+      const isImage = mime.startsWith("image/");
+      const isVideo = mime.startsWith("video/");
+      if (!isImage && !isVideo) {
+        sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
+        return;
+      }
+      const maxBytes = isVideo ? MAX_VIDEO_UPLOAD_BYTES : MAX_IMAGE_UPLOAD_BYTES;
+      const buffer = await readRawBody(req, maxBytes);
+      if (buffer.length === 0) {
+        sendJson(req, res, 400, { ok: false, error: "上传文件为空" });
+        return;
+      }
+      const mediaUrl = await uploadOriginalMedia(buffer, mime);
+      sendJson(req, res, 200, {
+        ok: true,
+        url: mediaUrl,
+        mime,
+        size: buffer.length,
+        storage: cosReady() ? "cos" : "local",
+      });
+    } catch (error) {
+      const status = error?.statusCode === 413 ? 413 : 500;
+      sendJson(req, res, status, {
+        ok: false,
+        error: status === 413
+          ? `上传文件过大，当前限制为图片 ${Math.round(MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024)}MB、视频 ${Math.round(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024)}MB`
+          : (error.message || "媒体上传失败"),
+      });
     }
     return;
   }

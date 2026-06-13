@@ -3,7 +3,6 @@ import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   PaymentRecord, PaymentType, Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
 } from "../store";
-import { readAndCompressImage } from "../utils/imageUtils";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -33,7 +32,7 @@ import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
-import { downloadMedia } from "../utils/media";
+import { downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
 
@@ -1522,24 +1521,31 @@ function ProofUploader({
     const results: string[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue;
-      try { results.push(await readAndCompressImage(file, 1.2 * 1024 * 1024, 0.82, 1600)); }
-      catch { toast.error("图片处理失败"); }
+      try {
+        toast.info("凭证原图上传中…");
+        results.push(await uploadOriginalMedia(file));
+        toast.success("凭证已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "凭证上传失败");
+      }
     }
     onChange([...images, ...results]);
     setLoading(false);
   };
 
-  const openImg = (src: string) => {
+  const openImg = async (src: string) => {
+    const resolved = await resolveMediaUrl(src).catch(() => src);
     const w = window.open();
-    w?.document.write(`<img src="${src}" style="max-width:100%;max-height:100vh;display:block;margin:auto;" />`);
+    w?.document.write(`<img src="${resolved}" style="max-width:100%;max-height:100vh;display:block;margin:auto;" />`);
   };
 
   return (
     <div className="flex flex-wrap gap-2 items-start">
       {images.map((img, i) => (
         <div key={i} className="relative group shrink-0">
-          <img
+          <ImageWithFallback
             src={img}
+            alt="凭证"
             className="size-14 object-cover rounded border cursor-pointer hover:opacity-80"
             onClick={() => openImg(img)}
             title="点击查看大图"
@@ -2933,31 +2939,28 @@ function StockPickerBioDialog({
     Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("image/")) return toast.error("请选择图片文件");
       try {
-        const needsCompress = file.size > 10 * 1024 * 1024;
-        if (needsCompress) toast.info("图片较大，正在压缩…");
-        const url = await readAndCompressImage(file);
-        if (needsCompress) toast.success("压缩完成");
+        toast.info("照片原图上传中…");
+        const url = await uploadOriginalMedia(file);
         setNewRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-      } catch {
-        toast.error("图片处理失败，请重试");
+        toast.success("照片已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
       }
     });
   };
 
   const handleVideoUpload = (files: FileList | null) => {
     if (!files) return;
-    Array.from(files).forEach((file) => {
+    Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("video/")) return toast.error("请选择视频文件");
-      if (file.size > 50 * 1024 * 1024) return toast.error("视频文件超过 50 MB 限制，请剪短后重试");
-      if (file.size > 10 * 1024 * 1024) toast.info("视频较大，读取中…");
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const url = event.target?.result as string;
+      try {
+        toast.info("视频原文件上传中…");
+        const url = await uploadOriginalMedia(file);
         setNewRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已就绪");
-      };
-      reader.onerror = () => toast.error("视频读取失败，请重试");
-      reader.readAsDataURL(file);
+        toast.success("视频已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
+      }
     });
   };
 
@@ -3014,13 +3017,12 @@ function StockPickerBioDialog({
     Array.from(files).forEach(async (file) => {
       if (!file.type.startsWith("image/")) return toast.error("请选择图片文件");
       try {
-        const needsCompress = file.size > 10 * 1024 * 1024;
-        if (needsCompress) toast.info("图片较大，正在压缩…");
-        const url = await readAndCompressImage(file);
-        if (needsCompress) toast.success("压缩完成");
+        toast.info("损耗凭证原图上传中…");
+        const url = await uploadOriginalMedia(file);
         setLossProof((prev) => [...prev, url]);
-      } catch {
-        toast.error("图片处理失败，请重试");
+        toast.success("损耗凭证已上传");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "损耗凭证上传失败，请重试");
       }
     });
   };
