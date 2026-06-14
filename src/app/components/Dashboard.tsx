@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DEFAULT_FISH_LIST_FOOTER_TEXT, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -170,6 +170,8 @@ type FocusData = {
   orders: Order[];
   shipments: Shipment[];
   lossRecords: StockLossRecord[];
+  customers: Customer[];
+  personnel: Personnel[];
 };
 
 type FocusOption = {
@@ -781,7 +783,7 @@ export function Dashboard() {
   useEffect(() => {
     let cancelled = false;
     setFocusLoading(true);
-    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords&lite=species", { headers: authJsonHeaders() })
+    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords,customers,personnel&lite=species", { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
@@ -794,6 +796,8 @@ export function Dashboard() {
           orders: Array.isArray(data.orders) ? data.orders : [],
           shipments: Array.isArray(data.shipments) ? data.shipments : [],
           lossRecords: Array.isArray(data.lossRecords) ? data.lossRecords : [],
+          customers: Array.isArray(data.customers) ? data.customers : [],
+          personnel: Array.isArray(data.personnel) ? data.personnel : [],
         });
       })
       .catch((error) => {
@@ -812,16 +816,16 @@ export function Dashboard() {
   useEffect(() => {
     if (fishListSettingsOpen) setFishListFooterDraft(fishListFooterText);
   }, [fishListSettingsOpen, fishListFooterText]);
-  const dashboardSpecies = Array.isArray(state.species) ? state.species : [];
-  const dashboardProducts = Array.isArray(state.products) ? state.products : [];
+  const dashboardSpecies = focusData?.species ?? (Array.isArray(state.species) ? state.species : []);
+  const dashboardProducts = focusData?.products ?? (Array.isArray(state.products) ? state.products : []);
   const dashboardBatches = Array.isArray(state.batches) ? state.batches : [];
   const dashboardTankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
-  const dashboardStock = Array.isArray(state.stock) ? state.stock : [];
-  const dashboardOrders = Array.isArray(state.orders) ? state.orders : [];
-  const dashboardShipments = Array.isArray(state.shipments) ? state.shipments : [];
-  const dashboardLossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
-  const dashboardPersonnel = Array.isArray(state.personnel) ? state.personnel : [];
-  const dashboardCustomers = Array.isArray(state.customers) ? state.customers : [];
+  const dashboardStock = focusData?.stock ?? (Array.isArray(state.stock) ? state.stock : []);
+  const dashboardOrders = focusData?.orders ?? (Array.isArray(state.orders) ? state.orders : []);
+  const dashboardShipments = focusData?.shipments ?? (Array.isArray(state.shipments) ? state.shipments : []);
+  const dashboardLossRecords = focusData?.lossRecords ?? (Array.isArray(state.lossRecords) ? state.lossRecords : []);
+  const dashboardPersonnel = focusData?.personnel ?? (Array.isArray(state.personnel) ? state.personnel : []);
+  const dashboardCustomers = focusData?.customers ?? (Array.isArray(state.customers) ? state.customers : []);
   const shippedOutStockIds = getShippedOutStockIds(dashboardShipments);
   const today = todayDateString();
   const todayDate = new Date(`${today}T00:00:00`);
