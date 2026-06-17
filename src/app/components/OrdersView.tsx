@@ -2749,7 +2749,6 @@ function StockPickerBioDialog({
   const nowForRecord = nowDatetimeLocal();
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
-  const videoCameraRef = useRef<HTMLInputElement>(null);
   const lossPhotoRef = useRef<HTMLInputElement>(null);
   const [actionMode, setActionMode] = useState<"detail" | "move" | "loss">("detail");
   const [bioStatus, setBioStatus] = useState<StockItem["status"]>("healthy");
@@ -3282,12 +3281,8 @@ function StockPickerBioDialog({
 	                    <Label className="text-xs">视频</Label>
 	                    <div className="flex items-center gap-2">
 	                      <input ref={videoRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} multiple className="hidden" onChange={(event) => { handleVideoUpload(event.target.files); event.target.value = ""; }} />
-	                      <input ref={videoCameraRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} capture="environment" className="hidden" onChange={(event) => { handleVideoUpload(event.target.files); event.target.value = ""; }} />
 	                      <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => videoRef.current?.click()}>
-	                        <Video className="size-4" /> 选原视频
-	                      </Button>
-	                      <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => videoCameraRef.current?.click()}>
-	                        <Camera className="size-4" /> 拍视频
+	                        <Video className="size-4" /> 上传视频
 	                      </Button>
 	                    </div>
 	                  </div>
@@ -3296,7 +3291,7 @@ function StockPickerBioDialog({
                   <div className="flex flex-wrap gap-2">
                     {newRecord.photos.map((src, index) => (
                       <div key={index} className="relative size-14 overflow-hidden rounded border">
-                        <img src={src} alt="" className="size-full object-cover" />
+                        <ImageWithFallback src={src} alt="" className="size-full object-cover" />
                         <button type="button" onClick={() => setNewRecord((prev) => ({ ...prev, photos: prev.photos.filter((_, idx) => idx !== index) }))} className="absolute -right-1 -top-1 flex size-4 items-center justify-center rounded-full bg-red-500 text-[10px] text-white">×</button>
                       </div>
                     ))}
@@ -3470,7 +3465,7 @@ function StockPickerBioDialog({
               <div className="flex flex-wrap gap-2">
                 {lossProof.map((src, index) => (
                   <div key={index} className="relative size-16 overflow-hidden rounded border">
-                    <img src={src} alt="" className="size-full object-cover" />
+                    <ImageWithFallback src={src} alt="" className="size-full object-cover" />
                     <button
                       type="button"
                       onClick={() => setLossProof((prev) => prev.filter((_, idx) => idx !== index))}

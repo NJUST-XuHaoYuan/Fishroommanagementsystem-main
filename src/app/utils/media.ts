@@ -31,6 +31,10 @@ function mediaMimeFromFile(file: File): string {
   return "";
 }
 
+type ResolveMediaOptions = {
+  thumbnailWidth?: number;
+};
+
 export function cosProxyUrl(src?: string) {
   if (typeof src !== "string") return undefined;
   try {
@@ -48,14 +52,21 @@ export function isCosMediaUrl(src?: string) {
   return Boolean(cosProxyUrl(src));
 }
 
-export async function resolveMediaUrl(src?: string) {
+export async function resolveMediaUrl(src?: string, options: ResolveMediaOptions = {}) {
   if (!src) return undefined;
   if (!isCosMediaUrl(src)) return src;
 
-  const cached = signedUrlCache.get(src);
+  const thumbnailWidth = Number(options.thumbnailWidth || 0);
+  const cacheKey = thumbnailWidth > 0 ? `${src}#thumbnail=${thumbnailWidth}` : src;
+  const cached = signedUrlCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now() + 60_000) return cached.url;
 
-  const response = await fetch(`/api/media/cos-url?url=${encodeURIComponent(src)}`, {
+  const query = new URLSearchParams({ url: src });
+  if (thumbnailWidth > 0) {
+    query.set("preview", "image");
+    query.set("width", String(thumbnailWidth));
+  }
+  const response = await fetch(`/api/media/cos-url?${query.toString()}`, {
     headers: authHeaders(),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -63,7 +74,7 @@ export async function resolveMediaUrl(src?: string) {
   const signedUrl = typeof data?.url === "string" ? data.url : "";
   if (!signedUrl) throw new Error("Missing signed media URL");
 
-  signedUrlCache.set(src, {
+  signedUrlCache.set(cacheKey, {
     url: signedUrl,
     expiresAt: Date.now() + Math.max(60, Number(data?.expiresIn ?? 3600) - 60) * 1000,
   });
@@ -98,9 +109,10 @@ export async function uploadOriginalMedia(file: File): Promise<string> {
   return data.url;
 }
 
-export function useResolvedMediaUrl(src?: string) {
+export function useResolvedMediaUrl(src?: string, options: ResolveMediaOptions = {}) {
   const originalSrc = typeof src === "string" ? src : undefined;
   const proxySrc = useMemo(() => cosProxyUrl(originalSrc), [originalSrc]);
+  const thumbnailWidth = Number(options.thumbnailWidth || 0);
   const [displaySrc, setDisplaySrc] = useState<string | undefined>(() =>
     proxySrc ? undefined : originalSrc
   );
@@ -121,7 +133,7 @@ export function useResolvedMediaUrl(src?: string) {
     }
 
     setDisplaySrc(undefined);
-    resolveMediaUrl(originalSrc)
+    resolveMediaUrl(originalSrc, { thumbnailWidth })
       .then((url) => {
         if (!cancelled) setDisplaySrc(url);
       })
@@ -132,7 +144,7 @@ export function useResolvedMediaUrl(src?: string) {
     return () => {
       cancelled = true;
     };
-  }, [originalSrc, proxySrc]);
+  }, [originalSrc, proxySrc, thumbnailWidth]);
 
   return displaySrc;
 }

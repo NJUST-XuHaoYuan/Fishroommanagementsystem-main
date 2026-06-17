@@ -10,7 +10,7 @@ export function ImageWithFallback(props: React.ImgHTMLAttributes<HTMLImageElemen
   const { src, alt, style, className, loading = 'lazy', decoding = 'async', ...rest } = props
   const originalSrc = typeof src === 'string' ? src : undefined
   const proxySrc = cosProxyUrl(originalSrc)
-  const resolvedSrc = useResolvedMediaUrl(originalSrc)
+  const resolvedSrc = useResolvedMediaUrl(originalSrc, { thumbnailWidth: 360 })
   const displaySrc = forceProxy && proxySrc ? proxySrc : resolvedSrc
 
   const handleError = () => {

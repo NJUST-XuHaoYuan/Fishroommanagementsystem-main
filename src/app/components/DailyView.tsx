@@ -82,7 +82,6 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
-  const videoCameraRef = useRef<HTMLInputElement>(null);
 
   // Log dialog state
   const [logOpen, setLogOpen] = useState(false);
@@ -115,7 +114,6 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [batchRecordSaving, setBatchRecordSaving] = useState(false);
   const batchPhotoRef = useRef<HTMLInputElement>(null);
   const batchVideoRef = useRef<HTMLInputElement>(null);
-  const batchVideoCameraRef = useRef<HTMLInputElement>(null);
 
   // Loss state
   const [lossOpen, setLossOpen] = useState(false);
@@ -1758,14 +1756,6 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                      className="hidden"
 	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
 	                    />
-	                    <input
-	                      ref={videoCameraRef}
-	                      type="file"
-	                      accept={ORIGINAL_VIDEO_ACCEPT}
-	                      capture="environment"
-	                      className="hidden"
-	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
-	                    />
 	                    <Button
 	                      type="button"
 	                      variant="outline"
@@ -1773,16 +1763,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                      className="flex-1"
 	                      onClick={() => videoRef.current?.click()}
 	                    >
-	                      <Video className="size-4" /> 选原视频
-	                    </Button>
-	                    <Button
-	                      type="button"
-	                      variant="outline"
-	                      size="sm"
-	                      className="flex-1"
-	                      onClick={() => videoCameraRef.current?.click()}
-	                    >
-	                      <Camera className="size-4" /> 拍视频
+	                      <Video className="size-4" /> 上传视频
 	                    </Button>
 	                  </div>
 	                </div>
@@ -1791,7 +1772,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                 <div className="flex flex-wrap gap-2">
                   {newRecord.photos.map((src, i) => (
                     <div key={i} className="relative size-14 rounded border overflow-hidden">
-                      <img src={src} alt="" className="size-full object-cover" />
+                      <ImageWithFallback src={src} alt="" className="size-full object-cover" />
                       <button
                         onClick={() => setNewRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
@@ -1910,19 +1891,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 		                    className="hidden"
 		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
 		                  />
-		                  <input
-		                    ref={batchVideoCameraRef}
-		                    type="file"
-		                    accept={ORIGINAL_VIDEO_ACCEPT}
-		                    capture="environment"
-		                    className="hidden"
-		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
-		                  />
 		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoRef.current?.click()}>
-		                    <Video className="size-4" /> 选原视频
-		                  </Button>
-		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoCameraRef.current?.click()}>
-		                    <Camera className="size-4" /> 拍视频
+		                    <Video className="size-4" /> 上传视频
 		                  </Button>
 		                </div>
 		              </div>
@@ -1931,7 +1901,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	              <div className="flex flex-wrap gap-2">
 	                {batchRecord.photos.map((src, i) => (
 	                  <div key={i} className="relative size-14 rounded border overflow-hidden">
-	                    <img src={src} alt="" className="size-full object-cover" />
+	                    <ImageWithFallback src={src} alt="" className="size-full object-cover" />
 	                    <button
 	                      type="button"
 	                      onClick={() => setBatchRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
@@ -2116,7 +2086,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                <div className="flex flex-wrap gap-2">
 	                  {lossProof.map((src, index) => (
 	                    <div key={index} className="relative size-16 rounded border overflow-hidden">
-	                      <img src={src} alt="" className="size-full object-cover" />
+	                      <ImageWithFallback src={src} alt="" className="size-full object-cover" />
 	                      <button
 	                        type="button"
 	                        onClick={() => setLossProof((prev) => prev.filter((_, i) => i !== index))}

@@ -2408,17 +2408,19 @@ function sendCosObject(req, res, key) {
   });
 }
 
-async function signedCosObjectUrl(key) {
+async function signedCosObjectUrl(key, queryString = "") {
   const client = getCosClient();
   if (!client) return "";
   return await new Promise((resolvePromise, rejectPromise) => {
-    client.getObjectUrl({
+    const params = {
       Bucket: cosConfig.bucket,
       Region: cosConfig.region,
       Key: key,
       Sign: true,
       Expires: 3600,
-    }, (error, data = {}) => {
+    };
+    if (queryString) params.QueryString = queryString;
+    client.getObjectUrl(params, (error, data = {}) => {
       if (error) {
         rejectPromise(error);
         return;
@@ -2426,6 +2428,11 @@ async function signedCosObjectUrl(key) {
       resolvePromise(typeof data === "string" ? data : (data.Url || data.url || ""));
     });
   });
+}
+
+function imagePreviewQuery(widthValue) {
+  const width = Math.min(1200, Math.max(80, Number(widthValue) || 360));
+  return `imageMogr2/thumbnail/${Math.round(width)}x/quality/70/ignore-error/1`;
 }
 
 function prefixedCosKey(...parts) {
@@ -3220,7 +3227,10 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { error: "Invalid COS media URL" });
         return;
       }
-      const signedUrl = await signedCosObjectUrl(key);
+      const previewQuery = url.searchParams.get("preview") === "image"
+        ? imagePreviewQuery(url.searchParams.get("width"))
+        : "";
+      const signedUrl = await signedCosObjectUrl(key, previewQuery);
       if (!signedUrl) {
         sendJson(req, res, 503, { error: "COS is not configured" });
         return;
