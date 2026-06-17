@@ -20,7 +20,7 @@ import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
-import { downloadMedia, uploadOriginalMedia } from "../utils/media";
+import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 
@@ -82,6 +82,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
+  const videoCameraRef = useRef<HTMLInputElement>(null);
 
   // Log dialog state
   const [logOpen, setLogOpen] = useState(false);
@@ -114,6 +115,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [batchRecordSaving, setBatchRecordSaving] = useState(false);
   const batchPhotoRef = useRef<HTMLInputElement>(null);
   const batchVideoRef = useRef<HTMLInputElement>(null);
+  const batchVideoCameraRef = useRef<HTMLInputElement>(null);
 
   // Loss state
   const [lossOpen, setLossOpen] = useState(false);
@@ -1745,28 +1747,45 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     </Button>
                   </div>
                 </div>
-                <div className="grid gap-2">
-                  <Label className="text-xs">视频</Label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      ref={videoRef}
-                      type="file"
-                      accept="video/*"
-                      multiple
-                      className="hidden"
-                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => videoRef.current?.click()}
-                    >
-                      <Video className="size-4" /> 上传视频
-                    </Button>
-                  </div>
-                </div>
+	                <div className="grid gap-2">
+	                  <Label className="text-xs">视频</Label>
+	                  <div className="flex items-center gap-2">
+	                    <input
+	                      ref={videoRef}
+	                      type="file"
+	                      accept={ORIGINAL_VIDEO_ACCEPT}
+	                      multiple
+	                      className="hidden"
+	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
+	                    />
+	                    <input
+	                      ref={videoCameraRef}
+	                      type="file"
+	                      accept={ORIGINAL_VIDEO_ACCEPT}
+	                      capture="environment"
+	                      className="hidden"
+	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
+	                    />
+	                    <Button
+	                      type="button"
+	                      variant="outline"
+	                      size="sm"
+	                      className="flex-1"
+	                      onClick={() => videoRef.current?.click()}
+	                    >
+	                      <Video className="size-4" /> 选原视频
+	                    </Button>
+	                    <Button
+	                      type="button"
+	                      variant="outline"
+	                      size="sm"
+	                      className="flex-1"
+	                      onClick={() => videoCameraRef.current?.click()}
+	                    >
+	                      <Camera className="size-4" /> 拍视频
+	                    </Button>
+	                  </div>
+	                </div>
               </div>
               {newRecord.photos.length > 0 && (
                 <div className="flex flex-wrap gap-2">
@@ -1883,19 +1902,30 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                  <Button type="button" variant="outline" size="sm" onClick={() => batchPhotoRef.current?.click()}>
 	                    <Camera className="size-4" /> 上传照片
 	                  </Button>
-	                  <input
-	                    ref={batchVideoRef}
-	                    type="file"
-	                    accept="video/*"
-	                    multiple
-	                    className="hidden"
-	                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
-	                  />
-	                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoRef.current?.click()}>
-	                    <Video className="size-4" /> 上传视频
-	                  </Button>
-	                </div>
-	              </div>
+		                  <input
+		                    ref={batchVideoRef}
+		                    type="file"
+		                    accept={ORIGINAL_VIDEO_ACCEPT}
+		                    multiple
+		                    className="hidden"
+		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
+		                  />
+		                  <input
+		                    ref={batchVideoCameraRef}
+		                    type="file"
+		                    accept={ORIGINAL_VIDEO_ACCEPT}
+		                    capture="environment"
+		                    className="hidden"
+		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
+		                  />
+		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoRef.current?.click()}>
+		                    <Video className="size-4" /> 选原视频
+		                  </Button>
+		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoCameraRef.current?.click()}>
+		                    <Camera className="size-4" /> 拍视频
+		                  </Button>
+		                </div>
+		              </div>
 	            </div>
 	            {batchRecord.photos.length > 0 && (
 	              <div className="flex flex-wrap gap-2">

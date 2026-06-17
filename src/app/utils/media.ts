@@ -5,6 +5,31 @@ const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 
 export const MAX_ORIGINAL_IMAGE_BYTES = 50 * 1024 * 1024;
 export const MAX_ORIGINAL_VIDEO_BYTES = 300 * 1024 * 1024;
+export const ORIGINAL_VIDEO_ACCEPT = "video/mp4,video/quicktime,video/x-m4v,video/3gpp,video/3gpp2,video/*";
+
+function extensionFromName(name: string) {
+  const match = String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? `.${match[1]}` : "";
+}
+
+function mediaMimeFromFile(file: File): string {
+  const mime = String(file.type || "").split(";", 1)[0].trim().toLowerCase();
+  if (mime) return mime;
+  const ext = extensionFromName(file.name);
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".heic") return "image/heic";
+  if (ext === ".heif") return "image/heif";
+  if (ext === ".mp4") return "video/mp4";
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".m4v") return "video/x-m4v";
+  if (ext === ".3gp") return "video/3gpp";
+  if (ext === ".3g2") return "video/3gpp2";
+  if (ext === ".webm") return "video/webm";
+  return "";
+}
 
 export function cosProxyUrl(src?: string) {
   if (typeof src !== "string") return undefined;
@@ -46,10 +71,11 @@ export async function resolveMediaUrl(src?: string) {
 }
 
 export async function uploadOriginalMedia(file: File): Promise<string> {
-  if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) {
+  const mime = mediaMimeFromFile(file);
+  if (!mime.startsWith("image/") && !mime.startsWith("video/")) {
     throw new Error("只支持上传图片或视频文件");
   }
-  const maxBytes = file.type.startsWith("video/") ? MAX_ORIGINAL_VIDEO_BYTES : MAX_ORIGINAL_IMAGE_BYTES;
+  const maxBytes = mime.startsWith("video/") ? MAX_ORIGINAL_VIDEO_BYTES : MAX_ORIGINAL_IMAGE_BYTES;
   if (file.size > maxBytes) {
     throw new Error(
       `文件超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制，请压缩或剪短后重试`
@@ -60,7 +86,7 @@ export async function uploadOriginalMedia(file: File): Promise<string> {
     method: "POST",
     headers: {
       ...authHeaders(),
-      "Content-Type": file.type || "application/octet-stream",
+      "Content-Type": mime,
       "X-File-Name": encodeURIComponent(file.name),
     },
     body: file,

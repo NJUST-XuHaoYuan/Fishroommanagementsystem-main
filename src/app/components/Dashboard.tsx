@@ -401,6 +401,16 @@ function uniqueText(parts: Array<unknown>): string {
   return values.length ? values.join("；") : "";
 }
 
+function normalizeFishListGroupText(value: unknown, fallback = "—"): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function normalizeFishListGroupPrice(value: unknown): number {
+  const price = Number(value ?? 0);
+  return Number.isFinite(price) ? Number(price.toFixed(2)) : 0;
+}
+
 function fishListStatusNote(stocks: StockItem[]): string {
   const feeding = stocks.filter((stock) => stock.status === "feeding").length;
   if (feeding === stocks.length && stocks.length > 0) return "开口颗粒";
@@ -1485,19 +1495,21 @@ export function Dashboard() {
       size: string;
       origin: string;
       price: number;
-      productNotes: string;
+      productNotes: string[];
       stocks: StockItem[];
     }>();
 
     for (const row of sellableRows.filter((row) => !row.specialPrice)) {
-      const productName = row.product?.name ?? row.stock.productId;
-      const size = row.product?.size || "—";
-      const origin = row.product?.origin || "";
-      const price = Number(row.price || row.defaultPrice || 0);
-      const key = [row.categoryName, productName, size, origin, price].join("__");
+      const productName = normalizeFishListGroupText(row.product?.name, row.stock.productId);
+      const size = normalizeFishListGroupText(row.product?.size);
+      const origin = normalizeFishListGroupText(row.product?.origin, "");
+      const price = normalizeFishListGroupPrice(row.price || row.defaultPrice || 0);
+      const productNotes = normalizeFishListGroupText(row.product?.notes, "");
+      const key = [row.categoryName, productName, size, price.toFixed(2)].join("__");
       const existing = regularGroups.get(key);
       if (existing) {
         existing.stocks.push(row.stock);
+        if (productNotes) existing.productNotes.push(productNotes);
       } else {
         regularGroups.set(key, {
           categoryName: row.categoryName,
@@ -1505,7 +1517,7 @@ export function Dashboard() {
           size,
           origin,
           price,
-          productNotes: row.product?.notes ?? "",
+          productNotes: productNotes ? [productNotes] : [],
           stocks: [row.stock],
         });
       }
@@ -1523,7 +1535,7 @@ export function Dashboard() {
         priceValue: group.price,
         notes: uniqueText([
           fishListStatusNote(group.stocks),
-          group.productNotes,
+          ...group.productNotes,
           ...group.stocks.map((stock) => stock.notes),
         ]),
       }))

@@ -2448,6 +2448,8 @@ function extensionForMime(mime) {
   if (normalized === "video/webm") return ".webm";
   if (normalized === "video/quicktime") return ".mov";
   if (normalized === "video/x-m4v") return ".m4v";
+  if (normalized === "video/3gpp") return ".3gp";
+  if (normalized === "video/3gpp2") return ".3g2";
   return ".bin";
 }
 
@@ -2463,6 +2465,8 @@ function mimeForExtension(ext) {
   if (normalized === ".webm") return "video/webm";
   if (normalized === ".mov") return "video/quicktime";
   if (normalized === ".m4v") return "video/x-m4v";
+  if (normalized === ".3gp") return "video/3gpp";
+  if (normalized === ".3g2") return "video/3gpp2";
   return "application/octet-stream";
 }
 
@@ -2542,8 +2546,12 @@ async function externalizeLocalUploadUrl(value) {
   }
 }
 
-function normalizeUploadMime(value) {
-  return String(value ?? "").split(";", 1)[0].trim().toLowerCase();
+function normalizeUploadMime(value, filename = "") {
+  const mime = String(value ?? "").split(";", 1)[0].trim().toLowerCase();
+  if (mime && mime !== "application/octet-stream") return mime;
+  const decodedName = decodeURIComponent(String(filename || ""));
+  const inferred = mimeForExtension(extname(decodedName));
+  return inferred === "application/octet-stream" ? mime : inferred;
 }
 
 async function uploadOriginalMedia(buffer, mime) {
@@ -3162,7 +3170,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/media/upload" && req.method === "POST") {
     try {
-      const mime = normalizeUploadMime(req.headers["content-type"]);
+      const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
       const isImage = mime.startsWith("image/");
       const isVideo = mime.startsWith("video/");
       if (!isImage && !isVideo) {

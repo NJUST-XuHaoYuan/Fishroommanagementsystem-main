@@ -53,11 +53,8 @@ export function buildStockPriceBaselines(
 
 export function isStockSpecialPrice(
   stock: StockItem,
-  product?: Product,
-  baselines?: Map<string, number>,
+  _product?: Product,
+  _baselines?: Map<string, number>,
 ): boolean {
-  if (stock.priceOverridden) return true;
-  const baseline = baselines?.get(stock.productId);
-  if (!(baseline && baseline > 0)) return false;
-  return Math.abs(stockSalePrice(stock, product) - baseline) > 0.005;
+  return stock.priceOverridden === true;
 }
