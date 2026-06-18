@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
 import { Login } from "./components/Login";
+import { LogoLoader } from "./components/LogoLoader";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
 import { SpeciesView } from "./components/SpeciesView";
@@ -1232,14 +1233,7 @@ export default function App() {
   if (loading || (state.user && (stateLoading || !stateLoaded))) {
     return (
       <div className="size-full min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="flex flex-col items-center gap-4">
-          <div className="size-16 overflow-hidden rounded-2xl border bg-white animate-pulse">
-            <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-full object-contain p-1" />
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {loading ? "正在加载登录信息…" : "正在加载业务数据…"}
-          </p>
-        </div>
+        <LogoLoader label={loading ? "正在加载登录信息…" : "正在加载业务数据…"} />
       </div>
     );
   }
