@@ -819,6 +819,17 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
   });
 }
 
+function isValidDashboardSalesOrder(order = {}) {
+  return order?.status !== "cancelled" && order?.status !== "damaged";
+}
+
+function isOfflinePickupDashboardOrder(order = {}, orderShipments = []) {
+  const source = String(order?.source ?? "").trim();
+  return source === "线下" ||
+    source === "线下自提" ||
+    (!source && orderShipments.some((shipment) => shipment?.shipMethod === "pickup"));
+}
+
 function buildDashboardSummary(state = {}, options = {}) {
   const today = todayInChina();
   const financeDays = parseFinanceDays(options.financeDays);
@@ -831,6 +842,12 @@ function buildDashboardSummary(state = {}, options = {}) {
   const tankGroups = Array.isArray(scopedState.tankGroups) ? scopedState.tankGroups : [];
   const orders = Array.isArray(scopedState.orders) ? scopedState.orders : [];
   const shipments = Array.isArray(scopedState.shipments) ? scopedState.shipments : [];
+  const shipmentsByOrderId = new Map();
+  for (const shipment of shipments) {
+    const orderId = String(shipment?.orderId ?? "");
+    if (!orderId) continue;
+    shipmentsByOrderId.set(orderId, [...(shipmentsByOrderId.get(orderId) ?? []), shipment]);
+  }
   const productById = new Map(products.map((product) => [product?.id, product]));
   const speciesById = new Map(species.map((item) => [item?.id, item]));
   const inTankFishStock = stock
@@ -854,6 +871,16 @@ function buildDashboardSummary(state = {}, options = {}) {
         String(payment?.time ?? "").slice(0, 10) === date
       )
     );
+    const salesRows = orders
+      .filter((order) => isValidDashboardSalesOrder(order) && String(order?.date ?? "").slice(0, 10) === date)
+      .map((order) => {
+        const orderShipments = shipmentsByOrderId.get(String(order?.id ?? "")) ?? [];
+        return {
+          order,
+          orderShipments,
+          amount: Math.max(0, calcAmountDueForOrder(order, orderShipments)),
+        };
+      });
     return {
       date,
       label: date.slice(5).replace("-", "/"),
@@ -863,6 +890,16 @@ function buildDashboardSummary(state = {}, options = {}) {
       refunded: payments
         .filter((payment) => payment?.type === "refund")
         .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
+      orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
+      platformAmount: salesRows
+        .filter((row) => String(row.order?.source ?? "").trim() === "平台下单")
+        .reduce((sum, row) => sum + row.amount, 0),
+      offlinePickupAmount: salesRows
+        .filter((row) => isOfflinePickupDashboardOrder(row.order, row.orderShipments))
+        .reduce((sum, row) => sum + row.amount, 0),
+      privateDomainAmount: salesRows
+        .filter((row) => String(row.order?.source ?? "").trim() === "私域线上")
+        .reduce((sum, row) => sum + row.amount, 0),
     };
   });
   const dailyLossData = buildDailyLossData(scopedState, dailyDates, productById, speciesById);
