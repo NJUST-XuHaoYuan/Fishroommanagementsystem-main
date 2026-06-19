@@ -916,7 +916,7 @@ export function PublicCatalogPage() {
             <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8 shadow-[0_16px_42px_rgba(30,230,239,0.08)]">
               <img src="/assets/brand-logo.jpg" alt="海水鱼廊" className="size-14 rounded-xl object-contain" />
             </div>
-            <div className="text-lg font-semibold tracking-normal text-white">海水生物超市</div>
+            <div className="text-2xl font-semibold tracking-normal text-white">海水生物超市</div>
           </div>
         </div>
       </header>
