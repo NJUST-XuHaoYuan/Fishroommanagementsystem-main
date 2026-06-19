@@ -105,6 +105,11 @@ const marinePhotos = {
   rare: "https://upload.wikimedia.org/wikipedia/commons/d/dd/Pterois_sphex.jpg",
 };
 
+const heroCarouselImages = Array.from(
+  { length: 14 },
+  (_, index) => `/assets/hero-carousel/hero-${String(index + 1).padStart(2, "0")}.jpg`
+);
+
 const premiumCategories: PremiumCategory[] = [
   {
     key: "clownfish",
@@ -377,6 +382,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
   const [detailLoadingStockId, setDetailLoadingStockId] = useState("");
   const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [heroImageIndex, setHeroImageIndex] = useState(0);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
@@ -404,6 +410,21 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (heroCarouselImages.length < 2) return;
+    const interval = window.setInterval(() => {
+      setHeroImageIndex((index) => (index + 1) % heroCarouselImages.length);
+    }, 5500);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (heroCarouselImages.length < 2) return;
+    const nextSrc = heroCarouselImages[(heroImageIndex + 1) % heroCarouselImages.length];
+    const preload = new window.Image();
+    preload.src = nextSrc;
+  }, [heroImageIndex]);
 
   const productBySpecies = useMemo(() => {
     const map = new Map<string, PublicProduct[]>();
@@ -649,7 +670,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     ];
   }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
-  const heroSpecimen = selectedSpecimen ?? specimens[0];
+  const heroImage = heroCarouselImages[heroImageIndex] ?? marinePhotos.localFish;
 
   const scrollToCatalog = () => {
     document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -673,14 +694,25 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
 
       <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
         <ImageWithFallback
-          src={heroSpecimen?.image || displayImageUrl(marinePhotos.blueTang, 1800)}
-          fallbackSrc={heroSpecimen?.fallbackImage ?? marinePhotos.localFish}
-          alt={heroSpecimen?.product.name ?? "海水鱼个体"}
+          key={heroImage}
+          src={heroImage}
+          fallbackSrc={marinePhotos.localFish}
+          alt="海水鱼廊图册照片"
           disableMediaProxy
-          className="absolute inset-0 h-full w-full object-cover opacity-70"
+          className="absolute inset-0 h-full w-full object-cover opacity-70 transition-opacity duration-700"
           loading="eager"
         />
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_74%_42%,rgba(16,211,222,0.18),transparent_28%),linear-gradient(90deg,rgba(3,16,31,0.98)_0%,rgba(3,16,31,0.76)_42%,rgba(3,16,31,0.18)_100%)]" />
+        <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-1.5" aria-hidden="true">
+          {heroCarouselImages.map((_, index) => (
+            <span
+              key={index}
+              className={`h-1.5 rounded-full transition-all duration-300 ${
+                index === heroImageIndex ? "w-6 bg-[#1ee6ef]" : "w-1.5 bg-white/38"
+              }`}
+            />
+          ))}
+        </div>
         <div className="relative mx-auto flex min-h-[calc(100dvh-5rem)] max-w-7xl items-center px-4 py-14 sm:px-6 lg:px-8">
           <div className="max-w-3xl">
             <h1 className="max-w-[16ch] text-5xl font-semibold leading-[1.02] tracking-normal text-white sm:text-6xl lg:text-7xl">
