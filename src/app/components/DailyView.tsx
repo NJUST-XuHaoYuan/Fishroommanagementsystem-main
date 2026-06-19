@@ -1077,18 +1077,41 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               const groupLogs = logsByGroup.get(g.id) ?? [];
               const latestLog = groupLogs[0];
               return (
-              <Card key={g.id} className="p-5 border-2 border-sky-200 bg-sky-50/30">
-                <div className="mb-3 flex items-start justify-between gap-3">
-                  <div>
-                    <h3>{g.name}</h3>
-                    <div className="text-xs text-muted-foreground">{g.location}</div>
+              <Card key={g.id} className="p-3 border border-sky-200 bg-sky-50/30">
+                <div className="mb-2.5 grid gap-2.5 md:grid-cols-[minmax(8rem,12rem)_minmax(16rem,1fr)_auto] md:items-start">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-base">{g.name}</h3>
+                    <div className="truncate text-xs text-muted-foreground">{g.location}</div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    className="flex min-w-0 items-start gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
+                    onClick={() => setViewLogGroupId(g.id)}
+                  >
+                    <Clock className="mt-0.5 size-4 shrink-0 text-sky-600" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-medium text-sky-700">最近养护</div>
+                      {latestLog ? (
+                        <>
+                          <div className="mt-0.5 truncate text-sm font-medium">
+                            {latestLog.date} · {latestLog.action}
+                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
+                          </div>
+                          {latestLog.notes && (
+                            <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{latestLog.notes}</div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="mt-0.5 text-sm text-muted-foreground">暂无养护日志</div>
+                      )}
+                    </div>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-2 md:justify-end">
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="text-slate-700 border-slate-200 hover:bg-white"
+                      className="h-8 border-slate-200 px-2.5 text-slate-700 hover:bg-white"
                       onClick={() => setViewLogGroupId(g.id)}
                     >
                       <ClipboardList className="size-3.5 mr-1" />
@@ -1099,7 +1122,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="text-sky-600 border-sky-200 hover:bg-sky-50"
+                        className="h-8 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50"
                         onClick={() => openNewLogForGroup(g.id)}
                       >
                         <Plus className="size-3.5 mr-1" />
@@ -1108,31 +1131,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     )}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="mb-3 flex w-full items-start gap-2 rounded-md border bg-white/80 px-3 py-2 text-left transition-colors hover:bg-white"
-                  onClick={() => setViewLogGroupId(g.id)}
-                >
-                  <Clock className="mt-0.5 size-4 shrink-0 text-sky-600" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium text-slate-600">最近养护</div>
-                    {latestLog ? (
-                      <>
-                        <div className="mt-0.5 truncate text-sm font-medium">
-                          {latestLog.date} · {latestLog.action}
-                          {latestLog.operator ? ` · ${latestLog.operator}` : ""}
-                        </div>
-                        {latestLog.notes && (
-                          <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{latestLog.notes}</div>
-                        )}
-                      </>
-                    ) : (
-                      <div className="mt-0.5 text-sm text-muted-foreground">暂无养护日志</div>
-                    )}
-                  </div>
-                </button>
                 {/* 子缸横向排列，溢出滚动 */}
-                <div className="flex flex-row gap-3 overflow-x-auto pb-1">
+                <div className="flex flex-row gap-2.5 overflow-x-auto pb-0.5">
                   {visibleSubTanks(g).map((t) => {
                     const items = stockBySub(t.id);
                     const allItems = state.stock.filter((s) =>
@@ -1144,9 +1144,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     const visibleIds = items.map((item) => item.id);
                     const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
                     return (
-                      <div key={t.id} className="bg-white rounded-md border flex flex-col min-w-[220px] flex-shrink-0">
+                      <div key={t.id} className="flex min-w-[208px] flex-shrink-0 flex-col overflow-hidden rounded-lg border border-slate-300 bg-white">
                         {/* 子缸标题行 */}
-                        <div className="flex items-center justify-between px-3 py-2 border-b">
+                        <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/80 px-2.5 py-1.5">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">{t.name}</span>
                             {allItems.length > 0 && (
@@ -1169,9 +1169,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         </div>
 
                         {/* 商品分组列表 */}
-                        <div className="flex flex-col divide-y">
+                        <div className="flex flex-col divide-y divide-slate-200">
                           {items.length === 0 && (
-                            <div className="px-3 py-3 text-xs text-muted-foreground text-center">
+                            <div className="px-2.5 py-2.5 text-xs text-muted-foreground text-center">
                               {anyFilter && !matchedByTank ? "无匹配" : "空缸"}
                             </div>
                           )}
@@ -1194,7 +1194,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                                 <div
                                   role="button"
                                   tabIndex={0}
-                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-slate-50 text-left"
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 text-left"
                                   onClick={() => toggleExpand(key)}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter" || e.key === " ") {
