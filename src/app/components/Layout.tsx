@@ -199,13 +199,6 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           <LayoutDashboard className="size-4 shrink-0" />
           <span>首页概览</span>
         </button>
-        <button
-          onClick={() => navigate("profile")}
-          className={navButtonClass(view === "profile", "main")}
-        >
-          <UserCircle className="size-4 shrink-0" />
-          <span>个人中心</span>
-        </button>
         {NAV.map((section) => {
           const Icon = section.icon;
           return (
@@ -271,7 +264,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </>
         )}
       </nav>
-      <div className="border-t p-2.5 flex flex-col gap-2 bg-sidebar">
+      <div className="fishroom-sidebar-footer border-t p-2.5 flex flex-col gap-2 bg-sidebar">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col">
             <div className="text-sm font-medium truncate">{user.username}</div>
@@ -279,18 +272,33 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               {user.role === "admin" ? "管理员" : "店员"}
             </Badge>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => {
-              void fetch("/api/auth/logout", { method: "POST", headers: authJsonHeaders() }).catch(() => undefined);
-              clearAuthSession();
-              setState((s) => ({ ...s, user: null }));
-            }}
-            title="退出"
-          >
-            <LogOut className="size-4" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => navigate("profile")}
+              className={`fishroom-sidebar-profile-action ${view === "profile" ? "is-active" : ""}`}
+              title="个人中心"
+              aria-label="个人中心"
+            >
+              <UserCircle className="size-3.5" />
+              <span>个人中心</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                void fetch("/api/auth/logout", { method: "POST", headers: authJsonHeaders() }).catch(() => undefined);
+                clearAuthSession();
+                setState((s) => ({ ...s, user: null }));
+              }}
+              className="fishroom-sidebar-action"
+              title="退出"
+              aria-label="退出"
+            >
+              <LogOut className="size-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </>

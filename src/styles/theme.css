@@ -353,6 +353,40 @@
     color: var(--fishroom-reef);
   }
 
+  .fishroom-sidebar-footer {
+    background: oklch(0.982 0.002 260);
+  }
+
+  .fishroom-sidebar-action {
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid transparent;
+    color: oklch(0.34 0.01 260);
+  }
+
+  .fishroom-sidebar-profile-action {
+    height: 2rem;
+    gap: 0.35rem;
+    border: 1px solid transparent;
+    padding: 0 0.5rem;
+    color: oklch(0.34 0.01 260);
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .fishroom-sidebar-profile-action:hover,
+  .fishroom-sidebar-action:hover {
+    border-color: oklch(0.82 0.006 260);
+    background: oklch(0.955 0.004 260);
+  }
+
+  .fishroom-sidebar-profile-action.is-active,
+  .fishroom-sidebar-action.is-active {
+    border-color: oklch(0.82 0.018 185);
+    background: var(--fishroom-reef-soft);
+    color: oklch(0.245 0.048 185);
+  }
+
   .fishroom-topbar {
     border-bottom: 1px solid var(--border);
     background: oklch(0.992 0.001 260 / 0.98);
