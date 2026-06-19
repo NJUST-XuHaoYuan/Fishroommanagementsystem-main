@@ -344,16 +344,31 @@ function hasActiveEditingSurface(): boolean {
   return Boolean(document.querySelector("[role='dialog'], [data-radix-popper-content-wrapper]"));
 }
 
+function isPublicSiteHost(): boolean {
+  try {
+    return window.location.port === "10000";
+  } catch {
+    return false;
+  }
+}
+
+function adminEntryUrl(): string {
+  try {
+    const url = new URL(window.location.href);
+    url.port = "8787";
+    url.pathname = "/";
+    url.search = "";
+    url.hash = "admin";
+    return url.toString();
+  } catch {
+    return "http://129.211.211.201:8787/#admin";
+  }
+}
+
 function AdminApp() {
+  const [isPublicSite] = useState(() => isPublicSiteHost());
   const [state, setStateBase] = useState<Store>(initialState);
   const [view, setView] = useState<ViewKey>("dashboard");
-  const [showStaffLogin, setShowStaffLogin] = useState(() => {
-    try {
-      return window.location.hash === "#admin";
-    } catch {
-      return false;
-    }
-  });
   const [loading, setLoading] = useState(true);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [stateLoading, setStateLoading] = useState(false);
@@ -1080,8 +1095,15 @@ function AdminApp() {
     }
   };
 
-	  // ── Validate the saved backend session on mount; login credentials are checked by the server. ──
+  // ── Validate the saved backend session on mount; login credentials are checked by the server. ──
   useEffect(() => {
+    if (isPublicSite) {
+      setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, null));
+      setLoadedKeys(new Set<PersistedKey>());
+      setLoading(false);
+      return;
+    }
+
     const sessionUser = restoreUserFromSession();
     if (!sessionUser) {
       setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, null));
@@ -1123,7 +1145,7 @@ function AdminApp() {
         setLoadedKeys(new Set<PersistedKey>());
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [isPublicSite]);
 
   useEffect(() => {
     if (state.user) return;
@@ -1132,14 +1154,6 @@ function AdminApp() {
     loadedKeysRef.current = new Set<PersistedKey>();
     setLoadedKeys(new Set<PersistedKey>());
     setStateLoaded(false);
-  }, [state.user]);
-
-  useEffect(() => {
-    if (state.user) return;
-    const syncStaffLoginHash = () => setShowStaffLogin(window.location.hash === "#admin");
-    window.addEventListener("hashchange", syncStaffLoginHash);
-    syncStaffLoginHash();
-    return () => window.removeEventListener("hashchange", syncStaffLoginHash);
   }, [state.user]);
 
   useEffect(() => {
@@ -1251,7 +1265,7 @@ function AdminApp() {
     </div>
   ) : renderView();
 
-  if (loading || (state.user && (stateLoading || !stateLoaded))) {
+  if (loading || (!isPublicSite && state.user && (stateLoading || !stateLoaded))) {
     return (
       <div className="size-full min-h-screen flex items-center justify-center bg-slate-50">
         <LogoLoader label={loading ? "正在加载登录信息…" : "正在加载业务数据…"} />
@@ -1261,17 +1275,14 @@ function AdminApp() {
 
 	  return (
 			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
-      {!state.user ? (
-        showStaffLogin ? (
-          <Login />
-        ) : (
-          <PublicCatalogPage
-            onStaffLogin={() => {
-              window.location.hash = "admin";
-              setShowStaffLogin(true);
-            }}
-          />
-        )
+      {isPublicSite ? (
+        <PublicCatalogPage
+          onStaffLogin={() => {
+            window.location.href = adminEntryUrl();
+          }}
+        />
+      ) : !state.user ? (
+        <Login />
       ) : (
         <Layout view={view} setView={handleSetView} saveStatus={saveStatus}>
           <div key={`${activeSiteId}:${view}`}>{viewContent}</div>

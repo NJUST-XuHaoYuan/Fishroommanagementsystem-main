@@ -1,4 +1,4 @@
-import { ComponentType, ReactNode, useState } from "react";
+import { ComponentType, ReactNode, useEffect, useState } from "react";
 import { useStore } from "../store";
 import { authJsonHeaders, clearAuthSession } from "../utils/authSession";
 import { Button } from "./ui/button";
@@ -135,6 +135,19 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const sites = getSites(state);
   const activeSiteName = siteName(state, activeSiteId);
+
+  useEffect(() => {
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    window.scrollTo(0, 0);
+    document.documentElement.classList.add("fishroom-admin-shell");
+    document.body.classList.add("fishroom-admin-shell");
+    return () => {
+      document.documentElement.classList.remove("fishroom-admin-shell");
+      document.body.classList.remove("fishroom-admin-shell");
+      window.scrollTo(scrollX, scrollY);
+    };
+  }, []);
 
   const currentLabel =
     view === "dashboard"
@@ -297,7 +310,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   );
 
   return (
-    <div className="fishroom-app size-full min-h-screen flex">
+    <div className="fishroom-app size-full min-h-screen flex overflow-hidden">
       <aside className="fishroom-sidebar hidden w-72 shrink-0 lg:flex lg:flex-col">
         <NavContent />
       </aside>
@@ -311,7 +324,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         </SheetContent>
       </Sheet>
 
-      <main className="flex-1 flex min-w-0 flex-col overflow-hidden">
+      <main className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
         <header className="fishroom-topbar sticky top-0 z-30 h-14 px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <Button
@@ -355,7 +368,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <div className="fishroom-content flex-1 overflow-auto p-3 sm:p-4 lg:p-6">
+        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-6">
           {children}
         </div>
       </main>

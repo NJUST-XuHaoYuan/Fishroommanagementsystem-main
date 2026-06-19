@@ -196,9 +196,31 @@
 }
 
 @layer components {
+  html.fishroom-admin-shell,
+  body.fishroom-admin-shell {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body.fishroom-admin-shell {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+  }
+
+  body.fishroom-admin-shell #root {
+    height: 100dvh;
+    overflow: hidden;
+    width: 100%;
+  }
+
   .fishroom-app {
     color: var(--fishroom-ink);
     background: oklch(0.968 0.003 260);
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
   }
 
   .fishroom-sidebar {
@@ -256,6 +278,8 @@
 
   .fishroom-content {
     background: oklch(0.96 0.003 260);
+    min-height: 0;
+    overscroll-behavior: contain;
   }
 
   .fishroom-page-title {

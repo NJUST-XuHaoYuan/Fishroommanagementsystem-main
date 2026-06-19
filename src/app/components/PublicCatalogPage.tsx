@@ -46,12 +46,22 @@ type SpeciesCard = {
   priceRange: string;
 };
 
+type CategorySummary = {
+  key: string;
+  label: string;
+  description: string;
+  image: string;
+  species: number;
+  specimens: number;
+};
+
 type Specimen = {
   id: string;
   product: Product;
   species?: Species;
   stock?: PublicStockItem;
   image: string;
+  fallbackImage: string;
   price: number;
   size: string;
   sex: string;
@@ -73,6 +83,8 @@ const fallbackCatalog: PublicCatalogData = {
 };
 
 const marinePhotos = {
+  localFish: "/assets/catalog-line-fish.jpg",
+  localCoral: "/assets/catalog-line-coral.jpg",
   clownfish: "https://upload.wikimedia.org/wikipedia/commons/f/f6/Clown_fish_in_the_Andaman_Coral_Reef.jpg",
   blueTang: "https://upload.wikimedia.org/wikipedia/commons/1/13/Paletten-Doktorfisch_M%C3%BCnster.JPG",
   yellowTang: "https://upload.wikimedia.org/wikipedia/commons/5/5e/Zebrasoma_flavescens_Luc_Viatour.jpg",
@@ -174,6 +186,34 @@ function isDemoImage(src?: string) {
   } catch {
     return false;
   }
+}
+
+function speciesCategoryName(species?: Species) {
+  return String(species?.category ?? "").trim() || "未分类";
+}
+
+function categoryFallbackImage(categoryName: string, species?: Species) {
+  const haystack = [
+    categoryName,
+    species?.name,
+    species?.scientificName,
+    ...(Array.isArray(species?.commonNames) ? species.commonNames : []),
+  ].join(" ").toLowerCase();
+  if (haystack.includes("珊瑚") || haystack.includes("活石") || haystack.includes("虾") || haystack.includes("蟹")) {
+    return marinePhotos.localCoral;
+  }
+  if (haystack.includes("耗材") || haystack.includes("活性炭")) {
+    return marinePhotos.localCoral;
+  }
+  return marinePhotos.localFish;
+}
+
+function categoryDescription(categoryName: string, counts: { species: number; specimens: number }) {
+  if (categoryName.includes("珊瑚")) return "后台珊瑚分类中的公开可售项目。";
+  if (categoryName.includes("耗材")) return "后台耗材分类中的公开可售项目。";
+  if (categoryName.includes("活石")) return "后台活石分类中的公开可售项目。";
+  if (categoryName.includes("虾") || categoryName.includes("蟹")) return "后台甲壳类分类中的公开可售个体。";
+  return `${counts.species} 个物种，${counts.specimens} 条可售个体，数据来自管理系统。`;
 }
 
 function specimenPhoto(product: Product | undefined, species: Species | undefined, category: PremiumCategory) {
@@ -294,7 +334,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [selectedCategoryKey, setSelectedCategoryKey] = useState<PremiumCategoryKey>("tangs");
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
   const [filter, setFilter] = useState("all");
@@ -336,16 +376,16 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   }, [catalog.products]);
 
   const categoryCounts = useMemo(() => {
-    const counts = new Map<PremiumCategoryKey, { species: number; specimens: number }>();
-    premiumCategories.forEach((category) => counts.set(category.key, { species: 0, specimens: 0 }));
+    const counts = new Map<string, { species: number; specimens: number; sample?: Species }>();
     catalog.species.forEach((species) => {
-      const category = categoryForSpecies(species);
+      const categoryName = speciesCategoryName(species);
       const products = productBySpecies.get(species.id) ?? [];
       const specimenCount = products.reduce((sum, product) => sum + availabilityForProduct(catalog.stock, product.id).length, 0);
-      const current = counts.get(category.key) ?? { species: 0, specimens: 0 };
-      counts.set(category.key, {
+      const current = counts.get(categoryName) ?? { species: 0, specimens: 0, sample: species };
+      counts.set(categoryName, {
         species: products.length > 0 ? current.species + 1 : current.species,
         specimens: current.specimens + specimenCount,
+        sample: current.sample ?? species,
       });
     });
     return counts;
@@ -357,6 +397,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     catalog.products.forEach((product, productIndex) => {
       const species = speciesById.get(product.speciesId);
       const category = categoryForSpecies(species);
+      const fallbackImage = displayImageUrl(categoryFallbackImage(speciesCategoryName(species), species), 1200);
       const availableStock = availabilityForProduct(catalog.stock, product.id);
       const stockItems = availableStock.length > 0 ? availableStock : [undefined];
       stockItems.forEach((stock, stockIndex) => {
@@ -367,6 +408,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
           species,
           stock,
           image: displayImageUrl(specimenPhoto(product, species, category), 1200),
+          fallbackImage,
           price: productPrice(product, stock),
           size: product.size || "待确认",
           sex: "未判定",
@@ -405,8 +447,46 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       .filter((card) => card.products.length > 0);
   }, [catalog.species, productBySpecies, specimens]);
 
-  const selectedCategory = premiumCategories.find((category) => category.key === selectedCategoryKey) ?? premiumCategories[0];
-  const visibleSpecies = speciesCards.filter((card) => categoryForSpecies(card.species).key === selectedCategoryKey);
+  const catalogCategories = useMemo<CategorySummary[]>(() => {
+    const orderedNames = catalog.speciesCategories
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+    const extraNames = [...categoryCounts.keys()]
+      .filter((name) => !orderedNames.includes(name))
+      .sort((a, b) => a.localeCompare(b, "zh-CN"));
+    return [...orderedNames, ...extraNames]
+      .filter((name, index, list) => list.indexOf(name) === index)
+      .filter((name) => (categoryCounts.get(name)?.specimens ?? 0) > 0)
+      .map((name) => {
+        const counts = categoryCounts.get(name) ?? { species: 0, specimens: 0 };
+        return {
+          key: name,
+          label: name,
+          description: categoryDescription(name, counts),
+          image: categoryFallbackImage(name, counts.sample),
+          species: counts.species,
+          specimens: counts.specimens,
+        };
+      });
+  }, [catalog.speciesCategories, categoryCounts]);
+
+  const selectedCategory =
+    catalogCategories.find((category) => category.key === selectedCategoryKey) ??
+    catalogCategories[0] ??
+    {
+      key: "",
+      label: "后台分类",
+      description: "管理系统中暂时没有公开可售分类。",
+      image: marinePhotos.localFish,
+      species: 0,
+      specimens: 0,
+    };
+  const visibleSpecies = speciesCards.filter((card) => speciesCategoryName(card.species) === selectedCategory.key);
+
+  useEffect(() => {
+    if (catalogCategories.some((category) => category.key === selectedCategoryKey)) return;
+    setSelectedCategoryKey(catalogCategories[0]?.key ?? "");
+  }, [catalogCategories, selectedCategoryKey]);
 
   useEffect(() => {
     if (visibleSpecies.some((card) => card.species.id === selectedSpeciesId)) return;
@@ -473,7 +553,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
         <ImageWithFallback
           src={heroSpecimen?.image || displayImageUrl(marinePhotos.blueTang, 1800)}
+          fallbackSrc={heroSpecimen?.fallbackImage ?? marinePhotos.localFish}
           alt={heroSpecimen?.product.name ?? "海水鱼个体"}
+          disableMediaProxy
           className="absolute inset-0 h-full w-full object-cover opacity-70"
           loading="eager"
         />
@@ -518,8 +600,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
             </p>
           </div>
           <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {premiumCategories.map((category, index) => {
-              const counts = categoryCounts.get(category.key) ?? { species: 0, specimens: 0 };
+            {catalogCategories.map((category, index) => {
               return (
                 <button
                   key={category.key}
@@ -534,7 +615,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 >
                   <ImageWithFallback
                     src={displayImageUrl(category.image, 1400)}
+                    fallbackSrc={marinePhotos.localFish}
                     alt={category.label}
+                    disableMediaProxy
                     className="absolute inset-0 h-full w-full object-cover opacity-54 transition duration-500 group-hover:scale-[1.035] group-hover:opacity-70"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-[#03101f] via-[#03101f]/45 to-transparent" />
@@ -542,8 +625,8 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                     <h3 className="text-3xl font-semibold text-white">{category.label}</h3>
                     <p className="mt-3 max-w-[24rem] text-sm leading-6 text-[#c5d4dd]">{category.description}</p>
                     <div className="mt-5 flex flex-wrap gap-3 text-xs font-semibold text-[#f3df9d]">
-                      <span>{counts.species} 个物种</span>
-                      <span>{counts.specimens} 条在售</span>
+                      <span>{category.species} 个物种</span>
+                      <span>{category.specimens} 条在售</span>
                     </div>
                   </div>
                 </button>
@@ -572,7 +655,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 <div className="aspect-[4/3] overflow-hidden bg-[#0f2a40]">
                   <ImageWithFallback
                     src={specimen?.image}
+                    fallbackSrc={specimen?.fallbackImage ?? marinePhotos.localFish}
                     alt={specimen?.product.name ?? label}
+                    disableMediaProxy
                     className="h-full w-full object-cover"
                   />
                 </div>
@@ -604,9 +689,8 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 按大类筛选
               </div>
               <div className="mt-4 grid gap-2">
-                {premiumCategories.map((category) => {
+                {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
-                  const counts = categoryCounts.get(category.key) ?? { species: 0, specimens: 0 };
                   return (
                     <button
                       key={category.key}
@@ -622,7 +706,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                         <span className="text-sm font-semibold">{category.label}</span>
                         {active && <Check className="size-4 text-[#1ee6ef]" />}
                       </div>
-                      <div className="mt-1 text-xs text-[#7893a6]">{counts.specimens} 条在售</div>
+                      <div className="mt-1 text-xs text-[#7893a6]">{category.specimens} 条在售</div>
                     </button>
                   );
                 })}
@@ -656,7 +740,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                           <div className="aspect-[4/3] overflow-hidden bg-[#102b42] sm:aspect-auto">
                             <ImageWithFallback
                               src={displayImageUrl(specimenPhoto(card.products[0], card.species, categoryForSpecies(card.species)), 900)}
+                              fallbackSrc={categoryFallbackImage(speciesCategoryName(card.species), card.species)}
                               alt={card.species.name}
+                              disableMediaProxy
                               className="h-full w-full object-cover"
                             />
                           </div>
@@ -725,7 +811,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                             <div className="aspect-[1.28/1] overflow-hidden bg-[#102b42]">
                               <ImageWithFallback
                                 src={specimen.image}
+                                fallbackSrc={specimen.fallbackImage}
                                 alt={`${specimen.id} ${specimen.product.name}`}
+                                disableMediaProxy
                                 className="h-full w-full object-cover transition duration-500 hover:scale-[1.035]"
                               />
                             </div>
@@ -765,7 +853,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
               <div className="aspect-[4/3] overflow-hidden rounded-[1.1rem] bg-[#102b42]">
                 <ImageWithFallback
                   src={selectedSpecimen?.image}
+                  fallbackSrc={selectedSpecimen?.fallbackImage ?? marinePhotos.localFish}
                   alt={selectedSpecimen?.product.name ?? "选中个体"}
+                  disableMediaProxy
                   className="h-full w-full object-cover"
                 />
               </div>
@@ -773,7 +863,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 <div className="overflow-hidden rounded-[1.1rem] bg-[#102b42]">
                   <ImageWithFallback
                     src={displayImageUrl(specimenPhoto(selectedSpecimen?.product, selectedSpecimen?.species, categoryForSpecies(selectedSpecimen?.species)), 900)}
+                    fallbackSrc={selectedSpecimen?.fallbackImage ?? marinePhotos.localFish}
                     alt={selectedSpecimen?.species?.name ?? "物种参考"}
+                    disableMediaProxy
                     className="h-full min-h-44 w-full object-cover"
                   />
                 </div>
@@ -866,7 +958,9 @@ function SpecimenPreview({ specimen }: { specimen?: Specimen }) {
       <div className="aspect-[4/3] overflow-hidden rounded-[1.1rem] bg-[#102b42]">
         <ImageWithFallback
           src={specimen.image}
+          fallbackSrc={specimen.fallbackImage}
           alt={`${specimen.id} 个体预览`}
+          disableMediaProxy
           className="h-full w-full object-cover"
         />
       </div>
