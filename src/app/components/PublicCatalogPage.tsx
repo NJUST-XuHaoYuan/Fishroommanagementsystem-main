@@ -839,9 +839,9 @@ export function PublicCatalogPage() {
       </section>
 
       <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725] py-8 sm:py-10">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="grid items-start gap-6 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_26rem]">
-            <aside className="overflow-hidden rounded-[1.25rem] bg-[#081b2c] lg:sticky lg:top-24 lg:self-start">
+        <div className="w-full max-w-[118rem] px-4 sm:px-6 lg:px-0 lg:pr-8">
+          <div className="grid items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[20rem_minmax(0,1fr)_26rem]">
+            <aside className="overflow-hidden bg-[#081b2c] lg:sticky lg:top-24 lg:self-start">
               <div className="max-h-[calc(100dvh-7rem)] overflow-y-auto">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
@@ -850,7 +850,7 @@ export function PublicCatalogPage() {
                       key={category.key}
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
-                      className={`group relative block min-h-[5.75rem] w-full overflow-hidden px-4 py-3 text-left transition active:translate-y-px ${
+                      className={`group relative block min-h-[7.25rem] w-full overflow-hidden px-6 py-5 text-left transition active:translate-y-px ${
                         active ? "text-white" : "text-[#dbe8ee] hover:text-white"
                       }`}
                     >
@@ -861,17 +861,16 @@ export function PublicCatalogPage() {
                         aria-hidden="true"
                         disableMediaProxy
                         className={`absolute inset-0 h-full w-full object-cover transition duration-300 ${
-                          active ? "scale-[1.02] opacity-50 saturate-110" : "opacity-24 saturate-[0.8] group-hover:scale-[1.02] group-hover:opacity-36"
+                          active ? "scale-[1.02] opacity-70 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
                         }`}
                       />
-                      <div className="absolute inset-0 bg-gradient-to-r from-[#03101f]/96 via-[#03101f]/72 to-[#03101f]/20" />
-                      <div className="absolute inset-0 bg-[#1ee6ef]/0 transition group-hover:bg-[#1ee6ef]/6" />
-                      {active && <div className="absolute inset-y-0 left-0 w-1 bg-[#1ee6ef]" />}
+                      <div className="absolute inset-0 bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10" />
+                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/12" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
                       <div className="relative z-10 flex items-center justify-between gap-3">
-                        <span className="truncate text-sm font-semibold">{category.label}</span>
-                        {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
+                        <span className="truncate text-lg font-semibold">{category.label}</span>
+                        {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                       </div>
-                      <div className="relative z-10 mt-1 text-xs text-[#9eb4c3]">{category.specimens} 条在售</div>
+                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">{category.specimens} 条在售</div>
                     </button>
                   );
                 })}
