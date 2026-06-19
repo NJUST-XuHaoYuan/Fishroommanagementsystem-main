@@ -418,6 +418,7 @@ export const initialState: Store = {
   sites: [
     { id: "jiangyin", name: "江阴" },
     { id: "nanjing", name: "南京" },
+    { id: "beijing", name: "北京" },
   ],
   personnel: [
     { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },

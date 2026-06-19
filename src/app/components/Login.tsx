@@ -51,20 +51,20 @@ export function Login() {
         <section className="fishroom-login-aside hidden min-h-[34rem] rounded-2xl p-8 lg:flex lg:flex-col lg:justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <div className="grid size-12 place-items-center rounded-xl bg-card/70">
-                <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-10 object-contain" />
+              <div className="fishroom-login-logo-mark grid size-[5.45rem] place-items-center overflow-hidden">
+                <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
               </div>
-              <div>
-                <div className="text-lg font-semibold">海水鱼房管理系统</div>
-                <div className="mt-1 text-sm opacity-80">面向库存、维护和销售的运营台</div>
+              <div className="fishroom-login-brand-copy">
+                <div className="fishroom-login-brand-title">进销存管理系统</div>
+                <div className="fishroom-login-brand-subtitle">面向库存、维护和销售的运营台</div>
               </div>
             </div>
             <div className="mt-12 max-w-xl">
               <h1 className="text-[2rem] font-semibold leading-tight text-balance">
-                从在缸个体到维护记录，每一步都回到真实库存。
+                从在每一个缸个体到每一条维护记录，每一步都回到真实情况。
               </h1>
               <p className="mt-4 max-w-[34rem] text-sm leading-7 opacity-80">
-                店员进入后台处理入库、维护、损耗和订单。
+                请仔细核对每一条操作
               </p>
             </div>
           </div>
@@ -82,12 +82,12 @@ export function Login() {
 
         <Card className="fishroom-login-panel rounded-2xl p-6 sm:p-8">
           <div className="mb-7 flex items-center gap-3 lg:hidden">
-            <div className="grid size-12 place-items-center rounded-xl border bg-card">
-              <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-10 object-contain" />
+            <div className="fishroom-login-logo-mark grid size-[4.75rem] place-items-center overflow-hidden">
+              <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
             </div>
-            <div>
-              <h1 className="text-lg font-semibold">海水鱼房管理系统</h1>
-              <p className="text-sm text-muted-foreground">登录以继续</p>
+            <div className="fishroom-login-brand-copy">
+              <h1 className="fishroom-login-brand-title">进销存管理系统</h1>
+              <p className="fishroom-login-brand-subtitle text-muted-foreground">登录以继续</p>
             </div>
           </div>
 
