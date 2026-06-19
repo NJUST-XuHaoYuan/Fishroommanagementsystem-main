@@ -577,22 +577,17 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const latestBioByStockId = new Map();
   const latestMediaByStockId = new Map();
   bioRecords
     .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
     .forEach((record) => {
       const stockItemId = String(record?.stockItemId ?? "");
-      const current = latestBioByStockId.get(stockItemId);
-      if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
-        latestBioByStockId.set(stockItemId, record);
-      }
       const photos = publicMediaUrls(record?.photos, 6);
       const videos = publicMediaUrls(record?.videos, 3);
       if (photos.length > 0 || videos.length > 0) {
         const currentMedia = latestMediaByStockId.get(stockItemId);
         if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
-          latestMediaByStockId.set(stockItemId, { date: record?.date, photos, videos });
+          latestMediaByStockId.set(stockItemId, { record, photos, videos });
         }
       }
     });
@@ -648,12 +643,12 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         tankLocation: String(tank?.group?.location ?? ""),
       };
     }),
-    bioRecords: [...latestBioByStockId.values()]
+    bioRecords: [...latestMediaByStockId.values()]
       .sort((a, b) =>
-        String(b?.date ?? "").localeCompare(String(a?.date ?? "")) ||
-        String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
+        String(b?.record?.date ?? "").localeCompare(String(a?.record?.date ?? "")) ||
+        String(a?.record?.id ?? "").localeCompare(String(b?.record?.id ?? ""))
       )
-      .map((record) => publicBioRecordPayload(record, latestMediaByStockId.get(String(record?.stockItemId ?? "")))),
+      .map((media) => publicBioRecordPayload(media.record, media)),
   };
 }
 
