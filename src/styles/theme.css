@@ -481,6 +481,26 @@
     color: oklch(0.94 0.002 260);
   }
 
+  .fishroom-login-logo-mark {
+    border: 1px solid oklch(0.84 0.006 260 / 0.45);
+    border-radius: 0.9rem;
+    background: oklch(0.998 0.001 260);
+  }
+
+  .fishroom-login-logo-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.34);
+  }
+
+  .fishroom-login-brand-title {
+    font-size: 1.45rem;
+    font-weight: 760;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
   .fishroom-status-pill {
     border: 1px solid oklch(0.8 0.006 260);
     background: oklch(0.94 0.004 260);
