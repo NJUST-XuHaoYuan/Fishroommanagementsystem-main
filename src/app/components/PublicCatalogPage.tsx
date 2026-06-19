@@ -1,21 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Check, ChevronRight, Search } from "lucide-react";
+import { ArrowRight, Camera, Check, ClipboardList, Clock, Hash, MapPin, PackageCheck, Search } from "lucide-react";
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 
 type PublicCatalogData = {
   speciesCategories: string[];
   species: Species[];
-  products: Product[];
+  products: PublicProduct[];
   stock: PublicStockItem[];
   bioRecords: PublicBioRecord[];
 };
 
+type PublicProduct = Pick<Product, "id" | "speciesId" | "name" | "size" | "origin" | "imageUrl" | "defaultPrice">;
+
 type PublicStockItem = Pick<StockItem, "id" | "productId" | "status" | "inDate"> &
-  Partial<Pick<StockItem, "sold" | "lost" | "notes" | "basePrice" | "code">>;
+  Partial<Pick<StockItem, "sold" | "lost" | "basePrice" | "code">> & {
+    batchNo?: string;
+    tankGroupName?: string;
+    subTankName?: string;
+    tankLocation?: string;
+  };
 
 type PublicBioRecord = Pick<BioRecord, "id" | "stockItemId" | "date" | "text"> &
-  Partial<Pick<BioRecord, "photos" | "videos">>;
+  Partial<Pick<BioRecord, "photos" | "videos" | "sourceType" | "tankGroupName" | "subTankName" | "operator">>;
 
 type PublicCatalogPageProps = {
   onStaffLogin?: () => void;
@@ -40,13 +47,10 @@ type PremiumCategory = {
 
 type SpeciesCard = {
   species: Species;
-  products: Product[];
+  products: PublicProduct[];
   availableSpecimens: Specimen[];
-  difficulty: string;
-  temperament: string;
-  reefSafe: string;
-  tankSize: string;
   priceRange: string;
+  latestArrival: string;
 };
 
 type CategorySummary = {
@@ -60,7 +64,7 @@ type CategorySummary = {
 
 type Specimen = {
   id: string;
-  product: Product;
+  product: PublicProduct;
   species?: Species;
   stock?: PublicStockItem;
   bioRecord?: PublicBioRecord;
@@ -68,15 +72,17 @@ type Specimen = {
   fallbackImage: string;
   price: number;
   size: string;
-  sex: string;
-  quarantineDays: number;
-  feedingStatus: string;
-  temperament: string;
-  reefSafe: string;
-  tankSize: string;
+  daysInStore: number;
+  statusLabel: string;
+  locationLabel: string;
+  batchNo: string;
   arrivalDate: string;
   available: boolean;
 };
+
+type PublicBioTimelineEvent =
+  | { type: "stock_in"; date: string; batchNo: string }
+  | { type: "record"; record: PublicBioRecord };
 
 const fallbackCatalog: PublicCatalogData = {
   speciesCategories: initialState.speciesCategories,
@@ -110,7 +116,7 @@ const premiumCategories: PremiumCategory[] = [
   {
     key: "tangs",
     label: "倒吊",
-    description: "开阔水域型鱼只，重点看体态、色泽和摄食状态。",
+    description: "开阔水域型鱼只，重点看体态、色泽和日常记录。",
     image: marinePhotos.blueTang,
     match: ["刺尾", "倒吊", "吊", "tang", "zebrasoma", "paracanthurus"],
   },
@@ -131,7 +137,7 @@ const premiumCategories: PremiumCategory[] = [
   {
     key: "gobies",
     label: "虾虎鱼",
-    description: "体型小而有性格，适合精致珊瑚系统。",
+    description: "体型小、辨识度高，适合精致海水系统。",
     image: marinePhotos.goby,
     match: ["虾虎", "goby"],
   },
@@ -151,11 +157,10 @@ const premiumCategories: PremiumCategory[] = [
   },
 ];
 
-const shelfLabels = ["新到个体", "新手友好", "珊瑚缸友好", "收藏级", "已检疫个体"];
 const filterOptions = [
   { key: "all", label: "全部" },
   { key: "available", label: "可预订" },
-  { key: "quarantined", label: "已检疫" },
+  { key: "quarantined", label: "入缸14天+" },
   { key: "eating", label: "已开口" },
 ];
 
@@ -233,7 +238,7 @@ function categoryDescription(categoryName: string, counts: { species: number; sp
 }
 
 function specimenPhoto(
-  product: Product | undefined,
+  product: PublicProduct | undefined,
   species: Species | undefined,
   category: PremiumCategory,
   bioRecord?: PublicBioRecord
@@ -291,39 +296,45 @@ function categoryForSpecies(species?: Species): PremiumCategory {
   ) ?? premiumCategories[6];
 }
 
-function productPrice(product?: Product, stock?: PublicStockItem) {
+function productPrice(product?: PublicProduct, stock?: PublicStockItem) {
   return Math.max(0, Number(stock?.basePrice || product?.defaultPrice || 0));
 }
 
-function temperamentFor(category: PremiumCategoryKey) {
-  if (category === "tangs") return "活跃";
-  if (category === "angelfish" || category === "butterflyfish") return "略强势";
-  if (category === "wrasses") return "好动";
-  return "温和";
+function stockStatusLabel(status?: string) {
+  if (status === "feeding") return "已开口";
+  if (status === "sick") return "疾病";
+  return "正常";
 }
 
-function difficultyFor(category: PremiumCategoryKey) {
-  if (category === "clownfish" || category === "gobies") return "新手友好";
-  if (category === "tangs" || category === "wrasses") return "进阶";
-  return "高阶";
+function stockStatusClass(status?: string) {
+  if (status === "feeding") return "border-[#d3b56f]/40 bg-[#d3b56f]/12 text-[#f3df9d]";
+  if (status === "sick") return "border-rose-300/35 bg-rose-500/12 text-rose-100";
+  return "border-[#1ee6ef]/35 bg-[#1ee6ef]/10 text-[#8deef4]";
 }
 
-function tankSizeFor(category: PremiumCategoryKey) {
-  if (category === "tangs") return "90 加仑以上";
-  if (category === "angelfish" || category === "butterflyfish") return "120 加仑以上";
-  if (category === "wrasses") return "55 加仑以上";
-  return "30 加仑以上";
+function stockLocation(stock?: PublicStockItem) {
+  const group = String(stock?.tankGroupName ?? "").trim();
+  const subTank = String(stock?.subTankName ?? "").trim();
+  if (group && subTank) return `${group} / ${subTank}`;
+  if (group) return group;
+  return String(stock?.tankLocation ?? "").trim() || "到店确认";
 }
 
-function reefSafeFor(category: PremiumCategoryKey) {
-  if (category === "angelfish" || category === "butterflyfish") return "谨慎混养";
-  return "适合";
+function normalizeBioRecordTime(value?: string) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00`;
+  return trimmed.slice(0, 16);
 }
 
-function feedingStatus(status?: string) {
-  if (status === "feeding") return "已吃颗粒";
-  if (status === "healthy") return "已吃冻饵";
-  return "每日观察";
+function formatBioRecordTime(value?: string) {
+  const normalized = normalizeBioRecordTime(value);
+  if (!normalized) return "待确认";
+  return normalized.includes("T") ? normalized.replace("T", " ") : normalized;
+}
+
+function isDailyLogRecord(record?: PublicBioRecord) {
+  return String(record?.sourceType ?? "") === "dailyLog";
 }
 
 function availabilityForProduct(stock: PublicStockItem[], productId: string) {
@@ -337,11 +348,11 @@ function priceRangeFromValues(values: number[]) {
   return `${formatMoney(prices[0])} - ${formatMoney(prices[prices.length - 1])}`;
 }
 
-function priceRange(products: Product[]) {
+function priceRange(products: PublicProduct[]) {
   return priceRangeFromValues(products.map((product) => productPrice(product)));
 }
 
-function specimenId(stock: PublicStockItem | undefined, product: Product, index: number) {
+function specimenId(stock: PublicStockItem | undefined, product: PublicProduct, index: number) {
   const code = String(stock?.code ?? "").trim();
   if (code) return code;
   const source = String(stock?.id ?? product.id ?? `fish-${index + 1}`).replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -356,8 +367,6 @@ function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
 
 export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
@@ -374,15 +383,10 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       .then((nextCatalog) => {
         if (cancelled) return;
         setCatalog(nextCatalog);
-        setLoadError(false);
       })
       .catch(() => {
         if (cancelled) return;
         setCatalog(fallbackCatalog);
-        setLoadError(true);
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -390,7 +394,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   }, []);
 
   const productBySpecies = useMemo(() => {
-    const map = new Map<string, Product[]>();
+    const map = new Map<string, PublicProduct[]>();
     catalog.products.forEach((product) => {
       const current = map.get(product.speciesId) ?? [];
       current.push(product);
@@ -399,18 +403,40 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     return map;
   }, [catalog.products]);
 
-  const bioRecordByStockId = useMemo(() => {
-    const map = new Map<string, PublicBioRecord>();
+  const bioRecordsByStockId = useMemo(() => {
+    const map = new Map<string, PublicBioRecord[]>();
     catalog.bioRecords.forEach((record) => {
       const stockItemId = String(record.stockItemId ?? "").trim();
       if (!stockItemId) return;
-      const current = map.get(stockItemId);
-      if (!current || String(record.date ?? "").localeCompare(String(current.date ?? "")) > 0) {
-        map.set(stockItemId, record);
-      }
+      const current = map.get(stockItemId) ?? [];
+      current.push(record);
+      map.set(stockItemId, current);
+    });
+    map.forEach((records) => {
+      records.sort((a, b) =>
+        String(b.date ?? "").localeCompare(String(a.date ?? "")) ||
+        String(a.id ?? "").localeCompare(String(b.id ?? ""))
+      );
     });
     return map;
   }, [catalog.bioRecords]);
+
+  const bioRecordByStockId = useMemo(() => {
+    const map = new Map<string, PublicBioRecord>();
+    bioRecordsByStockId.forEach((records, stockItemId) => {
+      if (records[0]) map.set(stockItemId, records[0]);
+    });
+    return map;
+  }, [bioRecordsByStockId]);
+
+  const bioMediaRecordByStockId = useMemo(() => {
+    const map = new Map<string, PublicBioRecord>();
+    bioRecordsByStockId.forEach((records, stockItemId) => {
+      const mediaRecord = records.find((record) => firstBioPhoto(record));
+      if (mediaRecord) map.set(stockItemId, mediaRecord);
+    });
+    return map;
+  }, [bioRecordsByStockId]);
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<string, { species: number; specimens: number; sample?: Species }>();
@@ -443,49 +469,48 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
           )
         : [undefined];
       stockItems.forEach((stock, stockIndex) => {
-        const quarantineDays = daysSince(stock?.inDate);
+        const daysInStore = daysSince(stock?.inDate);
         const bioRecord = stock?.id ? bioRecordByStockId.get(stock.id) : undefined;
+        const bioMediaRecord = stock?.id ? bioMediaRecordByStockId.get(stock.id) : undefined;
         all.push({
           id: specimenId(stock, product, productIndex + stockIndex),
           product,
           species,
           stock,
           bioRecord,
-          image: displayImageUrl(specimenPhoto(product, species, category, bioRecord), 1200),
+          image: displayImageUrl(specimenPhoto(product, species, category, bioMediaRecord ?? bioRecord), 1200),
           fallbackImage,
           price: productPrice(product, stock),
           size: product.size || "待确认",
-          sex: "未判定",
-          quarantineDays,
-          feedingStatus: feedingStatus(stock?.status),
-          temperament: temperamentFor(category.key),
-          reefSafe: reefSafeFor(category.key),
-          tankSize: tankSizeFor(category.key),
+          daysInStore,
+          statusLabel: stockStatusLabel(stock?.status),
+          locationLabel: stockLocation(stock),
+          batchNo: String(stock?.batchNo ?? "").trim() || "—",
           arrivalDate: formatDate(stock?.inDate),
           available: Boolean(stock),
         });
       });
     });
     return all;
-  }, [bioRecordByStockId, catalog.products, catalog.species, catalog.stock]);
+  }, [bioMediaRecordByStockId, bioRecordByStockId, catalog.products, catalog.species, catalog.stock]);
 
   const speciesCards = useMemo<SpeciesCard[]>(() => {
     return catalog.species
       .map((species) => {
-        const category = categoryForSpecies(species);
         const products = productBySpecies.get(species.id) ?? [];
         const speciesSpecimens = specimens.filter((specimen) => specimen.species?.id === species.id && specimen.available);
+        const latestArrival = speciesSpecimens
+          .map((specimen) => specimen.stock?.inDate ?? "")
+          .filter(Boolean)
+          .sort((a, b) => String(b).localeCompare(String(a)))[0];
         return {
           species,
           products,
           availableSpecimens: speciesSpecimens,
-          difficulty: difficultyFor(category.key),
-          temperament: temperamentFor(category.key),
-          reefSafe: reefSafeFor(category.key),
-          tankSize: tankSizeFor(category.key),
           priceRange: priceRangeFromValues(
             speciesSpecimens.length > 0 ? speciesSpecimens.map((specimen) => specimen.price) : products.map((product) => productPrice(product))
           ),
+          latestArrival: formatDate(latestArrival),
         };
       })
       .filter((card) => card.products.length > 0);
@@ -542,8 +567,8 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const specimenOptions = specimens.filter((specimen) => specimen.species?.id === selectedSpecies?.species.id);
   const filteredSpecimens = specimenOptions.filter((specimen) => {
     if (filter === "all") return true;
-    if (filter === "quarantined") return specimen.quarantineDays >= 14;
-    if (filter === "eating") return specimen.feedingStatus.includes("吃");
+    if (filter === "quarantined") return specimen.daysInStore >= 14;
+    if (filter === "eating") return specimen.stock?.status === "feeding";
     if (filter === "available") return specimen.available;
     return true;
   });
@@ -559,41 +584,27 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     filteredSpecimens[0] ??
     specimens[0];
 
+  const selectedBioRecords = selectedSpecimen?.stock?.id
+    ? bioRecordsByStockId.get(selectedSpecimen.stock.id) ?? []
+    : [];
+  const selectedTimeline = useMemo<PublicBioTimelineEvent[]>(() => {
+    if (!selectedSpecimen?.stock) return [];
+    return [
+      { type: "stock_in", date: selectedSpecimen.stock.inDate, batchNo: selectedSpecimen.batchNo },
+      ...selectedBioRecords
+        .slice()
+        .sort((a, b) =>
+          String(a.date ?? "").localeCompare(String(b.date ?? "")) ||
+          String(a.id ?? "").localeCompare(String(b.id ?? ""))
+        )
+        .map((record) => ({ type: "record" as const, record })),
+    ];
+  }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = selectedSpecimen?.bioRecord ?? firstBioRecord(catalog.bioRecords, selectedSpecimen?.stock?.id);
   const heroSpecimen = selectedSpecimen ?? specimens[0];
-  const featuredSpecimens = useMemo(() => {
-    const seenProducts = new Set<string>();
-    const addUniqueProduct = (items: Specimen[], output: Specimen[]) => {
-      items.forEach((specimen) => {
-        if (output.length >= shelfLabels.length) return;
-        const productId = String(specimen.product.id ?? "");
-        if (!productId || seenProducts.has(productId)) return;
-        seenProducts.add(productId);
-        output.push(specimen);
-      });
-    };
-    const byArrival = [...specimens]
-      .filter((specimen) => specimen.available)
-      .sort((a, b) =>
-        String(b.stock?.inDate ?? "").localeCompare(String(a.stock?.inDate ?? "")) ||
-        String(a.id).localeCompare(String(b.id))
-      );
-    const output: Specimen[] = [];
-    addUniqueProduct(byArrival.filter((specimen) => Boolean(firstBioPhoto(specimen.bioRecord))), output);
-    addUniqueProduct(byArrival, output);
-    return output.length > 0 ? output : specimens.slice(0, shelfLabels.length);
-  }, [specimens]);
-  const featureShelves = shelfLabels.map((label, index) => ({
-    label,
-    specimen: featuredSpecimens[index % Math.max(1, featuredSpecimens.length)],
-  }));
 
   const scrollToCatalog = () => {
     document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  const scrollToArrivals = () => {
-    document.getElementById("new-arrivals")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   return (
@@ -609,11 +620,6 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
               <div className="text-xs text-[#8faabc]">单体鱼选购</div>
             </div>
           </div>
-          <nav className="hidden items-center gap-7 text-sm text-[#a9bfce] lg:flex" aria-label="主导航">
-            <button type="button" onClick={scrollToArrivals} className="transition hover:text-white">新到个体</button>
-            <button type="button" onClick={scrollToCatalog} className="transition hover:text-white">在售个体</button>
-            <span className="text-[#d3b56f]">已检疫</span>
-          </nav>
         </div>
       </header>
 
@@ -645,13 +651,6 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
               >
                 开始选鱼
                 <ArrowRight className="size-4" />
-              </button>
-              <button
-                type="button"
-                onClick={scrollToArrivals}
-                className="inline-flex h-12 items-center justify-center rounded-full border border-[#d3b56f]/55 bg-[#071b2d]/60 px-6 text-sm font-semibold text-[#f3df9d] transition hover:border-[#f3df9d] hover:text-white active:translate-y-px"
-              >
-                查看新到
               </button>
             </div>
           </div>
@@ -699,43 +698,6 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 </button>
               );
             })}
-          </div>
-        </div>
-      </section>
-
-      <section id="new-arrivals" className="bg-[#03101f] py-12 sm:py-16">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-3xl font-semibold leading-tight text-white sm:text-4xl">精选陈列</h2>
-              <p className="mt-4 max-w-[36rem] text-sm leading-7 text-[#91a8b8]">
-                按到货、难度、珊瑚缸适配和收藏价值快速查看。
-              </p>
-            </div>
-            <div className="rounded-full border border-cyan-300/20 bg-cyan-300/8 px-4 py-2 text-xs font-semibold text-[#8deef4]">
-              {isLoading ? "正在同步库存" : loadError ? "当前显示预览数据" : "已同步管理系统库存"}
-            </div>
-          </div>
-          <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-            {featureShelves.map(({ label, specimen }) => (
-              <article key={label} className="overflow-hidden rounded-[1.25rem] border border-white/10 bg-[#081b2c]">
-                <div className="aspect-[4/3] overflow-hidden bg-[#0f2a40]">
-                  <ImageWithFallback
-                    src={specimen?.image}
-                    fallbackSrc={specimen?.fallbackImage ?? marinePhotos.localFish}
-                    alt={specimen?.product.name ?? label}
-                    disableMediaProxy
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-                <div className="p-4">
-                  <h3 className="text-sm font-semibold text-white">{label}</h3>
-                  <p className="mt-2 text-xs leading-5 text-[#91a8b8]">
-                    {specimen?.product.name ?? "个体列表待同步"}
-                  </p>
-                </div>
-              </article>
-            ))}
           </div>
         </div>
       </section>
@@ -822,9 +784,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                               {active && <Check className="size-4 text-[#1ee6ef]" />}
                             </div>
                             <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-[#a9bfce]">
-                              <SpecLine label="饲养难度" value={card.difficulty} />
-                              <SpecLine label="性格" value={card.temperament} />
-                              <SpecLine label="珊瑚缸" value={card.reefSafe} />
+                              <SpecLine label="规格" value={`${card.products.length} 个`} />
+                              <SpecLine label="在售" value={`${card.availableSpecimens.length} 条`} />
+                              <SpecLine label="最近到货" value={card.latestArrival} />
                               <SpecLine label="价格" value={card.priceRange} />
                             </div>
                             <div className="mt-4 text-xs font-semibold text-[#f3df9d]">{card.availableSpecimens.length} 条个体在售</div>
@@ -894,9 +856,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                               </div>
                               <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-[#a9bfce]">
                                 <SpecLine label="尺寸" value={specimen.size} />
-                                <SpecLine label="检疫" value={`${specimen.quarantineDays} 天`} />
-                                <SpecLine label="摄食" value={specimen.feedingStatus} />
-                                <SpecLine label="状态" value={specimen.available ? "可预订" : "到店确认"} />
+                                <SpecLine label="状态" value={specimen.statusLabel} />
+                                <SpecLine label="缸位" value={specimen.locationLabel} />
+                                <SpecLine label="入缸" value={`${specimen.daysInStore} 天`} />
                               </div>
                             </div>
                           </button>
@@ -937,9 +899,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                   />
                 </div>
                 <div className="rounded-[1.1rem] border border-white/10 bg-[#0b2033] p-5">
-                  <div className="text-xs font-semibold text-[#1ee6ef]">可提供视频确认</div>
+                  <div className="text-xs font-semibold text-[#1ee6ef]">个体影像</div>
                   <p className="mt-3 text-sm leading-6 text-[#91a8b8]">
-                    预订前可确认摄食视频，并沟通混养建议。
+                    优先展示这条鱼在日常维护记录里上传的照片。
                   </p>
                 </div>
               </div>
@@ -947,38 +909,48 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
           </div>
 
           <aside className="rounded-[1.5rem] border border-white/10 bg-[#081b2c] p-6">
-            <div className="text-xs font-semibold text-[#1ee6ef]">个体详情</div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs font-semibold text-[#1ee6ef]">个体详情</div>
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${stockStatusClass(selectedSpecimen?.stock?.status)}`}>
+                {selectedSpecimen?.statusLabel ?? "待确认"}
+              </span>
+            </div>
             <h2 className="mt-3 text-3xl font-semibold leading-tight text-white">{selectedSpecimen?.product.name ?? "选中个体"}</h2>
-            <div className="mt-2 text-sm text-[#91a8b8]">{selectedSpecimen?.id}</div>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-[#91a8b8]">
+              <span className="inline-flex items-center gap-1.5">
+                <Hash className="size-3.5 text-[#1ee6ef]" />
+                {selectedSpecimen?.id ?? "—"}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <MapPin className="size-3.5 text-[#d3b56f]" />
+                {selectedSpecimen?.locationLabel ?? "到店确认"}
+              </span>
+            </div>
             <div className="mt-6 text-4xl font-semibold text-[#f3df9d]">{formatMoney(selectedSpecimen?.price)}</div>
             <div className="mt-6 grid grid-cols-2 gap-3 text-sm">
-              <DetailTile label="准确尺寸" value={selectedSpecimen?.size ?? "待确认"} />
-              <DetailTile label="性别" value={selectedSpecimen?.sex ?? "未判定"} />
-              <DetailTile label="检疫天数" value={`${selectedSpecimen?.quarantineDays ?? 0} 天`} />
-              <DetailTile label="摄食状态" value={selectedSpecimen?.feedingStatus ?? "观察中"} />
-              <DetailTile label="性格" value={selectedSpecimen?.temperament ?? "温和"} />
-              <DetailTile label="珊瑚缸" value={selectedSpecimen?.reefSafe ?? "谨慎混养"} />
-              <DetailTile label="建议缸体" value={selectedSpecimen?.tankSize ?? "到店确认"} />
-              <DetailTile label="到货日期" value={selectedSpecimen?.arrivalDate ?? "待确认"} />
+              <DetailTile label="尺寸" value={selectedSpecimen?.size ?? "待确认"} />
+              <DetailTile label="状态" value={selectedSpecimen?.statusLabel ?? "待确认"} />
+              <DetailTile label="批次" value={selectedSpecimen?.batchNo ?? "—"} />
+              <DetailTile label="入库日期" value={selectedSpecimen?.arrivalDate ?? "待确认"} />
+              <DetailTile label="入缸天数" value={`${selectedSpecimen?.daysInStore ?? 0} 天`} />
+              <DetailTile label="缸位" value={selectedSpecimen?.locationLabel ?? "到店确认"} />
+              <DetailTile label="默认价" value={formatMoney(selectedSpecimen?.price)} />
+              <DetailTile label="产地" value={selectedSpecimen?.product.origin || "待确认"} />
             </div>
             <div className="mt-6 rounded-[1.1rem] border border-[#d3b56f]/20 bg-[#d3b56f]/8 p-4 text-sm leading-6 text-[#d6c996]">
-              {selectedBio?.text || "预订前会再次核对摄食、体表、混养对象和发货时间。"}
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#f3df9d]">
+                <Clock className="size-4" />
+                最近维护记录
+              </div>
+              <p className="text-[#e2d8ab]">{selectedBio?.text || "暂无公开维护记录。"}</p>
+              {selectedBio?.date && (
+                <div className="mt-2 text-xs text-[#a99554]">
+                  {formatBioRecordTime(selectedBio.date)}
+                  {selectedBio.operator ? ` · ${selectedBio.operator}` : ""}
+                </div>
+              )}
             </div>
-            <div className="mt-6 grid gap-3">
-              <button
-                type="button"
-                className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-5 text-sm font-semibold text-[#03101f] transition hover:bg-[#75f5f8] active:translate-y-px"
-              >
-                预订这条鱼
-                <ChevronRight className="size-4" />
-              </button>
-              <button
-                type="button"
-                className="inline-flex h-12 items-center justify-center rounded-full border border-[#d3b56f]/55 px-5 text-sm font-semibold text-[#f3df9d] transition hover:border-[#f3df9d] hover:text-white active:translate-y-px"
-              >
-                咨询混养建议
-              </button>
-            </div>
+            <PublicBioTimeline events={selectedTimeline} />
           </aside>
         </div>
       </section>
@@ -1001,18 +973,105 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
 
 function SpecLine({ label, value }: { label: string; value: string }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-[#607c90]">{label}</div>
-      <div className="mt-1 font-semibold text-[#dbe8ee]">{value}</div>
+      <div className="mt-1 break-words font-semibold text-[#dbe8ee]">{value}</div>
     </div>
   );
 }
 
 function DetailTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-[#0b2033] p-3">
+    <div className="min-w-0 rounded-xl border border-white/10 bg-[#0b2033] p-3">
       <div className="text-xs text-[#7893a6]">{label}</div>
-      <div className="mt-1 font-semibold text-white">{value}</div>
+      <div className="mt-1 break-words font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
+  return (
+    <div className="mt-6">
+      <div className="mb-4 flex items-center gap-2 text-xs font-semibold text-[#91a8b8]">
+        <Clock className="size-4 text-[#1ee6ef]" />
+        生物时间轴
+      </div>
+      {events.length === 0 ? (
+        <div className="rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-4 text-sm text-[#91a8b8]">
+          暂无公开记录。
+        </div>
+      ) : (
+        <div className="relative pl-5">
+          <div className="absolute left-[0.35rem] top-2 bottom-2 w-px bg-white/12" />
+          <div className="grid gap-4">
+            {events.map((event, index) => {
+              const isStockIn = event.type === "stock_in";
+              const record = event.type === "record" ? event.record : undefined;
+              const isDailyLog = isDailyLogRecord(record);
+              const label = isStockIn ? "入库" : isDailyLog ? "缸组养护" : "观察/治疗记录";
+              const icon = isStockIn ? (
+                <PackageCheck className="size-3.5" />
+              ) : isDailyLog ? (
+                <ClipboardList className="size-3.5" />
+              ) : (
+                <Camera className="size-3.5" />
+              );
+              const tone = isStockIn
+                ? "border-sky-300/24 bg-sky-300/8 text-sky-100"
+                : isDailyLog
+                  ? "border-[#1ee6ef]/24 bg-[#1ee6ef]/8 text-[#d6fbff]"
+                  : "border-emerald-300/24 bg-emerald-300/8 text-emerald-100";
+              const dot = isStockIn ? "bg-sky-300" : isDailyLog ? "bg-[#1ee6ef]" : "bg-emerald-300";
+              return (
+                <div key={isStockIn ? `stock-${index}` : record?.id ?? index} className="relative">
+                  <div className={`absolute -left-[1.08rem] top-3 size-3 rounded-full border-2 border-[#081b2c] ${dot}`} />
+                  <div className={`rounded-[1.1rem] border p-4 text-sm leading-6 ${tone}`}>
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-xs font-semibold">
+                        {icon}
+                        {label}
+                      </div>
+                      <div className="text-xs text-[#91a8b8]">
+                        {formatBioRecordTime(isStockIn ? event.date : record?.date)}
+                      </div>
+                    </div>
+                    {isStockIn ? (
+                      <p className="text-[#c6d7e0]">批次：{event.batchNo || "—"}</p>
+                    ) : (
+                      <>
+                        {record?.text && <p className="text-white">{record.text}</p>}
+                        {isDailyLog && (
+                          <p className="mt-1 text-xs text-[#8deef4]">
+                            来自养护日志
+                            {record?.tankGroupName ? ` · ${record.tankGroupName}` : ""}
+                            {record?.subTankName ? ` / ${record.subTankName}` : ""}
+                            {record?.operator ? ` · ${record.operator}` : ""}
+                          </p>
+                        )}
+                        {Array.isArray(record?.photos) && record.photos.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {record.photos.slice(0, 4).map((src, photoIndex) => (
+                              <div key={`${record.id}-photo-${photoIndex}`} className="size-16 overflow-hidden rounded-lg border border-white/10 bg-[#102b42]">
+                                <ImageWithFallback
+                                  src={src}
+                                  fallbackSrc={marinePhotos.localFish}
+                                  alt={`${label}照片${photoIndex + 1}`}
+                                  disableMediaProxy
+                                  className="h-full w-full object-cover"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1035,14 +1094,14 @@ function SpecimenPreview({ specimen }: { specimen?: Specimen }) {
         <div className="text-xs font-semibold text-[#1ee6ef]">{specimen.id}</div>
         <h3 className="mt-2 text-2xl font-semibold leading-tight text-white">{specimen.product.name}</h3>
         <p className="mt-3 text-sm leading-6 text-[#91a8b8]">
-          右侧预览同步展示检疫、摄食和预订信息。
+          同步展示日常维护里的状态、编号、价格和缸位。
         </p>
       </div>
       <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
         <DetailTile label="尺寸" value={specimen.size} />
-        <DetailTile label="检疫" value={`${specimen.quarantineDays} 天`} />
-        <DetailTile label="摄食" value={specimen.feedingStatus} />
-        <DetailTile label="状态" value={specimen.available ? "可预订" : "到店确认"} />
+        <DetailTile label="状态" value={specimen.statusLabel} />
+        <DetailTile label="入缸" value={`${specimen.daysInStore} 天`} />
+        <DetailTile label="缸位" value={specimen.locationLabel} />
       </div>
       <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
         <span className="text-sm text-[#d6c996]">预订价</span>

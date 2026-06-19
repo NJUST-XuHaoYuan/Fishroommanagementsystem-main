@@ -546,6 +546,8 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const batches = Array.isArray(scopedState.batches) ? scopedState.batches : [];
+  const batchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
@@ -556,24 +558,29 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const latestBioByStockId = new Map();
-  const latestMediaByStockId = new Map();
+  const publicBioRecords = [];
   bioRecords
     .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
+    .sort((a, b) =>
+      String(b?.date ?? "").localeCompare(String(a?.date ?? "")) ||
+      String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
+    )
     .forEach((record) => {
       const stockItemId = String(record?.stockItemId ?? "");
-      const current = latestBioByStockId.get(stockItemId);
-      if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
-        latestBioByStockId.set(stockItemId, record);
-      }
       const photos = publicMediaUrls(record?.photos, 6);
       const videos = publicMediaUrls(record?.videos, 3);
-      if (photos.length > 0 || videos.length > 0) {
-        const currentMedia = latestMediaByStockId.get(stockItemId);
-        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
-          latestMediaByStockId.set(stockItemId, { date: record?.date, photos, videos });
-        }
-      }
+      publicBioRecords.push({
+        id: String(record?.id ?? ""),
+        stockItemId,
+        date: String(record?.date ?? ""),
+        text: clampText(String(record?.text ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220),
+        sourceType: String(record?.sourceType ?? ""),
+        tankGroupName: String(record?.tankGroupName ?? ""),
+        subTankName: String(record?.subTankName ?? ""),
+        operator: String(record?.operator ?? ""),
+        photos: photos.map(publicCatalogMediaUrl),
+        videos: videos.map(publicCatalogMediaUrl),
+      });
     });
   const categorySet = new Set(
     species
@@ -610,26 +617,24 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         origin: String(item?.origin ?? ""),
         imageUrl: publicCatalogMediaUrl(item?.imageUrl),
         defaultPrice: Number(item?.defaultPrice ?? 0),
-        notes: clampText(item?.notes ?? "", 260),
       })),
-    stock: sellableStock.map((item) => ({
-      id: String(item?.id ?? ""),
-      productId: String(item?.productId ?? ""),
-      code: String(item?.code ?? ""),
-      status: item?.status === "feeding" ? "feeding" : "healthy",
-      inDate: String(item?.inDate ?? ""),
-      basePrice: Number(item?.basePrice ?? 0),
-      notes: clampText(item?.notes ?? "", 120),
-    })),
-    bioRecords: [...latestBioByStockId.values()]
-      .map((record) => ({
-        id: String(record?.id ?? ""),
-        stockItemId: String(record?.stockItemId ?? ""),
-        date: String(record?.date ?? ""),
-        text: clampText(record?.text ?? "", 180),
-        photos: latestMediaByStockId.get(String(record?.stockItemId ?? ""))?.photos.map(publicCatalogMediaUrl) ?? publicCatalogMediaUrls(record?.photos, 6),
-        videos: latestMediaByStockId.get(String(record?.stockItemId ?? ""))?.videos.map(publicCatalogMediaUrl) ?? publicCatalogMediaUrls(record?.videos, 3),
-      })),
+    stock: sellableStock.map((item) => {
+      const tank = findSubTank(scopedState, item?.subTankId);
+      const batch = batchById.get(String(item?.batchId ?? ""));
+      return {
+        id: String(item?.id ?? ""),
+        productId: String(item?.productId ?? ""),
+        code: String(item?.code ?? ""),
+        status: item?.status === "feeding" ? "feeding" : "healthy",
+        inDate: String(item?.inDate ?? ""),
+        basePrice: Number(item?.basePrice ?? 0),
+        batchNo: String(batch?.batchNo ?? ""),
+        tankGroupName: String(tank?.group?.name ?? ""),
+        subTankName: String(tank?.subTank?.name ?? ""),
+        tankLocation: String(tank?.group?.location ?? ""),
+      };
+    }),
+    bioRecords: publicBioRecords,
   };
 }
 
