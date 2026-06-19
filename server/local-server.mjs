@@ -508,6 +508,25 @@ function isPhysicallyInTank(item, shippedIds) {
   return item && !item.lost && !shippedIds.has(String(item.id));
 }
 
+function isPublicMediaUrl(value) {
+  const src = String(value ?? "").trim();
+  if (!src) return false;
+  if (src.startsWith("/uploads/")) return true;
+  try {
+    const url = new URL(src);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function publicMediaUrls(value, limit = 6) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => String(item ?? "").trim())
+    .filter(isPublicMediaUrl)
+    .slice(0, limit);
+}
+
 function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
@@ -526,6 +545,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
   const latestBioByStockId = new Map();
+  const latestMediaByStockId = new Map();
   bioRecords
     .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
     .forEach((record) => {
@@ -533,6 +553,14 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
       const current = latestBioByStockId.get(stockItemId);
       if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
         latestBioByStockId.set(stockItemId, record);
+      }
+      const photos = publicMediaUrls(record?.photos, 6);
+      const videos = publicMediaUrls(record?.videos, 3);
+      if (photos.length > 0 || videos.length > 0) {
+        const currentMedia = latestMediaByStockId.get(stockItemId);
+        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
+          latestMediaByStockId.set(stockItemId, { date: record?.date, photos, videos });
+        }
       }
     });
   const categorySet = new Set(
@@ -587,6 +615,8 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         stockItemId: String(record?.stockItemId ?? ""),
         date: String(record?.date ?? ""),
         text: clampText(record?.text ?? "", 180),
+        photos: latestMediaByStockId.get(String(record?.stockItemId ?? ""))?.photos ?? publicMediaUrls(record?.photos, 6),
+        videos: latestMediaByStockId.get(String(record?.stockItemId ?? ""))?.videos ?? publicMediaUrls(record?.videos, 3),
       })),
   };
 }

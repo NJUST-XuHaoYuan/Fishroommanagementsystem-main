@@ -8,11 +8,14 @@ type PublicCatalogData = {
   species: Species[];
   products: Product[];
   stock: PublicStockItem[];
-  bioRecords: BioRecord[];
+  bioRecords: PublicBioRecord[];
 };
 
 type PublicStockItem = Pick<StockItem, "id" | "productId" | "status" | "inDate"> &
   Partial<Pick<StockItem, "sold" | "lost" | "notes" | "basePrice" | "code">>;
+
+type PublicBioRecord = Pick<BioRecord, "id" | "stockItemId" | "date" | "text"> &
+  Partial<Pick<BioRecord, "photos" | "videos">>;
 
 type PublicCatalogPageProps = {
   onStaffLogin?: () => void;
@@ -60,6 +63,7 @@ type Specimen = {
   product: Product;
   species?: Species;
   stock?: PublicStockItem;
+  bioRecord?: PublicBioRecord;
   image: string;
   fallbackImage: string;
   price: number;
@@ -160,7 +164,13 @@ const normalizeCatalog = (value: Partial<PublicCatalogData> | null | undefined):
   species: Array.isArray(value?.species) ? value.species : fallbackCatalog.species,
   products: Array.isArray(value?.products) ? value.products : fallbackCatalog.products,
   stock: Array.isArray(value?.stock) ? value.stock : fallbackCatalog.stock,
-  bioRecords: Array.isArray(value?.bioRecords) ? value.bioRecords : fallbackCatalog.bioRecords,
+  bioRecords: Array.isArray(value?.bioRecords)
+    ? value.bioRecords.map((record) => ({
+        ...record,
+        photos: Array.isArray(record?.photos) ? record.photos.map(String).filter(Boolean) : [],
+        videos: Array.isArray(record?.videos) ? record.videos.map(String).filter(Boolean) : [],
+      }))
+    : fallbackCatalog.bioRecords,
 });
 
 function displayImageUrl(src?: string, width = 1400) {
@@ -208,6 +218,12 @@ function categoryFallbackImage(categoryName: string, species?: Species) {
   return marinePhotos.localFish;
 }
 
+function firstBioPhoto(record?: PublicBioRecord) {
+  return (Array.isArray(record?.photos) ? record.photos : [])
+    .map((src) => String(src ?? "").trim())
+    .find(Boolean);
+}
+
 function categoryDescription(categoryName: string, counts: { species: number; specimens: number }) {
   if (categoryName.includes("珊瑚")) return "后台珊瑚分类中的公开可售项目。";
   if (categoryName.includes("耗材")) return "后台耗材分类中的公开可售项目。";
@@ -216,7 +232,15 @@ function categoryDescription(categoryName: string, counts: { species: number; sp
   return `${counts.species} 个物种，${counts.specimens} 条可售个体，数据来自管理系统。`;
 }
 
-function specimenPhoto(product: Product | undefined, species: Species | undefined, category: PremiumCategory) {
+function specimenPhoto(
+  product: Product | undefined,
+  species: Species | undefined,
+  category: PremiumCategory,
+  bioRecord?: PublicBioRecord
+) {
+  const individualImage = firstBioPhoto(bioRecord);
+  if (individualImage) return individualImage;
+
   const managedImage = [product?.imageUrl, species?.imageUrl].find((src) => src && !isDemoImage(src));
   if (managedImage) return managedImage;
 
@@ -324,7 +348,7 @@ function specimenId(stock: PublicStockItem | undefined, product: Product, index:
   return `MF-${source.padStart(4, "0").slice(0, 6)}`;
 }
 
-function firstBioRecord(records: BioRecord[], stockId?: string) {
+function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
   return records
     .filter((record) => record.stockItemId === stockId)
     .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
@@ -375,6 +399,19 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     return map;
   }, [catalog.products]);
 
+  const bioRecordByStockId = useMemo(() => {
+    const map = new Map<string, PublicBioRecord>();
+    catalog.bioRecords.forEach((record) => {
+      const stockItemId = String(record.stockItemId ?? "").trim();
+      if (!stockItemId) return;
+      const current = map.get(stockItemId);
+      if (!current || String(record.date ?? "").localeCompare(String(current.date ?? "")) > 0) {
+        map.set(stockItemId, record);
+      }
+    });
+    return map;
+  }, [catalog.bioRecords]);
+
   const categoryCounts = useMemo(() => {
     const counts = new Map<string, { species: number; specimens: number; sample?: Species }>();
     catalog.species.forEach((species) => {
@@ -399,15 +436,22 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       const category = categoryForSpecies(species);
       const fallbackImage = displayImageUrl(categoryFallbackImage(speciesCategoryName(species), species), 1200);
       const availableStock = availabilityForProduct(catalog.stock, product.id);
-      const stockItems = availableStock.length > 0 ? availableStock : [undefined];
+      const stockItems = availableStock.length > 0
+        ? [...availableStock].sort((a, b) =>
+            String(b.inDate ?? "").localeCompare(String(a.inDate ?? "")) ||
+            String(a.id ?? "").localeCompare(String(b.id ?? ""))
+          )
+        : [undefined];
       stockItems.forEach((stock, stockIndex) => {
         const quarantineDays = daysSince(stock?.inDate);
+        const bioRecord = stock?.id ? bioRecordByStockId.get(stock.id) : undefined;
         all.push({
           id: specimenId(stock, product, productIndex + stockIndex),
           product,
           species,
           stock,
-          image: displayImageUrl(specimenPhoto(product, species, category), 1200),
+          bioRecord,
+          image: displayImageUrl(specimenPhoto(product, species, category, bioRecord), 1200),
           fallbackImage,
           price: productPrice(product, stock),
           size: product.size || "待确认",
@@ -423,7 +467,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       });
     });
     return all;
-  }, [catalog.products, catalog.species, catalog.stock]);
+  }, [bioRecordByStockId, catalog.products, catalog.species, catalog.stock]);
 
   const speciesCards = useMemo<SpeciesCard[]>(() => {
     return catalog.species
@@ -459,16 +503,17 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       .filter((name) => (categoryCounts.get(name)?.specimens ?? 0) > 0)
       .map((name) => {
         const counts = categoryCounts.get(name) ?? { species: 0, specimens: 0 };
+        const representative = specimens.find((specimen) => speciesCategoryName(specimen.species) === name);
         return {
           key: name,
           label: name,
           description: categoryDescription(name, counts),
-          image: categoryFallbackImage(name, counts.sample),
+          image: representative?.image ?? categoryFallbackImage(name, counts.sample),
           species: counts.species,
           specimens: counts.specimens,
         };
       });
-  }, [catalog.speciesCategories, categoryCounts]);
+  }, [catalog.speciesCategories, categoryCounts, specimens]);
 
   const selectedCategory =
     catalogCategories.find((category) => category.key === selectedCategoryKey) ??
@@ -514,11 +559,33 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     filteredSpecimens[0] ??
     specimens[0];
 
-  const selectedBio = firstBioRecord(catalog.bioRecords, selectedSpecimen?.stock?.id);
+  const selectedBio = selectedSpecimen?.bioRecord ?? firstBioRecord(catalog.bioRecords, selectedSpecimen?.stock?.id);
   const heroSpecimen = selectedSpecimen ?? specimens[0];
+  const featuredSpecimens = useMemo(() => {
+    const seenProducts = new Set<string>();
+    const addUniqueProduct = (items: Specimen[], output: Specimen[]) => {
+      items.forEach((specimen) => {
+        if (output.length >= shelfLabels.length) return;
+        const productId = String(specimen.product.id ?? "");
+        if (!productId || seenProducts.has(productId)) return;
+        seenProducts.add(productId);
+        output.push(specimen);
+      });
+    };
+    const byArrival = [...specimens]
+      .filter((specimen) => specimen.available)
+      .sort((a, b) =>
+        String(b.stock?.inDate ?? "").localeCompare(String(a.stock?.inDate ?? "")) ||
+        String(a.id).localeCompare(String(b.id))
+      );
+    const output: Specimen[] = [];
+    addUniqueProduct(byArrival.filter((specimen) => Boolean(firstBioPhoto(specimen.bioRecord))), output);
+    addUniqueProduct(byArrival, output);
+    return output.length > 0 ? output : specimens.slice(0, shelfLabels.length);
+  }, [specimens]);
   const featureShelves = shelfLabels.map((label, index) => ({
     label,
-    specimen: specimens[index % Math.max(1, specimens.length)],
+    specimen: featuredSpecimens[index % Math.max(1, featuredSpecimens.length)],
   }));
 
   const scrollToCatalog = () => {
@@ -739,7 +806,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                         >
                           <div className="aspect-[4/3] overflow-hidden bg-[#102b42] sm:aspect-auto">
                             <ImageWithFallback
-                              src={displayImageUrl(specimenPhoto(card.products[0], card.species, categoryForSpecies(card.species)), 900)}
+                              src={card.availableSpecimens[0]?.image ?? displayImageUrl(specimenPhoto(card.products[0], card.species, categoryForSpecies(card.species)), 900)}
                               fallbackSrc={categoryFallbackImage(speciesCategoryName(card.species), card.species)}
                               alt={card.species.name}
                               disableMediaProxy
