@@ -107,6 +107,8 @@ async function serveStatic(req, res, url) {
     };
     if (url.pathname.startsWith("/assets/")) {
       headers["Cache-Control"] = "public, max-age=31536000, immutable";
+    } else if (ext === ".html") {
+      headers["Cache-Control"] = "no-cache";
     }
     if (acceptsGzip(req) && isCompressible(ext)) {
       res.writeHead(200, {
