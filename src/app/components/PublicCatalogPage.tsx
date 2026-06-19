@@ -376,6 +376,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
   const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
   const [detailLoadingStockId, setDetailLoadingStockId] = useState("");
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
@@ -392,10 +393,12 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
       .then((nextCatalog) => {
         if (cancelled) return;
         setCatalog(nextCatalog);
+        setCatalogLoaded(true);
       })
       .catch(() => {
         if (cancelled) return;
         setCatalog(fallbackCatalog);
+        setCatalogLoaded(false);
       });
     return () => {
       cancelled = true;
@@ -596,7 +599,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const selectedStockId = selectedSpecimen?.stock?.id ?? "";
 
   useEffect(() => {
-    if (!selectedStockId || detailBioRecordsByStockId.has(selectedStockId)) return;
+    if (!catalogLoaded || !selectedStockId || detailBioRecordsByStockId.has(selectedStockId)) return;
     let cancelled = false;
     setDetailLoadingStockId(selectedStockId);
     fetch(`/api/public/bio-records?stockItemId=${encodeURIComponent(selectedStockId)}`, { cache: "no-store" })
@@ -627,7 +630,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [bioRecordsByStockId, detailBioRecordsByStockId, selectedStockId]);
+  }, [bioRecordsByStockId, catalogLoaded, detailBioRecordsByStockId, selectedStockId]);
 
   const selectedBioRecords = selectedStockId
     ? detailBioRecordsByStockId.get(selectedStockId) ?? bioRecordsByStockId.get(selectedStockId) ?? []
