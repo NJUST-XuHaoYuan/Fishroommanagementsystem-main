@@ -59,6 +59,16 @@ type CategorySummary = {
   specimens: number;
 };
 
+type SpecimenImageKind = "individual" | "product" | "reference";
+
+type SpecimenImage = {
+  src: string;
+  kind: SpecimenImageKind;
+  label: string;
+  hasIndividualPhoto: boolean;
+  hasRealPhoto: boolean;
+};
+
 type Specimen = {
   id: string;
   product: PublicProduct;
@@ -66,6 +76,10 @@ type Specimen = {
   stock?: PublicStockItem;
   bioRecord?: PublicBioRecord;
   image: string;
+  imageKind: SpecimenImageKind;
+  imageLabel: string;
+  hasIndividualPhoto: boolean;
+  hasRealPhoto: boolean;
   fallbackImage: string;
   price: number;
   size: string;
@@ -212,6 +226,47 @@ function isDemoImage(src?: string) {
   }
 }
 
+function originalImageUrl(src?: string) {
+  const value = String(src ?? "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value, "https://public.local");
+    return url.searchParams.get("url") ?? value;
+  } catch {
+    return value;
+  }
+}
+
+function isReferenceCatalogImage(src?: string) {
+  const value = originalImageUrl(src);
+  if (!value) return true;
+  if (value.startsWith("/assets/catalog-line-")) return true;
+  try {
+    const url = new URL(value, "https://public.local");
+    const host = url.hostname;
+    const path = url.pathname;
+    return (
+      host.includes("cdn.aquaml.com") ||
+      host.includes("upload.wikimedia.org") ||
+      host.includes("images.unsplash.com") ||
+      path.includes("/fishroom/auto/") ||
+      path.includes("/assets/catalog-line-")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildSpecimenImage(src: string, kind: SpecimenImageKind, label: string): SpecimenImage {
+  return {
+    src: displayImageUrl(src, 1200),
+    kind,
+    label,
+    hasIndividualPhoto: kind === "individual",
+    hasRealPhoto: kind === "individual" || kind === "product",
+  };
+}
+
 function speciesCategoryName(species?: Species) {
   return String(species?.category ?? "").trim() || "未分类";
 }
@@ -246,17 +301,22 @@ function categoryDescription(categoryName: string, counts: { species: number; sp
   return `${counts.species} 个物种，${counts.specimens} 条可售个体，数据来自管理系统。`;
 }
 
-function specimenPhoto(
+function specimenImage(
   product: PublicProduct | undefined,
   species: Species | undefined,
   category: PremiumCategory,
   bioRecord?: PublicBioRecord
 ) {
   const individualImage = firstBioPhoto(bioRecord);
-  if (individualImage) return individualImage;
+  if (individualImage) return buildSpecimenImage(individualImage, "individual", "个体实拍");
+
+  const productImage = String(product?.imageUrl ?? "").trim();
+  if (productImage && !isDemoImage(productImage) && !isReferenceCatalogImage(productImage)) {
+    return buildSpecimenImage(productImage, "product", "商品图");
+  }
 
   const managedImage = [product?.imageUrl, species?.imageUrl].find((src) => src && !isDemoImage(src));
-  if (managedImage) return managedImage;
+  if (managedImage) return buildSpecimenImage(managedImage, "reference", "图库参考");
 
   const haystack = [
     product?.name,
@@ -265,15 +325,15 @@ function specimenPhoto(
     ...(Array.isArray(species?.commonNames) ? species.commonNames : []),
   ].join(" ").toLowerCase();
   if (haystack.includes("黄金") || haystack.includes("yellow") || haystack.includes("flavescens")) {
-    return marinePhotos.yellowTang;
+    return buildSpecimenImage(marinePhotos.yellowTang, "reference", "图库参考");
   }
   if (haystack.includes("蓝倒吊") || haystack.includes("blue") || haystack.includes("hepatus")) {
-    return marinePhotos.blueTang;
+    return buildSpecimenImage(marinePhotos.blueTang, "reference", "图库参考");
   }
   if (haystack.includes("小丑") || haystack.includes("clown") || haystack.includes("amphiprion")) {
-    return marinePhotos.clownfish;
+    return buildSpecimenImage(marinePhotos.clownfish, "reference", "图库参考");
   }
-  return category.image;
+  return buildSpecimenImage(category.image, "reference", "图库参考");
 }
 
 function formatMoney(value?: number) {
@@ -524,13 +584,18 @@ export function PublicCatalogPage() {
         const daysInStore = daysSince(stock?.inDate);
         const bioRecord = stock?.id ? bioRecordByStockId.get(stock.id) : undefined;
         const bioMediaRecord = stock?.id ? bioMediaRecordByStockId.get(stock.id) : undefined;
+        const photo = specimenImage(product, species, category, bioMediaRecord ?? bioRecord);
         all.push({
           id: specimenId(stock, product, productIndex + stockIndex),
           product,
           species,
           stock,
           bioRecord,
-          image: displayImageUrl(specimenPhoto(product, species, category, bioMediaRecord ?? bioRecord), 1200),
+          image: photo.src,
+          imageKind: photo.kind,
+          imageLabel: photo.label,
+          hasIndividualPhoto: photo.hasIndividualPhoto,
+          hasRealPhoto: photo.hasRealPhoto,
           fallbackImage,
           price: productPrice(product, stock),
           size: product.size || "待确认",
@@ -691,6 +756,13 @@ export function PublicCatalogPage() {
   const selectedBioRecords = selectedStockId
     ? detailBioRecordsByStockId.get(selectedStockId) ?? bioRecordsByStockId.get(selectedStockId) ?? []
     : [];
+  const selectedDetailImage = useMemo<SpecimenImage | undefined>(() => {
+    if (!selectedSpecimen) return undefined;
+    const detailMediaRecord = selectedBioRecords.find((record) => firstBioPhoto(record));
+    return detailMediaRecord
+      ? specimenImage(selectedSpecimen.product, selectedSpecimen.species, categoryForSpecies(selectedSpecimen.species), detailMediaRecord)
+      : undefined;
+  }, [selectedBioRecords, selectedSpecimen]);
   const selectedTimeline = useMemo<PublicBioTimelineEvent[]>(() => {
     if (!selectedSpecimen?.stock) return [];
     return [
@@ -843,7 +915,7 @@ export function PublicCatalogPage() {
                         >
                           <div className="aspect-square overflow-hidden rounded-lg bg-[#102b42]">
                             <ImageWithFallback
-                              src={card.availableSpecimens[0]?.image ?? displayImageUrl(specimenPhoto(card.products[0], card.species, categoryForSpecies(card.species)), 900)}
+                              src={card.availableSpecimens[0]?.image ?? specimenImage(card.products[0], card.species, categoryForSpecies(card.species)).src}
                               fallbackSrc={categoryFallbackImage(speciesCategoryName(card.species), card.species)}
                               alt={card.species.name}
                               disableMediaProxy
@@ -920,15 +992,15 @@ export function PublicCatalogPage() {
                             active ? "border-[#1ee6ef]/70 shadow-[0_24px_48px_rgba(30,230,239,0.08)]" : "border-white/10 hover:border-white/22"
                           }`}
                         >
-                          <div className="aspect-[1.28/1] overflow-hidden bg-[#102b42]">
-                            <ImageWithFallback
-                              src={specimen.image}
-                              fallbackSrc={specimen.fallbackImage}
-                              alt={`${specimen.id} ${specimen.product.name}`}
-                              disableMediaProxy
-                              className="h-full w-full object-cover transition duration-500 hover:scale-[1.035]"
-                            />
-                          </div>
+                          <SpecimenImageFrame
+                            src={specimen.image}
+                            fallbackSrc={specimen.fallbackImage}
+                            alt={`${specimen.id} ${specimen.product.name}`}
+                            label={specimen.imageLabel}
+                            hasIndividualPhoto={specimen.hasIndividualPhoto}
+                            className="aspect-[1.28/1]"
+                            imageClassName="transition duration-500 hover:scale-[1.035]"
+                          />
                           <div className="p-4">
                             <div className="flex items-start justify-between gap-3">
                               <div>
@@ -954,6 +1026,7 @@ export function PublicCatalogPage() {
 
             <SpecimenDetailPanel
               specimen={selectedSpecimen}
+              detailImage={selectedDetailImage}
               timeline={selectedTimeline}
               latestBio={selectedBio}
               loading={detailLoadingStockId === selectedStockId}
@@ -979,6 +1052,54 @@ function SpecLine({ label, value }: { label: string; value: string }) {
     <div className="min-w-0">
       <div className="text-[#607c90]">{label}</div>
       <div className="mt-1 break-words font-semibold text-[#dbe8ee]">{value}</div>
+    </div>
+  );
+}
+
+function SpecimenImageFrame({
+  src,
+  fallbackSrc,
+  alt,
+  label,
+  hasIndividualPhoto,
+  className = "",
+  imageClassName = "",
+}: {
+  src: string;
+  fallbackSrc: string;
+  alt: string;
+  label: string;
+  hasIndividualPhoto: boolean;
+  className?: string;
+  imageClassName?: string;
+}) {
+  return (
+    <div className={`relative overflow-hidden bg-[#102b42] ${className}`}>
+      <ImageWithFallback
+        src={src}
+        fallbackSrc={fallbackSrc}
+        fallbackAlt="图库参考图"
+        alt={alt}
+        disableMediaProxy
+        className={`h-full w-full object-cover ${hasIndividualPhoto ? "" : "opacity-[0.82] saturate-[0.78]"} ${imageClassName}`}
+      />
+      <div
+        className={`absolute left-3 top-3 rounded-full border px-2.5 py-1 text-[0.68rem] font-semibold shadow-[0_10px_24px_rgba(0,0,0,0.18)] ${
+          hasIndividualPhoto
+            ? "border-[#1ee6ef]/45 bg-[#062536]/88 text-[#8deef4]"
+            : "border-[#d3b56f]/40 bg-[#1b2430]/88 text-[#f3df9d]"
+        }`}
+      >
+        {label}
+      </div>
+      {!hasIndividualPhoto && (
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#03101f]/92 via-[#03101f]/62 to-transparent px-3 pb-3 pt-10">
+          <div className="inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-[#03101f]/82 px-2.5 py-1 text-[0.68rem] font-semibold text-[#dbe8ee]">
+            <Camera className="size-3" />
+            暂无个体实拍
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1081,6 +1202,7 @@ function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
 
 function SpecimenDetailPanel({
   specimen,
+  detailImage,
   timeline,
   latestBio,
   loading,
@@ -1089,6 +1211,7 @@ function SpecimenDetailPanel({
   onCopy,
 }: {
   specimen?: Specimen;
+  detailImage?: SpecimenImage;
   timeline: PublicBioTimelineEvent[];
   latestBio?: PublicBioRecord;
   loading: boolean;
@@ -1106,17 +1229,22 @@ function SpecimenDetailPanel({
     );
   }
 
+  const displayImage = detailImage ?? {
+    src: specimen.image,
+    label: specimen.imageLabel,
+    hasIndividualPhoto: specimen.hasIndividualPhoto,
+  };
+
   return (
     <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start">
-      <div className="aspect-[4/3] overflow-hidden rounded-[1.1rem] bg-[#102b42]">
-        <ImageWithFallback
-          src={specimen.image}
-          fallbackSrc={specimen.fallbackImage}
-          alt={`${specimen.id} 个体详情`}
-          disableMediaProxy
-          className="h-full w-full object-cover"
-        />
-      </div>
+      <SpecimenImageFrame
+        src={displayImage.src}
+        fallbackSrc={specimen.fallbackImage}
+        alt={`${specimen.id} 个体详情`}
+        label={displayImage.label}
+        hasIndividualPhoto={displayImage.hasIndividualPhoto}
+        className="aspect-[4/3] rounded-[1.1rem]"
+      />
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs font-semibold text-[#1ee6ef]">个体详情</div>
