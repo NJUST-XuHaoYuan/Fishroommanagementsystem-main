@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 
 function buildStockItems(item: StockItem, quantity: number): StockItem[] {
   return item.id
@@ -252,6 +253,8 @@ export function StockInView() {
   const permission = usePermission("stockIn");
   const isAdmin = state.user?.role === "admin";
   const [q, setQ] = useState("");
+  const [publicLookupCode, setPublicLookupCode] = useState("");
+  const [highlightStockId, setHighlightStockId] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StockItem | null>(null);
   const [del, setDel] = useState<StockItem | null>(null);
@@ -378,6 +381,59 @@ export function StockInView() {
       : state.tankGroups[0]?.id ?? "";
     setSelectedGroupId(gid);
     setOpen(true);
+  };
+
+  const locatePublicLookupCode = () => {
+    const candidates = parsePublicSelectionCode(publicLookupCode).map((item) => item.toLowerCase());
+    if (candidates.length === 0) {
+      toast.error("请粘贴公开页复制的选鱼码");
+      return;
+    }
+
+    const target = state.stock.find((item) => {
+      const itemCandidates = [
+        item.id,
+        item.code,
+        buildPublicSelectionCode(item.id),
+      ]
+        .map((value) => String(value ?? "").trim().toLowerCase())
+        .filter(Boolean);
+      return itemCandidates.some((candidate) => candidates.includes(candidate));
+    });
+
+    if (!target) {
+      toast.error("没有找到对应库存商品，请确认选鱼码是否完整");
+      return;
+    }
+
+    const groupId = groupIdOfSubTank(target.subTankId);
+    const productName = product(target.productId)?.name ?? target.productId;
+    setQ("");
+    setHighlightStockId(target.id);
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(`${target.subTankId}-${target.productId}`);
+      return next;
+    });
+
+    window.setTimeout(() => {
+      const element = [...document.querySelectorAll<HTMLElement>("[data-stock-item-id]")]
+        .find((node) => node.dataset.stockItemId === target.id);
+      element?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    }, 80);
+
+    window.setTimeout(() => {
+      setHighlightStockId((current) => current === target.id ? "" : current);
+    }, 8000);
+
+    if (groupId) setSelectedGroupId(groupId);
+    if (permission.canUpdate && !stockCannotDelete(target)) {
+      openDialog({ ...target }, false);
+      toast.success(`已打开：${productName}`);
+      return;
+    }
+
+    toast.success(`已定位：${productName}`);
   };
 
   const subTanksOfGroup = useMemo(
@@ -601,7 +657,27 @@ export function StockInView() {
           <h2>库存明细</h2>
           <p className="text-sm text-muted-foreground">查看和管理每个子缸内的库存商品</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center gap-2 rounded-lg border bg-white p-1.5 shadow-sm">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+              <Input
+                value={publicLookupCode}
+                onChange={(event) => setPublicLookupCode(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    locatePublicLookupCode();
+                  }
+                }}
+                placeholder="粘贴公开选鱼码"
+                className="h-8 w-48 border-0 bg-transparent pl-9 shadow-none focus-visible:ring-0"
+              />
+            </div>
+            <Button type="button" size="sm" variant="outline" onClick={locatePublicLookupCode}>
+              定位
+            </Button>
+          </div>
           {permission.canDelete && (
             <>
               <Button
@@ -782,35 +858,39 @@ export function StockInView() {
                                 {stockItems.map((s) => {
                                   const selected = selectedIds.has(s.id);
                                   const locked = stockCannotDelete(s);
+                                  const highlighted = highlightStockId === s.id;
                                   const lockReason = s.sold ? "已售商品，不能删除" : "已关联订单，不能删除";
                                   return (
-                                  <div
-                                    key={s.id}
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (selectMode) {
-                                        if (!locked) toggleSelected(s.id);
-                                        return;
-                                      }
-                                      openDialog({ ...s }, false);
-                                    }}
-                                    onKeyDown={(e) => {
-                                      if (e.key !== "Enter" && e.key !== " ") return;
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (selectMode) {
-                                        if (!locked) toggleSelected(s.id);
-                                        return;
-                                      }
-                                      openDialog({ ...s }, false);
-                                    }}
-                                    className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
-                                      selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
-                                    } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
-                                    title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
-                                  >
+                                    <div
+                                      key={s.id}
+                                      data-stock-item-id={s.id}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (selectMode) {
+                                          if (!locked) toggleSelected(s.id);
+                                          return;
+                                        }
+                                        openDialog({ ...s }, false);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key !== "Enter" && e.key !== " ") return;
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (selectMode) {
+                                          if (!locked) toggleSelected(s.id);
+                                          return;
+                                        }
+                                        openDialog({ ...s }, false);
+                                      }}
+                                      className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
+                                        highlighted
+                                          ? "ring-4 ring-cyan-500 ring-offset-2 ring-offset-white"
+                                          : selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
+                                      } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
+                                      title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
+                                    >
                                     {p?.imageUrl ? (
                                       <ImageWithFallback src={p.imageUrl} alt={p?.name ?? ""} className="size-full object-cover" />
                                     ) : (

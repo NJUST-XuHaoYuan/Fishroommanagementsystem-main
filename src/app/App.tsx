@@ -352,19 +352,6 @@ function isPublicSiteHost(): boolean {
   }
 }
 
-function adminEntryUrl(): string {
-  try {
-    const url = new URL(window.location.href);
-    url.port = "8787";
-    url.pathname = "/";
-    url.search = "";
-    url.hash = "admin";
-    return url.toString();
-  } catch {
-    return "http://129.211.211.201:8787/#admin";
-  }
-}
-
 function AdminApp() {
   const [isPublicSite] = useState(() => isPublicSiteHost());
   const [state, setStateBase] = useState<Store>(initialState);
@@ -1276,11 +1263,7 @@ function AdminApp() {
 	  return (
 			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
-        <PublicCatalogPage
-          onStaffLogin={() => {
-            window.location.href = adminEntryUrl();
-          }}
-        />
+        <PublicCatalogPage />
       ) : !state.user ? (
         <Login />
       ) : (
