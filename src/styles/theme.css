@@ -231,71 +231,126 @@
 
   .fishroom-sidebar {
     border-right: 1px solid var(--sidebar-border);
-    background: var(--sidebar);
+    background: oklch(0.976 0.003 260);
   }
 
   .fishroom-brand {
-    min-height: 4.25rem;
+    min-height: 4rem;
     border-bottom: 1px solid var(--sidebar-border);
-    background: oklch(0.99 0.002 260);
+    background: oklch(0.992 0.001 260);
   }
 
   .fishroom-brand-mark {
-    border: 1px solid oklch(0.8 0.006 260);
-    border-radius: 0.65rem;
-    background: oklch(0.97 0.003 260);
+    border: 1px solid oklch(0.82 0.006 260);
+    border-radius: 0.7rem;
+    background: oklch(1 0 0);
   }
 
   .fishroom-nav-section {
     display: grid;
-    gap: 0.2rem;
+    gap: 0.08rem;
+    padding-top: 0.35rem;
+  }
+
+  .fishroom-nav-section + .fishroom-nav-section {
+    margin-top: 0.2rem;
   }
 
   .fishroom-nav-title {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    min-height: 2.05rem;
-    border: 1px solid oklch(0.84 0.006 260);
-    border-left: 3px solid var(--fishroom-reef);
-    border-radius: 0.55rem;
-    background: oklch(0.95 0.005 260);
-    padding: 0.4rem 0.6rem 0.4rem 0.5rem;
-    color: oklch(0.24 0.012 260);
+    gap: 0.45rem;
+    min-height: 1.85rem;
+    padding: 0.25rem 0.45rem 0.2rem;
+    color: oklch(0.42 0.011 260);
     font-size: 0.75rem;
-    font-weight: 700;
+    font-weight: 680;
     line-height: 1.1;
   }
 
-  .fishroom-nav-title svg {
+  .fishroom-nav-title-icon {
+    display: grid;
+    place-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 1px solid oklch(0.86 0.006 260);
+    border-radius: 0.45rem;
+    background: oklch(0.948 0.005 260);
+  }
+
+  .fishroom-nav-title-icon svg {
     color: var(--fishroom-reef);
   }
 
   .fishroom-nav-button {
+    position: relative;
     min-height: 2.3rem;
     border: 1px solid transparent;
     border-radius: 0.55rem;
     color: oklch(0.315 0.01 260);
   }
 
+  .fishroom-nav-button svg {
+    color: oklch(0.39 0.012 260);
+  }
+
+  .fishroom-nav-button.is-main {
+    width: 100%;
+    min-height: 2.35rem;
+  }
+
   .fishroom-nav-section > .fishroom-nav-button {
-    width: calc(100% - 0.9rem);
+    width: calc(100% - 2.25rem);
     min-height: 2.15rem;
-    margin-left: 0.9rem;
+    margin-left: 1.75rem;
     color: oklch(0.395 0.01 260);
     font-size: 0.93rem;
     font-weight: 500;
   }
 
-  .fishroom-nav-button:hover {
-    border-color: oklch(0.81 0.006 260);
-    background: oklch(0.948 0.004 260);
+  .fishroom-nav-button.is-sub::before {
+    content: "";
+    position: absolute;
+    left: -0.72rem;
+    top: 50%;
+    width: 0.42rem;
+    height: 1px;
+    border-radius: 999px;
+    background: oklch(0.78 0.006 260);
+    transform: translateY(-50%);
   }
 
-  .fishroom-nav-button.is-active {
-    border-color: oklch(0.7 0.045 185);
+  .fishroom-nav-button:hover {
+    border-color: oklch(0.84 0.006 260);
+    background: oklch(0.955 0.004 260);
+  }
+
+  .fishroom-nav-button.is-main.is-active {
+    border-color: oklch(0.32 0.045 185);
+    background: oklch(0.31 0.045 185);
+    color: oklch(0.985 0.003 185);
+  }
+
+  .fishroom-nav-button.is-main.is-active svg {
+    color: oklch(0.985 0.003 185);
+  }
+
+  .fishroom-nav-button.is-sub.is-active {
+    border-color: oklch(0.82 0.018 185);
     background: var(--fishroom-reef-soft);
     color: oklch(0.245 0.048 185);
+    font-weight: 650;
+  }
+
+  .fishroom-nav-button.is-sub.is-active::before {
+    left: -0.75rem;
+    width: 0.42rem;
+    height: 0.42rem;
+    background: var(--fishroom-reef);
+  }
+
+  .fishroom-nav-button.is-sub.is-active svg {
+    color: var(--fishroom-reef);
   }
 
   .fishroom-topbar {

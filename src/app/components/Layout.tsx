@@ -117,12 +117,12 @@ function SaveStatus({ saveStatus }: { saveStatus: Props["saveStatus"] }) {
 
 function Brand() {
   return (
-    <div className="fishroom-brand flex items-center gap-3 px-4">
-      <div className="fishroom-brand-mark size-11 overflow-hidden rounded-xl shrink-0">
+    <div className="fishroom-brand flex items-center gap-3 px-3.5">
+      <div className="fishroom-brand-mark size-10 overflow-hidden shrink-0">
         <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-full object-contain p-1" />
       </div>
       <div className="min-w-0">
-        <div className="truncate text-[15px] font-semibold text-foreground">海水鱼房</div>
+        <div className="truncate text-[14px] font-semibold text-foreground">海水鱼房</div>
         <div className="mt-0.5 text-xs text-muted-foreground">库存 · 维护 · 销售</div>
       </div>
     </div>
@@ -180,17 +180,18 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const navButtonClass = (active: boolean, level: "main" | "sub" = "sub") =>
     [
-      "fishroom-nav-button flex w-full items-center text-left transition-colors",
+      "fishroom-nav-button flex items-center text-left transition-colors",
+      level === "main" ? "is-main" : "is-sub",
       active ? "is-active" : "",
       level === "main"
-        ? "gap-2 px-3 py-2 text-sm font-semibold"
-        : "justify-between px-7 py-1.5 text-[13px]",
+        ? "gap-2 px-2.5 py-2 text-sm font-semibold"
+        : "justify-between px-2.5 py-1.5 text-[13px]",
     ].join(" ");
 
   const NavContent = () => (
     <>
       <Brand />
-      <nav className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-2.5">
+      <nav className="flex-1 overflow-y-auto px-2.5 py-3 flex flex-col gap-2">
         <button
           onClick={() => navigate("dashboard")}
           className={navButtonClass(view === "dashboard", "main")}
@@ -210,8 +211,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           return (
             <div key={section.title} className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <Icon className="size-4 shrink-0" />
-                {section.title}
+                <span className="fishroom-nav-title-icon">
+                  <Icon className="size-3.5 shrink-0" />
+                </span>
+                <span>{section.title}</span>
               </div>
               {section.items.map((item) => (
                 <button
@@ -230,8 +233,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           <>
             <div className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <Users className="size-4 shrink-0" />
-                人员管理
+                <span className="fishroom-nav-title-icon">
+                  <Users className="size-3.5 shrink-0" />
+                </span>
+                <span>人员管理</span>
               </div>
               <button
                 onClick={() => navigate("permissions")}
@@ -250,8 +255,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             </div>
             <div className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <ScrollText className="size-4 shrink-0" />
-                日志管理
+                <span className="fishroom-nav-title-icon">
+                  <ScrollText className="size-3.5 shrink-0" />
+                </span>
+                <span>日志管理</span>
               </div>
               <button
                 onClick={() => navigate("operationLogs")}
