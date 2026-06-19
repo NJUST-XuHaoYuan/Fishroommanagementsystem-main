@@ -84,6 +84,23 @@ type OrderPickerItem = {
   commissionRate: number;
 };
 
+function normalizeFishCode(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function splitFishCodeInput(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(/[\s,，、;；]+/)
+    .map((code) => code.trim())
+    .filter((code) => {
+      const normalized = normalizeFishCode(code);
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+}
+
 async function postOrderApi(path: string, body: Record<string, unknown>) {
   const response = await fetch(`/api/${path}`, {
     method: "POST",
@@ -4383,6 +4400,11 @@ function OrderDetailDialog({
                                   </div>
                                   <div>
                                     <span className="text-sm">{p?.name ?? "—"}</span>
+                                    {s?.code && (
+                                      <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
+                                        {s.code}
+                                      </span>
+                                    )}
                                     {isShipped && <span className="ml-2 text-xs text-purple-600 bg-purple-100 px-1 py-0.5 rounded">已出库/发货</span>}
                                     {isLost && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">已损耗，需退商品</span>}
                                   </div>
@@ -4765,6 +4787,7 @@ function StockPickerDialog({
   const { state } = useStore();
   const [groupId, setGroupId] = useState("");
   const [subTankId, setSubTankId] = useState("");
+  const [fishCodeInput, setFishCodeInput] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [detailStockId, setDetailStockId] = useState<string | null>(null);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -4773,6 +4796,7 @@ function StockPickerDialog({
     if (open) {
       setGroupId("");
       setSubTankId("");
+      setFishCodeInput("");
       setPicked(new Set());
       setDetailStockId(null);
       if (clickTimer.current) {
@@ -4813,7 +4837,7 @@ function StockPickerDialog({
   };
 
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
-  const isAvail = (s: typeof state.stock[0]) =>
+  const isAvail = (s: StockItem) =>
     !s.sold && !excludeIds.has(s.id) && isPhysicallyInTank(s, shippedOutStockIds);
 
   const availableGroups = state.tankGroups.filter((g) =>
@@ -4854,6 +4878,76 @@ function StockPickerDialog({
     }, 220);
   };
 
+  const pickByFishCode = () => {
+    const codes = splitFishCodeInput(fishCodeInput);
+    if (codes.length === 0) {
+      toast.error("请输入选鱼码");
+      return;
+    }
+
+    const nextPicked = new Set(picked);
+    const added: string[] = [];
+    const skipped: string[] = [];
+    const errors: string[] = [];
+    let firstAdded: StockItem | null = null;
+
+    for (const code of codes) {
+      const normalizedCode = normalizeFishCode(code);
+      const codeMatches = state.stock.filter((stock) => normalizeFishCode(stock.code) === normalizedCode);
+      const availableMatches = codeMatches.filter(isAvail);
+
+      if (availableMatches.length === 1) {
+        const match = availableMatches[0];
+        if (nextPicked.has(match.id)) {
+          skipped.push(code);
+          continue;
+        }
+        nextPicked.add(match.id);
+        added.push(match.code?.trim() || code);
+        firstAdded = firstAdded ?? match;
+        continue;
+      }
+
+      if (availableMatches.length > 1) {
+        errors.push(`选鱼码「${code}」对应 ${availableMatches.length} 条可售鱼，请从缸位列表选择`);
+        continue;
+      }
+
+      if (codeMatches.some((stock) => excludeIds.has(stock.id))) {
+        skipped.push(code);
+        continue;
+      }
+
+      if (codeMatches.length > 0) {
+        errors.push(`选鱼码「${code}」对应的鱼不可添加`);
+      } else {
+        errors.push(`未找到选鱼码「${code}」`);
+      }
+    }
+
+    if (added.length > 0) {
+      setPicked(nextPicked);
+      if (firstAdded) {
+        const nextGroup = state.tankGroups.find((group) =>
+          group.subTanks.some((tank) => tank.id === firstAdded?.subTankId)
+        );
+        if (nextGroup) setGroupId(nextGroup.id);
+        setSubTankId(firstAdded.subTankId);
+      }
+      setFishCodeInput("");
+      toast.success(`已按选鱼码选择 ${added.length} 条鱼`);
+    }
+
+    if (skipped.length > 0 && added.length === 0 && errors.length === 0) {
+      toast.info(`选鱼码「${skipped.join("、")}」已在当前订单或已选列表中`);
+    }
+
+    if (errors.length > 0) {
+      const message = errors.slice(0, 3).join("；");
+      toast.error(errors.length > 3 ? `${message}；还有 ${errors.length - 3} 个问题` : message);
+    }
+  };
+
   const selectAll = () => setPicked(new Set(availableItems.map((s) => s.id)));
   const clearAll = () => setPicked(new Set());
 
@@ -4883,6 +4977,36 @@ function StockPickerDialog({
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto flex flex-col gap-4 pr-1 min-h-0">
+
+          <div className="rounded-lg border bg-muted/20 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <Label className="text-xs font-medium text-muted-foreground">按选鱼码直接选鱼</Label>
+              {picked.size > 0 && (
+                <span className="text-xs font-medium text-emerald-600">已选 {picked.size} 条</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={fishCodeInput}
+                onChange={(event) => setFishCodeInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    pickByFishCode();
+                  }
+                }}
+                placeholder="输入选鱼码，多个用空格或逗号分隔"
+                className="h-9"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={pickByFishCode}>
+                <Check className="size-4" />
+                选鱼
+              </Button>
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              只会添加当前可售且未加入订单的鱼；回车即可确认。
+            </p>
+          </div>
 
           {/* Step 1: 缸组 */}
           <div className="flex flex-col gap-2">
@@ -5398,7 +5522,14 @@ function NewOrderDialog({
                                     ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
                                     : <div className="size-full flex items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
                                 </div>
-                                <span className="text-sm">{p?.name ?? "—"}</span>
+                                <div className="min-w-0">
+                                  <span className="text-sm">{p?.name ?? "—"}</span>
+                                  {s.code && (
+                                    <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
+                                      {s.code}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </td>
                             <td className="px-4 py-2.5 text-sm text-muted-foreground">{subTankName(s.subTankId)}</td>
