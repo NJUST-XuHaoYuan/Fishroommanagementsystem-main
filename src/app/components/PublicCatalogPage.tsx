@@ -869,8 +869,11 @@ export function PublicCatalogPage() {
                       key={category.key}
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
-                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b border-white/8 px-6 py-5 text-left transition active:translate-y-px ${
-                        active ? "text-white" : "text-[#dbe8ee] hover:text-white"
+                      aria-current={active ? "true" : undefined}
+                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b px-6 py-5 text-left transition active:translate-y-px ${
+                        active
+                          ? "border-[#1ee6ef]/70 bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
+                          : "border-white/8 text-[#dbe8ee] hover:text-white"
                       }`}
                     >
                       <ImageWithFallback
@@ -880,36 +883,33 @@ export function PublicCatalogPage() {
                         aria-hidden="true"
                         disableMediaProxy
                         className={`absolute inset-0 h-full w-full object-cover transition duration-300 ${
-                          active ? "scale-[1.02] opacity-70 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
+                          active ? "scale-[1.02] opacity-72 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
                         }`}
                       />
-                      <div className="absolute inset-0 bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10" />
-                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/12" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
+                      <div
+                        className={`absolute inset-0 ${
+                          active
+                            ? "bg-gradient-to-r from-[#03101f]/74 via-[#0c2b3f]/54 to-[#1ee6ef]/16"
+                            : "bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10"
+                        }`}
+                      />
+                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/16" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
+                      {active && <div className="absolute inset-y-0 right-0 w-px bg-[#1ee6ef]" aria-hidden="true" />}
                       <div className="relative z-10 flex items-center justify-between gap-3">
                         <span className="truncate text-lg font-semibold">{category.label}</span>
                         {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                       </div>
-                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">{category.specimens} 条在售</div>
+                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">
+                        {category.species} 个品种 · {category.specimens} 条在售
+                      </div>
                     </button>
                   );
                 })}
               </div>
             </aside>
 
-            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0">
-              <div className="border-b border-white/10 bg-[#081b2c]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-[#1ee6ef]">{selectedCategory.label}</div>
-                    <h3 className="mt-1 text-lg font-semibold text-white">品种</h3>
-                    <p className="mt-1 text-sm leading-5 text-[#91a8b8]">
-                      {visibleSpecies.length} 个品种，{selectedCategory.specimens} 条可售个体
-                    </p>
-                  </div>
-                  <Check className="mt-1 size-5 shrink-0 text-[#1ee6ef]" />
-                </div>
-              </div>
-              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-11rem)]">
+            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
+              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-5rem)]">
                 {visibleSpecies.length === 0 ? (
                   <div className="border-b border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
