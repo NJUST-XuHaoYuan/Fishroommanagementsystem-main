@@ -951,22 +951,25 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const STATUS_ORDER: StockStatus[] = ["sick", "feeding", "healthy"];
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2>日常管理</h2>
-        <p className="text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
-      </div>
+    <div className="flex flex-col gap-3">
+      <Tabs defaultValue="visual" className="gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="leading-tight">日常管理</h2>
+              <TabsList className="h-8 rounded-full">
+                <TabsTrigger value="visual" className="rounded-full px-3 text-sm">缸位视图</TabsTrigger>
+                <TabsTrigger value="logs" className="rounded-full px-3 text-sm">养护日志</TabsTrigger>
+              </TabsList>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
+          </div>
+        </div>
 
-      <Tabs defaultValue="visual">
-        <TabsList>
-          <TabsTrigger value="visual">缸位视图</TabsTrigger>
-          <TabsTrigger value="logs">养护日志</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="visual" className="flex flex-col gap-4">
+        <TabsContent value="visual" className="flex flex-col gap-3">
           {/* 过滤栏：状态按钮 + 搜索框 */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
+          <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-end gap-2 border-b bg-background/95 px-1 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
               {STATUS_ORDER.map((st) => {
                 const meta = statusFilterMeta[st];
                 const active = filterStatuses.has(st);
@@ -974,7 +977,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   <button
                     key={st}
                     onClick={() => toggleStatusFilter(st)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-all select-none
+                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-all select-none
                       ${active ? meta.active : meta.inactive}`}
                   >
                     <span className={`size-3 rounded border-2 shrink-0 ${statusFrameClass(st)}`} />
@@ -985,7 +988,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               {/* 已售独立过滤按钮 */}
               <button
                 onClick={() => setFilterSoldOnly((v) => !v)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-all select-none
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-all select-none
                   ${filterSoldOnly
                     ? "bg-amber-100 border-amber-400 text-amber-800"
                     : "border-border text-muted-foreground hover:border-amber-300 hover:text-amber-700"}`}
@@ -999,77 +1002,77 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               {(filterStatuses.size > 0 || filterSoldOnly) && (
                 <button
                   onClick={() => { setFilterStatuses(new Set()); setFilterSoldOnly(false); }}
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground px-1.5 py-1 rounded transition-colors"
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
                 >
                   <X className="size-3" /> 清除
                 </button>
               )}
             </div>
-	            <div className="flex items-center gap-2">
-	              {canBatchSelect && (
-	                <Button
-	                  type="button"
-	                  size="sm"
-	                  variant={selectMode ? "default" : "outline"}
-	                  onClick={enterSelectMode}
-	                >
-	                  <ArrowRightLeft className="size-3.5 mr-1" />
-	                  批量操作
-	                </Button>
-	              )}
-	              {selectMode && (
-	                <>
-	                  <span className="text-xs text-muted-foreground">已选 {selectedItems.length} 条</span>
-	                  {permission.canCreate && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openBatchRecordDialog(Array.from(selectedIds))}
-	                    >
-	                      批量维护
-	                    </Button>
-	                  )}
-	                  {permission.canUpdate && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openMoveDialog(Array.from(selectedIds))}
-	                    >
-	                      移到子缸
-	                    </Button>
-	                  )}
-	                  {permission.canDelete && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openLossDialog(Array.from(selectedIds))}
-	                    >
-	                      批量报损
-	                    </Button>
-	                  )}
-	                </>
-	              )}
-	              <div className="relative">
-	                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-	                <Input
-	                  value={q}
-	                  onChange={(e) => setQ(e.target.value)}
-		                  placeholder="搜索缸位 / 商品名 / 编号 / 备注…"
-		                  aria-label="搜索缸位、商品名、编号或备注"
-		                  className="pl-9 w-64"
-		                />
-	              </div>
-	            </div>
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              {canBatchSelect && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={selectMode ? "default" : "outline"}
+                  onClick={enterSelectMode}
+                >
+                  <ArrowRightLeft className="size-3.5 mr-1" />
+                  批量操作
+                </Button>
+              )}
+              {selectMode && (
+                <>
+                  <span className="text-xs text-muted-foreground">已选 {selectedItems.length} 条</span>
+                  {permission.canCreate && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openBatchRecordDialog(Array.from(selectedIds))}
+                    >
+                      批量维护
+                    </Button>
+                  )}
+                  {permission.canUpdate && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openMoveDialog(Array.from(selectedIds))}
+                    >
+                      移到子缸
+                    </Button>
+                  )}
+                  {permission.canDelete && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openLossDialog(Array.from(selectedIds))}
+                    >
+                      批量报损
+                    </Button>
+                  )}
+                </>
+              )}
+              <div className="relative min-w-[13rem] flex-1 sm:flex-none">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜索缸位 / 商品名 / 编号 / 备注…"
+                  aria-label="搜索缸位、商品名、编号或备注"
+                  className="h-8 w-full pl-9 sm:w-72"
+                />
+              </div>
+            </div>
           </div>
 
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
             {visibleGroups.length === 0 && anyFilter && (
               <div className="py-12 text-center text-sm text-muted-foreground">没有符合条件的结果</div>
             )}
