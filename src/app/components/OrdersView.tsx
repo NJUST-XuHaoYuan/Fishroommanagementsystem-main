@@ -73,6 +73,10 @@ function customerTypeLabel(type?: CustomerType) {
   return "未设置";
 }
 
+function effectiveOrderAddress(order?: Pick<Order, "shippingAddress"> | null, customer?: Pick<Customer, "address"> | null) {
+  return String(order?.shippingAddress ?? "").trim() || String(customer?.address ?? "").trim();
+}
+
 type OrderPickerItem = {
   stockItemId: string;
   productId: string;
@@ -542,7 +546,7 @@ function collectPendingTrackingShipmentRows(orders: Order[], state: Store): Pend
         phone: orderCustomer?.phone || "",
         wechat: orderCustomer?.wechat || "",
         douyin: orderCustomer?.douyin || "",
-        address: orderCustomer?.address || "待确认",
+        address: effectiveOrderAddress(order, orderCustomer) || "待确认",
         contactPerson: order.contactPerson || "",
         productName: itemProduct?.name ?? orderItem.productId,
         size: itemProduct?.size ?? "",
@@ -819,6 +823,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       order.source || "",
       orderCustomer?.name ?? "—",
       orderCustomer?.phone || "",
+      effectiveOrderAddress(order, orderCustomer) || "",
       order.date,
       order.status === "completed" ? "—" : order.plannedShipDate || "—",
       order.contactPerson || "",
@@ -924,7 +929,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "客户", "手机", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
         ${table("资金往来", ["订单号", "客户", "序号", "时间", "类型", "金额", "备注"], paymentRows)}
@@ -3664,7 +3669,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3722,6 +3727,7 @@ function OrderDetailDialog({
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
+      shippingAddress: order.shippingAddress ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
       shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
@@ -3755,6 +3761,7 @@ function OrderDetailDialog({
         customerId: editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
+        shippingAddress: editForm.shippingAddress.trim(),
         plannedShipDate: editForm.plannedShipDate || undefined,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
@@ -3838,6 +3845,9 @@ function OrderDetailDialog({
   const customer = (state.customers ?? []).find(
     (c) => c.id === (editMode && editForm ? editForm.customerId : order?.customerId)
   );
+  const displayAddress = effectiveOrderAddress(order, customer);
+  const hasOrderAddressOverride = Boolean(String(order?.shippingAddress ?? "").trim());
+  const editDefaultAddress = String(customer?.address ?? "").trim();
 
   const displayItems = editMode && editForm ? editForm.items : (order?.items ?? []);
   const displayItemsTotal = displayItems.reduce((s, i) => s + i.price, 0);
@@ -4273,6 +4283,17 @@ function OrderDetailDialog({
                   </div>
                 </div>
                 <div className="grid gap-1.5 col-span-4">
+                  <Label className="text-xs">本单收货地址</Label>
+                  <Input
+                    value={editForm.shippingAddress}
+                    placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
+                    onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
+                  </p>
+                </div>
+                <div className="grid gap-1.5 col-span-5">
                   <Label className="text-xs">备注</Label>
                   <Input value={editForm.notes} placeholder="选填"
                     onChange={(e) => setEditForm((f) => f ? { ...f, notes: e.target.value } : f)} />
@@ -4296,7 +4317,15 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div><span className="text-muted-foreground">对接人：</span>{order.contactPerson || "—"}</div>
-                {customer?.address && <div className="col-span-2"><span className="text-muted-foreground">地址：</span>{customer.address}</div>}
+                {displayAddress && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">收货地址：</span>
+                    {displayAddress}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {hasOrderAddressOverride ? "本单地址" : "客户默认地址"}
+                    </span>
+                  </div>
+                )}
                 {order.notes && <div className="col-span-2"><span className="text-muted-foreground">备注：</span>{order.notes}</div>}
               </div>
             )}
@@ -5030,6 +5059,7 @@ function NewOrderDialog({
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
+  const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
   const [notes, setNotes] = useState("");
@@ -5045,7 +5075,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5057,6 +5087,11 @@ function NewOrderDialog({
   }, [open, defaultContactPerson, today]);
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
+  const selectedCustomer = useMemo(
+    () => (state.customers ?? []).find((customer) => customer.id === customerId),
+    [state.customers, customerId]
+  );
+  const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
 
   const subTankName = (id: string) => {
     for (const g of state.tankGroups) {
@@ -5180,6 +5215,7 @@ function NewOrderDialog({
         customerId,
         date,
         source: source.trim(),
+        shippingAddress: shippingAddress.trim(),
         plannedShipDate: plannedShipDate || undefined,
         contactPerson: contactPerson.trim(),
         items,
@@ -5292,6 +5328,17 @@ function NewOrderDialog({
                 </Select>
               </div>
               <div className="col-span-3 grid gap-2">
+                <Label>本单收货地址</Label>
+                <Input
+                  value={shippingAddress}
+                  onChange={(e) => setShippingAddress(e.target.value)}
+                  placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
+                />
+                <p className="text-xs text-muted-foreground -mt-1">
+                  {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
+                </p>
+              </div>
+              <div className="col-span-4 grid gap-2">
                 <Label>备注</Label>
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
               </div>
@@ -5617,6 +5664,7 @@ export function OrdersView() {
         customer?.douyin,
         customer?.source,
         customer?.address,
+        order.shippingAddress,
         customer?.notes,
         order.contactPerson,
         order.notes,

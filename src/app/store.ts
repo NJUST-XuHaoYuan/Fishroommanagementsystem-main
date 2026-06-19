@@ -203,6 +203,7 @@ export type Order = {
   customerId: string;
   date: string;
   source?: OrderSource | string;
+  shippingAddress?: string;
   plannedShipDate?: string;
   contactPerson?: string;
   items: OrderItem[];

@@ -2043,6 +2043,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const source = String(body.source ?? currentOrder?.source ?? "").trim();
   if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
+  const shippingAddress = String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim();
   const plannedShipDate = String(body.plannedShipDate ?? "").trim();
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
@@ -2084,6 +2085,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     customerId,
     date,
     source,
+    shippingAddress,
     plannedShipDate: plannedShipDate || undefined,
     contactPerson,
     items,
@@ -2166,6 +2168,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "customerId",
   "date",
   "source",
+  "shippingAddress",
   "plannedShipDate",
   "contactPerson",
   "items",
@@ -2181,6 +2184,7 @@ function orderMutableFieldsComparable(order = {}) {
     customerId: String(order.customerId ?? "").trim(),
     date: String(order.date ?? "").trim(),
     source: String(order.source ?? "").trim(),
+    shippingAddress: String(order.shippingAddress ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
     items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
