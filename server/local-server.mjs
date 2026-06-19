@@ -27,6 +27,7 @@ const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
   { id: "jiangyin", name: "江阴" },
   { id: "nanjing", name: "南京" },
+  { id: "beijing", name: "北京" },
 ];
 const AUTH_SESSION_TTL_MS = numberFromEnv(process.env.AUTH_SESSION_TTL_MS, 4 * 60 * 60 * 1000);
 const AUTH_COOKIE_NAME = "fishroom_auth";
@@ -1165,6 +1166,7 @@ function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...normalizePickupShipmentsForState(data) };
+  next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
   }
@@ -1634,10 +1636,16 @@ function buildAssistantSnapshot(state = {}, options = {}) {
 }
 
 function getSitesFromState(state = {}) {
-  const sites = Array.isArray(state.sites) && state.sites.length > 0 ? state.sites : DEFAULT_SITES;
-  return sites
-    .map((site) => ({ id: normalizeSiteId(site?.id), name: String(site?.name ?? site?.id ?? "") }))
-    .filter((site) => site.id && site.name);
+  const merged = DEFAULT_SITES.map((site) => ({ ...site }));
+  const sites = Array.isArray(state.sites) ? state.sites : [];
+  sites.forEach((site) => {
+    const id = normalizeSiteId(site?.id);
+    const name = String(site?.name ?? site?.id ?? "").trim() || id;
+    if (!merged.some((item) => item.id === id)) {
+      merged.push({ id, name });
+    }
+  });
+  return merged.filter((site) => site.id && site.name);
 }
 
 function assistantSystemPrompt(source = "web") {
@@ -3007,6 +3015,38 @@ async function importLegacyStateIfPresent() {
   console.log(`Imported legacy JSON state from ${legacyStateFile}`);
 }
 
+async function backfillDefaultSites() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data;
+    if (!state || typeof state !== "object") {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    const currentSites = Array.isArray(state.sites) ? state.sites : [];
+    const nextSites = getSitesFromState(state);
+    if (JSON.stringify(currentSites) === JSON.stringify(nextSites)) {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    await client.query(
+      "UPDATE app_state SET data = jsonb_set(data, '{sites}', $2::jsonb, true), updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify(nextSites)]
+    );
+    await client.query("COMMIT");
+    console.log(`Backfilled default sites: ${nextSites.map((site) => site.name).join(", ")}`);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Failed to backfill default sites:", error);
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureSchema() {
   schemaReady ??= (async () => {
     await pool.query(`
@@ -3017,6 +3057,7 @@ async function ensureSchema() {
       )
     `);
     await importLegacyStateIfPresent();
+    await backfillDefaultSites();
     await rehashPlaintextPersonnelPasswords();
     await externalizePersistedUploads();
     await backfillDailyLogBioRecords();
