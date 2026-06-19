@@ -37,9 +37,9 @@ if (process.env.NODE_ENV === "production" && !configuredAuthTokenSecret) {
 const authTokenSecret = configuredAuthTokenSecret || randomBytes(32).toString("hex");
 const allowDefaultCredentials = process.env.ALLOW_DEFAULT_CREDENTIALS === "true";
 const BOOTSTRAP_AUTH_ACCOUNTS = [
-  { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin" },
-  { id: "person-staff", name: "staff", username: "staff", password: process.env.BOOTSTRAP_STAFF_PASSWORD || "", accessRole: "staff" },
-  { id: "person-staff-a", name: "员工A", username: "staff-a", password: process.env.BOOTSTRAP_STAFF_A_PASSWORD || "", accessRole: "staff" },
+  { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin", employmentStatus: "active" },
+  { id: "person-staff", name: "staff", username: "staff", password: process.env.BOOTSTRAP_STAFF_PASSWORD || "", accessRole: "staff", employmentStatus: "active" },
+  { id: "person-staff-a", name: "员工A", username: "staff-a", password: process.env.BOOTSTRAP_STAFF_A_PASSWORD || "", accessRole: "staff", employmentStatus: "active" },
 ].filter((account) => account.password);
 const DEFAULT_CREDENTIAL_DIGESTS = new Set([
   "8da193366e1554c08b2870c50f737b9587c3372b656151c4a96028af26f51334",
@@ -917,6 +917,13 @@ function fullPermissionsValue() {
   ]));
 }
 
+function emptyPermissionsValue() {
+  return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
+    module,
+    Object.fromEntries(PERMISSION_ACTIONS.map((action) => [action, false])),
+  ]));
+}
+
 function normalizePermissionsForStorage(permissions) {
   const full = fullPermissionsValue();
   return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
@@ -968,9 +975,14 @@ function isDefaultCredential(username, password) {
 }
 
 function publicUserFromAccount(account = {}) {
+  if (isPersonnelResigned(account)) return null;
   const username = String(account.username ?? "").trim();
   const role = account.accessRole === "admin" ? "admin" : "staff";
   return username ? { username, role } : null;
+}
+
+function isPersonnelResigned(person = {}) {
+  return person?.employmentStatus === "resigned" || Boolean(person?.resignedAt);
 }
 
 function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
@@ -980,8 +992,14 @@ function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
   const isCurrentUser = username && username === req?.auth?.user?.username;
   const { password, ...safePerson } = person;
   if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
+  safePerson.employmentStatus = isPersonnelResigned(safePerson) ? "resigned" : "active";
+  if (isPersonnelResigned(safePerson)) {
+    safePerson.permissions = emptyPermissionsValue();
+  }
   if (options.includePermissions || isAdmin || isCurrentUser) {
-    safePerson.permissions = normalizePermissionsForStorage(safePerson.permissions);
+    safePerson.permissions = isPersonnelResigned(safePerson)
+      ? emptyPermissionsValue()
+      : normalizePermissionsForStorage(safePerson.permissions);
   } else {
     delete safePerson.permissions;
   }
@@ -1088,6 +1106,7 @@ function sanitizeOperationLogsForAuth(logs = [], req) {
 }
 
 function hasModulePermission(account = {}, module, action = "update") {
+  if (isPersonnelResigned(account)) return false;
   if (account?.accessRole === "admin") return true;
   if (!PERMISSION_MODULE_KEYS.includes(module) || !PERMISSION_ACTIONS.includes(action)) return false;
   return normalizePermissionsForStorage(account?.permissions)?.[module]?.[action] === true;
@@ -1133,7 +1152,11 @@ function normalizePersonnelInput(input = {}, existing = null) {
     username,
     password: plainPassword ? hashPassword(plainPassword) : existing?.password,
     accessRole,
-    permissions: accessRole === "admin"
+    employmentStatus: isPersonnelResigned(existing) ? "resigned" : "active",
+    resignedAt: isPersonnelResigned(existing) ? existing?.resignedAt : undefined,
+    permissions: isPersonnelResigned(existing)
+      ? emptyPermissionsValue()
+      : accessRole === "admin"
       ? fullPermissionsValue()
       : normalizePermissionsForStorage(source.permissions ?? existing?.permissions),
     role,
@@ -1144,8 +1167,29 @@ function normalizePersonnelInput(input = {}, existing = null) {
 
 function countAdmins(personnel = [], excludeId = "") {
   return (Array.isArray(personnel) ? personnel : [])
-    .filter((person) => String(person?.id ?? "") !== String(excludeId) && person?.accessRole === "admin")
+    .filter((person) =>
+      String(person?.id ?? "") !== String(excludeId) &&
+      person?.accessRole === "admin" &&
+      !isPersonnelResigned(person)
+    )
     .length;
+}
+
+function isActivePersonnelName(state = {}, value = "") {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return false;
+  return (Array.isArray(state.personnel) ? state.personnel : [])
+    .some((person) =>
+      !isPersonnelResigned(person) &&
+      (String(person?.name ?? "").trim() === normalized || String(person?.username ?? "").trim() === normalized)
+    );
+}
+
+function assertActivePersonnelName(state = {}, value = "", label = "人员", allowedHistoricalValue = "") {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) throw new Error(`请选择${label}`);
+  if (allowedHistoricalValue && normalized === String(allowedHistoricalValue ?? "").trim()) return;
+  if (!isActivePersonnelName(state, normalized)) throw new Error(`${label}必须是在职人员`);
 }
 
 function createOperationLog(req, module, action, detail) {
@@ -2047,7 +2091,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const plannedShipDate = String(body.plannedShipDate ?? "").trim();
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
-  if (!contactPerson) throw new Error("请选择对接人");
+  assertActivePersonnelName(state, contactPerson, "对接人", currentOrder?.contactPerson);
   const itemsInput = Array.isArray(body.items) ? body.items : [];
   if (itemsInput.length === 0) throw new Error("请至少添加一条商品");
   const itemIds = itemsInput.map((item) => String(item?.stockItemId ?? "").trim()).filter(Boolean);
@@ -3120,6 +3164,69 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/personnel/resign" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "accounts", "update");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const targetId = String(body.id ?? body.personnelId ?? "").trim();
+      if (!targetId) throw new Error("缺少人员 ID");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const target = personnel.find((person) => String(person?.id ?? "") === targetId);
+      if (!target) throw new Error("人员不存在或已被删除");
+      if (isPersonnelResigned(target)) throw new Error("该人员已经离职");
+      if (target.username === req.auth.user.username) throw new Error("当前登录人员不能设为离职");
+      if (target.accessRole === "admin" && countAdmins(personnel, target.id) === 0) {
+        throw new Error("至少需要保留一个在职管理员账号");
+      }
+      const resignedAt = nowDatetimeInChina();
+      const nextPersonnel = personnel.map((person) =>
+        String(person?.id ?? "") === targetId
+          ? {
+              ...person,
+              accessRole: "staff",
+              employmentStatus: "resigned",
+              resignedAt,
+              permissions: emptyPermissionsValue(),
+            }
+          : person
+      );
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "修改记录",
+        `设置人员「${target.name || target.username}」（${target.username}）离职，并清空权限`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "离职操作失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/personnel/permissions" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -3133,6 +3240,7 @@ async function handleApi(req, res, url) {
       const personnel = Array.isArray(state.personnel) ? state.personnel : [];
       const target = personnel.find((person) => String(person?.id ?? "") === targetId);
       if (!target) throw new Error("人员不存在或已被删除");
+      if (isPersonnelResigned(target)) throw new Error("离职人员权限已清空，不能再授权");
       const nextPermissions = target.accessRole === "admin"
         ? fullPermissionsValue()
         : normalizePermissionsForStorage(body.permissions);
@@ -3188,6 +3296,7 @@ async function handleApi(req, res, url) {
         ? personnel.find((person) => String(person?.id ?? "") === targetId)
         : personnel.find((person) => String(person?.username ?? "") === req.auth.user.username);
       if (!target) throw new Error("人员不存在或已被删除");
+      if (isPersonnelResigned(target)) throw new Error("离职人员不能修改登录密码");
       const adminReset = Boolean(targetId) && req.auth.account?.accessRole === "admin";
       if (adminReset) {
         requireModulePermissionForAuth(req, "accounts", "update");

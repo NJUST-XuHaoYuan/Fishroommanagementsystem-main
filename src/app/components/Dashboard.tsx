@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -1049,15 +1049,22 @@ export function Dashboard() {
     order.status !== "cancelled" && (salesScope === ALL_SITE_ID || matchesSite(order, salesScope))
   );
   const scopedSalesOrderIds = new Set(scopedSalesOrders.map((order) => order.id));
-  const scopedSalesShipments = dashboardShipments.filter((shipment) =>
-    salesScope === ALL_SITE_ID || matchesSite(shipment, salesScope) || scopedSalesOrderIds.has(shipment.orderId)
-  );
-  const salespersonOptions = (() => {
-    const seen = new Set<string>();
-    const options: Array<{ name: string; person?: Personnel; orderCount: number; amount: number }> = [];
-    const addOption = (name: string, person?: Personnel) => {
-      const normalized = normalizeSalespersonName(name);
-      if (seen.has(normalized)) return;
+	  const scopedSalesShipments = dashboardShipments.filter((shipment) =>
+	    salesScope === ALL_SITE_ID || matchesSite(shipment, salesScope) || scopedSalesOrderIds.has(shipment.orderId)
+	  );
+	  const resignedSalespersonNames = new Set(
+	    dashboardPersonnel
+	      .filter((person) => isPersonnelResigned(person))
+	      .map((person) => normalizeSalespersonName(person.name || person.username))
+	      .filter(Boolean)
+	  );
+	  const salespersonOptions = (() => {
+	    const seen = new Set<string>();
+	    const options: Array<{ name: string; person?: Personnel; orderCount: number; amount: number }> = [];
+	    const addOption = (name: string, person?: Personnel) => {
+	      const normalized = normalizeSalespersonName(name);
+	      if (!normalized || resignedSalespersonNames.has(normalized)) return;
+	      if (seen.has(normalized)) return;
       seen.add(normalized);
       const personOrders = scopedSalesOrders.filter((order) => normalizeSalespersonName(order.contactPerson) === normalized);
       options.push({
@@ -1066,10 +1073,10 @@ export function Dashboard() {
         orderCount: personOrders.length,
         amount: personOrders.reduce((sum, order) => sum + calcOrderDealAmount(order, scopedSalesShipments), 0),
       });
-    };
-    dashboardPersonnel
-      .filter((person) => String(person.name ?? "").trim())
-      .forEach((person) => addOption(person.name, person));
+	    };
+	    dashboardPersonnel
+	      .filter((person) => String(person.name ?? "").trim() && !isPersonnelResigned(person))
+	      .forEach((person) => addOption(person.name, person));
     scopedSalesOrders.forEach((order) => addOption(order.contactPerson));
     return options.sort((a, b) =>
       b.amount - a.amount ||
@@ -1085,8 +1092,9 @@ export function Dashboard() {
     const rowsByPerson = new Map<string, DailySalespersonBreakdown>();
     const ordersForDate = scopedSalesOrders.filter((order) => String(order.date ?? "").slice(0, 10) === financePoint.date);
     for (const order of ordersForDate) {
-      const salesperson = normalizeSalespersonName(order.contactPerson);
-      if (!selectedSalespersonSet.has(salesperson)) continue;
+	      const salesperson = normalizeSalespersonName(order.contactPerson);
+	      if (resignedSalespersonNames.has(salesperson)) continue;
+	      if (!selectedSalespersonSet.has(salesperson)) continue;
       const amount = calcOrderDealAmount(order, scopedSalesShipments);
       const customer = customerById.get(order.customerId);
       const detail: DailySalespersonOrderDetail = {

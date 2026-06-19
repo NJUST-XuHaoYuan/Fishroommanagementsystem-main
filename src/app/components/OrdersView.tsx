@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   PaymentRecord, PaymentType, Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
-  ORDER_SOURCE_OPTIONS,
+  ORDER_SOURCE_OPTIONS, isPersonnelResigned,
 } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -374,10 +374,13 @@ function formatShipmentCreatedAt(value?: string): string {
 
 function getDefaultContactPerson(personnel: Personnel[], username?: string): string {
   const currentAccount = username
-    ? personnel.find((person) => person.username === username || person.name === username)
+    ? personnel.find((person) =>
+        (person.username === username || person.name === username) &&
+        !isPersonnelResigned(person)
+      )
     : undefined;
   if (currentAccount) return currentAccount.name;
-  return personnel[0]?.name ?? "";
+  return personnel.find((person) => !isPersonnelResigned(person))?.name ?? "";
 }
 
 function normalizeContactPersonName(value?: string): string {
@@ -392,7 +395,10 @@ function getCurrentContactAliases(personnel: Personnel[], username?: string): Se
   };
   add(username);
   const currentAccount = username
-    ? personnel.find((person) => person.username === username || person.name === username)
+    ? personnel.find((person) =>
+        (person.username === username || person.name === username) &&
+        !isPersonnelResigned(person)
+      )
     : undefined;
   add(currentAccount?.name);
   add(currentAccount?.username);
@@ -404,11 +410,12 @@ function isActiveOrder(order: Order): boolean {
 }
 
 function getContactPersonOptions(personnel: Personnel[], current: string): Personnel[] {
-  const names = new Set(personnel.map((person) => person.name));
+  const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
+  const names = new Set(activePersonnel.map((person) => person.name));
   if (current && !names.has(current)) {
-    return [{ id: `current-${current}`, name: current, role: "历史订单", phone: "", notes: "" }, ...personnel];
+    return [{ id: `current-${current}`, name: current, role: "历史记录", phone: "", notes: "" }, ...activePersonnel];
   }
-  return personnel;
+  return activePersonnel;
 }
 
 function excelEscape(value: unknown): string {

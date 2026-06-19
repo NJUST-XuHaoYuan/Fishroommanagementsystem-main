@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { emptyPermissions, fullPermissions, useStore, Personnel, Role } from "../store";
+import { emptyPermissions, fullPermissions, isPersonnelResigned, useStore, Personnel, Role } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -25,11 +25,13 @@ const ACCESS_ROLE_LABEL: Record<Role, string> = {
 };
 
 export function PersonnelView() {
-  const { state, savePersonnelAccount, deletePersonnelAccount } = useStore();
+  const { state, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount } = useStore();
   const [editing, setEditing] = useState<Personnel | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<Personnel | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [resign, setResign] = useState<Personnel | null>(null);
+  const [resigning, setResigning] = useState(false);
 
   if (state.user?.role !== "admin") {
     return (
@@ -49,13 +51,18 @@ export function PersonnelView() {
     role: "",
     phone: "",
     notes: "",
+    employmentStatus: "active",
   });
 
   const orderCount = (name: string) =>
     (state.orders ?? []).filter((order) => order.contactPerson === name).length;
 
   const adminCount = (excludeId?: string) =>
-    (state.personnel ?? []).filter((person) => person.id !== excludeId && person.accessRole === "admin").length;
+    (state.personnel ?? []).filter((person) =>
+      person.id !== excludeId &&
+      person.accessRole === "admin" &&
+      !isPersonnelResigned(person)
+    ).length;
 
   const save = async () => {
     if (!editing) return;
@@ -65,7 +72,11 @@ export function PersonnelView() {
       username: editing.username.trim(),
       password: editing.password,
       accessRole: editing.accessRole,
-      permissions: editing.accessRole === "admin"
+      employmentStatus: isPersonnelResigned(editing) ? "resigned" : "active",
+      resignedAt: editing.resignedAt,
+      permissions: isPersonnelResigned(editing)
+        ? emptyPermissions()
+        : editing.accessRole === "admin"
         ? fullPermissions()
         : editing.permissions ?? emptyPermissions(),
       role: editing.role.trim(),
@@ -106,6 +117,21 @@ export function PersonnelView() {
     toast.success("已删除");
   };
 
+  const confirmResign = async () => {
+    if (!resign) return;
+    if (isPersonnelResigned(resign)) return toast.error("该人员已经离职");
+    if (resign.username === state.user?.username) return toast.error("当前登录人员不能设为离职");
+    if (resign.accessRole === "admin" && adminCount(resign.id) === 0)
+      return toast.error("至少需要保留一个在职管理员账号");
+    const resignId = resign.id;
+    setResigning(true);
+    const ok = await resignPersonnelAccount(resignId);
+    setResigning(false);
+    if (!ok) return toast.error("离职操作失败，请重试");
+    setResign(null);
+    toast.success("已设为离职，权限已清空");
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -115,7 +141,7 @@ export function PersonnelView() {
 
       <DataTable
         data={state.personnel ?? []}
-        searchKeys={["name", "username", "accessRole", "role", "phone", "notes"]}
+        searchKeys={["name", "username", "accessRole", "employmentStatus", "role", "phone", "notes"]}
         searchPlaceholder="搜索姓名、账号、岗位、电话..."
         onAdd={() => { setEditing(empty()); setOpen(true); }}
         addLabel="新增人员"
@@ -126,15 +152,25 @@ export function PersonnelView() {
             render: (row) => (
               <div className="flex items-center gap-2">
                 <span className="font-medium">{row.name}</span>
-                {row.username === state.user?.username && (
-                  <Badge variant="secondary" className="text-xs">当前账户</Badge>
-                )}
-              </div>
-            ),
-          },
-          { key: "username", title: "登录账号", render: (row) => row.username || "—" },
-          {
-            key: "accessRole",
+	                {row.username === state.user?.username && (
+	                  <Badge variant="secondary" className="text-xs">当前账户</Badge>
+	                )}
+	                {isPersonnelResigned(row) && (
+	                  <Badge variant="outline" className="border-slate-300 text-xs text-slate-500">离职</Badge>
+	                )}
+	              </div>
+	            ),
+	          },
+	          { key: "username", title: "登录账号", render: (row) => row.username || "—" },
+	          {
+	            key: "employmentStatus",
+	            title: "状态",
+	            render: (row) => isPersonnelResigned(row)
+	              ? <Badge variant="outline" className="border-slate-300 text-xs text-slate-500">离职</Badge>
+	              : <Badge variant="secondary" className="text-xs">在职</Badge>,
+	          },
+	          {
+	            key: "accessRole",
             title: "系统权限",
             render: (row) => (
               <Badge variant={row.accessRole === "admin" ? "default" : "secondary"} className="text-xs">
@@ -145,15 +181,20 @@ export function PersonnelView() {
           { key: "role", title: "岗位", render: (row) => row.role || "—" },
           { key: "phone", title: "电话", render: (row) => row.phone || "—" },
           { key: "orderCount", title: "关联订单", render: (row) => `${orderCount(row.name)} 单` },
-          { key: "notes", title: "备注", render: (row) => row.notes || "—" },
-        ]}
-        actions={(row) => (
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row }); setOpen(true); }}>
-              编辑
-            </Button>
-            <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDel(row)}>
-              删除
+	          { key: "notes", title: "备注", render: (row) => row.notes || "—" },
+	        ]}
+	        actions={(row) => (
+	          <div className="flex justify-end gap-2">
+	            <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row }); setOpen(true); }}>
+	              编辑
+	            </Button>
+	            {!isPersonnelResigned(row) && (
+	              <Button size="sm" variant="outline" className="text-orange-600" onClick={() => setResign(row)}>
+	                离职
+	              </Button>
+	            )}
+	            <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDel(row)}>
+	              删除
             </Button>
           </div>
         )}
@@ -265,6 +306,30 @@ export function PersonnelView() {
               }}
             >
               {deleting ? "删除中..." : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!resign} onOpenChange={(o) => !o && setResign(null)}>
+        <AlertDialogContent className="w-[min(92vw,30rem)] max-w-[92vw] pb-[calc(1rem+env(safe-area-inset-bottom))] sm:pb-6">
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认人员离职</AlertDialogTitle>
+            <AlertDialogDescription>
+              确认将「{resign?.name}」设为离职？离职后会清空全部权限，不能登录，也不会出现在订单对接人和养护操作员下拉列表中。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
+            <AlertDialogCancel disabled={resigning} className="mt-0">取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resigning}
+              className="bg-orange-600 text-white hover:bg-orange-700"
+              onClick={(event) => {
+                event.preventDefault();
+                confirmResign();
+              }}
+            >
+              {resigning ? "处理中..." : "确认离职"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Order, PaymentType, Shipment, useStore } from "../store";
+import { isPersonnelResigned, Order, PaymentType, Shipment, useStore } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -61,6 +61,10 @@ export function PersonalCenterView() {
   );
   const currentContactName = currentAccount?.name || user?.username || "";
   const isAdmin = user?.role === "admin" || currentAccount?.accessRole === "admin";
+  const activePersonnel = useMemo(
+    () => (state.personnel ?? []).filter((person) => !isPersonnelResigned(person)),
+    [state.personnel]
+  );
 
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -120,7 +124,7 @@ export function PersonalCenterView() {
 
   const adminChangePassword = async () => {
     if (!isAdmin) return;
-    const target = (state.personnel ?? []).find((person) => person.id === adminTargetId);
+    const target = activePersonnel.find((person) => person.id === adminTargetId);
     if (!target) return toast.error("请选择人员");
     if (!adminPassword.trim()) return toast.error("请输入新密码");
     if (adminPassword.length < 6) return toast.error("新密码至少 6 位");
@@ -202,7 +206,7 @@ export function PersonalCenterView() {
                       <SelectValue placeholder="选择人员" />
                     </SelectTrigger>
                     <SelectContent>
-                      {(state.personnel ?? []).map((person) => (
+	                      {activePersonnel.map((person) => (
                         <SelectItem key={person.id} value={person.id}>
                           {person.name || person.username}（{person.username}）
                         </SelectItem>

@@ -267,10 +267,16 @@ export type Personnel = {
   password: string;
   accessRole: Role;
   permissions?: PermissionSet;
+  employmentStatus?: "active" | "resigned";
+  resignedAt?: string;
   role: string;
   phone: string;
   notes: string;
 };
+
+export function isPersonnelResigned(person?: Pick<Personnel, "employmentStatus" | "resignedAt"> | null): boolean {
+  return person?.employmentStatus === "resigned" || Boolean(person?.resignedAt);
+}
 
 export type OperationLog = {
   id: string;
@@ -365,6 +371,7 @@ export type StoreContextType = {
     paymentId?: string;
   }) => Promise<boolean>;
   savePersonnelAccount: (personnel: Personnel) => Promise<boolean>;
+  resignPersonnelAccount: (id: string) => Promise<boolean>;
   deletePersonnelAccount: (id: string) => Promise<boolean>;
   savePersonnelPermissions: (id: string, permissions: PermissionSet) => Promise<boolean>;
   changePersonnelPassword: (change: { targetId?: string; oldPassword?: string; newPassword: string }) => Promise<boolean>;
@@ -411,9 +418,9 @@ export const initialState: Store = {
     { id: "nanjing", name: "南京" },
   ],
   personnel: [
-    { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), role: "管理员", phone: "", notes: "系统默认管理员账户" },
-    { id: "person-staff", name: "staff", username: "staff", password: "", accessRole: "staff", permissions: fullPermissions(), role: "店员", phone: "", notes: "系统默认店员账户" },
-    { id: "person-a", name: "店员A", username: "staff-a", password: "", accessRole: "staff", permissions: fullPermissions(), role: "养护", phone: "", notes: "" },
+    { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
+    { id: "person-staff", name: "staff", username: "staff", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "店员", phone: "", notes: "系统默认店员账户" },
+    { id: "person-a", name: "店员A", username: "staff-a", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "养护", phone: "", notes: "" },
   ],
   operationLogs: [],
   speciesCategories: [
@@ -559,6 +566,7 @@ export const StoreContext = createContext<StoreContextType>({
   saveShipmentOutbound: async () => false,
   saveOrderPaymentChange: async () => false,
   savePersonnelAccount: async () => false,
+  resignPersonnelAccount: async () => false,
   deletePersonnelAccount: async () => false,
   savePersonnelPermissions: async () => false,
   changePersonnelPassword: async () => false,

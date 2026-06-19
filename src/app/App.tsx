@@ -260,6 +260,8 @@ function normalizePersistedState(data: any, currentUser: User): Store {
             ? person.accessRole
             : username === "admin" ? "admin" : "staff",
           permissions: normalizePermissions((person as any).permissions),
+          employmentStatus: person.employmentStatus === "resigned" || person.resignedAt ? "resigned" : "active",
+          resignedAt: typeof person.resignedAt === "string" ? person.resignedAt : undefined,
           role: String(person.role ?? ""),
           phone: String(person.phone ?? ""),
           notes: String(person.notes ?? ""),
@@ -1048,6 +1050,9 @@ function AdminApp() {
   const savePersonnelAccount = (personnel: Personnel): Promise<boolean> =>
     postPersonnelMutation("/personnel/save", { personnel });
 
+  const resignPersonnelAccount = (id: string): Promise<boolean> =>
+    postPersonnelMutation("/personnel/resign", { id });
+
   const deletePersonnelAccount = (id: string): Promise<boolean> =>
     postPersonnelMutation("/personnel/delete", { id });
 
@@ -1255,7 +1260,7 @@ function AdminApp() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {!state.user ? (
         showStaffLogin ? (
           <Login />

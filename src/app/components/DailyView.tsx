@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, DailyLog, StockStatus, StockItem, TankGroup, uid } from "../store";
+import { useStore, DailyLog, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -164,7 +164,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const groupName = (groupId?: string) =>
     state.tankGroups.find((group) => group.id === groupId)?.name ?? "—";
   const currentOperator =
-    (state.personnel ?? []).find((person) => person.username === state.user?.username)?.name ??
+    (state.personnel ?? []).find((person) => person.username === state.user?.username && !isPersonnelResigned(person))?.name ??
     state.user?.username ??
     "";
   const operatorOptions = useMemo(() => {
@@ -172,6 +172,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     const options: { value: string; label: string }[] = [];
 
     for (const person of state.personnel ?? []) {
+      if (isPersonnelResigned(person)) continue;
       const value = person.name || person.username;
       if (!value || seen.has(value)) continue;
       seen.add(value);

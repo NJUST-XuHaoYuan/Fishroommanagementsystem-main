@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import { emptyPermissions, fullPermissions, PermissionAction, PermissionModule, PermissionSet } from "../store";
+import { emptyPermissions, fullPermissions, isPersonnelResigned, PermissionAction, PermissionModule, PermissionSet } from "../store";
 import { useStore } from "../store";
 
 export const PERMISSION_MODULES: { key: PermissionModule; label: string; group: string }[] = [
@@ -40,8 +40,9 @@ export function usePermission(module: PermissionModule) {
   const account = user
     ? (state.personnel ?? []).find((p) => p.username === user.username)
     : undefined;
-  const isAdmin = user?.role === "admin" || account?.accessRole === "admin";
-  const permissions = normalizePermissions(account?.permissions);
+  const resigned = isPersonnelResigned(account);
+  const isAdmin = !resigned && (user?.role === "admin" || account?.accessRole === "admin");
+  const permissions = resigned ? emptyPermissions() : normalizePermissions(account?.permissions);
 
   const can = (action: PermissionAction) => isAdmin || permissions[module][action];
   const requirePermission = (action: PermissionAction) => {
