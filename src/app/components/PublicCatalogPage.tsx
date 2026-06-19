@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, X } from "lucide-react";
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
@@ -452,6 +452,28 @@ function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
     .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
 }
 
+function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement) {
+  const maxScrollTop = container.scrollHeight - container.clientHeight;
+  if (maxScrollTop <= 0) return;
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? container.clientHeight : 1;
+  const nextTop = Math.min(maxScrollTop, Math.max(0, container.scrollTop + event.deltaY * unit));
+  event.preventDefault();
+  event.stopPropagation();
+  container.scrollTop = nextTop;
+}
+
+function keepCatalogWheelInsideColumns(event: WheelEvent<HTMLElement>) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+
+  const container = target.closest("[data-public-catalog-scroll]");
+  if (!(container instanceof HTMLElement) || !event.currentTarget.contains(container)) return;
+
+  scrollCatalogColumnByWheel(event, container);
+}
+
 export function PublicCatalogPage() {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
   const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
@@ -464,6 +486,8 @@ export function PublicCatalogPage() {
   const [copiedSelectionCode, setCopiedSelectionCode] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [filter, setFilter] = useState("all");
+  const speciesListRef = useRef<HTMLDivElement | null>(null);
+  const specimenListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -683,6 +707,14 @@ export function PublicCatalogPage() {
     setDetailOpen(false);
   }, [selectedCategoryKey, selectedSpeciesId]);
 
+  useEffect(() => {
+    speciesListRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [selectedCategoryKey]);
+
+  useEffect(() => {
+    specimenListRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [filter, selectedSpeciesId]);
+
   const selectedSpecies = visibleSpecies.find((card) => card.species.id === selectedSpeciesId) ?? visibleSpecies[0];
   const specimenOptions = specimens.filter((specimen) => specimen.species?.id === selectedSpecies?.species.id && specimen.available);
   const filteredSpecimens = specimenOptions.filter((specimen) => {
@@ -857,11 +889,15 @@ export function PublicCatalogPage() {
         </div>
       </section>
 
-      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725]">
+      <section
+        id="catalog"
+        className="scroll-mt-20 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:overflow-hidden"
+        onWheelCapture={keepCatalogWheelInsideColumns}
+      >
         <div className="w-full">
-          <div className="grid min-h-[calc(100dvh-5rem)] lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
-            <aside className="overflow-hidden bg-[#071827] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:self-start">
-              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto">
+          <div className="grid min-h-[calc(100dvh-5rem)] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
+            <aside className="overflow-hidden bg-[#071827] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)]">
+              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain [overflow-anchor:none]" data-public-catalog-scroll="categories">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -908,8 +944,12 @@ export function PublicCatalogPage() {
               </div>
             </aside>
 
-            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
-              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-5rem)]">
+            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
+              <div
+                ref={speciesListRef}
+                className="max-h-none overflow-y-auto overscroll-contain [overflow-anchor:none] lg:h-full lg:max-h-none"
+                data-public-catalog-scroll="species"
+              >
                 {visibleSpecies.length === 0 ? (
                   <div className="border-b border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
@@ -963,8 +1003,8 @@ export function PublicCatalogPage() {
               </div>
             </section>
 
-            <section className="min-w-0 border-t border-white/10 bg-[#061725] lg:border-l lg:border-t-0">
-              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
+            <section className="min-w-0 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:flex lg:h-[calc(100dvh-5rem)] lg:flex-col lg:overflow-hidden lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:z-20 lg:shrink-0">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
@@ -1009,7 +1049,11 @@ export function PublicCatalogPage() {
                   </div>
                 </div>
               </div>
-              <div className="min-h-[calc(100dvh-15rem)]">
+              <div
+                ref={specimenListRef}
+                className="min-h-[calc(100dvh-15rem)] [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
+                data-public-catalog-scroll="specimens"
+              >
                 {filteredSpecimens.length === 0 ? (
                   <EmptyState text="当前筛选下没有可展示个体。" />
                 ) : (
