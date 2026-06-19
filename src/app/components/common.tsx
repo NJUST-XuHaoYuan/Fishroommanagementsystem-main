@@ -115,7 +115,7 @@ export function DataTable<T extends { id: string }>({
               changePage(1);
             }}
             placeholder={searchPlaceholder}
-            className="pl-9"
+            className="fishroom-control pl-9"
           />
         </div>
         {onAdd && (
@@ -124,20 +124,20 @@ export function DataTable<T extends { id: string }>({
           </Button>
         )}
       </div>
-      <div className="hidden rounded-lg border bg-card overflow-x-auto md:block">
+      <div className="fishroom-table-shell hidden overflow-x-auto rounded-xl md:block">
         <table className="w-full">
-          <thead className="bg-muted/50">
+          <thead>
             <tr>
               {columns.map((c) => (
                 <th
                   key={c.key}
-                  className="text-left px-4 py-3 text-sm"
+                  className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground"
                   style={c.width ? { width: c.width } : undefined}
                 >
                   {c.title}
                 </th>
               ))}
-              {actions && <th className="text-right px-4 py-3 text-sm w-40">操作</th>}
+              {actions && <th className="w-40 px-4 py-3 text-right text-xs font-semibold text-muted-foreground">操作</th>}
             </tr>
           </thead>
           <tbody>
@@ -145,20 +145,20 @@ export function DataTable<T extends { id: string }>({
               <tr>
                 <td
                   colSpan={columns.length + (actions ? 1 : 0)}
-                  className="px-4 py-12 text-center text-muted-foreground text-sm"
+                  className="px-4 py-14 text-center text-sm text-muted-foreground"
                 >
-                  暂无数据
+                  暂无数据，使用上方操作新增记录。
                 </td>
               </tr>
             ) : (
               slice.map((row) => (
                 <tr
                   key={row.id}
-                  className={`border-t hover:bg-muted/30 ${onRowDoubleClick ? "cursor-pointer" : ""}`}
+                  className={`border-t transition-colors ${onRowDoubleClick ? "cursor-pointer" : ""}`}
                   onDoubleClick={() => onRowDoubleClick?.(row)}
                 >
-                  {columns.map((c) => (
-                    <td key={c.key} className="px-4 py-3 text-sm">
+                  {columns.map((c, index) => (
+                    <td key={c.key} className={`px-4 py-3 text-sm ${index === 0 ? "font-medium text-foreground" : ""}`}>
                       {c.render ? c.render(row) : String((row as any)[c.key] ?? "")}
                     </td>
                   ))}
@@ -172,14 +172,14 @@ export function DataTable<T extends { id: string }>({
 
       <div className="flex flex-col gap-3 md:hidden">
         {slice.length === 0 ? (
-          <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
-            暂无数据
+          <div className="fishroom-card rounded-xl px-4 py-10 text-center text-sm text-muted-foreground">
+            暂无数据，使用上方操作新增记录。
           </div>
         ) : (
           slice.map((row) => (
             <div
               key={row.id}
-              className={`rounded-lg border bg-card p-4 shadow-sm ${onRowDoubleClick ? "cursor-pointer" : ""}`}
+              className={`fishroom-card rounded-xl p-4 ${onRowDoubleClick ? "cursor-pointer" : ""}`}
               onDoubleClick={() => onRowDoubleClick?.(row)}
             >
               <div className="flex flex-col gap-3">

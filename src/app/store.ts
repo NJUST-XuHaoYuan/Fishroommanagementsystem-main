@@ -172,6 +172,8 @@ export type StockLossRecord = {
 };
 
 export type OrderStatus = "pending" | "confirmed" | "shipped" | "completed" | "cancelled" | "damaged";
+export const ORDER_SOURCE_OPTIONS = ["线下", "平台下单", "私域线上"] as const;
+export type OrderSource = typeof ORDER_SOURCE_OPTIONS[number];
 
 export type OrderItem = {
   stockItemId: string;
@@ -200,6 +202,7 @@ export type Order = {
   createdAt?: string;
   customerId: string;
   date: string;
+  source?: OrderSource | string;
   plannedShipDate?: string;
   contactPerson?: string;
   items: OrderItem[];
@@ -494,6 +497,7 @@ export const initialState: Store = {
       orderNo: "SO-2026-001",
       customerId: "c1",
       date: "2026-04-22",
+      source: "线下",
       plannedShipDate: "2026-04-25",
       contactPerson: "admin",
       items: [{ stockItemId: "i5", productId: "p3", price: 350, commissionRate: 0 }],

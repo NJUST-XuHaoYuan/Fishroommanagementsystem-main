@@ -6,6 +6,7 @@ import { Label } from "./ui/label";
 import { Button } from "./ui/button";
 import { toast } from "sonner";
 import { saveAuthSession } from "../utils/authSession";
+import { ArrowRight, LockKeyhole, Waves } from "lucide-react";
 
 export function Login() {
   const { setState } = useStore();
@@ -45,32 +46,85 @@ export function Login() {
   };
 
   return (
-    <div className="size-full min-h-screen flex items-center justify-center bg-slate-50 p-6">
-      <Card className="w-full max-w-md p-8">
-        <div className="flex flex-col items-center gap-2 mb-6">
-          <div className="size-16 overflow-hidden rounded-2xl border bg-white">
-            <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-full object-contain p-1" />
+    <div className="fishroom-login flex min-h-screen items-center justify-center p-4 sm:p-6">
+      <div className="grid w-full max-w-5xl gap-4 lg:grid-cols-[minmax(0,1fr)_26rem]">
+        <section className="fishroom-login-aside hidden min-h-[34rem] rounded-2xl p-8 lg:flex lg:flex-col lg:justify-between">
+          <div>
+            <div className="flex items-center gap-3">
+              <div className="grid size-12 place-items-center rounded-xl bg-card/70">
+                <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-10 object-contain" />
+              </div>
+              <div>
+                <div className="text-lg font-semibold">海水鱼房管理系统</div>
+                <div className="mt-1 text-sm opacity-80">面向库存、维护和销售的运营台</div>
+              </div>
+            </div>
+            <div className="mt-12 max-w-xl">
+              <h1 className="text-[2rem] font-semibold leading-tight text-balance">
+                从在缸个体到维护记录，每一步都回到真实库存。
+              </h1>
+              <p className="mt-4 max-w-[34rem] text-sm leading-7 opacity-80">
+                店员进入后台处理入库、维护、损耗和订单。
+              </p>
+            </div>
           </div>
-          <h1>海水鱼房管理系统</h1>
-          <p className="text-sm text-muted-foreground">登录以继续</p>
-        </div>
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="u">用户名</Label>
-            <Input id="u" value={u} onChange={(e) => setU(e.target.value)} />
+          <div className="grid gap-3 text-sm">
+            <div className="flex items-center gap-2">
+              <Waves className="size-4" />
+              <span>数据集中维护，减少重复录入和遗漏</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <LockKeyhole className="size-4" />
+              <span>后台数据按账号权限进入，不暴露客户和成本信息</span>
+            </div>
           </div>
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="p">密码</Label>
-            <Input id="p" type="password" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        </section>
+
+        <Card className="fishroom-login-panel rounded-2xl p-6 sm:p-8">
+          <div className="mb-7 flex items-center gap-3 lg:hidden">
+            <div className="grid size-12 place-items-center rounded-xl border bg-card">
+              <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-10 object-contain" />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold">海水鱼房管理系统</h1>
+              <p className="text-sm text-muted-foreground">登录以继续</p>
+            </div>
           </div>
-          <Button onClick={submit} className="w-full" disabled={loggingIn}>
-            {loggingIn ? "登录中…" : "登录"}
-          </Button>
-          <div className="text-xs text-muted-foreground text-center leading-relaxed">
-            请输入账号密码登录，账号可在人员管理中维护
+
+          <div className="hidden lg:block">
+            <div className="inline-flex rounded-full border bg-secondary px-3 py-1 text-xs font-medium text-secondary-foreground">
+              员工入口
+            </div>
+            <h2 className="fishroom-page-title mt-4">登录后台</h2>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">使用人员管理中维护的账号进入系统。</p>
           </div>
-        </div>
-      </Card>
+
+          <div className="mt-7 flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="u">用户名</Label>
+              <Input id="u" value={u} onChange={(e) => setU(e.target.value)} autoComplete="username" />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="p">密码</Label>
+              <Input
+                id="p"
+                type="password"
+                value={p}
+                onChange={(e) => setP(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+                autoComplete="current-password"
+              />
+            </div>
+            <Button onClick={submit} className="h-11 w-full" disabled={loggingIn}>
+              {loggingIn ? "登录中…" : "登录后台"}
+              {!loggingIn && <ArrowRight className="size-4" />}
+            </Button>
+            <div className="rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              后台账号只用于内部库存、维护和销售操作。
+            </div>
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }

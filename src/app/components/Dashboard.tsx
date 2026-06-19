@@ -1655,15 +1655,19 @@ export function Dashboard() {
 
   return (
     <div className="flex flex-col gap-6">
+      <div className="fishroom-card rounded-2xl p-5 sm:p-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h2>欢迎回来，{state.user?.username}</h2>
-          <p className="text-sm text-muted-foreground">
+          <div className="inline-flex rounded-full border bg-secondary px-3 py-1 text-xs font-medium text-secondary-foreground">
+            当前看板：{dashboardSiteId === ALL_SITE_ID ? "全部场地" : siteName(state, dashboardSiteId)}
+          </div>
+          <h2 className="fishroom-page-title mt-3">欢迎回来，{state.user?.username}</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
             海水鱼房经营概览 · 当前看板：{dashboardSiteId === ALL_SITE_ID ? "全部场地" : siteName(state, dashboardSiteId)}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm text-muted-foreground">
+          <label className="fishroom-control flex items-center gap-2 rounded-lg border px-3 py-2 text-sm text-muted-foreground">
             <span>看板范围</span>
             <select
               value={dashboardSiteId}
@@ -1690,6 +1694,7 @@ export function Dashboard() {
             <Settings2 className="size-4" />
           </Button>
         </div>
+      </div>
       </div>
       <Dialog open={fishListSettingsOpen} onOpenChange={setFishListSettingsOpen}>
         <DialogContent className="sm:max-w-2xl">
@@ -1722,19 +1727,19 @@ export function Dashboard() {
         {cards.map((c) => {
           const Icon = c.icon;
           return (
-            <Card key={c.label} className="p-5 flex items-center gap-4">
-              <div className={`size-12 rounded-xl ${c.color} text-white flex items-center justify-center`}>
+            <Card key={c.label} className="fishroom-card fishroom-metric-card p-5 flex items-center gap-4">
+              <div className="fishroom-metric-icon size-12 rounded-xl flex items-center justify-center">
                 <Icon className="size-6" />
               </div>
               <div>
-                <div className="text-xs text-muted-foreground">{c.label}</div>
-                <div className="text-2xl font-semibold">{c.value}</div>
+                <div className="text-xs font-medium text-muted-foreground">{c.label}</div>
+                <div className="mt-1 text-2xl font-semibold tracking-normal">{c.value}</div>
               </div>
             </Card>
           );
         })}
       </div>
-      <Card className="order-3 p-5">
+      <Card className="fishroom-card order-3 p-5">
         <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
           <div>
             <h3 className="text-base font-semibold">关注商品 / 物种</h3>
@@ -1755,7 +1760,7 @@ export function Dashboard() {
                   }}
                   className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                     focusMode === mode
-                      ? "bg-white text-sky-700 shadow-sm"
+                      ? "bg-card text-primary"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -1767,13 +1772,13 @@ export function Dashboard() {
               value={focusSearch}
               onChange={(event) => setFocusSearch(event.target.value)}
               placeholder={focusMode === "species" ? "搜索物种/俗名..." : "搜索商品/尺寸/产地..."}
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm outline-none transition-colors focus:border-sky-400 sm:w-56"
+              className="fishroom-control h-9 w-full rounded-lg border px-3 text-sm outline-none transition-colors focus:border-primary sm:w-56"
             />
           </div>
         </div>
 
         <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.75fr)_minmax(0,1.65fr)]">
-          <div className="overflow-hidden rounded-lg border bg-white">
+          <div className="fishroom-table-shell overflow-hidden rounded-xl">
             <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-3 py-2">
               <div className="text-sm font-medium">{focusMode === "species" ? "物种列表" : "商品列表"}</div>
               <div className="text-xs text-muted-foreground">按在缸库存从多到少</div>
@@ -1790,12 +1795,12 @@ export function Dashboard() {
                   onClick={() => setFocusId(option.id)}
                   className={`flex w-full items-center gap-3 border-b px-3 py-3 text-left transition-colors last:border-b-0 ${
                     focusId === option.id
-                      ? "bg-sky-50 text-sky-900"
+                      ? "bg-secondary text-secondary-foreground"
                       : "hover:bg-muted/40"
                   }`}
                 >
                   <span className={`flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
-                    focusId === option.id ? "bg-sky-600 text-white" : "bg-muted text-muted-foreground"
+                    focusId === option.id ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
                   }`}>
                     {index + 1}
                   </span>
@@ -1816,7 +1821,7 @@ export function Dashboard() {
 
           <div className="min-w-0">
             {!focusMetrics ? (
-              <div className="rounded-lg border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+              <div className="fishroom-card rounded-xl px-4 py-8 text-center text-sm text-muted-foreground">
                 {focusLoading ? "正在加载关注看板数据..." : "请选择要关注的商品或物种"}
               </div>
             ) : (
@@ -1859,7 +1864,7 @@ export function Dashboard() {
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.7fr)]">
-              <div className="overflow-hidden rounded-lg border">
+              <div className="fishroom-table-shell overflow-hidden rounded-xl">
                 <div className="border-b bg-muted/30 px-3 py-2 text-sm font-medium">
                   {focusMode === "species" ? "商品规格明细" : "商品明细"}
                 </div>
@@ -1905,7 +1910,7 @@ export function Dashboard() {
                 </div>
               </div>
 
-              <div className="rounded-lg border bg-muted/10 p-4">
+              <div className="fishroom-card rounded-xl p-4">
                 <div className="text-sm font-medium">口径说明</div>
                 <div className="mt-3 flex flex-col gap-2 text-xs text-muted-foreground">
                   <p>销售：统计未取消订单中的对应商品金额和数量。</p>
@@ -1914,7 +1919,7 @@ export function Dashboard() {
                   <p>在缸：未损耗、未出库的实物；其中已售在缸表示客户已下单但还没出库。</p>
                   <p>损耗率：损耗数量 / 该关注对象历史入库数量。</p>
                   {focusMetrics.currentAverageAgeDays > 0 && (
-                    <p className="rounded border bg-white px-2 py-1 text-slate-700">
+                    <p className="rounded-lg border bg-card px-2 py-1 text-foreground">
                       当前可售鱼平均库龄：{focusMetrics.currentAverageAgeDays.toFixed(1)} 天
                     </p>
                   )}
@@ -1927,7 +1932,7 @@ export function Dashboard() {
         </div>
       </Card>
       <div className="order-1 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.9fr)]">
-        <Card className="p-5">
+        <Card className="fishroom-card p-5">
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">每日销售与退款</h3>
@@ -2078,7 +2083,7 @@ export function Dashboard() {
           </div>
         </Card>
 
-	        <Card className="p-5">
+        <Card className="fishroom-card p-5">
 	          <div className="mb-4">
 	            <h3 className="text-base font-semibold">鱼类状态构成</h3>
 	            <p className="text-xs text-muted-foreground">仅统计鱼类，虾类等无脊椎生物不计入</p>
@@ -2123,7 +2128,7 @@ export function Dashboard() {
             ))}
           </div>
         </Card>
-        <Card className="p-5 xl:col-span-2">
+        <Card className="fishroom-card p-5 xl:col-span-2">
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">每日销售人员成交额</h3>
@@ -2320,7 +2325,7 @@ export function Dashboard() {
             统计有效订单的调整后应付金额；取消订单不计入，报损退款调整会从成交额中扣除。
           </div>
         </Card>
-        <Card className="p-5 xl:col-span-2">
+        <Card className="fishroom-card p-5 xl:col-span-2">
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">每日损耗趋势</h3>
@@ -2517,7 +2522,7 @@ export function Dashboard() {
           </div>
         </Card>
       </div>
-      <Card className="order-4 p-6">
+      <Card className="fishroom-card order-4 p-6">
         <h3 className="mb-3">使用提示</h3>
         <ul className="text-sm text-muted-foreground flex flex-col gap-2 list-disc pl-5">
           <li>在「品名管理」中先维护物种和商品（带图片），再开始入库。</li>

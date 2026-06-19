@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
 import { Login } from "./components/Login";
+import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
@@ -341,9 +342,16 @@ function hasActiveEditingSurface(): boolean {
   return Boolean(document.querySelector("[role='dialog'], [data-radix-popper-content-wrapper]"));
 }
 
-export default function App() {
+function AdminApp() {
   const [state, setStateBase] = useState<Store>(initialState);
   const [view, setView] = useState<ViewKey>("dashboard");
+  const [showStaffLogin, setShowStaffLogin] = useState(() => {
+    try {
+      return window.location.hash === "#admin";
+    } catch {
+      return false;
+    }
+  });
   const [loading, setLoading] = useState(true);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [stateLoading, setStateLoading] = useState(false);
@@ -1122,6 +1130,14 @@ export default function App() {
   }, [state.user]);
 
   useEffect(() => {
+    if (state.user) return;
+    const syncStaffLoginHash = () => setShowStaffLogin(window.location.hash === "#admin");
+    window.addEventListener("hashchange", syncStaffLoginHash);
+    syncStaffLoginHash();
+    return () => window.removeEventListener("hashchange", syncStaffLoginHash);
+  }, [state.user]);
+
+  useEffect(() => {
     if (!state.user) return;
     const expiresAt = getAuthSessionExpiresAt();
     if (!expiresAt) return;
@@ -1241,7 +1257,16 @@ export default function App() {
 	  return (
 			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {!state.user ? (
-        <Login />
+        showStaffLogin ? (
+          <Login />
+        ) : (
+          <PublicCatalogPage
+            onStaffLogin={() => {
+              window.location.hash = "admin";
+              setShowStaffLogin(true);
+            }}
+          />
+        )
       ) : (
         <Layout view={view} setView={handleSetView} saveStatus={saveStatus}>
           <div key={`${activeSiteId}:${view}`}>{viewContent}</div>
@@ -1250,4 +1275,8 @@ export default function App() {
       <Toaster position="top-center" />
     </StoreContext.Provider>
   );
+}
+
+export default function App() {
+  return <AdminApp />;
 }

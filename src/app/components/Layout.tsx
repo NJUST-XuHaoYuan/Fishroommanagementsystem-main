@@ -117,13 +117,13 @@ function SaveStatus({ saveStatus }: { saveStatus: Props["saveStatus"] }) {
 
 function Brand() {
   return (
-    <div className="p-4 border-b flex items-center gap-3">
-      <div className="size-10 overflow-hidden rounded-xl border bg-white shrink-0">
+    <div className="fishroom-brand flex items-center gap-3 px-4">
+      <div className="fishroom-brand-mark size-11 overflow-hidden rounded-xl shrink-0">
         <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-full object-contain p-1" />
       </div>
       <div className="min-w-0">
-        <div className="font-medium truncate">海水鱼房</div>
-        <div className="text-xs text-muted-foreground">管理系统</div>
+        <div className="truncate text-[15px] font-semibold text-foreground">海水鱼房</div>
+        <div className="mt-0.5 text-xs text-muted-foreground">库存 · 维护 · 销售</div>
       </div>
     </div>
   );
@@ -167,17 +167,17 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const navButtonClass = (active: boolean, level: "main" | "sub" = "sub") =>
     [
-      "flex w-full items-center rounded-md text-left transition-colors",
-      active ? "bg-sky-100 text-sky-700" : "hover:bg-muted",
+      "fishroom-nav-button flex w-full items-center rounded-lg text-left transition-colors",
+      active ? "is-active" : "",
       level === "main"
-        ? "gap-2 px-3 py-2.5 text-base font-medium"
+        ? "gap-2 px-3 py-2.5 text-sm font-semibold"
         : "justify-between px-8 py-2 text-sm",
     ].join(" ");
 
   const NavContent = () => (
     <>
       <Brand />
-      <nav className="flex-1 overflow-y-auto p-3 flex flex-col gap-4">
+      <nav className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
         <button
           onClick={() => navigate("dashboard")}
           className={navButtonClass(view === "dashboard", "main")}
@@ -195,8 +195,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         {NAV.map((section) => {
           const Icon = section.icon;
           return (
-            <div key={section.title} className="flex flex-col gap-1">
-              <div className="px-3 py-1 text-base font-semibold text-foreground flex items-center gap-2">
+            <div key={section.title} className="fishroom-nav-section">
+              <div className="fishroom-nav-title">
                 <Icon className="size-4 shrink-0" />
                 {section.title}
               </div>
@@ -215,8 +215,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         })}
         {user.role === "admin" && (
           <>
-            <div className="flex flex-col gap-1">
-              <div className="px-3 py-1 text-base font-semibold text-foreground flex items-center gap-2">
+            <div className="fishroom-nav-section">
+              <div className="fishroom-nav-title">
                 <Users className="size-4 shrink-0" />
                 人员管理
               </div>
@@ -235,8 +235,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                 {view === "accounts" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
             </div>
-            <div className="flex flex-col gap-1">
-              <div className="px-3 py-1 text-base font-semibold text-foreground flex items-center gap-2">
+            <div className="fishroom-nav-section">
+              <div className="fishroom-nav-title">
                 <ScrollText className="size-4 shrink-0" />
                 日志管理
               </div>
@@ -251,11 +251,11 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </>
         )}
       </nav>
-      <div className="border-t p-3 flex flex-col gap-2">
+      <div className="border-t p-3 flex flex-col gap-2 bg-sidebar">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col">
-            <div className="text-sm truncate">{user.username}</div>
-            <Badge variant="secondary" className="w-fit text-xs">
+            <div className="text-sm font-medium truncate">{user.username}</div>
+            <Badge variant="secondary" className="fishroom-status-pill w-fit text-xs">
               {user.role === "admin" ? "管理员" : "店员"}
             </Badge>
           </div>
@@ -278,7 +278,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const SiteSelector = ({ compact = false }: { compact?: boolean }) => (
     <label className={[
-      "flex items-center gap-2 rounded-md border bg-white px-2 py-1.5 text-xs text-muted-foreground",
+      "fishroom-control flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs text-muted-foreground",
       compact ? "max-w-[140px]" : "",
     ].join(" ")}>
       <MapPin className="size-3.5 shrink-0 text-sky-600" />
@@ -297,8 +297,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   );
 
   return (
-    <div className="fishroom-app size-full min-h-screen flex bg-slate-50">
-      <aside className="hidden w-64 shrink-0 bg-white border-r lg:flex lg:flex-col">
+    <div className="fishroom-app size-full min-h-screen flex">
+      <aside className="fishroom-sidebar hidden w-72 shrink-0 lg:flex lg:flex-col">
         <NavContent />
       </aside>
 
@@ -312,7 +312,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       </Sheet>
 
       <main className="flex-1 flex min-w-0 flex-col overflow-hidden">
-        <header className="sticky top-0 z-30 h-14 bg-white border-b px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
+        <header className="fishroom-topbar sticky top-0 z-30 h-14 px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <Button
               variant="ghost"
@@ -329,7 +329,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                   {currentSection}
                 </div>
               )}
-              <div className="truncate font-medium text-foreground">{currentLabel}</div>
+              <div className="truncate font-semibold text-foreground">{currentLabel}</div>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -338,7 +338,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <header className="hidden h-14 bg-white border-b px-6 lg:flex items-center justify-between text-sm">
+        <header className="fishroom-topbar hidden h-14 px-6 lg:flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
             {currentSection && (
               <>
@@ -346,7 +346,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                 <ChevronRight className="size-4 text-muted-foreground" />
               </>
             )}
-            <span className="font-medium text-foreground">{currentLabel}</span>
+            <span className="font-semibold text-foreground">{currentLabel}</span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground">当前：{activeSiteName}</div>

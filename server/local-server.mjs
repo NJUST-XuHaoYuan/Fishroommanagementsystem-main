@@ -508,6 +508,89 @@ function isPhysicallyInTank(item, shippedIds) {
   return item && !item.lost && !shippedIds.has(String(item.id));
 }
 
+function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
+  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
+  const shippedIds = shippedOutStockIds(scopedState);
+  const species = Array.isArray(scopedState.species) ? scopedState.species : [];
+  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
+  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const sellableStock = stock.filter((item) =>
+    !item?.sold &&
+    item?.status !== "sick" &&
+    isPhysicallyInTank(item, shippedIds)
+  );
+  const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
+  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
+  const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
+  const latestBioByStockId = new Map();
+  bioRecords
+    .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
+    .forEach((record) => {
+      const stockItemId = String(record?.stockItemId ?? "");
+      const current = latestBioByStockId.get(stockItemId);
+      if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
+        latestBioByStockId.set(stockItemId, record);
+      }
+    });
+  const categorySet = new Set(
+    species
+      .filter((item) => speciesIds.has(String(item?.id ?? "")))
+      .map((item) => String(item?.category ?? "").trim())
+      .filter(Boolean)
+  );
+  const storedCategories = Array.isArray(scopedState.speciesCategories) ? scopedState.speciesCategories : [];
+  const speciesCategories = [
+    ...storedCategories.map((item) => String(item ?? "").trim()).filter((item) => item && categorySet.has(item)),
+    ...[...categorySet].filter((item) => !storedCategories.includes(item)),
+  ];
+
+  return {
+    speciesCategories,
+    species: species
+      .filter((item) => speciesIds.has(String(item?.id ?? "")))
+      .map((item) => ({
+        id: String(item?.id ?? ""),
+        name: String(item?.name ?? ""),
+        scientificName: String(item?.scientificName ?? ""),
+        category: String(item?.category ?? ""),
+        commonNames: Array.isArray(item?.commonNames) ? item.commonNames.map(String).slice(0, 6) : [],
+        description: clampText(item?.description ?? "", 260),
+        imageUrl: String(item?.imageUrl ?? ""),
+      })),
+    products: availableProducts
+      .filter((item) => productIds.has(String(item?.id ?? "")))
+      .map((item) => ({
+        id: String(item?.id ?? ""),
+        speciesId: String(item?.speciesId ?? ""),
+        name: String(item?.name ?? ""),
+        size: String(item?.size ?? ""),
+        origin: String(item?.origin ?? ""),
+        imageUrl: String(item?.imageUrl ?? ""),
+        defaultPrice: Number(item?.defaultPrice ?? 0),
+        notes: clampText(item?.notes ?? "", 260),
+      })),
+    stock: sellableStock.map((item) => ({
+      id: String(item?.id ?? ""),
+      productId: String(item?.productId ?? ""),
+      code: String(item?.code ?? ""),
+      status: item?.status === "feeding" ? "feeding" : "healthy",
+      inDate: String(item?.inDate ?? ""),
+      basePrice: Number(item?.basePrice ?? 0),
+      notes: clampText(item?.notes ?? "", 120),
+    })),
+    bioRecords: [...latestBioByStockId.values()]
+      .map((record) => ({
+        id: String(record?.id ?? ""),
+        stockItemId: String(record?.stockItemId ?? ""),
+        date: String(record?.date ?? ""),
+        text: clampText(record?.text ?? "", 180),
+      })),
+  };
+}
+
 function normalizePickupShipmentRecord(shipment = {}) {
   if (shipment?.shipMethod !== "pickup") return shipment;
   const next = {
@@ -1157,6 +1240,7 @@ async function authenticateApiRequest(req) {
 function isPublicApiRoute(req, url) {
   if (req.method === "OPTIONS") return true;
   if (url.pathname === "/api/health" && req.method === "GET") return true;
+  if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
   if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
   if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
   if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") return true;
@@ -1943,6 +2027,8 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
   };
 }
 
+const ORDER_SOURCE_VALUES = new Set(["线下", "平台下单", "私域线上"]);
+
 function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
   const incomingSiteId = body.siteId === ALL_SITE_ID ? DEFAULT_SITE_ID : body.siteId;
   const siteId = normalizeSiteId(incomingSiteId ?? currentOrder?.siteId);
@@ -1953,6 +2039,10 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const date = String(body.date ?? currentOrder?.date ?? "").trim();
   if (!date) throw new Error("下单日期不能为空");
   if (date > todayInChina()) throw new Error("下单日期不能晚于今天");
+  const hasSourceInput = Object.prototype.hasOwnProperty.call(body, "source");
+  const source = String(body.source ?? currentOrder?.source ?? "").trim();
+  if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
+  if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
   const plannedShipDate = String(body.plannedShipDate ?? "").trim();
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
@@ -1993,6 +2083,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     siteId,
     customerId,
     date,
+    source,
     plannedShipDate: plannedShipDate || undefined,
     contactPerson,
     items,
@@ -2074,6 +2165,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "siteId",
   "customerId",
   "date",
+  "source",
   "plannedShipDate",
   "contactPerson",
   "items",
@@ -2088,6 +2180,7 @@ function orderMutableFieldsComparable(order = {}) {
     siteId: normalizeSiteId(order.siteId),
     customerId: String(order.customerId ?? "").trim(),
     date: String(order.date ?? "").trim(),
+    source: String(order.source ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
     items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
@@ -2876,6 +2969,19 @@ async function handleApi(req, res, url) {
       return;
     }
     req.auth = auth;
+  }
+
+  if (url.pathname === "/api/public/catalog" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      sendJson(req, res, 200, {
+        ok: true,
+        catalog: buildPublicCatalog(rows[0]?.data ?? {}, url.searchParams.get("siteId") ?? ALL_SITE_ID),
+      });
+    } catch (error) {
+      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public catalog" });
+    }
+    return;
   }
 
   if (url.pathname === "/api/auth/me" && req.method === "GET") {

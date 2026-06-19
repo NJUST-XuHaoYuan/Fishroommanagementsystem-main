@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   PaymentRecord, PaymentType, Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
+  ORDER_SOURCE_OPTIONS,
 } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -815,6 +816,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       index + 1,
       order.orderNo,
       getOrderStatusText(order, state.shipments),
+      order.source || "",
       orderCustomer?.name ?? "—",
       orderCustomer?.phone || "",
       order.date,
@@ -922,7 +924,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "客户", "手机", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "客户", "手机", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
         ${table("资金往来", ["订单号", "客户", "序号", "时间", "类型", "金额", "备注"], paymentRows)}
@@ -3662,7 +3664,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3719,6 +3721,7 @@ function OrderDetailDialog({
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
+      source: order.source ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
       shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
@@ -3738,6 +3741,7 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
+    if (!editForm.source.trim()) return toast.error("请选择订单来源");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
     if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
@@ -3750,6 +3754,7 @@ function OrderDetailDialog({
         orderId: order.id,
         customerId: editForm.customerId,
         date: editForm.date,
+        source: editForm.source.trim(),
         plannedShipDate: editForm.plannedShipDate || undefined,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
@@ -4197,12 +4202,28 @@ function OrderDetailDialog({
 
             {/* ── 基本信息 ── */}
             {editMode && editForm ? (
-              <div className="rounded-lg border p-4 grid grid-cols-4 gap-3 bg-amber-50/50">
+              <div className="rounded-lg border p-4 grid grid-cols-5 gap-3 bg-amber-50/50">
                 <div className="grid gap-1.5">
                   <Label className="text-xs">客户</Label>
                   <CustomerCombobox value={editForm.customerId}
                     onChange={(id) => setEditForm((f) => f ? { ...f, customerId: id } : f)}
                     customers={state.customers ?? []} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">订单来源<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Select
+                    value={editForm.source}
+                    onValueChange={(value) => setEditForm((f) => f ? { ...f, source: value } : f)}
+                  >
+                    <SelectTrigger className={!editForm.source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                      <SelectValue placeholder="请选择来源" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ORDER_SOURCE_OPTIONS.map((source) => (
+                        <SelectItem key={source} value={source}>{source}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs">下单日期</Label>
@@ -4262,7 +4283,8 @@ function OrderDetailDialog({
                 <div><span className="text-muted-foreground">客户：</span><span className="font-medium">{customer?.name ?? "—"}</span></div>
                 <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
                 <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
-                <div><span className="text-muted-foreground">来源：</span>{customer?.source || "—"}</div>
+                <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
+                <div><span className="text-muted-foreground">订单来源：</span>{order.source || "—"}</div>
                 <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
                 <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
                 {order.status !== "completed" && (
@@ -5007,6 +5029,7 @@ function NewOrderDialog({
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
+  const [source, setSource] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
   const [notes, setNotes] = useState("");
@@ -5022,7 +5045,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5134,6 +5157,7 @@ function NewOrderDialog({
     if (!permission.requirePermission("create")) return;
     if (!customerId) return toast.error("请选择客户");
     if (date > today) return toast.error("下单日期不能晚于今天");
+    if (!source.trim()) return toast.error("请选择订单来源");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
@@ -5155,6 +5179,7 @@ function NewOrderDialog({
         siteId: activeSiteId,
         customerId,
         date,
+        source: source.trim(),
         plannedShipDate: plannedShipDate || undefined,
         contactPerson: contactPerson.trim(),
         items,
@@ -5210,6 +5235,19 @@ function NewOrderDialog({
                 <CustomerCombobox value={customerId} onChange={setCustomerId} customers={state.customers ?? []} />
               </div>
               <div className="grid gap-2">
+                <Label>来源<span className="text-red-500 ml-0.5">*</span></Label>
+                <Select value={source} onValueChange={setSource}>
+                  <SelectTrigger className={!source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectValue placeholder="请选择来源" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ORDER_SOURCE_OPTIONS.map((option) => (
+                      <SelectItem key={option} value={option}>{option}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
                 <Label>下单日期</Label>
                 <Input
                   type="date"
@@ -5253,7 +5291,7 @@ function NewOrderDialog({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="col-span-4 grid gap-2">
+              <div className="col-span-3 grid gap-2">
                 <Label>备注</Label>
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
               </div>
@@ -5570,6 +5608,7 @@ export function OrdersView() {
       const searchText = [
         order.orderNo,
         order.date,
+        order.source,
         order.plannedShipDate,
         getOrderStatusText(order, state.shipments),
         customer?.name,
@@ -5858,7 +5897,7 @@ export function OrdersView() {
 	      <DataTable
 	        data={filteredOrders}
         searchKeys={["searchText"] as (keyof OrderListRow)[]}
-        searchPlaceholder="搜索订单号、客户、商品、对接人..."
+        searchPlaceholder="搜索订单号、客户、商品、来源、对接人..."
         onAdd={permission.canCreate ? () => setNewOpen(true) : undefined}
 	        addLabel="新建订单"
 	        columns={[
@@ -5907,6 +5946,17 @@ export function OrdersView() {
                 </Button>
               );
             },
+          },
+          {
+            key: "source",
+            title: "来源",
+            render: (r) => r.source ? (
+              <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
+                {r.source}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            ),
           },
           { key: "date", title: "下单日期" },
           {

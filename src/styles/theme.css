@@ -2,43 +2,48 @@
 
 :root {
   --font-size: 14px;
-  --background: #ffffff;
-  --foreground: oklch(0.145 0 0);
-  --card: #ffffff;
-  --card-foreground: oklch(0.145 0 0);
-  --popover: #ffffff;
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: #030213;
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.95 0.0058 264.53);
-  --secondary-foreground: #030213;
-  --muted: #ececf0;
-  --muted-foreground: #717182;
-  --accent: #e9ebef;
-  --accent-foreground: #030213;
-  --destructive: #d4183d;
-  --destructive-foreground: #ffffff;
-  --border: rgba(0, 0, 0, 0.1);
-  --input: transparent;
-  --input-background: #f3f3f5;
-  --switch-background: #cbced4;
+  --background: oklch(0.968 0.003 260);
+  --foreground: oklch(0.205 0.006 260);
+  --card: oklch(0.992 0.001 260);
+  --card-foreground: oklch(0.205 0.006 260);
+  --popover: oklch(0.992 0.001 260);
+  --popover-foreground: oklch(0.205 0.006 260);
+  --primary: oklch(0.225 0.006 260);
+  --primary-foreground: oklch(0.985 0.001 260);
+  --secondary: oklch(0.925 0.003 260);
+  --secondary-foreground: oklch(0.245 0.006 260);
+  --muted: oklch(0.925 0.003 260);
+  --muted-foreground: oklch(0.455 0.006 260);
+  --accent: oklch(0.91 0.006 260);
+  --accent-foreground: oklch(0.235 0.006 260);
+  --destructive: oklch(0.55 0.18 25);
+  --destructive-foreground: oklch(0.985 0.006 25);
+  --border: oklch(0.84 0.004 260);
+  --input: oklch(0.84 0.004 260);
+  --input-background: oklch(0.985 0.001 260);
+  --switch-background: oklch(0.76 0.004 260);
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
+  --ring: oklch(0.42 0.006 260);
+  --chart-1: oklch(0.36 0.006 260);
+  --chart-2: oklch(0.58 0.16 38);
+  --chart-3: oklch(0.52 0.11 232);
+  --chart-4: oklch(0.68 0.13 145);
+  --chart-5: oklch(0.62 0.15 18);
   --radius: 0.625rem;
-  --sidebar: #ffffff;
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: #030213;
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0.001 260);
+  --sidebar-foreground: oklch(0.205 0.006 260);
+  --sidebar-primary: oklch(0.225 0.006 260);
+  --sidebar-primary-foreground: oklch(0.985 0.001 260);
+  --sidebar-accent: oklch(0.925 0.003 260);
+  --sidebar-accent-foreground: oklch(0.245 0.006 260);
+  --sidebar-border: oklch(0.84 0.004 260);
+  --sidebar-ring: oklch(0.42 0.006 260);
+  --fishroom-coral: oklch(0.66 0.178 42);
+  --fishroom-coral-foreground: oklch(0.985 0.006 40);
+  --fishroom-reef: oklch(0.42 0.075 185);
+  --fishroom-reef-soft: oklch(0.93 0.018 185);
+  --fishroom-ink: oklch(0.205 0.006 260);
 }
 
 .dark {
@@ -126,6 +131,9 @@
 
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
   }
 
   /**
@@ -173,6 +181,13 @@
     line-height: 1.5;
   }
 
+  button,
+  input,
+  textarea,
+  select {
+    letter-spacing: 0;
+  }
+
   input {
     font-size: var(--text-base);
     font-weight: var(--font-weight-normal);
@@ -181,6 +196,167 @@
 }
 
 @layer components {
+  .fishroom-app {
+    color: var(--fishroom-ink);
+    background: oklch(0.968 0.003 260);
+  }
+
+  .fishroom-sidebar {
+    border-right: 1px solid var(--sidebar-border);
+    background: var(--sidebar);
+  }
+
+  .fishroom-brand {
+    min-height: 4.75rem;
+    border-bottom: 1px solid var(--sidebar-border);
+    background: oklch(0.992 0.001 260);
+  }
+
+  .fishroom-brand-mark {
+    border: 1px solid oklch(0.82 0.004 260);
+    background: oklch(0.962 0.002 260);
+  }
+
+  .fishroom-nav-section {
+    display: grid;
+    gap: 0.25rem;
+  }
+
+  .fishroom-nav-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.75rem;
+    color: oklch(0.42 0.006 260);
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .fishroom-nav-button {
+    min-height: 2.45rem;
+    border: 1px solid transparent;
+    color: oklch(0.32 0.006 260);
+  }
+
+  .fishroom-nav-button:hover {
+    border-color: oklch(0.84 0.004 260);
+    background: oklch(0.94 0.003 260);
+  }
+
+  .fishroom-nav-button.is-active {
+    border-color: oklch(0.225 0.006 260);
+    background: oklch(0.225 0.006 260);
+    color: oklch(0.985 0.001 260);
+  }
+
+  .fishroom-topbar {
+    border-bottom: 1px solid var(--border);
+    background: oklch(0.992 0.001 260 / 0.98);
+  }
+
+  .fishroom-content {
+    background: oklch(0.96 0.003 260);
+  }
+
+  .fishroom-page-title {
+    color: var(--fishroom-ink);
+    font-size: 1.35rem;
+    font-weight: 760;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+
+  .fishroom-control {
+    border-color: var(--border);
+    background: oklch(0.992 0.001 260);
+  }
+
+  .fishroom-card {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+
+  .fishroom-metric-card {
+    position: relative;
+    overflow: hidden;
+    min-height: 6.25rem;
+  }
+
+  .fishroom-metric-icon {
+    border: 1px solid oklch(0.82 0.004 260);
+    background: oklch(0.94 0.003 260);
+    color: var(--primary);
+  }
+
+  .fishroom-table-shell {
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+
+  .fishroom-table-shell thead {
+    background: oklch(0.935 0.003 260);
+  }
+
+  .fishroom-table-shell tbody tr:hover {
+    background: oklch(0.955 0.003 260);
+  }
+
+  .fishroom-login {
+    min-height: 100vh;
+    background: oklch(0.962 0.003 260);
+  }
+
+  .fishroom-login-panel {
+    border: 1px solid oklch(0.82 0.004 260);
+    background: oklch(0.992 0.001 260);
+  }
+
+  .fishroom-login-aside {
+    border: 1px solid oklch(0.28 0.006 260);
+    background: oklch(0.19 0.006 260);
+    color: oklch(0.94 0.002 260);
+  }
+
+  .fishroom-status-pill {
+    border: 1px solid oklch(0.82 0.004 260);
+    background: oklch(0.94 0.003 260);
+    color: oklch(0.32 0.006 260);
+  }
+
+  .fishroom-app .bg-sky-50,
+  .fishroom-app .bg-emerald-50,
+  .fishroom-app .bg-indigo-50,
+  .fishroom-app .bg-purple-50,
+  .fishroom-app .bg-orange-50,
+  .fishroom-app .bg-slate-50 {
+    background-color: oklch(0.955 0.003 260) !important;
+  }
+
+  .fishroom-app .bg-sky-100,
+  .fishroom-app .bg-emerald-100,
+  .fishroom-app .bg-indigo-100,
+  .fishroom-app .bg-purple-100,
+  .fishroom-app .bg-slate-100 {
+    background-color: oklch(0.91 0.004 260) !important;
+  }
+
+  .fishroom-app .bg-sky-600,
+  .fishroom-app .bg-emerald-600,
+  .fishroom-app .bg-indigo-600,
+  .fishroom-app .bg-purple-600 {
+    background-color: var(--primary) !important;
+  }
+
+  .fishroom-app .text-sky-700,
+  .fishroom-app .text-emerald-700,
+  .fishroom-app .text-indigo-700,
+  .fishroom-app .text-purple-700,
+  .fishroom-app .text-slate-700,
+  .fishroom-app .text-slate-600 {
+    color: oklch(0.28 0.006 260) !important;
+  }
+
   .logo-loader {
     position: relative;
     display: grid;
