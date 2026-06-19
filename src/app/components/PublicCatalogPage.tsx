@@ -896,30 +896,30 @@ export function PublicCatalogPage() {
               </div>
             </aside>
 
-            <section className="min-w-0 space-y-6">
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <section className="min-w-0 space-y-4">
+              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-3.5 sm:p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
                       <span>{selectedCategory.label}</span>
                       <span className="text-[#607c90]">/</span>
                       <span>{visibleSpecies.length} 个品种</span>
                     </div>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">选择品种</h3>
-                    <p className="mt-2 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
+                    <h3 className="mt-1.5 text-xl font-semibold text-white">选择品种</h3>
+                    <p className="mt-1.5 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
                       先选品种，下方只显示该品种的真实库存个体。
                     </p>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-[#061725] px-4 py-3 text-sm font-semibold text-[#a9bfce]">
+                  <div className="rounded-lg border border-white/10 bg-[#061725] px-3 py-2 text-sm font-semibold text-[#a9bfce]">
                     {selectedCategory.specimens} 条可售个体
                   </div>
                 </div>
                 {visibleSpecies.length === 0 ? (
-                  <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
+                  <div className="mt-4 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
                   </div>
                 ) : (
-                  <div className="mt-5 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
                     {visibleSpecies.map((card) => {
                       const active = selectedSpecies?.species.id === card.species.id;
                       const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
@@ -929,9 +929,9 @@ export function PublicCatalogPage() {
                           key={card.species.id}
                           type="button"
                           onClick={() => setSelectedSpeciesId(card.species.id)}
-                          className={`grid min-h-[7.5rem] grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 rounded-xl border p-3 text-left transition hover:-translate-y-0.5 active:translate-y-px ${
+                          className={`grid min-h-[4.75rem] grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-2 rounded-xl border p-2 text-left transition hover:-translate-y-0.5 active:translate-y-px ${
                             active
-                              ? "border-[#1ee6ef]/70 bg-[#123450] text-white shadow-[0_18px_38px_rgba(30,230,239,0.08)]"
+                              ? "border-[#1ee6ef]/70 bg-[#123450] text-white"
                               : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/22 hover:text-white"
                           }`}
                         >
@@ -948,14 +948,14 @@ export function PublicCatalogPage() {
                           <div className="min-w-0">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <div className="truncate text-base font-semibold">{card.species.name}</div>
+                                <div className="truncate text-[0.86rem] font-semibold">{card.species.name}</div>
                                 {card.species.scientificName && (
-                                  <div className="mt-1 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
+                                  <div className="mt-0.5 truncate text-[0.7rem] italic text-[#7893a6]">{card.species.scientificName}</div>
                                 )}
                               </div>
                               {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
                             </div>
-                            <div className="mt-3 text-xs font-medium text-[#91a8b8]">
+                            <div className="mt-1.5 truncate text-[0.72rem] font-medium text-[#91a8b8]">
                               {card.availableSpecimens.length} 条个体 · {card.priceRange}
                             </div>
                           </div>
@@ -966,19 +966,21 @@ export function PublicCatalogPage() {
                 )}
               </div>
 
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
-                <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-3.5 sm:p-4">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
                       <span>{selectedCategory.label}</span>
                       <span className="text-[#607c90]">/</span>
                       <span>{selectedSpecies?.species.name ?? "选择品种"}</span>
                     </div>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">具体个体</h3>
-                    {selectedSpecies?.species.scientificName && (
-                      <p className="mt-1 text-sm italic text-[#7893a6]">{selectedSpecies.species.scientificName}</p>
-                    )}
-                    <p className="mt-3 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
+                    <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <h3 className="text-xl font-semibold text-white">具体个体</h3>
+                      {selectedSpecies?.species.scientificName && (
+                        <span className="text-sm italic text-[#7893a6]">{selectedSpecies.species.scientificName}</span>
+                      )}
+                    </div>
+                    <p className="mt-1.5 max-w-[46rem] text-sm leading-6 text-[#91a8b8]">
                       {selectedSpecies
                         ? `${selectedSpecies.availableSpecimens.length} 条真实库存个体，最近到货 ${selectedSpecies.latestArrival}。点击任一具体个体查看养护记录和选鱼码。`
                         : "先选择一个品种，再查看具体库存个体。"}
@@ -1011,7 +1013,7 @@ export function PublicCatalogPage() {
                 {filteredSpecimens.length === 0 ? (
                   <EmptyState text="当前筛选下没有可展示个体。" />
                 ) : (
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <div className="mt-3 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                     {filteredSpecimens.map((specimen) => {
                       const active = specimen.id === selectedSpecimen?.id;
                       return (
@@ -1022,8 +1024,8 @@ export function PublicCatalogPage() {
                             setSelectedSpecimenId(specimen.id);
                             setDetailOpen(true);
                           }}
-                          className={`overflow-hidden rounded-[1.1rem] border bg-[#0b2033] text-left transition hover:-translate-y-0.5 active:translate-y-px ${
-                            active ? "border-[#1ee6ef]/70 shadow-[0_24px_48px_rgba(30,230,239,0.08)]" : "border-white/10 hover:border-white/22"
+                          className={`grid min-h-[6.75rem] grid-cols-[6.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-[#0b2033] text-left transition hover:-translate-y-0.5 active:translate-y-px ${
+                            active ? "border-[#1ee6ef]/70" : "border-white/10 hover:border-white/22"
                           }`}
                         >
                           <SpecimenImageFrame
@@ -1032,18 +1034,19 @@ export function PublicCatalogPage() {
                             alt={`${specimen.id} ${specimen.product.name}`}
                             label={specimen.imageLabel}
                             hasIndividualPhoto={specimen.hasIndividualPhoto}
-                            className="aspect-[1.28/1]"
+                            compact
+                            className="h-full min-h-[6.75rem]"
                             imageClassName="transition duration-500 hover:scale-[1.035]"
                           />
-                          <div className="p-4">
+                          <div className="min-w-0 p-2.5">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="text-xs font-semibold text-[#1ee6ef]">{specimen.id}</div>
-                                <h4 className="mt-1 truncate text-lg font-semibold text-white">{specimen.product.name}</h4>
+                                <h4 className="mt-0.5 truncate text-sm font-semibold text-white">{specimen.product.name}</h4>
                               </div>
-                              <div className="shrink-0 text-lg font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
+                              <div className="shrink-0 text-sm font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
                             </div>
-                            <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-[#a9bfce]">
+                            <div className="mt-2.5 grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-xs text-[#a9bfce]">
                               <SpecLine label="尺寸" value={specimen.size} />
                               <SpecLine label="状态" value={specimen.statusLabel} />
                               <SpecLine label="缸位" value={specimen.locationLabel} />
@@ -1098,6 +1101,7 @@ function SpecimenImageFrame({
   alt,
   label,
   hasIndividualPhoto,
+  compact = false,
   className = "",
   imageClassName = "",
 }: {
@@ -1106,6 +1110,7 @@ function SpecimenImageFrame({
   alt: string;
   label: string;
   hasIndividualPhoto: boolean;
+  compact?: boolean;
   className?: string;
   imageClassName?: string;
 }) {
@@ -1120,7 +1125,9 @@ function SpecimenImageFrame({
         className={`h-full w-full object-cover ${hasIndividualPhoto ? "" : "opacity-[0.82] saturate-[0.78]"} ${imageClassName}`}
       />
       <div
-        className={`absolute left-3 top-3 rounded-full border px-2.5 py-1 text-[0.68rem] font-semibold shadow-[0_10px_24px_rgba(22,34,40,0.12)] ${
+        className={`absolute rounded-full border font-semibold shadow-[0_10px_24px_rgba(22,34,40,0.12)] ${
+          compact ? "left-2 top-2 px-2 py-0.5 text-[0.62rem]" : "left-3 top-3 px-2.5 py-1 text-[0.68rem]"
+        } ${
           hasIndividualPhoto
             ? "border-[#1ee6ef]/45 bg-[#062536]/88 text-[#8deef4]"
             : "border-[#d3b56f]/40 bg-[#1b2430]/88 text-[#f3df9d]"
@@ -1128,14 +1135,21 @@ function SpecimenImageFrame({
       >
         {label}
       </div>
-      {!hasIndividualPhoto && (
+      {!hasIndividualPhoto && compact ? (
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#03101f]/90 to-transparent px-2 pb-2 pt-7">
+          <div className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-[#03101f]/82 px-2 py-0.5 text-[0.62rem] font-semibold text-[#dbe8ee]">
+            <Camera className="size-3" />
+            参考图
+          </div>
+        </div>
+      ) : !hasIndividualPhoto ? (
         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#03101f]/92 via-[#03101f]/62 to-transparent px-3 pb-3 pt-10">
           <div className="inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-[#03101f]/82 px-2.5 py-1 text-[0.68rem] font-semibold text-[#dbe8ee]">
             <Camera className="size-3" />
             暂无个体实拍
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
