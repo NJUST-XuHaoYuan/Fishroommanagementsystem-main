@@ -1062,7 +1062,7 @@ export function PublicCatalogPage() {
             </section>
 
           </div>
-          <SpecimenDetailDrawer
+          <SpecimenDetailModal
             open={detailOpen}
             onClose={() => setDetailOpen(false)}
             specimen={selectedSpecimen}
@@ -1259,7 +1259,7 @@ type SpecimenDetailContentProps = {
   onCopy: () => void;
 };
 
-function SpecimenDetailDrawer({
+function SpecimenDetailModal({
   open,
   onClose,
   ...detailProps
@@ -1271,18 +1271,18 @@ function SpecimenDetailDrawer({
   if (!open || !specimen) return null;
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div className="fixed inset-0 z-50 grid place-items-center p-3 sm:p-6">
       <button
         type="button"
         aria-label="关闭商品详情"
         onClick={onClose}
-        className="absolute inset-0 bg-[#020b15]/76 backdrop-blur-sm transition-opacity"
+        className="absolute inset-0 bg-[#020b15]/78 backdrop-blur-sm transition-opacity"
       />
-      <aside
+      <section
         role="dialog"
         aria-modal="true"
         aria-label="商品详情"
-        className="absolute inset-y-0 right-0 flex w-full max-w-[34rem] flex-col border-l border-white/10 bg-[#061725] shadow-[-24px_0_70px_rgba(0,0,0,0.34)] sm:max-w-[36rem]"
+        className="relative z-10 flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[76rem] flex-col overflow-hidden rounded-[1.25rem] border border-white/10 bg-[#061725] shadow-[0_30px_90px_rgba(0,0,0,0.48)] sm:max-h-[calc(100dvh-3rem)]"
       >
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-white/10 px-4 py-3 sm:px-5">
           <div className="min-w-0">
@@ -1300,10 +1300,10 @@ function SpecimenDetailDrawer({
             <X className="size-5" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-          <SpecimenDetailPanel {...detailProps} frame="drawer" />
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4 lg:p-5">
+          <SpecimenDetailPanel {...detailProps} frame="modal" />
         </div>
-      </aside>
+      </section>
     </div>
   );
 }
@@ -1318,15 +1318,15 @@ function SpecimenDetailPanel({
   copied,
   onCopy,
   frame = "panel",
-}: SpecimenDetailContentProps & { frame?: "panel" | "drawer" }) {
+}: SpecimenDetailContentProps & { frame?: "panel" | "drawer" | "modal" }) {
   const shellClass =
-    frame === "drawer"
+    frame === "drawer" || frame === "modal"
       ? "bg-transparent"
       : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start";
 
   if (!specimen) {
     return (
-      <aside className={frame === "drawer" ? "bg-transparent" : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start"}>
+      <aside className={frame === "drawer" || frame === "modal" ? "bg-transparent" : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start"}>
         <div className="grid min-h-72 place-items-center rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
           请选择一个具体个体查看养护记录。
         </div>
@@ -1339,6 +1339,97 @@ function SpecimenDetailPanel({
     label: specimen.imageLabel,
     hasIndividualPhoto: specimen.hasIndividualPhoto,
   };
+
+  if (frame === "modal") {
+    return (
+      <aside className="bg-transparent">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.96fr)_minmax(22rem,0.74fr)]">
+          <div className="min-w-0 space-y-4">
+            <SpecimenImageFrame
+              src={displayImage.src}
+              fallbackSrc={specimen.fallbackImage}
+              alt={`${specimen.id} 个体详情`}
+              label={displayImage.label}
+              hasIndividualPhoto={displayImage.hasIndividualPhoto}
+              className="aspect-[4/3] rounded-[1rem]"
+              imageClassName="transition duration-500 hover:scale-[1.025]"
+            />
+
+            <div className="rounded-[1rem] border border-[#d3b56f]/20 bg-[#d3b56f]/8 p-4 text-sm leading-6 text-[#d6c996]">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#f3df9d]">
+                <Clock className="size-4" />
+                最近养护及检疫记录
+              </div>
+              <p className="text-[#e2d8ab]">
+                {loading ? "正在同步维护记录..." : latestBio?.text || "暂无公开维护记录。"}
+              </p>
+              {latestBio?.date && (
+                <div className="mt-2 text-xs text-[#a99554]">
+                  {formatBioRecordTime(latestBio.date)}
+                  {latestBio.operator ? ` · ${latestBio.operator}` : ""}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="min-w-0 rounded-[1rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs font-semibold text-[#1ee6ef]">个体详情</div>
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${stockStatusClass(specimen.stock?.status)}`}>
+                {specimen.statusLabel}
+              </span>
+            </div>
+            <h3 className="mt-3 text-2xl font-semibold leading-tight text-white">{specimen.product.name}</h3>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-[#91a8b8]">
+              <span className="inline-flex items-center gap-1.5">
+                <Hash className="size-3.5 text-[#1ee6ef]" />
+                {specimen.id}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <MapPin className="size-3.5 text-[#d3b56f]" />
+                {specimen.locationLabel}
+              </span>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
+              <span className="text-sm text-[#d6c996]">售价</span>
+              <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-[#1ee6ef]/20 bg-[#1ee6ef]/8 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-[#8deef4]">选鱼码</div>
+                  <div className="mt-1 break-all font-mono text-sm text-white">{selectionCode || "暂无可复制编码"}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onCopy}
+                  disabled={!selectionCode}
+                  className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-4 text-xs font-semibold text-[#03101f] transition hover:bg-[#75f5f8] disabled:cursor-not-allowed disabled:opacity-45 active:translate-y-px"
+                >
+                  {copied ? <ClipboardCheck className="size-4" /> : <Copy className="size-4" />}
+                  {copied ? "已复制" : "复制"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2.5 text-sm">
+              <DetailTile label="尺寸" value={specimen.size} />
+              <DetailTile label="状态" value={specimen.statusLabel} />
+              <DetailTile label="入库日期" value={specimen.arrivalDate} />
+              <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
+              <DetailTile label="缸位" value={specimen.locationLabel} />
+              <DetailTile label="售价" value={formatMoney(specimen.price)} />
+              <DetailTile label="产地" value={specimen.product.origin || "待确认"} />
+            </div>
+
+            <PublicBioTimeline events={timeline} />
+          </div>
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside className={shellClass}>
