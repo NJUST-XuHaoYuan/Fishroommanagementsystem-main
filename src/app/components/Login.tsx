@@ -51,12 +51,12 @@ export function Login() {
         <section className="fishroom-login-aside hidden min-h-[34rem] rounded-2xl p-8 lg:flex lg:flex-col lg:justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <div className="fishroom-login-logo-mark grid size-[6.5rem] place-items-center overflow-hidden">
+              <div className="fishroom-login-logo-mark grid size-[5.75rem] place-items-center overflow-hidden">
                 <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
               </div>
-              <div>
+              <div className="fishroom-login-brand-copy">
                 <div className="fishroom-login-brand-title">进销存管理系统</div>
-                <div className="mt-1 text-sm opacity-80">面向库存、维护和销售的运营台</div>
+                <div className="fishroom-login-brand-subtitle">面向库存、维护和销售的运营台</div>
               </div>
             </div>
             <div className="mt-12 max-w-xl">
@@ -82,12 +82,12 @@ export function Login() {
 
         <Card className="fishroom-login-panel rounded-2xl p-6 sm:p-8">
           <div className="mb-7 flex items-center gap-3 lg:hidden">
-            <div className="fishroom-login-logo-mark grid size-[5.75rem] place-items-center overflow-hidden">
+            <div className="fishroom-login-logo-mark grid size-20 place-items-center overflow-hidden">
               <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
             </div>
-            <div>
+            <div className="fishroom-login-brand-copy">
               <h1 className="fishroom-login-brand-title">进销存管理系统</h1>
-              <p className="text-sm text-muted-foreground">登录以继续</p>
+              <p className="fishroom-login-brand-subtitle text-muted-foreground">登录以继续</p>
             </div>
           </div>
 
