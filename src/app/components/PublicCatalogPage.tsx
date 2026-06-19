@@ -16,7 +16,6 @@ type PublicProduct = Pick<Product, "id" | "speciesId" | "name" | "size" | "origi
 
 type PublicStockItem = Pick<StockItem, "id" | "productId" | "status" | "inDate"> &
   Partial<Pick<StockItem, "sold" | "lost" | "basePrice" | "code">> & {
-    batchNo?: string;
     tankGroupName?: string;
     subTankName?: string;
     tankLocation?: string;
@@ -86,13 +85,12 @@ type Specimen = {
   daysInStore: number;
   statusLabel: string;
   locationLabel: string;
-  batchNo: string;
   arrivalDate: string;
   available: boolean;
 };
 
 type PublicBioTimelineEvent =
-  | { type: "stock_in"; date: string; batchNo: string }
+  | { type: "stock_in"; date: string }
   | { type: "record"; record: PublicBioRecord };
 
 const fallbackCatalog: PublicCatalogData = {
@@ -175,7 +173,6 @@ const premiumCategories: PremiumCategory[] = [
 
 const filterOptions = [
   { key: "all", label: "全部" },
-  { key: "available", label: "可预订" },
   { key: "quarantined", label: "入缸14天+" },
   { key: "eating", label: "已开口" },
 ];
@@ -602,7 +599,6 @@ export function PublicCatalogPage() {
           daysInStore,
           statusLabel: stockStatusLabel(stock?.status),
           locationLabel: stockLocation(stock),
-          batchNo: String(stock?.batchNo ?? "").trim() || "—",
           arrivalDate: formatDate(stock?.inDate),
           available: Boolean(stock),
         });
@@ -688,7 +684,6 @@ export function PublicCatalogPage() {
     if (filter === "all") return true;
     if (filter === "quarantined") return specimen.daysInStore >= 14;
     if (filter === "eating") return specimen.stock?.status === "feeding";
-    if (filter === "available") return specimen.available;
     return true;
   });
 
@@ -766,7 +761,7 @@ export function PublicCatalogPage() {
   const selectedTimeline = useMemo<PublicBioTimelineEvent[]>(() => {
     if (!selectedSpecimen?.stock) return [];
     return [
-      { type: "stock_in", date: selectedSpecimen.stock.inDate, batchNo: selectedSpecimen.batchNo },
+      { type: "stock_in", date: selectedSpecimen.stock.inDate },
       ...selectedBioRecords
         .slice()
         .sort((a, b) =>
@@ -777,7 +772,6 @@ export function PublicCatalogPage() {
     ];
   }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
-  const heroImage = heroCarouselImages[heroImageIndex] ?? marinePhotos.localFish;
 
   const scrollToCatalog = () => {
     document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -786,29 +780,30 @@ export function PublicCatalogPage() {
   return (
     <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]">
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
-        <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="flex h-20 w-full items-center justify-start px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-4">
             <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8 shadow-[0_16px_42px_rgba(30,230,239,0.08)]">
               <img src="/assets/brand-logo.jpg" alt="海水鱼廊" className="size-14 rounded-xl object-contain" />
             </div>
-            <div>
-              <div className="text-lg font-semibold tracking-normal text-white">海水鱼廊</div>
-              <div className="text-xs text-[#8faabc]">单体鱼选购</div>
-            </div>
+            <div className="text-lg font-semibold tracking-normal text-white">海水生物超市</div>
           </div>
         </div>
       </header>
 
       <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
-        <ImageWithFallback
-          key={heroImage}
-          src={heroImage}
-          fallbackSrc={marinePhotos.localFish}
-          alt="海水鱼廊图册照片"
-          disableMediaProxy
-          className="absolute inset-0 h-full w-full object-cover opacity-70 transition-opacity duration-700"
-          loading="eager"
-        />
+        {heroCarouselImages.map((src, index) => (
+          <ImageWithFallback
+            key={src}
+            src={src}
+            fallbackSrc={marinePhotos.localFish}
+            alt="海水鱼廊图册照片"
+            disableMediaProxy
+            className={`absolute inset-0 h-full w-full object-cover transition-[opacity,transform] duration-[1200ms] ease-out motion-reduce:transition-none ${
+              index === heroImageIndex ? "scale-100 opacity-70" : "scale-[1.025] opacity-0"
+            }`}
+            loading={index === heroImageIndex ? "eager" : "lazy"}
+          />
+        ))}
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_74%_42%,rgba(16,211,222,0.18),transparent_28%),linear-gradient(90deg,rgba(3,16,31,0.98)_0%,rgba(3,16,31,0.76)_42%,rgba(3,16,31,0.18)_100%)]" />
         <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-1.5" aria-hidden="true">
           {heroCarouselImages.map((_, index) => (
@@ -823,9 +818,10 @@ export function PublicCatalogPage() {
         <div className="relative mx-auto flex min-h-[calc(100dvh-5rem)] max-w-7xl items-center px-4 py-14 sm:px-6 lg:px-8">
           <div className="max-w-3xl">
             <h1 className="max-w-[18ch] text-5xl font-semibold leading-[1.04] tracking-normal text-white sm:text-6xl lg:text-7xl">
-              按真实库存个体挑选海水生物
+              <span className="block">按真实库存</span>
+              <span className="block">挑选海水生物</span>
             </h1>
-            <p className="mt-6 max-w-[32rem] text-base leading-7 text-[#bfd0db]">
+            <p className="mt-6 max-w-[34rem] text-xl leading-8 text-[#d4e2ea] sm:text-2xl sm:leading-9">
               每一条鱼都可查看养护及检疫记录
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
@@ -1013,7 +1009,7 @@ export function PublicCatalogPage() {
                               <SpecLine label="尺寸" value={specimen.size} />
                               <SpecLine label="状态" value={specimen.statusLabel} />
                               <SpecLine label="缸位" value={specimen.locationLabel} />
-                              <SpecLine label="入缸" value={`${specimen.daysInStore} 天`} />
+                              <SpecLine label="入库" value={specimen.arrivalDate} />
                             </div>
                           </div>
                         </button>
@@ -1159,9 +1155,7 @@ function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
                         {formatBioRecordTime(isStockIn ? event.date : record?.date)}
                       </div>
                     </div>
-                    {isStockIn ? (
-                      <p className="text-[#c6d7e0]">批次：{event.batchNo || "—"}</p>
-                    ) : (
+                    {!isStockIn && (
                       <>
                         {record?.text && <p className="text-white">{record.text}</p>}
                         {isDailyLog && (
@@ -1265,7 +1259,7 @@ function SpecimenDetailPanel({
       </div>
 
       <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
-        <span className="text-sm text-[#d6c996]">预订价</span>
+        <span className="text-sm text-[#d6c996]">售价</span>
         <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
       </div>
 
@@ -1290,7 +1284,6 @@ function SpecimenDetailPanel({
       <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
         <DetailTile label="尺寸" value={specimen.size} />
         <DetailTile label="状态" value={specimen.statusLabel} />
-        <DetailTile label="批次" value={specimen.batchNo} />
         <DetailTile label="入库日期" value={specimen.arrivalDate} />
         <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
         <DetailTile label="缸位" value={specimen.locationLabel} />
