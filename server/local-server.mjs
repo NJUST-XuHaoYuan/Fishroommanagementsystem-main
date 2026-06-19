@@ -539,6 +539,25 @@ function publicCatalogMediaUrls(value, limit = 6) {
   return publicMediaUrls(value, limit).map(publicCatalogMediaUrl);
 }
 
+function publicBioRecordText(value) {
+  return clampText(String(value ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220);
+}
+
+function publicBioRecordPayload(record = {}, media = {}) {
+  return {
+    id: String(record?.id ?? ""),
+    stockItemId: String(record?.stockItemId ?? ""),
+    date: String(record?.date ?? ""),
+    text: publicBioRecordText(record?.text ?? ""),
+    sourceType: String(record?.sourceType ?? ""),
+    tankGroupName: String(record?.tankGroupName ?? ""),
+    subTankName: String(record?.subTankName ?? ""),
+    operator: String(record?.operator ?? ""),
+    photos: (media.photos ?? publicMediaUrls(record?.photos, 6)).map(publicCatalogMediaUrl),
+    videos: (media.videos ?? publicMediaUrls(record?.videos, 3)).map(publicCatalogMediaUrl),
+  };
+}
+
 function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
@@ -558,29 +577,24 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const publicBioRecords = [];
+  const latestBioByStockId = new Map();
+  const latestMediaByStockId = new Map();
   bioRecords
     .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
-    .sort((a, b) =>
-      String(b?.date ?? "").localeCompare(String(a?.date ?? "")) ||
-      String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
-    )
     .forEach((record) => {
       const stockItemId = String(record?.stockItemId ?? "");
+      const current = latestBioByStockId.get(stockItemId);
+      if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
+        latestBioByStockId.set(stockItemId, record);
+      }
       const photos = publicMediaUrls(record?.photos, 6);
       const videos = publicMediaUrls(record?.videos, 3);
-      publicBioRecords.push({
-        id: String(record?.id ?? ""),
-        stockItemId,
-        date: String(record?.date ?? ""),
-        text: clampText(String(record?.text ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220),
-        sourceType: String(record?.sourceType ?? ""),
-        tankGroupName: String(record?.tankGroupName ?? ""),
-        subTankName: String(record?.subTankName ?? ""),
-        operator: String(record?.operator ?? ""),
-        photos: photos.map(publicCatalogMediaUrl),
-        videos: videos.map(publicCatalogMediaUrl),
-      });
+      if (photos.length > 0 || videos.length > 0) {
+        const currentMedia = latestMediaByStockId.get(stockItemId);
+        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
+          latestMediaByStockId.set(stockItemId, { date: record?.date, photos, videos });
+        }
+      }
     });
   const categorySet = new Set(
     species
@@ -634,8 +648,30 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         tankLocation: String(tank?.group?.location ?? ""),
       };
     }),
-    bioRecords: publicBioRecords,
+    bioRecords: [...latestBioByStockId.values()]
+      .sort((a, b) =>
+        String(b?.date ?? "").localeCompare(String(a?.date ?? "")) ||
+        String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
+      )
+      .map((record) => publicBioRecordPayload(record, latestMediaByStockId.get(String(record?.stockItemId ?? "")))),
   };
+}
+
+function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
+  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
+  const shippedIds = shippedOutStockIds(scopedState);
+  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const targetId = String(stockItemId ?? "").trim();
+  const item = stock.find((candidate) => String(candidate?.id ?? "") === targetId);
+  if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
+  const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  return records
+    .filter((record) => String(record?.stockItemId ?? "") === targetId)
+    .sort((a, b) =>
+      String(a?.date ?? "").localeCompare(String(b?.date ?? "")) ||
+      String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
+    )
+    .map((record) => publicBioRecordPayload(record));
 }
 
 function publicCatalogAllowedMediaUrls(state = {}, siteId = ALL_SITE_ID) {
@@ -1367,6 +1403,7 @@ function isPublicApiRoute(req, url) {
   if (req.method === "OPTIONS") return true;
   if (url.pathname === "/api/health" && req.method === "GET") return true;
   if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
+  if (url.pathname === "/api/public/bio-records" && req.method === "GET") return true;
   if (url.pathname === "/api/public/media/cos" && req.method === "GET") return true;
   if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
   if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
@@ -3133,6 +3170,30 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public catalog" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/public/bio-records" && req.method === "GET") {
+    try {
+      const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
+      if (!stockItemId) {
+        sendJson(req, res, 400, { ok: false, error: "stockItemId is required" });
+        return;
+      }
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const bioRecords = buildPublicBioRecordsForStock(
+        rows[0]?.data ?? {},
+        url.searchParams.get("siteId") ?? ALL_SITE_ID,
+        stockItemId
+      );
+      if (!bioRecords) {
+        sendJson(req, res, 404, { ok: false, error: "Stock item is not public" });
+        return;
+      }
+      sendJson(req, res, 200, { ok: true, bioRecords });
+    } catch (error) {
+      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public bio records" });
     }
     return;
   }

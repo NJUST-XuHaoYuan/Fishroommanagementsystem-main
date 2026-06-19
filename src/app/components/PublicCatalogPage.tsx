@@ -164,18 +164,25 @@ const filterOptions = [
   { key: "eating", label: "已开口" },
 ];
 
+const normalizePublicBioRecords = (value: unknown): PublicBioRecord[] =>
+  Array.isArray(value)
+    ? value.map((record) => ({
+        ...(record as PublicBioRecord),
+        photos: Array.isArray((record as PublicBioRecord)?.photos)
+          ? (record as PublicBioRecord).photos?.map(String).filter(Boolean)
+          : [],
+        videos: Array.isArray((record as PublicBioRecord)?.videos)
+          ? (record as PublicBioRecord).videos?.map(String).filter(Boolean)
+          : [],
+      }))
+    : [];
+
 const normalizeCatalog = (value: Partial<PublicCatalogData> | null | undefined): PublicCatalogData => ({
   speciesCategories: Array.isArray(value?.speciesCategories) ? value.speciesCategories : fallbackCatalog.speciesCategories,
   species: Array.isArray(value?.species) ? value.species : fallbackCatalog.species,
   products: Array.isArray(value?.products) ? value.products : fallbackCatalog.products,
   stock: Array.isArray(value?.stock) ? value.stock : fallbackCatalog.stock,
-  bioRecords: Array.isArray(value?.bioRecords)
-    ? value.bioRecords.map((record) => ({
-        ...record,
-        photos: Array.isArray(record?.photos) ? record.photos.map(String).filter(Boolean) : [],
-        videos: Array.isArray(record?.videos) ? record.videos.map(String).filter(Boolean) : [],
-      }))
-    : fallbackCatalog.bioRecords,
+  bioRecords: Array.isArray(value?.bioRecords) ? normalizePublicBioRecords(value.bioRecords) : fallbackCatalog.bioRecords,
 });
 
 function displayImageUrl(src?: string, width = 1400) {
@@ -367,6 +374,8 @@ function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
 
 export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
+  const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
+  const [detailLoadingStockId, setDetailLoadingStockId] = useState("");
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
@@ -584,8 +593,44 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
     filteredSpecimens[0] ??
     specimens[0];
 
-  const selectedBioRecords = selectedSpecimen?.stock?.id
-    ? bioRecordsByStockId.get(selectedSpecimen.stock.id) ?? []
+  const selectedStockId = selectedSpecimen?.stock?.id ?? "";
+
+  useEffect(() => {
+    if (!selectedStockId || detailBioRecordsByStockId.has(selectedStockId)) return;
+    let cancelled = false;
+    setDetailLoadingStockId(selectedStockId);
+    fetch(`/api/public/bio-records?stockItemId=${encodeURIComponent(selectedStockId)}`, { cache: "no-store" })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        return normalizePublicBioRecords(result.bioRecords ?? result.data ?? []);
+      })
+      .then((records) => {
+        if (cancelled) return;
+        setDetailBioRecordsByStockId((current) => {
+          const next = new Map(current);
+          next.set(selectedStockId, records);
+          return next;
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDetailBioRecordsByStockId((current) => {
+          const next = new Map(current);
+          next.set(selectedStockId, bioRecordsByStockId.get(selectedStockId) ?? []);
+          return next;
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoadingStockId("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bioRecordsByStockId, detailBioRecordsByStockId, selectedStockId]);
+
+  const selectedBioRecords = selectedStockId
+    ? detailBioRecordsByStockId.get(selectedStockId) ?? bioRecordsByStockId.get(selectedStockId) ?? []
     : [];
   const selectedTimeline = useMemo<PublicBioTimelineEvent[]>(() => {
     if (!selectedSpecimen?.stock) return [];
@@ -600,7 +645,7 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
         .map((record) => ({ type: "record" as const, record })),
     ];
   }, [selectedBioRecords, selectedSpecimen]);
-  const selectedBio = selectedSpecimen?.bioRecord ?? firstBioRecord(catalog.bioRecords, selectedSpecimen?.stock?.id);
+  const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
   const heroSpecimen = selectedSpecimen ?? specimens[0];
 
   const scrollToCatalog = () => {
@@ -942,7 +987,9 @@ export function PublicCatalogPage({ onStaffLogin }: PublicCatalogPageProps) {
                 <Clock className="size-4" />
                 最近维护记录
               </div>
-              <p className="text-[#e2d8ab]">{selectedBio?.text || "暂无公开维护记录。"}</p>
+              <p className="text-[#e2d8ab]">
+                {detailLoadingStockId === selectedStockId ? "正在同步维护记录..." : selectedBio?.text || "暂无公开维护记录。"}
+              </p>
               {selectedBio?.date && (
                 <div className="mt-2 text-xs text-[#a99554]">
                   {formatBioRecordTime(selectedBio.date)}
