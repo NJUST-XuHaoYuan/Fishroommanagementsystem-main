@@ -51,7 +51,7 @@ export function Login() {
         <section className="fishroom-login-aside hidden min-h-[34rem] rounded-2xl p-8 lg:flex lg:flex-col lg:justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <div className="fishroom-login-logo-mark grid size-[4.75rem] place-items-center overflow-hidden">
+              <div className="fishroom-login-logo-mark grid size-[6.5rem] place-items-center overflow-hidden">
                 <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
               </div>
               <div>
@@ -82,7 +82,7 @@ export function Login() {
 
         <Card className="fishroom-login-panel rounded-2xl p-6 sm:p-8">
           <div className="mb-7 flex items-center gap-3 lg:hidden">
-            <div className="fishroom-login-logo-mark grid size-16 place-items-center overflow-hidden">
+            <div className="fishroom-login-logo-mark grid size-[5.75rem] place-items-center overflow-hidden">
               <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="fishroom-login-logo-image" />
             </div>
             <div>
