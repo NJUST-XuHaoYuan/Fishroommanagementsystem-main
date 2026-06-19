@@ -857,11 +857,11 @@ export function PublicCatalogPage() {
         </div>
       </section>
 
-      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725] py-8 sm:py-10">
-        <div className="w-full max-w-[118rem] px-4 sm:px-6 lg:px-0 lg:pr-8">
-          <div className="grid items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
-            <aside className="overflow-hidden bg-[#081b2c] lg:sticky lg:top-24 lg:self-start">
-              <div className="max-h-[calc(100dvh-7rem)] overflow-y-auto">
+      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725]">
+        <div className="w-full">
+          <div className="grid min-h-[calc(100dvh-5rem)] lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
+            <aside className="overflow-hidden bg-[#071827] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:self-start">
+              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -869,7 +869,7 @@ export function PublicCatalogPage() {
                       key={category.key}
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
-                      className={`group relative block min-h-[7.25rem] w-full overflow-hidden px-6 py-5 text-left transition active:translate-y-px ${
+                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b border-white/8 px-6 py-5 text-left transition active:translate-y-px ${
                         active ? "text-white" : "text-[#dbe8ee] hover:text-white"
                       }`}
                     >
@@ -896,30 +896,26 @@ export function PublicCatalogPage() {
               </div>
             </aside>
 
-            <section className="min-w-0 space-y-4">
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-3.5 sm:p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#081b2c]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
+                <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
-                      <span>{selectedCategory.label}</span>
-                      <span className="text-[#607c90]">/</span>
-                      <span>{visibleSpecies.length} 个品种</span>
-                    </div>
-                    <h3 className="mt-1.5 text-xl font-semibold text-white">选择品种</h3>
-                    <p className="mt-1.5 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
-                      先选品种，下方只显示该品种的真实库存个体。
+                    <div className="truncate text-sm font-semibold text-[#1ee6ef]">{selectedCategory.label}</div>
+                    <h3 className="mt-1 text-lg font-semibold text-white">品种</h3>
+                    <p className="mt-1 text-sm leading-5 text-[#91a8b8]">
+                      {visibleSpecies.length} 个品种，{selectedCategory.specimens} 条可售个体
                     </p>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-[#061725] px-3 py-2 text-sm font-semibold text-[#a9bfce]">
-                    {selectedCategory.specimens} 条可售个体
-                  </div>
+                  <Check className="mt-1 size-5 shrink-0 text-[#1ee6ef]" />
                 </div>
+              </div>
+              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-11rem)]">
                 {visibleSpecies.length === 0 ? (
-                  <div className="mt-4 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
+                  <div className="border-b border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
                   </div>
                 ) : (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
+                  <div>
                     {visibleSpecies.map((card) => {
                       const active = selectedSpecies?.species.id === card.species.id;
                       const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
@@ -929,13 +925,13 @@ export function PublicCatalogPage() {
                           key={card.species.id}
                           type="button"
                           onClick={() => setSelectedSpeciesId(card.species.id)}
-                          className={`grid min-h-[4.75rem] grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-2 rounded-xl border p-2 text-left transition hover:-translate-y-0.5 active:translate-y-px ${
+                          className={`grid min-h-[5.5rem] w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 border-b border-white/8 p-3 text-left transition active:translate-y-px ${
                             active
-                              ? "border-[#1ee6ef]/70 bg-[#123450] text-white"
-                              : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/22 hover:text-white"
+                              ? "bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
+                              : "bg-[#0b2033] text-[#a9bfce] hover:bg-[#102a41] hover:text-white"
                           }`}
                         >
-                          <div className="relative aspect-square overflow-hidden rounded-lg bg-[#102b42]">
+                          <div className="relative aspect-[1.22/1] overflow-hidden bg-[#102b42]">
                             <ImageWithFallback
                               src={previewSpecimen?.image ?? previewFallback}
                               fallbackSrc={previewFallback}
@@ -948,14 +944,14 @@ export function PublicCatalogPage() {
                           <div className="min-w-0">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <div className="truncate text-[0.86rem] font-semibold">{card.species.name}</div>
+                                <div className="truncate text-base font-semibold">{card.species.name}</div>
                                 {card.species.scientificName && (
-                                  <div className="mt-0.5 truncate text-[0.7rem] italic text-[#7893a6]">{card.species.scientificName}</div>
+                                  <div className="mt-0.5 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
                                 )}
                               </div>
-                              {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
+                              {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                             </div>
-                            <div className="mt-1.5 truncate text-[0.72rem] font-medium text-[#91a8b8]">
+                            <div className="mt-2 truncate text-xs font-medium text-[#91a8b8]">
                               {card.availableSpecimens.length} 条个体 · {card.priceRange}
                             </div>
                           </div>
@@ -965,8 +961,10 @@ export function PublicCatalogPage() {
                   </div>
                 )}
               </div>
+            </section>
 
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-3.5 sm:p-4">
+            <section className="min-w-0 border-t border-white/10 bg-[#061725] lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
@@ -988,7 +986,7 @@ export function PublicCatalogPage() {
                   </div>
                   <div className="flex shrink-0 flex-col items-start gap-2 xl:items-end">
                     {selectedSpecies && (
-                      <div className="rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3 text-sm font-semibold text-[#f3df9d]">
+                      <div className="border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-2.5 text-sm font-semibold text-[#f3df9d]">
                         {selectedSpecies.priceRange}
                       </div>
                     )}
@@ -998,7 +996,7 @@ export function PublicCatalogPage() {
                           key={item.key}
                           type="button"
                           onClick={() => setFilter(item.key)}
-                          className={`h-9 rounded-full border px-4 text-xs font-semibold transition active:translate-y-px ${
+                          className={`h-9 border px-4 text-xs font-semibold transition active:translate-y-px ${
                             filter === item.key
                               ? "border-[#1ee6ef] bg-[#1ee6ef] text-[#03101f]"
                               : "border-white/10 bg-[#061725] text-[#a9bfce] hover:border-white/25 hover:text-white"
@@ -1010,10 +1008,12 @@ export function PublicCatalogPage() {
                     </div>
                   </div>
                 </div>
+              </div>
+              <div className="min-h-[calc(100dvh-15rem)]">
                 {filteredSpecimens.length === 0 ? (
                   <EmptyState text="当前筛选下没有可展示个体。" />
                 ) : (
-                  <div className="mt-3 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  <div className="grid border-t border-white/8 sm:grid-cols-2 2xl:grid-cols-3">
                     {filteredSpecimens.map((specimen) => {
                       const active = specimen.id === selectedSpecimen?.id;
                       return (
@@ -1024,8 +1024,8 @@ export function PublicCatalogPage() {
                             setSelectedSpecimenId(specimen.id);
                             setDetailOpen(true);
                           }}
-                          className={`grid min-h-[6.75rem] grid-cols-[6.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-[#0b2033] text-left transition hover:-translate-y-0.5 active:translate-y-px ${
-                            active ? "border-[#1ee6ef]/70" : "border-white/10 hover:border-white/22"
+                          className={`grid min-h-[7.25rem] grid-cols-[6.75rem_minmax(0,1fr)] overflow-hidden border-b border-r border-white/8 bg-[#0b2033] text-left transition active:translate-y-px ${
+                            active ? "shadow-[inset_0_0_0_1px_rgba(30,230,239,0.62)]" : "hover:bg-[#102a41]"
                           }`}
                         >
                           <SpecimenImageFrame
@@ -1035,10 +1035,10 @@ export function PublicCatalogPage() {
                             label={specimen.imageLabel}
                             hasIndividualPhoto={specimen.hasIndividualPhoto}
                             compact
-                            className="h-full min-h-[6.75rem]"
+                            className="h-full min-h-[7.25rem]"
                             imageClassName="transition duration-500 hover:scale-[1.035]"
                           />
-                          <div className="min-w-0 p-2.5">
+                          <div className="min-w-0 p-3">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="text-xs font-semibold text-[#1ee6ef]">{specimen.id}</div>
@@ -1060,7 +1060,6 @@ export function PublicCatalogPage() {
                 )}
               </div>
             </section>
-
           </div>
           <SpecimenDetailModal
             open={detailOpen}
@@ -1516,7 +1515,7 @@ function SpecimenDetailPanel({
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="mt-5 grid min-h-36 place-items-center rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
+    <div className="grid min-h-36 place-items-center border-b border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
       {text}
     </div>
   );
