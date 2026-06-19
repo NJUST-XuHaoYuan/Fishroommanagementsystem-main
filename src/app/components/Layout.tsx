@@ -180,17 +180,17 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const navButtonClass = (active: boolean, level: "main" | "sub" = "sub") =>
     [
-      "fishroom-nav-button flex w-full items-center rounded-lg text-left transition-colors",
+      "fishroom-nav-button flex w-full items-center text-left transition-colors",
       active ? "is-active" : "",
       level === "main"
-        ? "gap-2 px-3 py-2.5 text-sm font-semibold"
-        : "justify-between px-8 py-2 text-sm",
+        ? "gap-2 px-3 py-2 text-sm font-semibold"
+        : "justify-between px-7 py-1.5 text-[13px]",
     ].join(" ");
 
   const NavContent = () => (
     <>
       <Brand />
-      <nav className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+      <nav className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-2.5">
         <button
           onClick={() => navigate("dashboard")}
           className={navButtonClass(view === "dashboard", "main")}
@@ -264,7 +264,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </>
         )}
       </nav>
-      <div className="border-t p-3 flex flex-col gap-2 bg-sidebar">
+      <div className="border-t p-2.5 flex flex-col gap-2 bg-sidebar">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col">
             <div className="text-sm font-medium truncate">{user.username}</div>
@@ -291,7 +291,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const SiteSelector = ({ compact = false }: { compact?: boolean }) => (
     <label className={[
-      "fishroom-control flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs text-muted-foreground",
+      "fishroom-control flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs text-muted-foreground",
       compact ? "max-w-[140px]" : "",
     ].join(" ")}>
       <MapPin className="size-3.5 shrink-0 text-sky-600" />
@@ -311,7 +311,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   return (
     <div className="fishroom-app size-full min-h-screen flex overflow-hidden">
-      <aside className="fishroom-sidebar hidden w-72 shrink-0 lg:flex lg:flex-col">
+      <aside className="fishroom-sidebar hidden w-64 shrink-0 lg:flex lg:flex-col">
         <NavContent />
       </aside>
 
@@ -325,7 +325,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       </Sheet>
 
       <main className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <header className="fishroom-topbar sticky top-0 z-30 h-14 px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
+        <header className="fishroom-topbar sticky top-0 z-30 h-[3.25rem] px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <Button
               variant="ghost"
@@ -351,7 +351,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <header className="fishroom-topbar hidden h-14 px-6 lg:flex items-center justify-between text-sm">
+        <header className="fishroom-topbar hidden h-[3.25rem] px-5 lg:flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
             {currentSection && (
               <>
@@ -368,7 +368,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-6">
+        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-5">
           {children}
         </div>
       </main>
