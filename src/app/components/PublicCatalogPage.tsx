@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck } from "lucide-react";
+import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, X } from "lucide-react";
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
@@ -462,6 +462,7 @@ export function PublicCatalogPage() {
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
   const [copiedSelectionCode, setCopiedSelectionCode] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [filter, setFilter] = useState("all");
 
   useEffect(() => {
@@ -678,6 +679,10 @@ export function PublicCatalogPage() {
     setSelectedSpeciesId(visibleSpecies[0]?.species.id ?? "");
   }, [selectedSpeciesId, visibleSpecies]);
 
+  useEffect(() => {
+    setDetailOpen(false);
+  }, [selectedCategoryKey, selectedSpeciesId]);
+
   const selectedSpecies = visibleSpecies.find((card) => card.species.id === selectedSpeciesId) ?? visibleSpecies[0];
   const specimenOptions = specimens.filter((specimen) => specimen.species?.id === selectedSpecies?.species.id && specimen.available);
   const filteredSpecimens = specimenOptions.filter((specimen) => {
@@ -703,6 +708,20 @@ export function PublicCatalogPage() {
   useEffect(() => {
     setCopiedSelectionCode(false);
   }, [selectedSelectionCode]);
+
+  useEffect(() => {
+    if (!detailOpen) return;
+    const originalOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDetailOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [detailOpen]);
 
   const copySelectedSelectionCode = async () => {
     if (!selectedSelectionCode) return;
@@ -840,7 +859,7 @@ export function PublicCatalogPage() {
 
       <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725] py-8 sm:py-10">
         <div className="w-full max-w-[118rem] px-4 sm:px-6 lg:px-0 lg:pr-8">
-          <div className="grid items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[20rem_minmax(0,1fr)_26rem]">
+          <div className="grid items-start gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
             <aside className="overflow-hidden bg-[#081b2c] lg:sticky lg:top-24 lg:self-start">
               <div className="max-h-[calc(100dvh-7rem)] overflow-y-auto">
                 {catalogCategories.map((category) => {
@@ -878,78 +897,90 @@ export function PublicCatalogPage() {
             </aside>
 
             <section className="min-w-0 space-y-6">
-              <div className="overflow-hidden rounded-[1.25rem] border border-white/10 bg-[#081b2c]">
-                <div className="grid gap-0 lg:grid-cols-[10rem_minmax(0,1fr)]">
-                  <div className="relative hidden min-h-40 overflow-hidden bg-[#102b42] lg:block">
-                    <ImageWithFallback
-                      src={displayImageUrl(selectedCategory.image, 900)}
-                      fallbackSrc={marinePhotos.localFish}
-                      alt={selectedCategory.label}
-                      disableMediaProxy
-                      className="h-full w-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#03101f]/72 to-transparent" />
-                  </div>
-                  <div className="p-5 sm:p-6">
-                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-[#1ee6ef]">当前大类</div>
-                        <h3 className="mt-2 text-2xl font-semibold text-white">{selectedCategory.label}</h3>
-                        <p className="mt-2 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">{selectedCategory.description}</p>
-                      </div>
-                      <div className="rounded-full border border-white/10 bg-[#061725] px-3 py-1.5 text-xs font-semibold text-[#a9bfce]">
-                        {visibleSpecies.length} 个品种
-                      </div>
+              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
+                      <span>{selectedCategory.label}</span>
+                      <span className="text-[#607c90]">/</span>
+                      <span>{visibleSpecies.length} 个品种</span>
                     </div>
-                    {visibleSpecies.length === 0 ? (
-                      <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
-                        这个大类暂时没有公开在售品种。
-                      </div>
-                    ) : (
-                      <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
-                        {visibleSpecies.map((card) => {
-                          const active = selectedSpecies?.species.id === card.species.id;
-                          return (
-                            <button
-                              key={card.species.id}
-                              type="button"
-                              onClick={() => setSelectedSpeciesId(card.species.id)}
-                              className={`min-w-[12rem] rounded-xl border px-3.5 py-3 text-left transition active:translate-y-px ${
-                                active
-                                  ? "border-[#1ee6ef]/65 bg-[#123450] text-white"
-                                  : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/22 hover:text-white"
-                              }`}
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <div className="truncate text-sm font-semibold">{card.species.name}</div>
-                                  {card.species.scientificName && (
-                                    <div className="mt-0.5 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
-                                  )}
-                                </div>
-                                {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
-                              </div>
-                              <div className="mt-2 text-xs text-[#7893a6]">{card.availableSpecimens.length} 条个体 · {card.priceRange}</div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
+                    <h3 className="mt-2 text-2xl font-semibold text-white">选择品种</h3>
+                    <p className="mt-2 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
+                      先选品种，下方只显示该品种的真实库存个体。
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-[#061725] px-4 py-3 text-sm font-semibold text-[#a9bfce]">
+                    {selectedCategory.specimens} 条可售个体
                   </div>
                 </div>
+                {visibleSpecies.length === 0 ? (
+                  <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
+                    这个大类暂时没有公开在售品种。
+                  </div>
+                ) : (
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                    {visibleSpecies.map((card) => {
+                      const active = selectedSpecies?.species.id === card.species.id;
+                      const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
+                      const previewFallback = previewSpecimen?.fallbackImage ?? categoryFallbackImage(speciesCategoryName(card.species), card.species);
+                      return (
+                        <button
+                          key={card.species.id}
+                          type="button"
+                          onClick={() => setSelectedSpeciesId(card.species.id)}
+                          className={`grid min-h-[7.5rem] grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 rounded-xl border p-3 text-left transition hover:-translate-y-0.5 active:translate-y-px ${
+                            active
+                              ? "border-[#1ee6ef]/70 bg-[#123450] text-white shadow-[0_18px_38px_rgba(30,230,239,0.08)]"
+                              : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/22 hover:text-white"
+                          }`}
+                        >
+                          <div className="relative aspect-square overflow-hidden rounded-lg bg-[#102b42]">
+                            <ImageWithFallback
+                              src={previewSpecimen?.image ?? previewFallback}
+                              fallbackSrc={previewFallback}
+                              alt={card.species.name}
+                              disableMediaProxy
+                              className="h-full w-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-[#03101f]/42 to-transparent" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-base font-semibold">{card.species.name}</div>
+                                {card.species.scientificName && (
+                                  <div className="mt-1 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
+                                )}
+                              </div>
+                              {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
+                            </div>
+                            <div className="mt-3 text-xs font-medium text-[#91a8b8]">
+                              {card.availableSpecimens.length} 条个体 · {card.priceRange}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
                 <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold text-[#1ee6ef]">当前品种</div>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">{selectedSpecies?.species.name ?? "选择品种"}</h3>
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
+                      <span>{selectedCategory.label}</span>
+                      <span className="text-[#607c90]">/</span>
+                      <span>{selectedSpecies?.species.name ?? "选择品种"}</span>
+                    </div>
+                    <h3 className="mt-2 text-2xl font-semibold text-white">具体个体</h3>
                     {selectedSpecies?.species.scientificName && (
                       <p className="mt-1 text-sm italic text-[#7893a6]">{selectedSpecies.species.scientificName}</p>
                     )}
                     <p className="mt-3 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
                       {selectedSpecies
-                        ? `${selectedSpecies.availableSpecimens.length} 条真实库存个体，最近到货 ${selectedSpecies.latestArrival}。选中后右侧直接展示养护、检疫和选鱼码。`
+                        ? `${selectedSpecies.availableSpecimens.length} 条真实库存个体，最近到货 ${selectedSpecies.latestArrival}。点击任一具体个体查看养护记录和选鱼码。`
                         : "先选择一个品种，再查看具体库存个体。"}
                     </p>
                   </div>
@@ -987,7 +1018,10 @@ export function PublicCatalogPage() {
                         <button
                           key={specimen.id}
                           type="button"
-                          onClick={() => setSelectedSpecimenId(specimen.id)}
+                          onClick={() => {
+                            setSelectedSpecimenId(specimen.id);
+                            setDetailOpen(true);
+                          }}
                           className={`overflow-hidden rounded-[1.1rem] border bg-[#0b2033] text-left transition hover:-translate-y-0.5 active:translate-y-px ${
                             active ? "border-[#1ee6ef]/70 shadow-[0_24px_48px_rgba(30,230,239,0.08)]" : "border-white/10 hover:border-white/22"
                           }`}
@@ -1024,17 +1058,19 @@ export function PublicCatalogPage() {
               </div>
             </section>
 
-            <SpecimenDetailPanel
-              specimen={selectedSpecimen}
-              detailImage={selectedDetailImage}
-              timeline={selectedTimeline}
-              latestBio={selectedBio}
-              loading={detailLoadingStockId === selectedStockId}
-              selectionCode={selectedSelectionCode}
-              copied={copiedSelectionCode}
-              onCopy={copySelectedSelectionCode}
-            />
           </div>
+          <SpecimenDetailDrawer
+            open={detailOpen}
+            onClose={() => setDetailOpen(false)}
+            specimen={selectedSpecimen}
+            detailImage={selectedDetailImage}
+            timeline={selectedTimeline}
+            latestBio={selectedBio}
+            loading={detailLoadingStockId === selectedStockId}
+            selectionCode={selectedSelectionCode}
+            copied={copiedSelectionCode}
+            onCopy={copySelectedSelectionCode}
+          />
         </div>
       </section>
 
@@ -1198,6 +1234,66 @@ function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
   );
 }
 
+type SpecimenDetailContentProps = {
+  specimen?: Specimen;
+  detailImage?: SpecimenImage;
+  timeline: PublicBioTimelineEvent[];
+  latestBio?: PublicBioRecord;
+  loading: boolean;
+  selectionCode: string;
+  copied: boolean;
+  onCopy: () => void;
+};
+
+function SpecimenDetailDrawer({
+  open,
+  onClose,
+  ...detailProps
+}: SpecimenDetailContentProps & {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const specimen = detailProps.specimen;
+  if (!open || !specimen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <button
+        type="button"
+        aria-label="关闭商品详情"
+        onClick={onClose}
+        className="absolute inset-0 bg-[#020b15]/76 backdrop-blur-sm transition-opacity"
+      />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="商品详情"
+        className="absolute inset-y-0 right-0 flex w-full max-w-[34rem] flex-col border-l border-white/10 bg-[#061725] shadow-[-24px_0_70px_rgba(0,0,0,0.34)] sm:max-w-[36rem]"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-white/10 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-[#1ee6ef]">商品详情</div>
+            <div className="mt-1 truncate text-sm text-[#91a8b8]">
+              {specimen.id} · {specimen.product.name}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid size-10 shrink-0 place-items-center rounded-full border border-white/10 bg-[#0b2033] text-[#dbe8ee] transition hover:border-white/25 hover:text-white active:translate-y-px"
+            aria-label="关闭商品详情"
+          >
+            <X className="size-5" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          <SpecimenDetailPanel {...detailProps} frame="drawer" />
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 function SpecimenDetailPanel({
   specimen,
   detailImage,
@@ -1207,19 +1303,16 @@ function SpecimenDetailPanel({
   selectionCode,
   copied,
   onCopy,
-}: {
-  specimen?: Specimen;
-  detailImage?: SpecimenImage;
-  timeline: PublicBioTimelineEvent[];
-  latestBio?: PublicBioRecord;
-  loading: boolean;
-  selectionCode: string;
-  copied: boolean;
-  onCopy: () => void;
-}) {
+  frame = "panel",
+}: SpecimenDetailContentProps & { frame?: "panel" | "drawer" }) {
+  const shellClass =
+    frame === "drawer"
+      ? "bg-transparent"
+      : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start";
+
   if (!specimen) {
     return (
-      <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start">
+      <aside className={frame === "drawer" ? "bg-transparent" : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start"}>
         <div className="grid min-h-72 place-items-center rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
           请选择一个具体个体查看养护记录。
         </div>
@@ -1234,7 +1327,7 @@ function SpecimenDetailPanel({
   };
 
   return (
-    <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start">
+    <aside className={shellClass}>
       <SpecimenImageFrame
         src={displayImage.src}
         fallbackSrc={specimen.fallbackImage}
