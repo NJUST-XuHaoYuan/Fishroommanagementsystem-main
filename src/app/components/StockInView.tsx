@@ -601,7 +601,7 @@ export function StockInView() {
           <h2>库存明细</h2>
           <p className="text-sm text-muted-foreground">查看和管理每个子缸内的库存商品</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {permission.canDelete && (
             <>
               <Button
@@ -784,33 +784,33 @@ export function StockInView() {
                                   const locked = stockCannotDelete(s);
                                   const lockReason = s.sold ? "已售商品，不能删除" : "已关联订单，不能删除";
                                   return (
-                                  <div
-                                    key={s.id}
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (selectMode) {
-                                        if (!locked) toggleSelected(s.id);
-                                        return;
-                                      }
-                                      openDialog({ ...s }, false);
-                                    }}
-                                    onKeyDown={(e) => {
-                                      if (e.key !== "Enter" && e.key !== " ") return;
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (selectMode) {
-                                        if (!locked) toggleSelected(s.id);
-                                        return;
-                                      }
-                                      openDialog({ ...s }, false);
-                                    }}
-                                    className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
-                                      selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
-                                    } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
-                                    title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
-                                  >
+                                    <div
+                                      key={s.id}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (selectMode) {
+                                          if (!locked) toggleSelected(s.id);
+                                          return;
+                                        }
+                                        openDialog({ ...s }, false);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key !== "Enter" && e.key !== " ") return;
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (selectMode) {
+                                          if (!locked) toggleSelected(s.id);
+                                          return;
+                                        }
+                                        openDialog({ ...s }, false);
+                                      }}
+                                      className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
+                                        selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
+                                      } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
+                                      title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
+                                    >
                                     {p?.imageUrl ? (
                                       <ImageWithFallback src={p.imageUrl} alt={p?.name ?? ""} className="size-full object-cover" />
                                     ) : (

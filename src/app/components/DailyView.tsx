@@ -23,6 +23,7 @@ import { normalizeSiteId, siteName } from "../utils/sites";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -64,6 +65,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [publicLookupCode, setPublicLookupCode] = useState("");
+  const [highlightStockId, setHighlightStockId] = useState("");
 
   // Bio detail dialog state
   const [bioOpen, setBioOpen] = useState(false);
@@ -662,6 +665,54 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     void loadBioRecords(item.id);
   };
 
+  const locatePublicLookupCode = () => {
+    const candidates = parsePublicSelectionCode(publicLookupCode).map((item) => item.toLowerCase());
+    if (candidates.length === 0) {
+      toast.error("请粘贴公开页复制的选鱼码");
+      return;
+    }
+
+    const target = state.stock.find((item) => {
+      const itemCandidates = [
+        item.id,
+        item.code,
+        buildPublicSelectionCode(item.id),
+      ]
+        .map((value) => String(value ?? "").trim().toLowerCase())
+        .filter(Boolean);
+      return itemCandidates.some((candidate) => candidates.includes(candidate));
+    });
+
+    if (!target) {
+      toast.error("没有找到对应库存商品，请确认选鱼码是否完整");
+      return;
+    }
+
+    const productName = product(target.productId)?.name ?? target.productId;
+    setQ("");
+    setFilterStatuses(new Set());
+    setFilterSoldOnly(false);
+    setHighlightStockId(target.id);
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(`${target.subTankId}-${target.productId}`);
+      return next;
+    });
+    openBio(target);
+
+    window.setTimeout(() => {
+      const element = [...document.querySelectorAll<HTMLElement>("[data-daily-stock-item-id]")]
+        .find((node) => node.dataset.dailyStockItemId === target.id);
+      element?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    }, 80);
+
+    window.setTimeout(() => {
+      setHighlightStockId((current) => current === target.id ? "" : current);
+    }, 8000);
+
+    toast.success(`已打开：${productName}`);
+  };
+
   // Build timeline for bio detail
   const buildTimeline = (item: StockItem) => {
     const events: Array<
@@ -1009,6 +1060,27 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               )}
             </div>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2 rounded-lg border bg-white p-1.5 shadow-sm">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                  <Input
+                    value={publicLookupCode}
+                    onChange={(event) => setPublicLookupCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        locatePublicLookupCode();
+                      }
+                    }}
+                    placeholder="粘贴公开选鱼码"
+                    aria-label="公开选鱼码"
+                    className="h-8 w-48 border-0 bg-transparent pl-9 shadow-none focus-visible:ring-0"
+                  />
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={locatePublicLookupCode}>
+                  定位
+                </Button>
+              </div>
               {canBatchSelect && (
                 <Button
                   type="button"
@@ -1263,48 +1335,52 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                                     className="grid gap-1.5 px-3 pb-2 pt-1 bg-slate-50 border-t"
                                     style={{ gridTemplateColumns: "repeat(auto-fill, 2.25rem)", maxWidth: "27.375rem" }}
                                   >
-	                                    {stockItems.map((s) => {
-	                                      const iconUrl = getItemIcon(s.id, s.productId);
-	                                      const selected = selectedIds.has(s.id);
-	                                      return (
-	                                        <button
-	                                          key={s.id}
-	                                          onClick={(e) => {
-	                                            e.stopPropagation();
-	                                            if (selectMode) toggleSelectItem(s.id);
-	                                            else openBio(s);
-	                                          }}
-	                                          className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
-	                                            selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
-	                                          }`}
-		                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
-	                                        >
-	                                          {iconUrl ? (
-	                                            <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
-	                                          ) : (
-	                                            <div className="size-full flex items-center justify-center">
-	                                              <Fish className="size-3 text-muted-foreground" />
-	                                            </div>
-		                                          )}
-		                                          {s.code && (
-		                                            <span className="absolute inset-x-0 bottom-0 z-20 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
-		                                              {s.code}
-		                                            </span>
-		                                          )}
-		                                          {isSpecialPrice(s) && (
-		                                            <span className="absolute left-0 top-0 z-20 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
-		                                              {priceBadgeText(s)}
-		                                            </span>
-		                                          )}
-		                                          <StatusBadge sold={s.sold} />
-		                                          {selected && (
-		                                            <div className="absolute inset-0 z-10 bg-emerald-500/35 flex items-center justify-center">
-		                                              <Check className="size-4 text-white drop-shadow" />
-		                                            </div>
-		                                          )}
-	                                        </button>
-	                                      );
-	                                    })}
+                                    {stockItems.map((s) => {
+                                      const iconUrl = getItemIcon(s.id, s.productId);
+                                      const selected = selectedIds.has(s.id);
+                                      const highlighted = highlightStockId === s.id;
+                                      return (
+                                        <button
+                                          key={s.id}
+                                          data-daily-stock-item-id={s.id}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (selectMode) toggleSelectItem(s.id);
+                                            else openBio(s);
+                                          }}
+                                          className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
+                                            highlighted
+                                              ? "ring-4 ring-cyan-500 ring-offset-2 ring-offset-white"
+                                              : selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
+                                          }`}
+                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
+                                        >
+                                          {iconUrl ? (
+                                            <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
+                                          ) : (
+                                            <div className="size-full flex items-center justify-center">
+                                              <Fish className="size-3 text-muted-foreground" />
+                                            </div>
+                                          )}
+                                          {s.code && (
+                                            <span className="absolute inset-x-0 bottom-0 z-20 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
+                                              {s.code}
+                                            </span>
+                                          )}
+                                          {isSpecialPrice(s) && (
+                                            <span className="absolute left-0 top-0 z-20 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
+                                              {priceBadgeText(s)}
+                                            </span>
+                                          )}
+                                          <StatusBadge sold={s.sold} />
+                                          {selected && (
+                                            <div className="absolute inset-0 z-10 bg-emerald-500/35 flex items-center justify-center">
+                                              <Check className="size-4 text-white drop-shadow" />
+                                            </div>
+                                          )}
+                                        </button>
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </div>
