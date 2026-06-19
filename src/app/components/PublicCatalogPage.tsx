@@ -452,26 +452,32 @@ function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
     .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
 }
 
-function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement) {
+function isDesktopCatalogLayout() {
+  return window.matchMedia("(min-width: 1024px)").matches;
+}
+
+function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement, onTopOverscroll: () => void) {
   const maxScrollTop = container.scrollHeight - container.clientHeight;
-  if (maxScrollTop <= 0) return;
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
 
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? container.clientHeight : 1;
-  const nextTop = Math.min(maxScrollTop, Math.max(0, container.scrollTop + event.deltaY * unit));
+  const deltaY = event.deltaY * unit;
+  const currentTop = container.scrollTop;
+  const atTop = currentTop <= 1;
+  const atBottom = currentTop >= maxScrollTop - 1;
+
   event.preventDefault();
   event.stopPropagation();
+
+  if (maxScrollTop <= 0 || (deltaY < 0 && atTop)) {
+    onTopOverscroll();
+    return;
+  }
+
+  if (deltaY > 0 && atBottom) return;
+
+  const nextTop = Math.min(maxScrollTop, Math.max(0, currentTop + deltaY));
   container.scrollTop = nextTop;
-}
-
-function keepCatalogWheelInsideColumns(event: WheelEvent<HTMLElement>) {
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-
-  const container = target.closest("[data-public-catalog-scroll]");
-  if (!(container instanceof HTMLElement) || !event.currentTarget.contains(container)) return;
-
-  scrollCatalogColumnByWheel(event, container);
 }
 
 export function PublicCatalogPage() {
@@ -486,6 +492,11 @@ export function PublicCatalogPage() {
   const [copiedSelectionCode, setCopiedSelectionCode] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [filter, setFilter] = useState("all");
+  const headerRef = useRef<HTMLElement | null>(null);
+  const heroRef = useRef<HTMLElement | null>(null);
+  const catalogRef = useRef<HTMLElement | null>(null);
+  const pageSnapTimerRef = useRef<number | undefined>(undefined);
+  const pageSnapLockedUntilRef = useRef(0);
   const speciesListRef = useRef<HTMLDivElement | null>(null);
   const specimenListRef = useRef<HTMLDivElement | null>(null);
 
@@ -824,13 +835,82 @@ export function PublicCatalogPage() {
   }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
 
-  const scrollToCatalog = () => {
-    document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const catalogPageTop = () => {
+    const headerHeight = headerRef.current?.getBoundingClientRect().height ?? 80;
+    return Math.max(0, heroRef.current?.offsetHeight ?? window.innerHeight - headerHeight);
+  };
+
+  const scrollToHero = (behavior: ScrollBehavior = "smooth") => {
+    pageSnapLockedUntilRef.current = Date.now() + 900;
+    window.scrollTo({ top: 0, behavior });
+  };
+
+  const scrollToCatalog = (behavior: ScrollBehavior = "smooth") => {
+    pageSnapLockedUntilRef.current = Date.now() + 900;
+    window.scrollTo({ top: catalogPageTop(), behavior });
+  };
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (!isDesktopCatalogLayout() || detailOpen) return;
+      if (Date.now() < pageSnapLockedUntilRef.current) return;
+      window.clearTimeout(pageSnapTimerRef.current);
+      pageSnapTimerRef.current = window.setTimeout(() => {
+        const targetTop = catalogPageTop();
+        if (targetTop <= 0) return;
+        const currentTop = window.scrollY;
+        const nearestTop = currentTop < targetTop / 2 ? 0 : targetTop;
+        if (Math.abs(currentTop - nearestTop) > 2) {
+          window.scrollTo({ top: nearestTop, behavior: "smooth" });
+        }
+      }, 120);
+    };
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("resize", handleScroll);
+    return () => {
+      window.clearTimeout(pageSnapTimerRef.current);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("resize", handleScroll);
+    };
+  }, [detailOpen]);
+
+  const handlePageWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    if (!isDesktopCatalogLayout() || detailOpen) return;
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("#catalog")) return;
+    if (event.deltaY <= 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    scrollToCatalog();
+  };
+
+  const handleCatalogWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    if (!isDesktopCatalogLayout() || detailOpen) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    const container = target.closest("[data-public-catalog-scroll]");
+    if (container instanceof HTMLElement && event.currentTarget.contains(container)) {
+      scrollCatalogColumnByWheel(event, container, scrollToHero);
+      return;
+    }
+
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.deltaY < 0) {
+      scrollToHero();
+    } else {
+      scrollToCatalog();
+    }
   };
 
   return (
-    <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]">
-      <header className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
+    <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]" onWheelCapture={handlePageWheelCapture}>
+      <header ref={headerRef} className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
         <div className="flex h-20 w-full items-center justify-start px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-4">
             <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8 shadow-[0_16px_42px_rgba(30,230,239,0.08)]">
@@ -841,7 +921,7 @@ export function PublicCatalogPage() {
         </div>
       </header>
 
-      <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
+      <section ref={heroRef} className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
         {heroCarouselImages.map((src, index) => (
           <ImageWithFallback
             key={src}
@@ -876,14 +956,21 @@ export function PublicCatalogPage() {
               每一条鱼都可查看养护及检疫记录
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={scrollToCatalog}
+              <a
+                href="#catalog"
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  scrollToCatalog();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  scrollToCatalog();
+                }}
                 className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-6 text-sm font-semibold text-[#03101f] shadow-[0_18px_44px_rgba(30,230,239,0.18)] transition hover:bg-[#75f5f8] active:translate-y-px"
               >
                 开始选鱼
                 <ArrowRight className="size-4" />
-              </button>
+              </a>
             </div>
           </div>
         </div>
@@ -891,13 +978,14 @@ export function PublicCatalogPage() {
 
       <section
         id="catalog"
+        ref={catalogRef}
         className="scroll-mt-20 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:overflow-hidden"
-        onWheelCapture={keepCatalogWheelInsideColumns}
+        onWheelCapture={handleCatalogWheelCapture}
       >
         <div className="w-full">
           <div className="grid min-h-[calc(100dvh-5rem)] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
             <aside className="overflow-hidden bg-[#071827] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)]">
-              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain [overflow-anchor:none]" data-public-catalog-scroll="categories">
+              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain pb-8 [overflow-anchor:none]" data-public-catalog-scroll="categories">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -947,7 +1035,7 @@ export function PublicCatalogPage() {
             <section className="min-w-0 border-t border-white/10 bg-[#081b2c] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
               <div
                 ref={speciesListRef}
-                className="max-h-none overflow-y-auto overscroll-contain [overflow-anchor:none] lg:h-full lg:max-h-none"
+                className="max-h-none overflow-y-auto overscroll-contain pb-8 [overflow-anchor:none] lg:h-full lg:max-h-none"
                 data-public-catalog-scroll="species"
               >
                 {visibleSpecies.length === 0 ? (
@@ -1051,7 +1139,7 @@ export function PublicCatalogPage() {
               </div>
               <div
                 ref={specimenListRef}
-                className="min-h-[calc(100dvh-15rem)] [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
+                className="min-h-[calc(100dvh-15rem)] pb-8 [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
                 data-public-catalog-scroll="specimens"
               >
                 {filteredSpecimens.length === 0 ? (
