@@ -382,6 +382,21 @@ function isFishCategory(category: string): boolean {
   return !/(虾|蟹|螺|贝|海胆|珊瑚|海星|海葵)/.test(category);
 }
 
+function isFishInventoryItem(product?: Product, species?: Species): boolean {
+  const text = [
+    species?.category,
+    species?.name,
+    species?.scientificName,
+    ...(Array.isArray(species?.commonNames) ? species.commonNames : []),
+    product?.name,
+    product?.size,
+    product?.origin,
+    product?.notes,
+  ].filter(Boolean).join(" ");
+  if (/(耗材|活石|活石头|珊瑚|活性炭|吸附|滤材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(text)) return false;
+  return isFishCategory(String(species?.category ?? text));
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -906,7 +921,7 @@ export function Dashboard() {
   const inTankFishStock = inTankStock.filter((stockItem) => {
     const product = productById.get(stockItem.productId);
     const species = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishCategory(species?.category ?? "");
+    return isFishInventoryItem(product, species);
   });
   let inFishStock = inTankFishStock.length;
   let sick = inTankFishStock.filter((s) => s.status === "sick").length;
@@ -997,7 +1012,7 @@ export function Dashboard() {
       species: itemSpecies,
       date: String(record.date ?? stockItem?.lossDate ?? "").slice(0, 10),
       estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
-      isFish: isFishCategory(itemSpecies?.category ?? ""),
+      isFish: isFishInventoryItem(product, itemSpecies),
     };
   }).filter((row) => row.date && row.stockItem && row.isFish);
   const lossDateByStockId = new Map<string, string>();
@@ -1025,7 +1040,7 @@ export function Dashboard() {
   const fishStock = dashboardStock.filter((item) => {
     const product = productById.get(item.productId);
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishCategory(itemSpecies?.category ?? "");
+    return isFishInventoryItem(product, itemSpecies);
   });
   let dailyLossData: DailyLossPoint[] = dailyDates.map((date) => {
     const seenLossIds = new Set<string>();
@@ -1538,7 +1553,7 @@ export function Dashboard() {
         if (!isPhysicallyInTank(stock, exportShippedOutStockIds)) return false;
         const product = exportProductById.get(stock.productId);
         const species = product ? exportSpeciesById.get(product.speciesId) : undefined;
-        return isFishCategory(species?.category ?? "");
+        return isFishInventoryItem(product, species);
       });
     const fishListPriceBaselines = buildStockPriceBaselines(sellableStock, exportData.products);
 
