@@ -1120,24 +1120,20 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   {isGroupExpanded && (
                     <button
                       type="button"
-                      className="flex min-w-0 items-start gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
+                      className="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
                       onClick={() => setViewLogGroupId(g.id)}
                     >
-                      <Clock className="mt-0.5 size-4 shrink-0 text-sky-600" />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-medium text-sky-700">最近养护</div>
+                      <Clock className="size-4 shrink-0 text-sky-600" />
+                      <div className="min-w-0 flex items-center gap-2 text-sm">
+                        <span className="shrink-0 text-xs font-medium text-sky-700">最近养护</span>
                         {latestLog ? (
-                          <>
-                            <div className="mt-0.5 truncate text-sm font-medium">
-                              {latestLog.date} · {latestLog.action}
-                              {latestLog.operator ? ` · ${latestLog.operator}` : ""}
-                            </div>
-                            {latestLog.notes && (
-                              <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{latestLog.notes}</div>
-                            )}
-                          </>
+                          <span className="min-w-0 truncate font-medium">
+                            {latestLog.date} · {latestLog.action}
+                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
+                            {latestLog.notes ? ` · ${latestLog.notes}` : ""}
+                          </span>
                         ) : (
-                          <div className="mt-0.5 text-sm text-muted-foreground">暂无养护日志</div>
+                          <span className="truncate text-muted-foreground">暂无养护日志</span>
                         )}
                       </div>
                     </button>
