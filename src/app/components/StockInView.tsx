@@ -12,13 +12,16 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "./ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, StatusLegend, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, ChevronDown, Trash2, Check, ArrowRightLeft } from "lucide-react";
+import { Search, ChevronDown, Trash2, Check, ArrowRightLeft, MapPin, List } from "lucide-react";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+
+type StockViewMode = "tank" | "species";
 
 function buildStockItems(item: StockItem, quantity: number): StockItem[] {
   return item.id
@@ -265,17 +268,44 @@ export function StockInView() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = useState<StockViewMode>("tank");
 
   const today = new Date().toISOString().slice(0, 10);
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
-  const product = (id: string) => state.products.find((p) => p.id === id);
+  const productById = useMemo(
+    () => new Map(state.products.map((p) => [p.id, p])),
+    [state.products],
+  );
+  const speciesById = useMemo(
+    () => new Map(state.species.map((s) => [s.id, s])),
+    [state.species],
+  );
+  const tankMetaById = useMemo(() => {
+    const map = new Map<string, { groupName: string; subTankName: string; location: string; label: string }>();
+    state.tankGroups.forEach((g) => {
+      g.subTanks.forEach((t) => {
+        map.set(t.id, {
+          groupName: g.name,
+          subTankName: t.name,
+          location: g.location,
+          label: `${g.name} / ${t.name}`,
+        });
+      });
+    });
+    return map;
+  }, [state.tankGroups]);
+  const activeStock = useMemo(
+    () => state.stock.filter((item) => isPhysicallyInTank(item, shippedOutStockIds)),
+    [state.stock, shippedOutStockIds],
+  );
+  const product = (id: string) => productById.get(id);
   const batch = (id: string) => state.batches.find((b) => b.id === id);
   const priceBaselineByProduct = useMemo(
     () => buildStockPriceBaselines(
-      state.stock.filter((item) => !item.lost && isPhysicallyInTank(item, shippedOutStockIds)),
+      activeStock,
       state.products,
     ),
-    [state.stock, state.products, shippedOutStockIds],
+    [activeStock, state.products],
   );
   const isSpecialPrice = (item: StockItem) => {
     return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
@@ -385,6 +415,8 @@ export function StockInView() {
     [selectedGroupId, state.tankGroups]
   );
   const editingBatch = editing ? batch(editing.batchId) : undefined;
+  const includesTerm = (value: unknown, term: string) =>
+    String(value ?? "").toLowerCase().includes(term);
 
   const filteredGroups = useMemo(() => {
     if (!q.trim()) return state.tankGroups;
@@ -393,8 +425,7 @@ export function StockInView() {
       (g) =>
         g.name.toLowerCase().includes(term) ||
         g.subTanks.some((t) => t.name.toLowerCase().includes(term)) ||
-        state.stock.some((s) => {
-          if (!isPhysicallyInTank(s, shippedOutStockIds)) return false;
+        activeStock.some((s) => {
           if (!g.subTanks.find((t) => t.id === s.subTankId)) return false;
 	          const p = product(s.productId);
 	          return (
@@ -403,10 +434,10 @@ export function StockInView() {
 	          );
 	        })
     );
-  }, [q, state, shippedOutStockIds]);
+  }, [q, state.tankGroups, activeStock, productById]);
 
   const stockBySub = (subId: string) =>
-    state.stock.filter((s) => s.subTankId === subId && isPhysicallyInTank(s, shippedOutStockIds));
+    activeStock.filter((s) => s.subTankId === subId);
 
   useEffect(() => {
     setSelectedIds((prev) => {
@@ -581,6 +612,94 @@ export function StockInView() {
     return [...map.entries()];
   };
 
+  const speciesStockGroups = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    const matches = (item: StockItem) => {
+      if (!term) return true;
+      const p = productById.get(item.productId);
+      const sp = p?.speciesId ? speciesById.get(p.speciesId) : undefined;
+      const tank = tankMetaById.get(item.subTankId);
+      return (
+        includesTerm(p?.name, term) ||
+        includesTerm(p?.size, term) ||
+        includesTerm(p?.origin, term) ||
+        includesTerm(sp?.name, term) ||
+        includesTerm(sp?.scientificName, term) ||
+        sp?.commonNames?.some((name) => includesTerm(name, term)) ||
+        includesTerm(item.code, term) ||
+        includesTerm(item.notes, term) ||
+        includesTerm(tank?.groupName, term) ||
+        includesTerm(tank?.subTankName, term) ||
+        includesTerm(tank?.location, term)
+      );
+    };
+
+    const groups = new Map<string, {
+      speciesId: string;
+      speciesName: string;
+      scientificName: string;
+      commonNames: string[];
+      imageUrl: string;
+      total: number;
+      statuses: Record<StockStatus, number>;
+      products: Map<string, {
+        productId: string;
+        name: string;
+        size: string;
+        origin: string;
+        count: number;
+        tankCounts: Map<string, number>;
+      }>;
+    }>();
+
+    activeStock.filter(matches).forEach((item) => {
+      const p = productById.get(item.productId);
+      const speciesId = p?.speciesId ?? item.productId;
+      const sp = speciesById.get(speciesId);
+      const group = groups.get(speciesId) ?? {
+        speciesId,
+        speciesName: sp?.name ?? p?.name ?? speciesId,
+        scientificName: sp?.scientificName ?? "",
+        commonNames: sp?.commonNames ?? [],
+        imageUrl: sp?.imageUrl || p?.imageUrl || "",
+        total: 0,
+        statuses: { healthy: 0, feeding: 0, sick: 0 },
+        products: new Map(),
+      };
+
+      group.total += 1;
+      group.statuses[item.status] += 1;
+
+      const productRow = group.products.get(item.productId) ?? {
+        productId: item.productId,
+        name: p?.name ?? item.productId,
+        size: p?.size ?? "",
+        origin: p?.origin ?? "",
+        count: 0,
+        tankCounts: new Map<string, number>(),
+      };
+      productRow.count += 1;
+      const tankLabel = tankMetaById.get(item.subTankId)?.label ?? "未知缸位";
+      productRow.tankCounts.set(tankLabel, (productRow.tankCounts.get(tankLabel) ?? 0) + 1);
+      group.products.set(item.productId, productRow);
+      groups.set(speciesId, group);
+    });
+
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        productRows: [...group.products.values()]
+          .map((row) => ({
+            ...row,
+            tankRows: [...row.tankCounts.entries()]
+              .map(([label, count]) => ({ label, count }))
+              .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-Hans-CN")),
+          }))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "zh-Hans-CN")),
+      }))
+      .sort((a, b) => b.total - a.total || a.speciesName.localeCompare(b.speciesName, "zh-Hans-CN"));
+  }, [activeStock, q, productById, speciesById, tankMetaById]);
+
   const statusMeta: Record<StockStatus, { label: string }> = {
     healthy: { label: "正常" },
     feeding: { label: "开口" },
@@ -599,9 +718,28 @@ export function StockInView() {
       <div className="flex items-end justify-between gap-3">
         <div>
           <h2>库存明细</h2>
-          <p className="text-sm text-muted-foreground">查看和管理每个子缸内的库存商品</p>
+          <p className="text-sm text-muted-foreground">按缸位或品种查看和管理在缸库存</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2 flex-wrap">
+          <ToggleGroup
+            type="single"
+            value={viewMode}
+            onValueChange={(value) => {
+              if (value) setViewMode(value as StockViewMode);
+            }}
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+          >
+            <ToggleGroupItem value="tank" aria-label="缸位视图" className="gap-1.5 px-3">
+              <MapPin className="size-3.5" />
+              缸位视图
+            </ToggleGroupItem>
+            <ToggleGroupItem value="species" aria-label="品种视图" className="gap-1.5 px-3">
+              <List className="size-3.5" />
+              品种视图
+            </ToggleGroupItem>
+          </ToggleGroup>
           {permission.canDelete && (
             <>
               <Button
@@ -633,15 +771,21 @@ export function StockInView() {
           )}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索缸 / 商品 / 编号..." className="pl-9 w-64" />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={viewMode === "tank" ? "搜索缸 / 商品 / 编号..." : "搜索品种 / 商品 / 缸位..."}
+              className="pl-9 w-64"
+            />
           </div>
         </div>
       </div>
       <StatusLegend />
 
-      {/* 缸组列表：每个缸组独占一行 */}
-      <div className="flex flex-col gap-4">
-        {filteredGroups.map((g) => (
+      {viewMode === "tank" ? (
+        /* 缸组列表：每个缸组独占一行 */
+        <div className="flex flex-col gap-4">
+          {filteredGroups.map((g) => (
           <Card key={g.id} className="p-5 border-2 border-sky-200 bg-sky-50/30">
             <div className="mb-3">
               <h3>{g.name}</h3>
@@ -846,8 +990,99 @@ export function StockInView() {
               })}
             </div>
           </Card>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {speciesStockGroups.length === 0 ? (
+            <Card className="p-8 text-center text-sm text-muted-foreground">
+              暂无匹配的在缸库存
+            </Card>
+          ) : (
+            speciesStockGroups.map((group) => (
+              <Card key={group.speciesId} className="p-4">
+                <div className="flex items-start gap-4">
+                  <div className="size-14 rounded-md overflow-hidden border bg-muted shrink-0">
+                    {group.imageUrl ? (
+                      <ImageWithFallback src={group.imageUrl} alt={group.speciesName} className="size-full object-cover" />
+                    ) : (
+                      <div className="size-full flex items-center justify-center px-1 text-center text-[10px] text-muted-foreground">
+                        {group.speciesName}
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="truncate">{group.speciesName}</h3>
+                      <span className="rounded-md bg-sky-600 px-2 py-1 text-sm font-bold leading-none text-white shadow-sm">
+                        {group.total} 条
+                      </span>
+                    </div>
+                    {(group.commonNames.length > 0 || group.scientificName) && (
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {[group.commonNames.join(" / "), group.scientificName].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    <div className="mt-2 flex items-center gap-3 flex-wrap">
+                      {(["healthy", "feeding", "sick"] as StockStatus[])
+                        .filter((st) => group.statuses[st] > 0)
+                        .map((st) => (
+                          <span key={st} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                            <span className={`size-3 rounded border-2 ${statusFrameClass(st)}`} />
+                            {statusMeta[st].label} {group.statuses[st]} 条
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-xs text-muted-foreground">
+                        <th className="py-2 pr-3 text-left font-medium">商品规格</th>
+                        <th className="py-2 px-3 text-left font-medium">数量</th>
+                        <th className="py-2 pl-3 text-left font-medium">缸位分布</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.productRows.map((row) => (
+                        <tr key={row.productId} className="border-b last:border-b-0">
+                          <td className="py-2.5 pr-3 align-top">
+                            <div className="font-medium">{row.name}</div>
+                            {(row.size || row.origin) && (
+                              <div className="mt-0.5 text-xs text-muted-foreground">
+                                {[row.size, row.origin].filter(Boolean).join(" · ")}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 align-top">
+                            <span className="whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                              {row.count} 条
+                            </span>
+                          </td>
+                          <td className="py-2.5 pl-3 align-top">
+                            <div className="flex flex-wrap gap-1.5">
+                              {row.tankRows.map((tank) => (
+                                <span
+                                  key={tank.label}
+                                  className="rounded-full border bg-background px-2 py-0.5 text-xs text-muted-foreground"
+                                >
+                                  {tank.label} · {tank.count} 条
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            ))
+          )}
+        </div>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent aria-describedby={undefined}>
