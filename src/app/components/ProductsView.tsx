@@ -21,6 +21,7 @@ import {
 } from "./ui/alert-dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { ImageUpload } from "./ImageUpload";
@@ -542,7 +543,7 @@ export function ProductsView() {
   );
 
   const empty = (): Product => ({
-    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, commissionRate: 0, notes: "",
+    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, publicVisible: true, commissionRate: 0, notes: "",
   });
 
   const onSpeciesChange = (sid: string) => {
@@ -573,6 +574,7 @@ export function ProductsView() {
       id: editing.id || uid(),
       notes: editing.notes?.trim() ?? "",
       defaultPrice: isNaN(price) ? 0 : price,
+      publicVisible: editing.publicVisible !== false,
       commissionRate: isAdmin ? Number(commissionRate.toFixed(4)) : Number(editing.commissionRate ?? 0),
     };
     if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存商品信息的修改。" : "将新增一个商品。")) return;
@@ -661,6 +663,19 @@ export function ProductsView() {
           { key: "size", title: "规格" },
           { key: "origin", title: "产地" },
           { key: "defaultPrice", title: "销售默认价(¥)", render: (r) => Number(r.defaultPrice || 0).toFixed(2) },
+          {
+            key: "publicVisible",
+            title: "对外网站",
+            render: (r) => (
+              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                r.publicVisible === false
+                  ? "bg-slate-100 text-slate-500"
+                  : "bg-emerald-50 text-emerald-700"
+              }`}>
+                {r.publicVisible === false ? "隐藏" : "展示"}
+              </span>
+            ),
+          },
           { key: "commissionRate", title: "提成比例", render: (r) => `${Number(r.commissionRate ?? 0).toFixed(2)}%` },
           {
             key: "notes",
@@ -676,7 +691,7 @@ export function ProductsView() {
           <div className="flex justify-end gap-2">
             {permission.canUpdate && <Button size="sm" variant="outline" onClick={() => {
               const { speciesSearch, ...product } = row;
-              setEditing({ ...product, commissionRate: Number(product.commissionRate ?? 0), notes: product.notes ?? "" });
+              setEditing({ ...product, publicVisible: product.publicVisible !== false, commissionRate: Number(product.commissionRate ?? 0), notes: product.notes ?? "" });
               setPriceStr(String(row.defaultPrice));
               setCommissionStr(String(row.commissionRate ?? 0));
               setOpen(true);
@@ -728,6 +743,17 @@ export function ProductsView() {
                   value={priceStr}
                   onChange={(e) => setPriceStr(e.target.value)}
                   placeholder="0.00"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/20 px-3 py-3">
+                <div className="space-y-1">
+                  <Label htmlFor="product-public-visible">对外网站展示</Label>
+                  <div className="text-xs text-muted-foreground">关闭后，此商品和它的库存个体不会出现在公开网站，也不能通过公开选鱼码查询。</div>
+                </div>
+                <Switch
+                  id="product-public-visible"
+                  checked={editing.publicVisible !== false}
+                  onCheckedChange={(checked) => setEditing({ ...editing, publicVisible: checked })}
                 />
               </div>
               <div className="grid gap-2">

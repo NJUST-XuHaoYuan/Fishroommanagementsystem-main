@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, Search } from "lucide-react";
+import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, X } from "lucide-react";
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
@@ -16,7 +16,6 @@ type PublicProduct = Pick<Product, "id" | "speciesId" | "name" | "size" | "origi
 
 type PublicStockItem = Pick<StockItem, "id" | "productId" | "status" | "inDate"> &
   Partial<Pick<StockItem, "sold" | "lost" | "basePrice" | "code">> & {
-    batchNo?: string;
     tankGroupName?: string;
     subTankName?: string;
     tankLocation?: string;
@@ -86,13 +85,12 @@ type Specimen = {
   daysInStore: number;
   statusLabel: string;
   locationLabel: string;
-  batchNo: string;
   arrivalDate: string;
   available: boolean;
 };
 
 type PublicBioTimelineEvent =
-  | { type: "stock_in"; date: string; batchNo: string }
+  | { type: "stock_in"; date: string }
   | { type: "record"; record: PublicBioRecord };
 
 const fallbackCatalog: PublicCatalogData = {
@@ -175,7 +173,6 @@ const premiumCategories: PremiumCategory[] = [
 
 const filterOptions = [
   { key: "all", label: "全部" },
-  { key: "available", label: "可预订" },
   { key: "quarantined", label: "入缸14天+" },
   { key: "eating", label: "已开口" },
 ];
@@ -465,6 +462,7 @@ export function PublicCatalogPage() {
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
   const [selectedSpecimenId, setSelectedSpecimenId] = useState("");
   const [copiedSelectionCode, setCopiedSelectionCode] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [filter, setFilter] = useState("all");
 
   useEffect(() => {
@@ -602,7 +600,6 @@ export function PublicCatalogPage() {
           daysInStore,
           statusLabel: stockStatusLabel(stock?.status),
           locationLabel: stockLocation(stock),
-          batchNo: String(stock?.batchNo ?? "").trim() || "—",
           arrivalDate: formatDate(stock?.inDate),
           available: Boolean(stock),
         });
@@ -682,13 +679,16 @@ export function PublicCatalogPage() {
     setSelectedSpeciesId(visibleSpecies[0]?.species.id ?? "");
   }, [selectedSpeciesId, visibleSpecies]);
 
+  useEffect(() => {
+    setDetailOpen(false);
+  }, [selectedCategoryKey, selectedSpeciesId]);
+
   const selectedSpecies = visibleSpecies.find((card) => card.species.id === selectedSpeciesId) ?? visibleSpecies[0];
   const specimenOptions = specimens.filter((specimen) => specimen.species?.id === selectedSpecies?.species.id && specimen.available);
   const filteredSpecimens = specimenOptions.filter((specimen) => {
     if (filter === "all") return true;
     if (filter === "quarantined") return specimen.daysInStore >= 14;
     if (filter === "eating") return specimen.stock?.status === "feeding";
-    if (filter === "available") return specimen.available;
     return true;
   });
 
@@ -708,6 +708,20 @@ export function PublicCatalogPage() {
   useEffect(() => {
     setCopiedSelectionCode(false);
   }, [selectedSelectionCode]);
+
+  useEffect(() => {
+    if (!detailOpen) return;
+    const originalOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDetailOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [detailOpen]);
 
   const copySelectedSelectionCode = async () => {
     if (!selectedSelectionCode) return;
@@ -766,7 +780,7 @@ export function PublicCatalogPage() {
   const selectedTimeline = useMemo<PublicBioTimelineEvent[]>(() => {
     if (!selectedSpecimen?.stock) return [];
     return [
-      { type: "stock_in", date: selectedSpecimen.stock.inDate, batchNo: selectedSpecimen.batchNo },
+      { type: "stock_in", date: selectedSpecimen.stock.inDate },
       ...selectedBioRecords
         .slice()
         .sort((a, b) =>
@@ -777,7 +791,6 @@ export function PublicCatalogPage() {
     ];
   }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
-  const heroImage = heroCarouselImages[heroImageIndex] ?? marinePhotos.localFish;
 
   const scrollToCatalog = () => {
     document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -786,29 +799,30 @@ export function PublicCatalogPage() {
   return (
     <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]">
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
-        <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="flex h-20 w-full items-center justify-start px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-4">
             <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8 shadow-[0_16px_42px_rgba(30,230,239,0.08)]">
               <img src="/assets/brand-logo.jpg" alt="海水鱼廊" className="size-14 rounded-xl object-contain" />
             </div>
-            <div>
-              <div className="text-lg font-semibold tracking-normal text-white">海水鱼廊</div>
-              <div className="text-xs text-[#8faabc]">单体鱼选购</div>
-            </div>
+            <div className="text-lg font-semibold tracking-normal text-white">海水生物超市</div>
           </div>
         </div>
       </header>
 
       <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
-        <ImageWithFallback
-          key={heroImage}
-          src={heroImage}
-          fallbackSrc={marinePhotos.localFish}
-          alt="海水鱼廊图册照片"
-          disableMediaProxy
-          className="absolute inset-0 h-full w-full object-cover opacity-70 transition-opacity duration-700"
-          loading="eager"
-        />
+        {heroCarouselImages.map((src, index) => (
+          <ImageWithFallback
+            key={src}
+            src={src}
+            fallbackSrc={marinePhotos.localFish}
+            alt="海水鱼廊图册照片"
+            disableMediaProxy
+            className={`absolute inset-0 h-full w-full object-cover transition-[opacity,transform] duration-[1200ms] ease-out motion-reduce:transition-none ${
+              index === heroImageIndex ? "scale-100 opacity-70" : "scale-[1.025] opacity-0"
+            }`}
+            loading={index === heroImageIndex ? "eager" : "lazy"}
+          />
+        ))}
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_74%_42%,rgba(16,211,222,0.18),transparent_28%),linear-gradient(90deg,rgba(3,16,31,0.98)_0%,rgba(3,16,31,0.76)_42%,rgba(3,16,31,0.18)_100%)]" />
         <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-1.5" aria-hidden="true">
           {heroCarouselImages.map((_, index) => (
@@ -823,9 +837,10 @@ export function PublicCatalogPage() {
         <div className="relative mx-auto flex min-h-[calc(100dvh-5rem)] max-w-7xl items-center px-4 py-14 sm:px-6 lg:px-8">
           <div className="max-w-3xl">
             <h1 className="max-w-[18ch] text-5xl font-semibold leading-[1.04] tracking-normal text-white sm:text-6xl lg:text-7xl">
-              按真实库存个体挑选海水生物
+              <span className="block">按真实库存</span>
+              <span className="block">挑选海水生物</span>
             </h1>
-            <p className="mt-6 max-w-[32rem] text-base leading-7 text-[#bfd0db]">
+            <p className="mt-6 max-w-[34rem] text-xl leading-8 text-[#d4e2ea] sm:text-2xl sm:leading-9">
               每一条鱼都可查看养护及检疫记录
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
@@ -842,22 +857,11 @@ export function PublicCatalogPage() {
         </div>
       </section>
 
-      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725] py-12 sm:py-16">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="max-w-2xl">
-            <h2 className="text-3xl font-semibold leading-tight text-white sm:text-4xl">按大类浏览</h2>
-            <p className="mt-4 max-w-[39rem] text-sm leading-7 text-[#91a8b8]">
-              先在侧边栏选大类，再选品种，页面内直接切换到具体库存个体。
-            </p>
-          </div>
-
-          <div className="mt-8 grid items-start gap-6 lg:grid-cols-[18rem_minmax(0,1fr)] xl:grid-cols-[18rem_minmax(0,1fr)_26rem]">
-            <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 lg:sticky lg:top-24 lg:self-start">
-              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#041321] px-4 py-3 text-sm text-[#91a8b8]">
-                <Search className="size-4 text-[#1ee6ef]" />
-                大类
-              </div>
-              <div className="mt-4 grid gap-2">
+      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725]">
+        <div className="w-full">
+          <div className="grid min-h-[calc(100dvh-5rem)] lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
+            <aside className="overflow-hidden bg-[#071827] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:self-start">
+              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -865,72 +869,91 @@ export function PublicCatalogPage() {
                       key={category.key}
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
-                      className={`rounded-xl border px-4 py-3 text-left transition active:translate-y-px ${
-                        active
-                          ? "border-[#1ee6ef]/65 bg-[#123450] text-white"
-                          : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/20 hover:text-white"
+                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b border-white/8 px-6 py-5 text-left transition active:translate-y-px ${
+                        active ? "text-white" : "text-[#dbe8ee] hover:text-white"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-semibold">{category.label}</span>
-                        {active && <Check className="size-4 text-[#1ee6ef]" />}
+                      <ImageWithFallback
+                        src={displayImageUrl(category.image, 700)}
+                        fallbackSrc={categoryFallbackImage(category.label)}
+                        alt=""
+                        aria-hidden="true"
+                        disableMediaProxy
+                        className={`absolute inset-0 h-full w-full object-cover transition duration-300 ${
+                          active ? "scale-[1.02] opacity-70 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
+                        }`}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10" />
+                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/12" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
+                      <div className="relative z-10 flex items-center justify-between gap-3">
+                        <span className="truncate text-lg font-semibold">{category.label}</span>
+                        {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                       </div>
-                      <div className="mt-1 text-xs text-[#7893a6]">{category.specimens} 条在售</div>
+                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">{category.specimens} 条在售</div>
                     </button>
                   );
                 })}
               </div>
             </aside>
 
-            <section className="grid gap-6">
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <div className="text-xs font-semibold text-[#1ee6ef]">当前大类</div>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">{selectedCategory.label}</h3>
-                    <p className="mt-3 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">{selectedCategory.description}</p>
+            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#081b2c]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-[#1ee6ef]">{selectedCategory.label}</div>
+                    <h3 className="mt-1 text-lg font-semibold text-white">品种</h3>
+                    <p className="mt-1 text-sm leading-5 text-[#91a8b8]">
+                      {visibleSpecies.length} 个品种，{selectedCategory.specimens} 条可售个体
+                    </p>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-[#061725] px-4 py-3 text-sm font-semibold text-[#a9bfce]">
-                    {visibleSpecies.length} 个品种
-                  </div>
+                  <Check className="mt-1 size-5 shrink-0 text-[#1ee6ef]" />
                 </div>
+              </div>
+              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-11rem)]">
                 {visibleSpecies.length === 0 ? (
-                  <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
+                  <div className="border-b border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
                   </div>
                 ) : (
-                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <div>
                     {visibleSpecies.map((card) => {
                       const active = selectedSpecies?.species.id === card.species.id;
+                      const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
+                      const previewFallback = previewSpecimen?.fallbackImage ?? categoryFallbackImage(speciesCategoryName(card.species), card.species);
                       return (
                         <button
                           key={card.species.id}
                           type="button"
                           onClick={() => setSelectedSpeciesId(card.species.id)}
-                          className={`grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3 rounded-xl border p-3 text-left transition active:translate-y-px ${
+                          className={`grid min-h-[5.5rem] w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 border-b border-white/8 p-3 text-left transition active:translate-y-px ${
                             active
-                              ? "border-[#1ee6ef]/65 bg-[#123450] text-white"
-                              : "border-white/10 bg-[#0b2033] text-[#a9bfce] hover:border-white/22 hover:text-white"
+                              ? "bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
+                              : "bg-[#0b2033] text-[#a9bfce] hover:bg-[#102a41] hover:text-white"
                           }`}
                         >
-                          <div className="aspect-square overflow-hidden rounded-lg bg-[#102b42]">
+                          <div className="relative aspect-[1.22/1] overflow-hidden bg-[#102b42]">
                             <ImageWithFallback
-                              src={card.availableSpecimens[0]?.image ?? specimenImage(card.products[0], card.species, categoryForSpecies(card.species)).src}
-                              fallbackSrc={categoryFallbackImage(speciesCategoryName(card.species), card.species)}
+                              src={previewSpecimen?.image ?? previewFallback}
+                              fallbackSrc={previewFallback}
                               alt={card.species.name}
                               disableMediaProxy
                               className="h-full w-full object-cover"
                             />
+                            <div className="absolute inset-0 bg-gradient-to-t from-[#03101f]/42 to-transparent" />
                           </div>
                           <div className="min-w-0">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="truncate text-sm font-semibold">{card.species.name}</div>
-                              {active && <Check className="size-4 shrink-0 text-[#1ee6ef]" />}
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-base font-semibold">{card.species.name}</div>
+                                {card.species.scientificName && (
+                                  <div className="mt-0.5 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
+                                )}
+                              </div>
+                              {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                             </div>
-                            {card.species.scientificName && (
-                              <div className="mt-0.5 truncate text-xs italic text-[#7893a6]">{card.species.scientificName}</div>
-                            )}
-                            <div className="mt-1 truncate text-xs text-[#7893a6]">{card.availableSpecimens.length} 条真实个体 · {card.priceRange}</div>
+                            <div className="mt-2 truncate text-xs font-medium text-[#91a8b8]">
+                              {card.availableSpecimens.length} 条个体 · {card.priceRange}
+                            </div>
                           </div>
                         </button>
                       );
@@ -938,34 +961,42 @@ export function PublicCatalogPage() {
                   </div>
                 )}
               </div>
+            </section>
 
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
-                <div className="flex flex-col gap-4">
-                  <div>
-                    <div className="text-xs font-semibold text-[#1ee6ef]">当前品种</div>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">{selectedSpecies?.species.name ?? "选择品种"}</h3>
-                    {selectedSpecies?.species.scientificName && (
-                      <p className="mt-1 text-sm italic text-[#7893a6]">{selectedSpecies.species.scientificName}</p>
-                    )}
-                    <p className="mt-3 max-w-[42rem] text-sm leading-6 text-[#91a8b8]">
+            <section className="min-w-0 border-t border-white/10 bg-[#061725] lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
+                      <span>{selectedCategory.label}</span>
+                      <span className="text-[#607c90]">/</span>
+                      <span>{selectedSpecies?.species.name ?? "选择品种"}</span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <h3 className="text-xl font-semibold text-white">具体个体</h3>
+                      {selectedSpecies?.species.scientificName && (
+                        <span className="text-sm italic text-[#7893a6]">{selectedSpecies.species.scientificName}</span>
+                      )}
+                    </div>
+                    <p className="mt-1.5 max-w-[46rem] text-sm leading-6 text-[#91a8b8]">
                       {selectedSpecies
-                        ? `${selectedSpecies.availableSpecimens.length} 条真实库存个体，最近到货 ${selectedSpecies.latestArrival}。选中后右侧直接展示养护、检疫和选鱼码。`
+                        ? `${selectedSpecies.availableSpecimens.length} 条真实库存个体，最近到货 ${selectedSpecies.latestArrival}。点击任一具体个体查看养护记录和选鱼码。`
                         : "先选择一个品种，再查看具体库存个体。"}
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex shrink-0 flex-col items-start gap-2 xl:items-end">
                     {selectedSpecies && (
-                      <div className="rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3 text-sm font-semibold text-[#f3df9d]">
+                      <div className="border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-2.5 text-sm font-semibold text-[#f3df9d]">
                         {selectedSpecies.priceRange}
                       </div>
                     )}
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-2 xl:justify-end">
                       {filterOptions.map((item) => (
                         <button
                           key={item.key}
                           type="button"
                           onClick={() => setFilter(item.key)}
-                          className={`h-9 rounded-full border px-4 text-xs font-semibold transition active:translate-y-px ${
+                          className={`h-9 border px-4 text-xs font-semibold transition active:translate-y-px ${
                             filter === item.key
                               ? "border-[#1ee6ef] bg-[#1ee6ef] text-[#03101f]"
                               : "border-white/10 bg-[#061725] text-[#a9bfce] hover:border-white/25 hover:text-white"
@@ -977,19 +1008,24 @@ export function PublicCatalogPage() {
                     </div>
                   </div>
                 </div>
+              </div>
+              <div className="min-h-[calc(100dvh-15rem)]">
                 {filteredSpecimens.length === 0 ? (
                   <EmptyState text="当前筛选下没有可展示个体。" />
                 ) : (
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <div className="grid border-t border-white/8 sm:grid-cols-2 2xl:grid-cols-3">
                     {filteredSpecimens.map((specimen) => {
                       const active = specimen.id === selectedSpecimen?.id;
                       return (
                         <button
                           key={specimen.id}
                           type="button"
-                          onClick={() => setSelectedSpecimenId(specimen.id)}
-                          className={`overflow-hidden rounded-[1.1rem] border bg-[#0b2033] text-left transition hover:-translate-y-0.5 active:translate-y-px ${
-                            active ? "border-[#1ee6ef]/70 shadow-[0_24px_48px_rgba(30,230,239,0.08)]" : "border-white/10 hover:border-white/22"
+                          onClick={() => {
+                            setSelectedSpecimenId(specimen.id);
+                            setDetailOpen(true);
+                          }}
+                          className={`grid min-h-[7.25rem] grid-cols-[6.75rem_minmax(0,1fr)] overflow-hidden border-b border-r border-white/8 bg-[#0b2033] text-left transition active:translate-y-px ${
+                            active ? "shadow-[inset_0_0_0_1px_rgba(30,230,239,0.62)]" : "hover:bg-[#102a41]"
                           }`}
                         >
                           <SpecimenImageFrame
@@ -998,22 +1034,23 @@ export function PublicCatalogPage() {
                             alt={`${specimen.id} ${specimen.product.name}`}
                             label={specimen.imageLabel}
                             hasIndividualPhoto={specimen.hasIndividualPhoto}
-                            className="aspect-[1.28/1]"
+                            compact
+                            className="h-full min-h-[7.25rem]"
                             imageClassName="transition duration-500 hover:scale-[1.035]"
                           />
-                          <div className="p-4">
+                          <div className="min-w-0 p-3">
                             <div className="flex items-start justify-between gap-3">
-                              <div>
+                              <div className="min-w-0">
                                 <div className="text-xs font-semibold text-[#1ee6ef]">{specimen.id}</div>
-                                <h4 className="mt-1 text-lg font-semibold text-white">{specimen.product.name}</h4>
+                                <h4 className="mt-0.5 truncate text-sm font-semibold text-white">{specimen.product.name}</h4>
                               </div>
-                              <div className="text-lg font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
+                              <div className="shrink-0 text-sm font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
                             </div>
-                            <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-[#a9bfce]">
+                            <div className="mt-2.5 grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-xs text-[#a9bfce]">
                               <SpecLine label="尺寸" value={specimen.size} />
                               <SpecLine label="状态" value={specimen.statusLabel} />
                               <SpecLine label="缸位" value={specimen.locationLabel} />
-                              <SpecLine label="入缸" value={`${specimen.daysInStore} 天`} />
+                              <SpecLine label="入库" value={specimen.arrivalDate} />
                             </div>
                           </div>
                         </button>
@@ -1023,18 +1060,19 @@ export function PublicCatalogPage() {
                 )}
               </div>
             </section>
-
-            <SpecimenDetailPanel
-              specimen={selectedSpecimen}
-              detailImage={selectedDetailImage}
-              timeline={selectedTimeline}
-              latestBio={selectedBio}
-              loading={detailLoadingStockId === selectedStockId}
-              selectionCode={selectedSelectionCode}
-              copied={copiedSelectionCode}
-              onCopy={copySelectedSelectionCode}
-            />
           </div>
+          <SpecimenDetailModal
+            open={detailOpen}
+            onClose={() => setDetailOpen(false)}
+            specimen={selectedSpecimen}
+            detailImage={selectedDetailImage}
+            timeline={selectedTimeline}
+            latestBio={selectedBio}
+            loading={detailLoadingStockId === selectedStockId}
+            selectionCode={selectedSelectionCode}
+            copied={copiedSelectionCode}
+            onCopy={copySelectedSelectionCode}
+          />
         </div>
       </section>
 
@@ -1062,6 +1100,7 @@ function SpecimenImageFrame({
   alt,
   label,
   hasIndividualPhoto,
+  compact = false,
   className = "",
   imageClassName = "",
 }: {
@@ -1070,6 +1109,7 @@ function SpecimenImageFrame({
   alt: string;
   label: string;
   hasIndividualPhoto: boolean;
+  compact?: boolean;
   className?: string;
   imageClassName?: string;
 }) {
@@ -1084,7 +1124,9 @@ function SpecimenImageFrame({
         className={`h-full w-full object-cover ${hasIndividualPhoto ? "" : "opacity-[0.82] saturate-[0.78]"} ${imageClassName}`}
       />
       <div
-        className={`absolute left-3 top-3 rounded-full border px-2.5 py-1 text-[0.68rem] font-semibold shadow-[0_10px_24px_rgba(0,0,0,0.18)] ${
+        className={`absolute rounded-full border font-semibold shadow-[0_10px_24px_rgba(22,34,40,0.12)] ${
+          compact ? "left-2 top-2 px-2 py-0.5 text-[0.62rem]" : "left-3 top-3 px-2.5 py-1 text-[0.68rem]"
+        } ${
           hasIndividualPhoto
             ? "border-[#1ee6ef]/45 bg-[#062536]/88 text-[#8deef4]"
             : "border-[#d3b56f]/40 bg-[#1b2430]/88 text-[#f3df9d]"
@@ -1092,14 +1134,21 @@ function SpecimenImageFrame({
       >
         {label}
       </div>
-      {!hasIndividualPhoto && (
+      {!hasIndividualPhoto && compact ? (
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#03101f]/90 to-transparent px-2 pb-2 pt-7">
+          <div className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-[#03101f]/82 px-2 py-0.5 text-[0.62rem] font-semibold text-[#dbe8ee]">
+            <Camera className="size-3" />
+            参考图
+          </div>
+        </div>
+      ) : !hasIndividualPhoto ? (
         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#03101f]/92 via-[#03101f]/62 to-transparent px-3 pb-3 pt-10">
           <div className="inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-[#03101f]/82 px-2.5 py-1 text-[0.68rem] font-semibold text-[#dbe8ee]">
             <Camera className="size-3" />
             暂无个体实拍
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -1159,9 +1208,7 @@ function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
                         {formatBioRecordTime(isStockIn ? event.date : record?.date)}
                       </div>
                     </div>
-                    {isStockIn ? (
-                      <p className="text-[#c6d7e0]">批次：{event.batchNo || "—"}</p>
-                    ) : (
+                    {!isStockIn && (
                       <>
                         {record?.text && <p className="text-white">{record.text}</p>}
                         {isDailyLog && (
@@ -1200,6 +1247,66 @@ function PublicBioTimeline({ events }: { events: PublicBioTimelineEvent[] }) {
   );
 }
 
+type SpecimenDetailContentProps = {
+  specimen?: Specimen;
+  detailImage?: SpecimenImage;
+  timeline: PublicBioTimelineEvent[];
+  latestBio?: PublicBioRecord;
+  loading: boolean;
+  selectionCode: string;
+  copied: boolean;
+  onCopy: () => void;
+};
+
+function SpecimenDetailModal({
+  open,
+  onClose,
+  ...detailProps
+}: SpecimenDetailContentProps & {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const specimen = detailProps.specimen;
+  if (!open || !specimen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center p-3 sm:p-6">
+      <button
+        type="button"
+        aria-label="关闭商品详情"
+        onClick={onClose}
+        className="absolute inset-0 bg-[#020b15]/78 backdrop-blur-sm transition-opacity"
+      />
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="商品详情"
+        className="relative z-10 flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[76rem] flex-col overflow-hidden rounded-[1.25rem] border border-white/10 bg-[#061725] shadow-[0_30px_90px_rgba(0,0,0,0.48)] sm:max-h-[calc(100dvh-3rem)]"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-white/10 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-[#1ee6ef]">商品详情</div>
+            <div className="mt-1 truncate text-sm text-[#91a8b8]">
+              {specimen.id} · {specimen.product.name}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid size-10 shrink-0 place-items-center rounded-full border border-white/10 bg-[#0b2033] text-[#dbe8ee] transition hover:border-white/25 hover:text-white active:translate-y-px"
+            aria-label="关闭商品详情"
+          >
+            <X className="size-5" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4 lg:p-5">
+          <SpecimenDetailPanel {...detailProps} frame="modal" />
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function SpecimenDetailPanel({
   specimen,
   detailImage,
@@ -1209,19 +1316,16 @@ function SpecimenDetailPanel({
   selectionCode,
   copied,
   onCopy,
-}: {
-  specimen?: Specimen;
-  detailImage?: SpecimenImage;
-  timeline: PublicBioTimelineEvent[];
-  latestBio?: PublicBioRecord;
-  loading: boolean;
-  selectionCode: string;
-  copied: boolean;
-  onCopy: () => void;
-}) {
+  frame = "panel",
+}: SpecimenDetailContentProps & { frame?: "panel" | "drawer" | "modal" }) {
+  const shellClass =
+    frame === "drawer" || frame === "modal"
+      ? "bg-transparent"
+      : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start";
+
   if (!specimen) {
     return (
-      <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start">
+      <aside className={frame === "drawer" || frame === "modal" ? "bg-transparent" : "rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-5 xl:sticky xl:top-24 xl:self-start"}>
         <div className="grid min-h-72 place-items-center rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
           请选择一个具体个体查看养护记录。
         </div>
@@ -1235,8 +1339,99 @@ function SpecimenDetailPanel({
     hasIndividualPhoto: specimen.hasIndividualPhoto,
   };
 
+  if (frame === "modal") {
+    return (
+      <aside className="bg-transparent">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.96fr)_minmax(22rem,0.74fr)]">
+          <div className="min-w-0 space-y-4">
+            <SpecimenImageFrame
+              src={displayImage.src}
+              fallbackSrc={specimen.fallbackImage}
+              alt={`${specimen.id} 个体详情`}
+              label={displayImage.label}
+              hasIndividualPhoto={displayImage.hasIndividualPhoto}
+              className="aspect-[4/3] rounded-[1rem]"
+              imageClassName="transition duration-500 hover:scale-[1.025]"
+            />
+
+            <div className="rounded-[1rem] border border-[#d3b56f]/20 bg-[#d3b56f]/8 p-4 text-sm leading-6 text-[#d6c996]">
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#f3df9d]">
+                <Clock className="size-4" />
+                最近养护及检疫记录
+              </div>
+              <p className="text-[#e2d8ab]">
+                {loading ? "正在同步维护记录..." : latestBio?.text || "暂无公开维护记录。"}
+              </p>
+              {latestBio?.date && (
+                <div className="mt-2 text-xs text-[#a99554]">
+                  {formatBioRecordTime(latestBio.date)}
+                  {latestBio.operator ? ` · ${latestBio.operator}` : ""}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="min-w-0 rounded-[1rem] border border-white/10 bg-[#081b2c] p-4 sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs font-semibold text-[#1ee6ef]">个体详情</div>
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${stockStatusClass(specimen.stock?.status)}`}>
+                {specimen.statusLabel}
+              </span>
+            </div>
+            <h3 className="mt-3 text-2xl font-semibold leading-tight text-white">{specimen.product.name}</h3>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-[#91a8b8]">
+              <span className="inline-flex items-center gap-1.5">
+                <Hash className="size-3.5 text-[#1ee6ef]" />
+                {specimen.id}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <MapPin className="size-3.5 text-[#d3b56f]" />
+                {specimen.locationLabel}
+              </span>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
+              <span className="text-sm text-[#d6c996]">售价</span>
+              <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-[#1ee6ef]/20 bg-[#1ee6ef]/8 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-[#8deef4]">选鱼码</div>
+                  <div className="mt-1 break-all font-mono text-sm text-white">{selectionCode || "暂无可复制编码"}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onCopy}
+                  disabled={!selectionCode}
+                  className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-4 text-xs font-semibold text-[#03101f] transition hover:bg-[#75f5f8] disabled:cursor-not-allowed disabled:opacity-45 active:translate-y-px"
+                >
+                  {copied ? <ClipboardCheck className="size-4" /> : <Copy className="size-4" />}
+                  {copied ? "已复制" : "复制"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2.5 text-sm">
+              <DetailTile label="尺寸" value={specimen.size} />
+              <DetailTile label="状态" value={specimen.statusLabel} />
+              <DetailTile label="入库日期" value={specimen.arrivalDate} />
+              <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
+              <DetailTile label="缸位" value={specimen.locationLabel} />
+              <DetailTile label="售价" value={formatMoney(specimen.price)} />
+              <DetailTile label="产地" value={specimen.product.origin || "待确认"} />
+            </div>
+
+            <PublicBioTimeline events={timeline} />
+          </div>
+        </div>
+      </aside>
+    );
+  }
+
   return (
-    <aside className="rounded-[1.25rem] border border-white/10 bg-[#081b2c] p-4 xl:sticky xl:top-24 xl:self-start">
+    <aside className={shellClass}>
       <SpecimenImageFrame
         src={displayImage.src}
         fallbackSrc={specimen.fallbackImage}
@@ -1265,7 +1460,7 @@ function SpecimenDetailPanel({
       </div>
 
       <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
-        <span className="text-sm text-[#d6c996]">预订价</span>
+        <span className="text-sm text-[#d6c996]">售价</span>
         <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
       </div>
 
@@ -1290,7 +1485,6 @@ function SpecimenDetailPanel({
       <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
         <DetailTile label="尺寸" value={specimen.size} />
         <DetailTile label="状态" value={specimen.statusLabel} />
-        <DetailTile label="批次" value={specimen.batchNo} />
         <DetailTile label="入库日期" value={specimen.arrivalDate} />
         <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
         <DetailTile label="缸位" value={specimen.locationLabel} />
@@ -1321,7 +1515,7 @@ function SpecimenDetailPanel({
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="mt-5 grid min-h-36 place-items-center rounded-[1.1rem] border border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
+    <div className="grid min-h-36 place-items-center border-b border-dashed border-white/15 bg-[#0b2033]/72 p-6 text-center text-sm text-[#91a8b8]">
       {text}
     </div>
   );

@@ -566,16 +566,24 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
-  const batches = Array.isArray(scopedState.batches) ? scopedState.batches : [];
-  const batchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds)
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
   );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
   const latestMediaByStockId = new Map();
@@ -630,7 +638,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
       })),
     stock: sellableStock.map((item) => {
       const tank = findSubTank(scopedState, item?.subTankId);
-      const batch = batchById.get(String(item?.batchId ?? ""));
       return {
         id: String(item?.id ?? ""),
         productId: String(item?.productId ?? ""),
@@ -638,7 +645,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         status: item?.status === "feeding" ? "feeding" : "healthy",
         inDate: String(item?.inDate ?? ""),
         basePrice: Number(item?.basePrice ?? 0),
-        batchNo: String(batch?.batchNo ?? ""),
         tankGroupName: String(tank?.group?.name ?? ""),
         subTankName: String(tank?.subTank?.name ?? ""),
         tankLocation: String(tank?.group?.location ?? ""),
@@ -656,10 +662,13 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
 function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
+  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const targetId = String(stockItemId ?? "").trim();
   const item = stock.find((candidate) => String(candidate?.id ?? "") === targetId);
   if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
+  const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
+  if (!product || product?.publicVisible === false) return null;
   const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
   return records
     .filter((record) => String(record?.stockItemId ?? "") === targetId)
@@ -677,14 +686,24 @@ function publicCatalogAllowedMediaUrls(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds)
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
   );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
   const allowed = new Set();
   const add = (value) => {
@@ -4845,6 +4864,7 @@ async function handleApi(req, res, url) {
           imageUrl: String(product.imageUrl ?? ""),
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
+          publicVisible: product.publicVisible !== false,
           commissionRate: Math.max(0, Number(product.commissionRate ?? 0)),
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);

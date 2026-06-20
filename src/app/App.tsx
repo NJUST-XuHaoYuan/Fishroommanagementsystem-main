@@ -243,6 +243,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
   const migratedProducts = Array.isArray(migratedData.products)
     ? migratedData.products.map((product: Record<string, unknown>) => ({
         ...product,
+        publicVisible: product.publicVisible !== false,
         notes: String(product.notes ?? ""),
       }))
     : migratedData.products;

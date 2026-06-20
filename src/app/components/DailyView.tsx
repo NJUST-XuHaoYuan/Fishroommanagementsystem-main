@@ -64,6 +64,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [q, setQ] = useState("");
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [publicLookupCode, setPublicLookupCode] = useState("");
   const [highlightStockId, setHighlightStockId] = useState("");
@@ -327,6 +328,13 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     setExpandedKeys((prev) => {
       const next = new Set(prev);
       next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
+  const toggleGroupExpand = (groupId: string) =>
+    setExpandedGroupIds((prev) => {
+      const next = new Set(prev);
+      next.has(groupId) ? next.delete(groupId) : next.add(groupId);
       return next;
     });
 
@@ -1151,36 +1159,57 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
             {visibleGroups.map((g) => {
               const groupLogs = logsByGroup.get(g.id) ?? [];
               const latestLog = groupLogs[0];
+              const isGroupExpanded = expandedGroupIds.has(g.id);
+              const subTanks = visibleSubTanks(g);
+              const visibleStockCount = subTanks.reduce((sum, t) => sum + stockBySub(t.id).length, 0);
               return (
               <Card key={g.id} className="p-3 border border-sky-200 bg-sky-50/30">
-                <div className="mb-2.5 grid gap-2.5 md:grid-cols-[minmax(8rem,12rem)_minmax(16rem,1fr)_auto] md:items-start">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-base">{g.name}</h3>
-                    <div className="truncate text-xs text-muted-foreground">{g.location}</div>
-                  </div>
+                <div className={`grid gap-2.5 md:items-start ${
+                  isGroupExpanded
+                    ? "mb-2.5 md:grid-cols-[minmax(9rem,13rem)_minmax(16rem,1fr)_auto]"
+                    : "md:grid-cols-[minmax(12rem,1fr)_auto]"
+                }`}>
                   <button
                     type="button"
-                    className="flex min-w-0 items-start gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
-                    onClick={() => setViewLogGroupId(g.id)}
+                    aria-expanded={isGroupExpanded}
+                    aria-controls={`daily-group-${g.id}`}
+                    className="flex min-w-0 items-start gap-2 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-white/70"
+                    onClick={() => toggleGroupExpand(g.id)}
                   >
-                    <Clock className="mt-0.5 size-4 shrink-0 text-sky-600" />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-medium text-sky-700">最近养护</div>
-                      {latestLog ? (
-                        <>
-                          <div className="mt-0.5 truncate text-sm font-medium">
-                            {latestLog.date} · {latestLog.action}
-                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
-                          </div>
-                          {latestLog.notes && (
-                            <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{latestLog.notes}</div>
-                          )}
-                        </>
-                      ) : (
-                        <div className="mt-0.5 text-sm text-muted-foreground">暂无养护日志</div>
-                      )}
+                    <ChevronDown
+                      className={`mt-1 size-4 shrink-0 text-sky-600 transition-transform ${isGroupExpanded ? "rotate-180" : "-rotate-90"}`}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h3 className="truncate text-base">{g.name}</h3>
+                        <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+                          {visibleStockCount} 条
+                        </span>
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">{g.location}</div>
                     </div>
                   </button>
+                  {isGroupExpanded && (
+                    <button
+                      type="button"
+                      className="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
+                      onClick={() => setViewLogGroupId(g.id)}
+                    >
+                      <Clock className="size-4 shrink-0 text-sky-600" />
+                      <div className="min-w-0 flex items-center gap-2 text-sm">
+                        <span className="shrink-0 text-xs font-medium text-sky-700">最近养护</span>
+                        {latestLog ? (
+                          <span className="min-w-0 truncate font-medium">
+                            {latestLog.date} · {latestLog.action}
+                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
+                            {latestLog.notes ? ` · ${latestLog.notes}` : ""}
+                          </span>
+                        ) : (
+                          <span className="truncate text-muted-foreground">暂无养护日志</span>
+                        )}
+                      </div>
+                    </button>
+                  )}
                   <div className="flex shrink-0 items-center gap-2 md:justify-end">
                     <Button
                       type="button"
@@ -1207,8 +1236,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   </div>
                 </div>
                 {/* 子缸横向排列，溢出滚动 */}
-                <div className="flex flex-row gap-2.5 overflow-x-auto pb-0.5">
-                  {visibleSubTanks(g).map((t) => {
+                {isGroupExpanded && (
+                <div id={`daily-group-${g.id}`} className="flex flex-row gap-2.5 overflow-x-auto pb-0.5">
+                  {subTanks.map((t) => {
                     const items = stockBySub(t.id);
                     const allItems = state.stock.filter((s) =>
                       s.subTankId === t.id && isPhysicallyInTank(s, shippedOutStockIds)
@@ -1391,6 +1421,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     );
                   })}
                 </div>
+                )}
               </Card>
               );
             })}
