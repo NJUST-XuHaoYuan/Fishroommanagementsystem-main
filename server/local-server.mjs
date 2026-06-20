@@ -1352,6 +1352,27 @@ function normalizePersonnelInput(input = {}, existing = null) {
   };
 }
 
+function normalizeCustomerInput(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const id = String(source.id || uid("customer")).trim();
+  const name = String(source.name ?? "").trim();
+  const addedDate = String(source.addedDate ?? todayInChina()).trim();
+  if (!name) throw new Error("请输入客户名称");
+  if (addedDate && addedDate > todayInChina()) throw new Error("客户添加时间不能晚于今天");
+  return {
+    id,
+    name,
+    customerType: source.customerType === "B" || source.customerType === "C" ? source.customerType : "",
+    addedDate,
+    phone: String(source.phone ?? "").trim(),
+    wechat: String(source.wechat ?? "").trim(),
+    douyin: String(source.douyin ?? "").trim(),
+    source: String(source.source ?? "").trim(),
+    address: String(source.address ?? "").trim(),
+    notes: String(source.notes ?? "").trim(),
+  };
+}
+
 function countAdmins(personnel = [], excludeId = "") {
   return (Array.isArray(personnel) ? personnel : [])
     .filter((person) =>
@@ -3801,6 +3822,55 @@ async function handleApi(req, res, url) {
       ok: false,
       error: "Full state save is disabled. Use dedicated save endpoints or /api/state/patch.",
     });
+    return;
+  }
+
+  if (url.pathname === "/api/customers/create" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      requireModulePermissionForAuth(req, "customers", "create");
+      const customer = normalizeCustomerInput(body.customer ?? body);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const customers = Array.isArray(state.customers) ? state.customers : [];
+      const customerSources = Array.isArray(state.customerSources) ? state.customerSources : [];
+      if (customers.some((item) => String(item?.id ?? "") === customer.id)) {
+        throw new Error("客户已存在，请刷新后重试");
+      }
+      const nextCustomers = [...customers, customer];
+      const nextCustomerSources = customer.source && !customerSources.includes(customer.source)
+        ? [...customerSources, customer.source]
+        : customerSources;
+      const operationLog = createOperationLog(req, "客户管理", "添加记录", `新增客户「${customer.name}」`);
+      const nextState = {
+        ...state,
+        customers: nextCustomers,
+        customerSources: nextCustomerSources,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        customer,
+        customers: nextCustomers,
+        customerSources: nextCustomerSources,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "新增客户失败" });
+    } finally {
+      client.release();
+    }
     return;
   }
 
