@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, X } from "lucide-react";
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
@@ -452,6 +452,34 @@ function firstBioRecord(records: PublicBioRecord[], stockId?: string) {
     .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
 }
 
+function isDesktopCatalogLayout() {
+  return window.matchMedia("(min-width: 1024px)").matches;
+}
+
+function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement, onTopOverscroll: () => void) {
+  const maxScrollTop = container.scrollHeight - container.clientHeight;
+  if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? container.clientHeight : 1;
+  const deltaY = event.deltaY * unit;
+  const currentTop = container.scrollTop;
+  const atTop = currentTop <= 1;
+  const atBottom = currentTop >= maxScrollTop - 1;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (maxScrollTop <= 0 || (deltaY < 0 && atTop)) {
+    onTopOverscroll();
+    return;
+  }
+
+  if (deltaY > 0 && atBottom) return;
+
+  const nextTop = Math.min(maxScrollTop, Math.max(0, currentTop + deltaY));
+  container.scrollTop = nextTop;
+}
+
 export function PublicCatalogPage() {
   const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
   const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
@@ -464,6 +492,13 @@ export function PublicCatalogPage() {
   const [copiedSelectionCode, setCopiedSelectionCode] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [filter, setFilter] = useState("all");
+  const headerRef = useRef<HTMLElement | null>(null);
+  const heroRef = useRef<HTMLElement | null>(null);
+  const catalogRef = useRef<HTMLElement | null>(null);
+  const pageSnapTimerRef = useRef<number | undefined>(undefined);
+  const pageSnapLockedUntilRef = useRef(0);
+  const speciesListRef = useRef<HTMLDivElement | null>(null);
+  const specimenListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -683,6 +718,14 @@ export function PublicCatalogPage() {
     setDetailOpen(false);
   }, [selectedCategoryKey, selectedSpeciesId]);
 
+  useEffect(() => {
+    speciesListRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [selectedCategoryKey]);
+
+  useEffect(() => {
+    specimenListRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [filter, selectedSpeciesId]);
+
   const selectedSpecies = visibleSpecies.find((card) => card.species.id === selectedSpeciesId) ?? visibleSpecies[0];
   const specimenOptions = specimens.filter((specimen) => specimen.species?.id === selectedSpecies?.species.id && specimen.available);
   const filteredSpecimens = specimenOptions.filter((specimen) => {
@@ -792,24 +835,93 @@ export function PublicCatalogPage() {
   }, [selectedBioRecords, selectedSpecimen]);
   const selectedBio = firstBioRecord(selectedBioRecords, selectedStockId) ?? selectedSpecimen?.bioRecord;
 
-  const scrollToCatalog = () => {
-    document.getElementById("catalog")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const catalogPageTop = () => {
+    const headerHeight = headerRef.current?.getBoundingClientRect().height ?? 80;
+    return Math.max(0, heroRef.current?.offsetHeight ?? window.innerHeight - headerHeight);
+  };
+
+  const scrollToHero = (behavior: ScrollBehavior = "smooth") => {
+    pageSnapLockedUntilRef.current = Date.now() + 900;
+    window.scrollTo({ top: 0, behavior });
+  };
+
+  const scrollToCatalog = (behavior: ScrollBehavior = "smooth") => {
+    pageSnapLockedUntilRef.current = Date.now() + 900;
+    window.scrollTo({ top: catalogPageTop(), behavior });
+  };
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (!isDesktopCatalogLayout() || detailOpen) return;
+      if (Date.now() < pageSnapLockedUntilRef.current) return;
+      window.clearTimeout(pageSnapTimerRef.current);
+      pageSnapTimerRef.current = window.setTimeout(() => {
+        const targetTop = catalogPageTop();
+        if (targetTop <= 0) return;
+        const currentTop = window.scrollY;
+        const nearestTop = currentTop < targetTop / 2 ? 0 : targetTop;
+        if (Math.abs(currentTop - nearestTop) > 2) {
+          window.scrollTo({ top: nearestTop, behavior: "smooth" });
+        }
+      }, 120);
+    };
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("resize", handleScroll);
+    return () => {
+      window.clearTimeout(pageSnapTimerRef.current);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("resize", handleScroll);
+    };
+  }, [detailOpen]);
+
+  const handlePageWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    if (!isDesktopCatalogLayout() || detailOpen) return;
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("#catalog")) return;
+    if (event.deltaY <= 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    scrollToCatalog();
+  };
+
+  const handleCatalogWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    if (!isDesktopCatalogLayout() || detailOpen) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    const container = target.closest("[data-public-catalog-scroll]");
+    if (container instanceof HTMLElement && event.currentTarget.contains(container)) {
+      scrollCatalogColumnByWheel(event, container, scrollToHero);
+      return;
+    }
+
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.deltaY < 0) {
+      scrollToHero();
+    } else {
+      scrollToCatalog();
+    }
   };
 
   return (
-    <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]">
-      <header className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
+    <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]" onWheelCapture={handlePageWheelCapture}>
+      <header ref={headerRef} className="sticky top-0 z-30 border-b border-white/10 bg-[#03101f]/86 backdrop-blur-xl">
         <div className="flex h-20 w-full items-center justify-start px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-4">
             <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8 shadow-[0_16px_42px_rgba(30,230,239,0.08)]">
               <img src="/assets/brand-logo.jpg" alt="海水鱼廊" className="size-14 rounded-xl object-contain" />
             </div>
-            <div className="text-lg font-semibold tracking-normal text-white">海水生物超市</div>
+            <div className="text-2xl font-semibold tracking-normal text-white">海水生物超市</div>
           </div>
         </div>
       </header>
 
-      <section className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
+      <section ref={heroRef} className="relative min-h-[calc(100dvh-5rem)] overflow-hidden">
         {heroCarouselImages.map((src, index) => (
           <ImageWithFallback
             key={src}
@@ -844,24 +956,36 @@ export function PublicCatalogPage() {
               每一条鱼都可查看养护及检疫记录
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={scrollToCatalog}
+              <a
+                href="#catalog"
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  scrollToCatalog();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  scrollToCatalog();
+                }}
                 className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-6 text-sm font-semibold text-[#03101f] shadow-[0_18px_44px_rgba(30,230,239,0.18)] transition hover:bg-[#75f5f8] active:translate-y-px"
               >
                 开始选鱼
                 <ArrowRight className="size-4" />
-              </button>
+              </a>
             </div>
           </div>
         </div>
       </section>
 
-      <section id="catalog" className="scroll-mt-20 border-t border-white/10 bg-[#061725]">
+      <section
+        id="catalog"
+        ref={catalogRef}
+        className="scroll-mt-20 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:overflow-hidden"
+        onWheelCapture={handleCatalogWheelCapture}
+      >
         <div className="w-full">
-          <div className="grid min-h-[calc(100dvh-5rem)] lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
-            <aside className="overflow-hidden bg-[#071827] lg:sticky lg:top-20 lg:h-[calc(100dvh-5rem)] lg:self-start">
-              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto">
+          <div className="min-h-[calc(100dvh-5rem)] [overflow-anchor:none] lg:grid lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
+            <aside className="overflow-hidden bg-[#071827] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)]">
+              <div className="flex snap-x overflow-x-auto overscroll-contain [overflow-anchor:none] lg:block lg:max-h-[calc(100dvh-5rem)] lg:snap-none lg:overflow-y-auto lg:pb-8" data-public-catalog-scroll="categories">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -869,8 +993,11 @@ export function PublicCatalogPage() {
                       key={category.key}
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
-                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b border-white/8 px-6 py-5 text-left transition active:translate-y-px ${
-                        active ? "text-white" : "text-[#dbe8ee] hover:text-white"
+                      aria-current={active ? "true" : undefined}
+                      className={`group relative block min-h-[6.8rem] w-[68vw] max-w-[18rem] flex-none snap-start overflow-hidden border-r px-4 py-4 text-left transition active:translate-y-px sm:w-[19rem] lg:min-h-[7.5rem] lg:w-full lg:max-w-none lg:border-b lg:border-r-0 lg:px-6 lg:py-5 ${
+                        active
+                          ? "border-[#1ee6ef]/70 bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
+                          : "border-white/8 text-[#dbe8ee] hover:text-white"
                       }`}
                     >
                       <ImageWithFallback
@@ -880,42 +1007,43 @@ export function PublicCatalogPage() {
                         aria-hidden="true"
                         disableMediaProxy
                         className={`absolute inset-0 h-full w-full object-cover transition duration-300 ${
-                          active ? "scale-[1.02] opacity-70 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
+                          active ? "scale-[1.02] opacity-72 saturate-110" : "opacity-42 saturate-[0.88] group-hover:scale-[1.02] group-hover:opacity-58"
                         }`}
                       />
-                      <div className="absolute inset-0 bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10" />
-                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/12" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
+                      <div
+                        className={`absolute inset-0 ${
+                          active
+                            ? "bg-gradient-to-r from-[#03101f]/74 via-[#0c2b3f]/54 to-[#1ee6ef]/16"
+                            : "bg-gradient-to-r from-[#03101f]/88 via-[#03101f]/54 to-[#03101f]/10"
+                        }`}
+                      />
+                      <div className={`absolute inset-0 transition ${active ? "bg-[#1ee6ef]/16" : "bg-[#1ee6ef]/0 group-hover:bg-[#1ee6ef]/7"}`} />
+                      {active && <div className="absolute inset-y-0 right-0 w-px bg-[#1ee6ef]" aria-hidden="true" />}
                       <div className="relative z-10 flex items-center justify-between gap-3">
                         <span className="truncate text-lg font-semibold">{category.label}</span>
                         {active && <Check className="size-5 shrink-0 text-[#1ee6ef]" />}
                       </div>
-                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">{category.specimens} 条在售</div>
+                      <div className="relative z-10 mt-2 text-sm font-medium text-[#b6c9d4]">
+                        {category.species} 个品种 · {category.specimens} 条在售
+                      </div>
                     </button>
                   );
                 })}
               </div>
             </aside>
 
-            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] lg:border-l lg:border-t-0">
-              <div className="border-b border-white/10 bg-[#081b2c]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-[#1ee6ef]">{selectedCategory.label}</div>
-                    <h3 className="mt-1 text-lg font-semibold text-white">品种</h3>
-                    <p className="mt-1 text-sm leading-5 text-[#91a8b8]">
-                      {visibleSpecies.length} 个品种，{selectedCategory.specimens} 条可售个体
-                    </p>
-                  </div>
-                  <Check className="mt-1 size-5 shrink-0 text-[#1ee6ef]" />
-                </div>
-              </div>
-              <div className="max-h-none overflow-y-auto lg:max-h-[calc(100dvh-11rem)]">
+            <section className="min-w-0 border-t border-white/10 bg-[#081b2c] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
+              <div
+                ref={speciesListRef}
+                className="max-h-none overflow-x-auto overscroll-contain px-4 py-4 [overflow-anchor:none] lg:h-full lg:max-h-none lg:overflow-y-auto lg:px-0 lg:py-0 lg:pb-8"
+                data-public-catalog-scroll="species"
+              >
                 {visibleSpecies.length === 0 ? (
                   <div className="border-b border-dashed border-white/15 bg-[#0b2033]/72 p-5 text-sm text-[#91a8b8]">
                     这个大类暂时没有公开在售品种。
                   </div>
                 ) : (
-                  <div>
+                  <div className="flex snap-x gap-3 lg:block lg:snap-none lg:gap-0">
                     {visibleSpecies.map((card) => {
                       const active = selectedSpecies?.species.id === card.species.id;
                       const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
@@ -925,7 +1053,7 @@ export function PublicCatalogPage() {
                           key={card.species.id}
                           type="button"
                           onClick={() => setSelectedSpeciesId(card.species.id)}
-                          className={`grid min-h-[5.5rem] w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 border-b border-white/8 p-3 text-left transition active:translate-y-px ${
+                          className={`grid min-h-[5.75rem] w-[78vw] max-w-[22rem] flex-none snap-start grid-cols-[5.25rem_minmax(0,1fr)] items-center gap-3 border border-white/8 p-3 text-left transition active:translate-y-px sm:w-[21rem] lg:min-h-[5.5rem] lg:w-full lg:max-w-none lg:border-x-0 lg:border-t-0 ${
                             active
                               ? "bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
                               : "bg-[#0b2033] text-[#a9bfce] hover:bg-[#102a41] hover:text-white"
@@ -963,8 +1091,8 @@ export function PublicCatalogPage() {
               </div>
             </section>
 
-            <section className="min-w-0 border-t border-white/10 bg-[#061725] lg:border-l lg:border-t-0">
-              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:sticky lg:top-20 lg:z-20">
+            <section className="min-w-0 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:flex lg:h-[calc(100dvh-5rem)] lg:flex-col lg:overflow-hidden lg:border-l lg:border-t-0">
+              <div className="border-b border-white/10 bg-[#061725]/96 px-4 py-4 backdrop-blur lg:z-20 lg:shrink-0 lg:px-5">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
@@ -1009,7 +1137,11 @@ export function PublicCatalogPage() {
                   </div>
                 </div>
               </div>
-              <div className="min-h-[calc(100dvh-15rem)]">
+              <div
+                ref={specimenListRef}
+                className="min-h-[calc(100dvh-15rem)] pb-10 [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pb-8"
+                data-public-catalog-scroll="specimens"
+              >
                 {filteredSpecimens.length === 0 ? (
                   <EmptyState text="当前筛选下没有可展示个体。" />
                 ) : (
