@@ -566,16 +566,24 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
-  const batches = Array.isArray(scopedState.batches) ? scopedState.batches : [];
-  const batchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds)
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
   );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
   const latestMediaByStockId = new Map();
@@ -630,7 +638,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
       })),
     stock: sellableStock.map((item) => {
       const tank = findSubTank(scopedState, item?.subTankId);
-      const batch = batchById.get(String(item?.batchId ?? ""));
       return {
         id: String(item?.id ?? ""),
         productId: String(item?.productId ?? ""),
@@ -638,7 +645,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         status: item?.status === "feeding" ? "feeding" : "healthy",
         inDate: String(item?.inDate ?? ""),
         basePrice: Number(item?.basePrice ?? 0),
-        batchNo: String(batch?.batchNo ?? ""),
         tankGroupName: String(tank?.group?.name ?? ""),
         subTankName: String(tank?.subTank?.name ?? ""),
         tankLocation: String(tank?.group?.location ?? ""),
@@ -656,10 +662,13 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
 function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
+  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const targetId = String(stockItemId ?? "").trim();
   const item = stock.find((candidate) => String(candidate?.id ?? "") === targetId);
   if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
+  const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
+  if (!product || product?.publicVisible === false) return null;
   const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
   return records
     .filter((record) => String(record?.stockItemId ?? "") === targetId)
@@ -677,14 +686,24 @@ function publicCatalogAllowedMediaUrls(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds)
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
   );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
   const allowed = new Set();
   const add = (value) => {
@@ -1330,6 +1349,27 @@ function normalizePersonnelInput(input = {}, existing = null) {
     role,
     phone,
     notes,
+  };
+}
+
+function normalizeCustomerInput(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const id = String(source.id || uid("customer")).trim();
+  const name = String(source.name ?? "").trim();
+  const addedDate = String(source.addedDate ?? todayInChina()).trim();
+  if (!name) throw new Error("请输入客户名称");
+  if (addedDate && addedDate > todayInChina()) throw new Error("客户添加时间不能晚于今天");
+  return {
+    id,
+    name,
+    customerType: source.customerType === "B" || source.customerType === "C" ? source.customerType : "",
+    addedDate,
+    phone: String(source.phone ?? "").trim(),
+    wechat: String(source.wechat ?? "").trim(),
+    douyin: String(source.douyin ?? "").trim(),
+    source: String(source.source ?? "").trim(),
+    address: String(source.address ?? "").trim(),
+    notes: String(source.notes ?? "").trim(),
   };
 }
 
@@ -3785,6 +3825,55 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/customers/create" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      requireModulePermissionForAuth(req, "customers", "create");
+      const customer = normalizeCustomerInput(body.customer ?? body);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const customers = Array.isArray(state.customers) ? state.customers : [];
+      const customerSources = Array.isArray(state.customerSources) ? state.customerSources : [];
+      if (customers.some((item) => String(item?.id ?? "") === customer.id)) {
+        throw new Error("客户已存在，请刷新后重试");
+      }
+      const nextCustomers = [...customers, customer];
+      const nextCustomerSources = customer.source && !customerSources.includes(customer.source)
+        ? [...customerSources, customer.source]
+        : customerSources;
+      const operationLog = createOperationLog(req, "客户管理", "添加记录", `新增客户「${customer.name}」`);
+      const nextState = {
+        ...state,
+        customers: nextCustomers,
+        customerSources: nextCustomerSources,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        `INSERT INTO app_state (id, data, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id)
+         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        customer,
+        customers: nextCustomers,
+        customerSources: nextCustomerSources,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "新增客户失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/create" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -4845,6 +4934,7 @@ async function handleApi(req, res, url) {
           imageUrl: String(product.imageUrl ?? ""),
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
+          publicVisible: product.publicVisible !== false,
           commissionRate: Math.max(0, Number(product.commissionRate ?? 0)),
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);
