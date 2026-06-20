@@ -983,9 +983,9 @@ export function PublicCatalogPage() {
         onWheelCapture={handleCatalogWheelCapture}
       >
         <div className="w-full">
-          <div className="grid min-h-[calc(100dvh-5rem)] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
+          <div className="min-h-[calc(100dvh-5rem)] [overflow-anchor:none] lg:grid lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:grid-cols-[22rem_29rem_minmax(0,1fr)] 2xl:grid-cols-[24rem_32rem_minmax(0,1fr)]">
             <aside className="overflow-hidden bg-[#071827] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)]">
-              <div className="max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain pb-8 [overflow-anchor:none]" data-public-catalog-scroll="categories">
+              <div className="flex snap-x overflow-x-auto overscroll-contain [overflow-anchor:none] lg:block lg:max-h-[calc(100dvh-5rem)] lg:snap-none lg:overflow-y-auto lg:pb-8" data-public-catalog-scroll="categories">
                 {catalogCategories.map((category) => {
                   const active = selectedCategoryKey === category.key;
                   return (
@@ -994,7 +994,7 @@ export function PublicCatalogPage() {
                       type="button"
                       onClick={() => setSelectedCategoryKey(category.key)}
                       aria-current={active ? "true" : undefined}
-                      className={`group relative block min-h-[7.5rem] w-full overflow-hidden border-b px-6 py-5 text-left transition active:translate-y-px ${
+                      className={`group relative block min-h-[6.8rem] w-[68vw] max-w-[18rem] flex-none snap-start overflow-hidden border-r px-4 py-4 text-left transition active:translate-y-px sm:w-[19rem] lg:min-h-[7.5rem] lg:w-full lg:max-w-none lg:border-b lg:border-r-0 lg:px-6 lg:py-5 ${
                         active
                           ? "border-[#1ee6ef]/70 bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
                           : "border-white/8 text-[#dbe8ee] hover:text-white"
@@ -1035,7 +1035,7 @@ export function PublicCatalogPage() {
             <section className="min-w-0 border-t border-white/10 bg-[#081b2c] [overflow-anchor:none] lg:h-[calc(100dvh-5rem)] lg:overflow-hidden lg:border-l lg:border-t-0 lg:border-l-[#1ee6ef]/55">
               <div
                 ref={speciesListRef}
-                className="max-h-none overflow-y-auto overscroll-contain pb-8 [overflow-anchor:none] lg:h-full lg:max-h-none"
+                className="max-h-none overflow-x-auto overscroll-contain px-4 py-4 [overflow-anchor:none] lg:h-full lg:max-h-none lg:overflow-y-auto lg:px-0 lg:py-0 lg:pb-8"
                 data-public-catalog-scroll="species"
               >
                 {visibleSpecies.length === 0 ? (
@@ -1043,7 +1043,7 @@ export function PublicCatalogPage() {
                     这个大类暂时没有公开在售品种。
                   </div>
                 ) : (
-                  <div>
+                  <div className="flex snap-x gap-3 lg:block lg:snap-none lg:gap-0">
                     {visibleSpecies.map((card) => {
                       const active = selectedSpecies?.species.id === card.species.id;
                       const previewSpecimen = card.availableSpecimens.find((item) => item.hasRealPhoto) ?? card.availableSpecimens[0];
@@ -1053,7 +1053,7 @@ export function PublicCatalogPage() {
                           key={card.species.id}
                           type="button"
                           onClick={() => setSelectedSpeciesId(card.species.id)}
-                          className={`grid min-h-[5.5rem] w-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 border-b border-white/8 p-3 text-left transition active:translate-y-px ${
+                          className={`grid min-h-[5.75rem] w-[78vw] max-w-[22rem] flex-none snap-start grid-cols-[5.25rem_minmax(0,1fr)] items-center gap-3 border border-white/8 p-3 text-left transition active:translate-y-px sm:w-[21rem] lg:min-h-[5.5rem] lg:w-full lg:max-w-none lg:border-x-0 lg:border-t-0 ${
                             active
                               ? "bg-[#123450] text-white shadow-[inset_0_0_0_1px_rgba(30,230,239,0.58)]"
                               : "bg-[#0b2033] text-[#a9bfce] hover:bg-[#102a41] hover:text-white"
@@ -1092,7 +1092,7 @@ export function PublicCatalogPage() {
             </section>
 
             <section className="min-w-0 border-t border-white/10 bg-[#061725] [overflow-anchor:none] lg:flex lg:h-[calc(100dvh-5rem)] lg:flex-col lg:overflow-hidden lg:border-l lg:border-t-0">
-              <div className="border-b border-white/10 bg-[#061725]/96 px-5 py-4 backdrop-blur lg:z-20 lg:shrink-0">
+              <div className="border-b border-white/10 bg-[#061725]/96 px-4 py-4 backdrop-blur lg:z-20 lg:shrink-0 lg:px-5">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#1ee6ef]">
@@ -1139,7 +1139,7 @@ export function PublicCatalogPage() {
               </div>
               <div
                 ref={specimenListRef}
-                className="min-h-[calc(100dvh-15rem)] pb-8 [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain"
+                className="min-h-[calc(100dvh-15rem)] pb-10 [overflow-anchor:none] lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:pb-8"
                 data-public-catalog-scroll="specimens"
               >
                 {filteredSpecimens.length === 0 ? (
