@@ -5178,7 +5178,7 @@ function StockPickerDialog({
 function NewOrderDialog({
   open, onOpenChange,
 }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, activeSiteId, setState, saveStateTransform } = useStore();
+  const { state, activeSiteId, setState } = useStore();
   const permission = usePermission("orders");
   const customerPermission = usePermission("customers");
   const isAdmin = state.user?.role === "admin";
@@ -5265,23 +5265,36 @@ function NewOrderDialog({
   const createCustomer = async (customer: Customer) => {
     if (!customerPermission.requirePermission("create")) return false;
     const nextCustomer = { ...customer, id: customer.id || uid() };
-    const ok = await saveStateTransform((latest) => {
-      const sources = latest.customerSources ?? [];
-      const nextSources = nextCustomer.source && !sources.includes(nextCustomer.source)
-        ? [...sources, nextCustomer.source]
-        : sources;
-      return {
-        ...latest,
-        customerSources: nextSources,
-        customers: [...(latest.customers ?? []), nextCustomer],
-      };
-    });
-    if (!ok) {
-      toast.error("新增客户失败，请重试");
+    let createdCustomer = nextCustomer;
+    try {
+      const result = await postOrderApi("customers/create", {
+        customer: nextCustomer,
+        operator: state.user?.username ?? "system",
+      });
+      createdCustomer = (result.customer ?? nextCustomer) as Customer;
+      setState((current) => {
+        const currentSources = current.customerSources ?? [];
+        const nextSources = Array.isArray(result.customerSources)
+          ? result.customerSources
+          : createdCustomer.source && !currentSources.includes(createdCustomer.source)
+            ? [...currentSources, createdCustomer.source]
+            : currentSources;
+        const nextCustomers = Array.isArray(result.customers)
+          ? result.customers
+          : [...(current.customers ?? []).filter((item) => item.id !== createdCustomer.id), createdCustomer];
+        return {
+          ...current,
+          customerSources: nextSources,
+          customers: nextCustomers,
+          operationLogs: mergeOperationLog(current, result.operationLog),
+        };
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "新增客户失败，请重试");
       return false;
     }
-    setCustomerId(nextCustomer.id);
-    toast.success(`客户「${nextCustomer.name}」已新增`);
+    setCustomerId(createdCustomer.id);
+    toast.success(`客户「${createdCustomer.name}」已新增`);
     return true;
   };
 
