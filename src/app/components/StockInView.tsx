@@ -29,6 +29,13 @@ function buildStockItems(item: StockItem, quantity: number): StockItem[] {
     : Array.from({ length: quantity }, () => ({ ...item, id: uid() }));
 }
 
+function formatInventoryValue(value: number) {
+  return `¥${Number(value || 0).toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 /** 支持模糊查询的商品选择器 */
 function ProductCombobox({
   products,
@@ -641,6 +648,7 @@ export function StockInView() {
       commonNames: string[];
       imageUrl: string;
       total: number;
+      inventoryValue: number;
       statuses: Record<StockStatus, number>;
       products: Map<string, {
         productId: string;
@@ -663,11 +671,14 @@ export function StockInView() {
         commonNames: sp?.commonNames ?? [],
         imageUrl: sp?.imageUrl || p?.imageUrl || "",
         total: 0,
+        inventoryValue: 0,
         statuses: { healthy: 0, feeding: 0, sick: 0 },
         products: new Map(),
       };
 
       group.total += 1;
+      const itemValue = Number(item.basePrice || p?.defaultPrice || 0);
+      group.inventoryValue += Number.isFinite(itemValue) ? itemValue : 0;
       group.statuses[item.status] += 1;
 
       const productRow = group.products.get(item.productId) ?? {
@@ -1002,7 +1013,7 @@ export function StockInView() {
             <Card className="gap-0 overflow-hidden rounded-lg">
               <div className="hidden grid-cols-[minmax(13rem,0.9fr)_minmax(10rem,0.65fr)_minmax(0,2.4fr)] gap-4 border-b bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
                 <div>品种</div>
-                <div>状态</div>
+                <div>状态 / 货值</div>
                 <div>商品规格 / 数量 / 缸位分布</div>
               </div>
               <div className="divide-y">
@@ -1038,15 +1049,23 @@ export function StockInView() {
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 md:pt-1">
-                      {(["healthy", "feeding", "sick"] as StockStatus[])
-                        .filter((st) => group.statuses[st] > 0)
-                        .map((st) => (
-                          <span key={st} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                            <span className={`size-3 rounded border-2 ${statusFrameClass(st)}`} />
-                            {statusMeta[st].label} {group.statuses[st]} 条
-                          </span>
-                        ))}
+                    <div className="flex flex-col gap-1 md:pt-0.5">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        {(["healthy", "feeding", "sick"] as StockStatus[])
+                          .filter((st) => group.statuses[st] > 0)
+                          .map((st) => (
+                            <span key={st} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                              <span className={`size-3 rounded border-2 ${statusFrameClass(st)}`} />
+                              {statusMeta[st].label} {group.statuses[st]} 条
+                            </span>
+                          ))}
+                      </div>
+                      <div className="flex items-baseline gap-1.5 text-xs">
+                        <span className="text-muted-foreground">货值</span>
+                        <span className="font-semibold tabular-nums text-slate-800">
+                          {formatInventoryValue(group.inventoryValue)}
+                        </span>
+                      </div>
                     </div>
 
                     <div className="grid gap-1.5">
