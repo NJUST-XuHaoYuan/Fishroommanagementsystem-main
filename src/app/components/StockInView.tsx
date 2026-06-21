@@ -993,37 +993,52 @@ export function StockInView() {
           ))}
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
+        <>
           {speciesStockGroups.length === 0 ? (
-            <Card className="p-8 text-center text-sm text-muted-foreground">
+            <Card className="p-6 text-center text-sm text-muted-foreground">
               暂无匹配的在缸库存
             </Card>
           ) : (
-            speciesStockGroups.map((group) => (
-              <Card key={group.speciesId} className="p-4">
-                <div className="flex items-start gap-4">
-                  <div className="size-14 rounded-md overflow-hidden border bg-muted shrink-0">
-                    {group.imageUrl ? (
-                      <ImageWithFallback src={group.imageUrl} alt={group.speciesName} className="size-full object-cover" />
-                    ) : (
-                      <div className="size-full flex items-center justify-center px-1 text-center text-[10px] text-muted-foreground">
-                        {group.speciesName}
+            <Card className="gap-0 overflow-hidden rounded-lg">
+              <div className="hidden grid-cols-[minmax(13rem,0.9fr)_minmax(10rem,0.65fr)_minmax(0,2.4fr)] gap-4 border-b bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
+                <div>品种</div>
+                <div>状态</div>
+                <div>商品规格 / 数量 / 缸位分布</div>
+              </div>
+              <div className="divide-y">
+                {speciesStockGroups.map((group) => (
+                  <div
+                    key={group.speciesId}
+                    className="grid gap-3 px-3 py-2.5 md:grid-cols-[minmax(13rem,0.9fr)_minmax(10rem,0.65fr)_minmax(0,2.4fr)] md:items-start"
+                  >
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <div className="size-10 shrink-0 overflow-hidden rounded-md border bg-muted">
+                        {group.imageUrl ? (
+                          <ImageWithFallback src={group.imageUrl} alt={group.speciesName} className="size-full object-cover" />
+                        ) : (
+                          <div className="flex size-full items-center justify-center px-1 text-center text-[9px] text-muted-foreground">
+                            {group.speciesName}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="truncate">{group.speciesName}</h3>
-                      <span className="rounded-md bg-sky-600 px-2 py-1 text-sm font-bold leading-none text-white shadow-sm">
-                        {group.total} 条
-                      </span>
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <div className="truncate font-semibold leading-tight" title={group.speciesName}>
+                            {group.speciesName}
+                          </div>
+                          <span className="shrink-0 rounded-md bg-slate-900 px-1.5 py-0.5 text-xs font-semibold leading-5 text-white">
+                            {group.total} 条
+                          </span>
+                        </div>
+                        {(group.commonNames.length > 0 || group.scientificName) && (
+                          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                            {[group.commonNames.join(" / "), group.scientificName].filter(Boolean).join(" · ")}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    {(group.commonNames.length > 0 || group.scientificName) && (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        {[group.commonNames.join(" / "), group.scientificName].filter(Boolean).join(" · ")}
-                      </div>
-                    )}
-                    <div className="mt-2 flex items-center gap-3 flex-wrap">
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 md:pt-1">
                       {(["healthy", "feeding", "sick"] as StockStatus[])
                         .filter((st) => group.statuses[st] > 0)
                         .map((st) => (
@@ -1033,55 +1048,43 @@ export function StockInView() {
                           </span>
                         ))}
                     </div>
-                  </div>
-                </div>
 
-                <div className="mt-4 overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-xs text-muted-foreground">
-                        <th className="py-2 pr-3 text-left font-medium">商品规格</th>
-                        <th className="py-2 px-3 text-left font-medium">数量</th>
-                        <th className="py-2 pl-3 text-left font-medium">缸位分布</th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                    <div className="grid gap-1.5">
                       {group.productRows.map((row) => (
-                        <tr key={row.productId} className="border-b last:border-b-0">
-                          <td className="py-2.5 pr-3 align-top">
-                            <div className="font-medium">{row.name}</div>
+                        <div
+                          key={row.productId}
+                          className="grid gap-2 rounded-md bg-muted/30 px-2 py-1.5 text-sm md:grid-cols-[minmax(8rem,1fr)_auto_minmax(12rem,1.8fr)] md:items-center"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-medium" title={row.name}>{row.name}</div>
                             {(row.size || row.origin) && (
-                              <div className="mt-0.5 text-xs text-muted-foreground">
+                              <div className="mt-0.5 truncate text-xs text-muted-foreground">
                                 {[row.size, row.origin].filter(Boolean).join(" · ")}
                               </div>
                             )}
-                          </td>
-                          <td className="py-2.5 px-3 align-top">
-                            <span className="whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
-                              {row.count} 条
-                            </span>
-                          </td>
-                          <td className="py-2.5 pl-3 align-top">
-                            <div className="flex flex-wrap gap-1.5">
-                              {row.tankRows.map((tank) => (
-                                <span
-                                  key={tank.label}
-                                  className="rounded-full border bg-background px-2 py-0.5 text-xs text-muted-foreground"
-                                >
-                                  {tank.label} · {tank.count} 条
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
+                          </div>
+                          <span className="w-fit whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                            {row.count} 条
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {row.tankRows.map((tank) => (
+                              <span
+                                key={tank.label}
+                                className="rounded-full border bg-background px-2 py-0.5 text-xs text-muted-foreground"
+                              >
+                                {tank.label} · {tank.count} 条
+                              </span>
+                            ))}
+                          </div>
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-            ))
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
           )}
-        </div>
+        </>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>
