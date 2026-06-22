@@ -4042,7 +4042,7 @@ function OrderDetailDialog({
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     const ok = await saveStateTransform((latest) => {
       const shipments = latest.shipments.map((sh) =>
-        sh.id === shipment.id ? { ...sh, status: "delivered" as const } : sh
+        sh.id === shipment.id ? { ...sh, status: "delivered" as const, deliveredAt: nowDatetimeLocal() } : sh
       );
       const relatedShipments = shipments.filter((sh) => sh.orderId === order.id && countsAsActiveShipment(sh));
       const shippedIds = new Set(relatedShipments.flatMap((sh) => sh.itemStockIds ?? []));

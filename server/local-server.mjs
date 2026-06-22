@@ -602,6 +602,9 @@ function normalizePickupShipmentRecord(shipment = {}) {
   if (!next.shippedAt) {
     next.shippedAt = String(shipment.createdAt ?? shipment.shipDate ?? shipment.outboundDate ?? nowDatetimeInChina());
   }
+  if (!next.deliveredAt) {
+    next.deliveredAt = next.shippedAt;
+  }
   return stableJson(next) === stableJson(shipment) ? shipment : next;
 }
 
@@ -628,6 +631,33 @@ function addDaysToDateString(dateString, days) {
   const date = new Date(`${dateString}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function datePart(value) {
+  const raw = String(value ?? "").trim();
+  const date = raw.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
+}
+
+function isDateOnOrBefore(value, threshold) {
+  const date = datePart(value);
+  return !!date && date <= threshold;
+}
+
+function msUntilNextChinaTime(hour = 4, minute = 0) {
+  const chinaNowMs = Date.now() + 8 * 60 * 60 * 1000;
+  const chinaNow = new Date(chinaNowMs);
+  let targetMs = Date.UTC(
+    chinaNow.getUTCFullYear(),
+    chinaNow.getUTCMonth(),
+    chinaNow.getUTCDate(),
+    hour,
+    minute,
+    0,
+    0
+  );
+  if (targetMs <= chinaNowMs) targetMs += 24 * 60 * 60 * 1000;
+  return targetMs - chinaNowMs;
 }
 
 function parseFinanceDays(value) {
@@ -2225,6 +2255,108 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   if (!allShipmentsResolved) {
     throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
   }
+}
+
+function applyAutomaticOrderTransitions(state = {}) {
+  const today = todayInChina();
+  const outboundThreshold = addDaysToDateString(today, -3);
+  const shippedThreshold = addDaysToDateString(today, -5);
+  const deliveredThreshold = addDaysToDateString(today, -3);
+  const now = nowDatetimeInChina();
+  const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  let autoShippedCount = 0;
+  let autoDeliveredCount = 0;
+
+  const nextShipments = shipments.map((shipment) => {
+    const status = String(shipment?.status ?? "");
+    if (status === "outbound") {
+      const outboundDate = datePart(shipment.outboundDate || shipment.createdAt || shipment.shipDate);
+      if (isDateOnOrBefore(outboundDate, outboundThreshold)) {
+        autoShippedCount += 1;
+        return {
+          ...shipment,
+          status: "shipped",
+          shippedAt: shipment.shippedAt || now,
+          shipDate: today,
+        };
+      }
+    }
+    if (status === "shipped") {
+      const shippedDate = datePart(shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt);
+      if (isDateOnOrBefore(shippedDate, shippedThreshold)) {
+        autoDeliveredCount += 1;
+        return {
+          ...shipment,
+          status: "delivered",
+          deliveredAt: shipment.deliveredAt || now,
+        };
+      }
+    }
+    return shipment;
+  });
+
+  let autoCompletedCount = 0;
+  const nextOrders = orders.map((order) => {
+    if (!order || ["completed", "cancelled", "damaged"].includes(String(order.status ?? ""))) return order;
+    const orderShipments = nextShipments.filter((shipment) =>
+      String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
+    );
+    if (orderShipments.length === 0) return order;
+    const deliveredShipments = orderShipments.filter((shipment) =>
+      shipment?.status === "delivered" ||
+      (shipment?.status === "damaged" && shipment?.damageResolution === "refund")
+    );
+    if (deliveredShipments.length !== orderShipments.length) return order;
+    const latestDeliveredDate = deliveredShipments
+      .map((shipment) => datePart(shipment.deliveredAt || shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt))
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+    if (!latestDeliveredDate || !isDateOnOrBefore(latestDeliveredDate, deliveredThreshold)) return order;
+    try {
+      validateOrderCanComplete(order, nextShipments);
+    } catch {
+      return order;
+    }
+    autoCompletedCount += 1;
+    return { ...order, status: "completed" };
+  });
+
+  const changed = autoShippedCount > 0 || autoDeliveredCount > 0 || autoCompletedCount > 0;
+  if (!changed) {
+    return {
+      changed: false,
+      state,
+      summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount },
+    };
+  }
+
+  const details = [
+    autoShippedCount > 0 ? `出库满 3 天自动确认发货 ${autoShippedCount} 单` : "",
+    autoDeliveredCount > 0 ? `发货满 5 天自动签收 ${autoDeliveredCount} 单` : "",
+    autoCompletedCount > 0 ? `签收满 3 天自动完成订单 ${autoCompletedCount} 单` : "",
+  ].filter(Boolean).join("；");
+  const operationLog = {
+    id: uid("log"),
+    time: new Date().toISOString(),
+    operator: "system",
+    module: "订单管理",
+    action: "自动流转",
+    detail: details,
+  };
+
+  return {
+    changed: true,
+    state: {
+      ...state,
+      shipments: nextShipments,
+      orders: nextOrders,
+      operationLogs: pushOperationLog(state.operationLogs, operationLog),
+    },
+    operationLog,
+    summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount },
+  };
 }
 
 const ORDER_STATUS_VALUES = new Set(["pending", "shipped", "completed", "cancelled", "damaged"]);
@@ -3883,7 +4015,7 @@ async function handleApi(req, res, url) {
         shipMethod,
         actualShippingFee: isPickup ? 0 : normalizeMoney(body.actualShippingFee, "Actual shipping fee"),
         itemStockIds: selectedItemIds,
-        ...(isPickup ? { shippedAt: createdAt } : {}),
+        ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
       const nextShipments = [...(Array.isArray(state.shipments) ? state.shipments : []), shipment];
       const nextOrders = orders.map((item) =>
@@ -4754,6 +4886,55 @@ async function serveUpload(req, res, url) {
   }
 }
 
+let autoOrderTransitionTimer = null;
+let autoOrderTransitionRunning = false;
+
+async function runAutomaticOrderTransitions(reason = "scheduled") {
+  if (autoOrderTransitionRunning) return;
+  autoOrderTransitionRunning = true;
+  let client = null;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const current = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+    const result = applyAutomaticOrderTransitions(current);
+    if (!result.changed) {
+      await client.query("ROLLBACK");
+      console.log(`[auto-orders] ${reason}: no changes`);
+      return;
+    }
+    await client.query(
+      `INSERT INTO app_state (id, data, updated_at)
+       VALUES ($1, $2::jsonb, now())
+       ON CONFLICT (id)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+      [stateId, JSON.stringify(result.state)]
+    );
+    await client.query("COMMIT");
+    console.log(
+      `[auto-orders] ${reason}: shipped=${result.summary.autoShippedCount}, delivered=${result.summary.autoDeliveredCount}, completed=${result.summary.autoCompletedCount}`
+    );
+  } catch (error) {
+    await client?.query("ROLLBACK").catch(() => undefined);
+    console.error("[auto-orders] failed:", error);
+  } finally {
+    client?.release();
+    autoOrderTransitionRunning = false;
+  }
+}
+
+function scheduleAutomaticOrderTransitions() {
+  const delay = msUntilNextChinaTime(4, 0);
+  const nextRunAt = new Date(Date.now() + delay).toISOString();
+  autoOrderTransitionTimer = setTimeout(async () => {
+    await runAutomaticOrderTransitions("daily-04:00");
+    scheduleAutomaticOrderTransitions();
+  }, delay);
+  autoOrderTransitionTimer.unref?.();
+  console.log(`[auto-orders] next run at ${nextRunAt} (04:00 Asia/Shanghai)`);
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   try {
@@ -4776,4 +4957,5 @@ const server = createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`Local Fishroom API/static server: http://${host}:${port}`);
   console.log(`PostgreSQL state table: ${pgConfig.database}.app_state`);
+  scheduleAutomaticOrderTransitions();
 });
