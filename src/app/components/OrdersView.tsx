@@ -3776,6 +3776,7 @@ function OrderDetailDialog({
     if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
       return toast.error("提成比例不能小于 0");
+    if (!editForm.plannedShipDate) return toast.error("请选择预计发货日期");
     if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
     if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
@@ -3786,7 +3787,7 @@ function OrderDetailDialog({
         date: editForm.date,
         source: editForm.source.trim(),
         shippingAddress: editForm.shippingAddress.trim(),
-        plannedShipDate: editForm.plannedShipDate || undefined,
+        plannedShipDate: editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
         shippingFee: editForm.shippingFee,
@@ -4270,14 +4271,18 @@ function OrderDetailDialog({
                   )}
                 </div>
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">预计发货日期</Label>
+                  <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
                   <Input
                     type="date"
                     value={editForm.plannedShipDate}
                     min={editForm.date}
+                    required
                     onChange={(e) => changeEditPlannedShipDate(e.target.value)}
-                    className={editForm.plannedShipDate && editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
                   />
+                  {!editForm.plannedShipDate && (
+                    <p className="text-xs text-red-500">请选择预计发货日期</p>
+                  )}
                   {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
                     <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
                   )}
@@ -5339,6 +5344,7 @@ function NewOrderDialog({
     if (!source.trim()) return toast.error("请选择订单来源");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
+    if (!plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
@@ -5360,7 +5366,7 @@ function NewOrderDialog({
         date,
         source: source.trim(),
         shippingAddress: shippingAddress.trim(),
-        plannedShipDate: plannedShipDate || undefined,
+        plannedShipDate,
         contactPerson: contactPerson.trim(),
         items,
         shippingFee,
@@ -5441,14 +5447,18 @@ function NewOrderDialog({
                 )}
               </div>
               <div className="grid gap-2">
-                <Label>预计发货日期</Label>
+                <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
                 <Input
                   type="date"
                   value={plannedShipDate}
                   min={date}
+                  required
                   onChange={(e) => changePlannedShipDate(e.target.value)}
-                  className={plannedShipDate && plannedShipDate < date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  className={!plannedShipDate || plannedShipDate < date ? "border-red-500 focus-visible:ring-red-500" : ""}
                 />
+                {!plannedShipDate && (
+                  <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
+                )}
                 {plannedShipDate && plannedShipDate < date && (
                   <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
                 )}

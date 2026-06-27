@@ -2334,7 +2334,8 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
   const shippingAddress = String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim();
-  const plannedShipDate = String(body.plannedShipDate ?? "").trim();
+  const plannedShipDate = String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
+  if (!plannedShipDate) throw new Error("请选择预计发货日期");
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
   assertActivePersonnelName(state, contactPerson, "对接人", currentOrder?.contactPerson);
@@ -2376,7 +2377,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     date,
     source,
     shippingAddress,
-    plannedShipDate: plannedShipDate || undefined,
+    plannedShipDate,
     contactPerson,
     items,
     shippingFee,
