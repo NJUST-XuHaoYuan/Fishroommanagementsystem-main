@@ -6,6 +6,7 @@ export const ALL_SITE_ID = "all";
 export const DEFAULT_SITES = [
   { id: "jiangyin", name: "江阴" },
   { id: "nanjing", name: "南京" },
+  { id: "beijing", name: "北京" },
 ] as const;
 
 export type SiteScopeId = typeof ALL_SITE_ID | string;

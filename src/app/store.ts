@@ -40,6 +40,8 @@ export type Product = {
   origin: string;
   imageUrl: string;
   defaultPrice: number;
+  /** 是否展示在对外网站。未设置时按展示处理，兼容旧数据。 */
+  publicVisible?: boolean;
   /** 销售提成比例，单位为百分比，例如 5 表示 5%。 */
   commissionRate?: number;
   notes: string;
@@ -417,6 +419,7 @@ export const initialState: Store = {
   sites: [
     { id: "jiangyin", name: "江阴" },
     { id: "nanjing", name: "南京" },
+    { id: "beijing", name: "北京" },
   ],
   personnel: [
     { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
@@ -441,9 +444,9 @@ export const initialState: Store = {
     { id: "s3", name: "黄金吊", scientificName: "Zebrasoma flavescens", category: "刺尾鱼科", commonNames: ["黄三角吊"], description: "鲜艳的黄色", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200" },
   ],
   products: [
-    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, commissionRate: 0, notes: "" },
-    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, commissionRate: 0, notes: "" },
-    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, commissionRate: 0, notes: "" },
+    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, publicVisible: true, commissionRate: 0, notes: "" },
   ],
   tankGroups: [
     {

@@ -243,6 +243,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
   const migratedProducts = Array.isArray(migratedData.products)
     ? migratedData.products.map((product: Record<string, unknown>) => ({
         ...product,
+        publicVisible: product.publicVisible !== false,
         notes: String(product.notes ?? ""),
       }))
     : migratedData.products;
@@ -349,19 +350,6 @@ function isPublicSiteHost(): boolean {
     return window.location.port === "10000";
   } catch {
     return false;
-  }
-}
-
-function adminEntryUrl(): string {
-  try {
-    const url = new URL(window.location.href);
-    url.port = "8787";
-    url.pathname = "/";
-    url.search = "";
-    url.hash = "admin";
-    return url.toString();
-  } catch {
-    return "http://129.211.211.201:8787/#admin";
   }
 }
 
@@ -1276,11 +1264,7 @@ function AdminApp() {
 	  return (
 			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
-        <PublicCatalogPage
-          onStaffLogin={() => {
-            window.location.href = adminEntryUrl();
-          }}
-        />
+        <PublicCatalogPage />
       ) : !state.user ? (
         <Login />
       ) : (

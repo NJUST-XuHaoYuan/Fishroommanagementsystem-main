@@ -73,7 +73,22 @@ type DailyFinancePoint = {
   label: string;
   received: number;
   refunded: number;
+  orderAmount: number;
+  platformAmount: number;
+  offlinePickupAmount: number;
+  privateDomainAmount: number;
 };
+
+type DailyFinanceMetricKey = "received" | "refunded" | "orderAmount" | "platformAmount" | "offlinePickupAmount" | "privateDomainAmount";
+
+const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
+  { key: "received", label: "实际收款", color: "#10b981" },
+  { key: "refunded", label: "退款", color: "#f43f5e" },
+  { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
+  { key: "platformAmount", label: "平台成交", color: "#8b5cf6" },
+  { key: "offlinePickupAmount", label: "线下自提", color: "#f59e0b" },
+  { key: "privateDomainAmount", label: "线上私域", color: "#14b8a6" },
+];
 
 type DailyLossDetail = {
   id: string;
@@ -194,7 +209,25 @@ type FocusProductRow = {
   salesAmount: number;
 };
 
-function linePoints(data: DailyFinancePoint[], key: "received" | "refunded", maxValue: number): string {
+function financeMetricValue(point: DailyFinancePoint, key: DailyFinanceMetricKey): number {
+  return Number(point[key] || 0);
+}
+
+function normalizeDailyFinancePoint(point: Partial<DailyFinancePoint>): DailyFinancePoint {
+  const date = String(point.date ?? "");
+  return {
+    date,
+    label: String(point.label ?? shortDateLabel(date)),
+    received: Number(point.received || 0),
+    refunded: Number(point.refunded || 0),
+    orderAmount: Number(point.orderAmount || 0),
+    platformAmount: Number(point.platformAmount || 0),
+    offlinePickupAmount: Number(point.offlinePickupAmount || 0),
+    privateDomainAmount: Number(point.privateDomainAmount || 0),
+  };
+}
+
+function linePoints(data: DailyFinancePoint[], key: DailyFinanceMetricKey, maxValue: number): string {
   const width = 960;
   const height = 250;
   const left = 64;
@@ -206,7 +239,7 @@ function linePoints(data: DailyFinancePoint[], key: "received" | "refunded", max
   const divisor = Math.max(data.length - 1, 1);
   return data.map((point, index) => {
     const x = left + (index / divisor) * chartWidth;
-    const y = top + (1 - Number(point[key] || 0) / maxValue) * chartHeight;
+    const y = top + (1 - financeMetricValue(point, key) / maxValue) * chartHeight;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
 }
@@ -306,6 +339,19 @@ function calcOrderDealAmount(order: Order, shipments: Shipment[]): number {
   ).toFixed(2));
 }
 
+function isValidSalesOrder(order: Order): boolean {
+  return order.status !== "cancelled" && order.status !== "damaged";
+}
+
+function orderShipmentsFor(order: Order, shipments: Shipment[]): Shipment[] {
+  return shipments.filter((shipment) => shipment.orderId === order.id);
+}
+
+function isOfflinePickupOrder(order: Order, orderShipments: Shipment[]): boolean {
+  const source = String(order.source ?? "").trim();
+  return source === "线下" || source === "线下自提" || (!source && orderShipments.some((shipment) => shipment.shipMethod === "pickup"));
+}
+
 function polarToCartesian(cx: number, cy: number, radius: number, angleInDegrees: number) {
   const angleInRadians = (angleInDegrees - 90) * Math.PI / 180;
   return {
@@ -334,6 +380,21 @@ function isFishCategory(category: string): boolean {
   if (/(活石|活性炭|吸附|滤材|耗材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(category)) return false;
   if (category.includes("虾虎") || category.includes("鰕虎")) return true;
   return !/(虾|蟹|螺|贝|海胆|珊瑚|海星|海葵)/.test(category);
+}
+
+function isFishInventoryItem(product?: Product, species?: Species): boolean {
+  const text = [
+    species?.category,
+    species?.name,
+    species?.scientificName,
+    ...(Array.isArray(species?.commonNames) ? species.commonNames : []),
+    product?.name,
+    product?.size,
+    product?.origin,
+    product?.notes,
+  ].filter(Boolean).join(" ");
+  if (/(耗材|活石|活石头|珊瑚|活性炭|吸附|滤材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(text)) return false;
+  return isFishCategory(String(species?.category ?? text));
 }
 
 function escapeHtml(value: unknown): string {
@@ -860,7 +921,7 @@ export function Dashboard() {
   const inTankFishStock = inTankStock.filter((stockItem) => {
     const product = productById.get(stockItem.productId);
     const species = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishCategory(species?.category ?? "");
+    return isFishInventoryItem(product, species);
   });
   let inFishStock = inTankFishStock.length;
   let sick = inTankFishStock.filter((s) => s.status === "sick").length;
@@ -893,6 +954,17 @@ export function Dashboard() {
     const payments = dashboardOrders.flatMap((order) =>
       (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === date)
     );
+    const ordersForDate = dashboardOrders.filter((order) =>
+      isValidSalesOrder(order) && String(order.date ?? "").slice(0, 10) === date
+    );
+    const salesRows = ordersForDate.map((order) => {
+      const orderShipments = orderShipmentsFor(order, dashboardShipments);
+      return {
+        order,
+        orderShipments,
+        amount: calcOrderDealAmount(order, orderShipments),
+      };
+    });
     return {
       date,
       label: shortDateLabel(date),
@@ -902,6 +974,16 @@ export function Dashboard() {
       refunded: payments
         .filter((payment) => payment.type === "refund")
         .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
+      orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
+      platformAmount: salesRows
+        .filter((row) => String(row.order.source ?? "").trim() === "平台下单")
+        .reduce((sum, row) => sum + row.amount, 0),
+      offlinePickupAmount: salesRows
+        .filter((row) => isOfflinePickupOrder(row.order, row.orderShipments))
+        .reduce((sum, row) => sum + row.amount, 0),
+      privateDomainAmount: salesRows
+        .filter((row) => String(row.order.source ?? "").trim() === "私域线上")
+        .reduce((sum, row) => sum + row.amount, 0),
     };
   });
   const dailyDates = dailyFinanceData.map((point) => point.date);
@@ -930,7 +1012,7 @@ export function Dashboard() {
       species: itemSpecies,
       date: String(record.date ?? stockItem?.lossDate ?? "").slice(0, 10),
       estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
-      isFish: isFishCategory(itemSpecies?.category ?? ""),
+      isFish: isFishInventoryItem(product, itemSpecies),
     };
   }).filter((row) => row.date && row.stockItem && row.isFish);
   const lossDateByStockId = new Map<string, string>();
@@ -958,7 +1040,7 @@ export function Dashboard() {
   const fishStock = dashboardStock.filter((item) => {
     const product = productById.get(item.productId);
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishCategory(itemSpecies?.category ?? "");
+    return isFishInventoryItem(product, itemSpecies);
   });
   let dailyLossData: DailyLossPoint[] = dailyDates.map((date) => {
     const seenLossIds = new Set<string>();
@@ -1041,7 +1123,9 @@ export function Dashboard() {
     activeOrders = summary.activeOrders;
     totalRevenue = summary.totalRevenue;
     pendingShipments = summary.pendingShipments;
-    dailyFinanceData = Array.isArray(summary.dailyFinanceData) ? summary.dailyFinanceData : dailyFinanceData;
+    dailyFinanceData = Array.isArray(summary.dailyFinanceData)
+      ? summary.dailyFinanceData.map((point) => normalizeDailyFinancePoint(point))
+      : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
   const salesScope = normalizeSiteScope(dashboardSiteId);
@@ -1164,8 +1248,14 @@ export function Dashboard() {
   };
   const maxFinanceValue = Math.max(
     1,
-    ...dailyFinanceData.flatMap((point) => [point.received, point.refunded])
+    ...dailyFinanceData.flatMap((point) =>
+      FINANCE_SERIES.map((series) => financeMetricValue(point, series.key))
+    )
   );
+  const financeRangeTotals = FINANCE_SERIES.map((series) => ({
+    ...series,
+    value: dailyFinanceData.reduce((sum, point) => sum + financeMetricValue(point, series.key), 0),
+  }));
   const hoveredFinancePoint =
     hoveredFinanceIndex !== null && hoveredFinanceIndex < dailyFinanceData.length
       ? dailyFinanceData[hoveredFinanceIndex]
@@ -1463,7 +1553,7 @@ export function Dashboard() {
         if (!isPhysicallyInTank(stock, exportShippedOutStockIds)) return false;
         const product = exportProductById.get(stock.productId);
         const species = product ? exportSpeciesById.get(product.speciesId) : undefined;
-        return isFishCategory(species?.category ?? "");
+        return isFishInventoryItem(product, species);
       });
     const fishListPriceBaselines = buildStockPriceBaselines(sellableStock, exportData.products);
 
@@ -1943,8 +2033,8 @@ export function Dashboard() {
         <Card className="fishroom-card p-5">
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <h3 className="text-base font-semibold">每日销售与退款</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天收款金额和退款金额</p>
+              <h3 className="text-base font-semibold">销售情况</h3>
+              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退款、订单金额与渠道成交金额</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5 text-muted-foreground">
@@ -1959,13 +2049,24 @@ export function Dashboard() {
                   ))}
                 </select>
               </label>
-              <span className="flex items-center gap-1.5 text-emerald-700">
-                <span className="size-2.5 rounded-full bg-emerald-500" /> 收款
-              </span>
-              <span className="flex items-center gap-1.5 text-rose-700">
-                <span className="size-2.5 rounded-full bg-rose-500" /> 退款
-              </span>
+              {FINANCE_SERIES.map((series) => (
+                <span key={series.key} className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="size-2.5 rounded-full" style={{ backgroundColor: series.color }} />
+                  {series.label}
+                </span>
+              ))}
             </div>
+          </div>
+          <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+            {financeRangeTotals.map((item) => (
+              <div key={item.key} className="rounded-lg border bg-slate-50/60 px-3 py-2">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="size-2 rounded-full" style={{ backgroundColor: item.color }} />
+                  {item.label}
+                </div>
+                <div className="mt-1 font-mono text-sm font-semibold text-slate-900">{formatMoney(item.value)}</div>
+              </div>
+            ))}
           </div>
           <div
             className="relative h-72"
@@ -1980,45 +2081,36 @@ export function Dashboard() {
                 }}
               >
                 <div className="mb-1 font-semibold text-slate-900">{hoveredFinancePoint.date}</div>
-                <div className="flex items-center justify-between gap-5 text-emerald-700">
-                  <span className="flex items-center gap-1.5">
-                    <span className="size-2 rounded-full bg-emerald-500" />
-                    收款
-                  </span>
-                  <span className="font-mono font-semibold">{formatMoney(hoveredFinancePoint.received)}</span>
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-5 text-rose-700">
-                  <span className="flex items-center gap-1.5">
-                    <span className="size-2 rounded-full bg-rose-500" />
-                    退款
-                  </span>
-                  <span className="font-mono font-semibold">{formatMoney(hoveredFinancePoint.refunded)}</span>
-                </div>
+                {FINANCE_SERIES.map((series) => (
+                  <div key={series.key} className="mt-1 flex items-center justify-between gap-5" style={{ color: series.color }}>
+                    <span className="flex items-center gap-1.5">
+                      <span className="size-2 rounded-full" style={{ backgroundColor: series.color }} />
+                      {series.label}
+                    </span>
+                    <span className="font-mono font-semibold">{formatMoney(financeMetricValue(hoveredFinancePoint, series.key))}</span>
+                  </div>
+                ))}
               </div>
             )}
-            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailyFinanceData.length}天收款和退款金额折线图`}>
+            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailyFinanceData.length}天销售情况趋势图`}>
               {financeTicks.map((tick) => (
                 <g key={tick.ratio}>
                   <line x1="64" x2="940" y1={tick.y} y2={tick.y} stroke="#e5e7eb" strokeDasharray="4 4" />
                   <text x="10" y={tick.y + 4} fontSize="12" fill="#64748b">¥{formatCompactMoney(tick.value)}</text>
                 </g>
               ))}
-              <polyline
-                points={linePoints(dailyFinanceData, "received", maxFinanceValue)}
-                fill="none"
-                stroke="#10b981"
-                strokeWidth="3.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <polyline
-                points={linePoints(dailyFinanceData, "refunded", maxFinanceValue)}
-                fill="none"
-                stroke="#f43f5e"
-                strokeWidth="3.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              {FINANCE_SERIES.map((series) => (
+                <polyline
+                  key={series.key}
+                  points={linePoints(dailyFinanceData, series.key, maxFinanceValue)}
+                  fill="none"
+                  stroke={series.color}
+                  strokeWidth={series.key === "orderAmount" ? "3.5" : "2.5"}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={series.key === "orderAmount" ? "1" : "0.86"}
+                />
+              ))}
               {hoveredFinancePoint && (
                 <g pointerEvents="none">
                   <line
@@ -2029,37 +2121,36 @@ export function Dashboard() {
                     stroke="#94a3b8"
                     strokeDasharray="4 4"
                   />
-                  <circle
-                    cx={hoveredFinanceX}
-                    cy={18 + (1 - hoveredFinancePoint.received / maxFinanceValue) * 198}
-                    r="5.5"
-                    fill="#10b981"
-                    stroke="#fff"
-                    strokeWidth="2"
-                  />
-                  <circle
-                    cx={hoveredFinanceX}
-                    cy={18 + (1 - hoveredFinancePoint.refunded / maxFinanceValue) * 198}
-                    r="5.5"
-                    fill="#f43f5e"
-                    stroke="#fff"
-                    strokeWidth="2"
-                  />
+                  {FINANCE_SERIES.map((series) => (
+                    <circle
+                      key={series.key}
+                      cx={hoveredFinanceX}
+                      cy={18 + (1 - financeMetricValue(hoveredFinancePoint, series.key) / maxFinanceValue) * 198}
+                      r="5.5"
+                      fill={series.color}
+                      stroke="#fff"
+                      strokeWidth="2"
+                    />
+                  ))}
                 </g>
               )}
               {dailyFinanceData.map((point, index) => {
                 const divisor = Math.max(dailyFinanceData.length - 1, 1);
                 const x = 64 + (index / divisor) * 876;
-                const receivedY = 18 + (1 - point.received / maxFinanceValue) * 198;
-                const refundedY = 18 + (1 - point.refunded / maxFinanceValue) * 198;
                 return (
                   <g key={point.date}>
-                    <circle cx={x} cy={receivedY} r="3.5" fill="#10b981">
-                      <title>{`${point.date} 收款 ${formatMoney(point.received)}`}</title>
-                    </circle>
-                    <circle cx={x} cy={refundedY} r="3.5" fill="#f43f5e">
-                      <title>{`${point.date} 退款 ${formatMoney(point.refunded)}`}</title>
-                    </circle>
+                    {FINANCE_SERIES.map((series) => (
+                      <circle
+                        key={series.key}
+                        cx={x}
+                        cy={18 + (1 - financeMetricValue(point, series.key) / maxFinanceValue) * 198}
+                        r="2.8"
+                        fill={series.color}
+                        opacity="0.8"
+                      >
+                        <title>{`${point.date} ${series.label} ${formatMoney(financeMetricValue(point, series.key))}`}</title>
+                      </circle>
+                    ))}
                     {(index % financeLabelStep === 0 || index === dailyFinanceData.length - 1) && (
                       <text x={x} y="246" textAnchor="middle" fontSize="12" fill="#64748b">{point.label}</text>
                     )}
@@ -2083,7 +2174,10 @@ export function Dashboard() {
                     onMouseEnter={() => setHoveredFinanceIndex(index)}
                     onMouseMove={() => setHoveredFinanceIndex(index)}
                   >
-                    <title>{`${point.date}\n收款 ${formatMoney(point.received)}\n退款 ${formatMoney(point.refunded)}`}</title>
+                    <title>{[
+                      point.date,
+                      ...FINANCE_SERIES.map((series) => `${series.label} ${formatMoney(financeMetricValue(point, series.key))}`),
+                    ].join("\n")}</title>
                   </rect>
                 );
               })}

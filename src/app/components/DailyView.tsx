@@ -23,6 +23,7 @@ import { normalizeSiteId, siteName } from "../utils/sites";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -63,7 +64,10 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const [q, setQ] = useState("");
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [publicLookupCode, setPublicLookupCode] = useState("");
+  const [highlightStockId, setHighlightStockId] = useState("");
 
   // Bio detail dialog state
   const [bioOpen, setBioOpen] = useState(false);
@@ -324,6 +328,13 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     setExpandedKeys((prev) => {
       const next = new Set(prev);
       next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
+  const toggleGroupExpand = (groupId: string) =>
+    setExpandedGroupIds((prev) => {
+      const next = new Set(prev);
+      next.has(groupId) ? next.delete(groupId) : next.add(groupId);
       return next;
     });
 
@@ -662,6 +673,54 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     void loadBioRecords(item.id);
   };
 
+  const locatePublicLookupCode = () => {
+    const candidates = parsePublicSelectionCode(publicLookupCode).map((item) => item.toLowerCase());
+    if (candidates.length === 0) {
+      toast.error("请粘贴公开页复制的选鱼码");
+      return;
+    }
+
+    const target = state.stock.find((item) => {
+      const itemCandidates = [
+        item.id,
+        item.code,
+        buildPublicSelectionCode(item.id),
+      ]
+        .map((value) => String(value ?? "").trim().toLowerCase())
+        .filter(Boolean);
+      return itemCandidates.some((candidate) => candidates.includes(candidate));
+    });
+
+    if (!target) {
+      toast.error("没有找到对应库存商品，请确认选鱼码是否完整");
+      return;
+    }
+
+    const productName = product(target.productId)?.name ?? target.productId;
+    setQ("");
+    setFilterStatuses(new Set());
+    setFilterSoldOnly(false);
+    setHighlightStockId(target.id);
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(`${target.subTankId}-${target.productId}`);
+      return next;
+    });
+    openBio(target);
+
+    window.setTimeout(() => {
+      const element = [...document.querySelectorAll<HTMLElement>("[data-daily-stock-item-id]")]
+        .find((node) => node.dataset.dailyStockItemId === target.id);
+      element?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    }, 80);
+
+    window.setTimeout(() => {
+      setHighlightStockId((current) => current === target.id ? "" : current);
+    }, 8000);
+
+    toast.success(`已打开：${productName}`);
+  };
+
   // Build timeline for bio detail
   const buildTimeline = (item: StockItem) => {
     const events: Array<
@@ -951,22 +1010,25 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const STATUS_ORDER: StockStatus[] = ["sick", "feeding", "healthy"];
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h2>日常管理</h2>
-        <p className="text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
-      </div>
+    <div className="flex flex-col gap-3">
+      <Tabs defaultValue="visual" className="gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="leading-tight">日常管理</h2>
+              <TabsList className="h-8 rounded-full">
+                <TabsTrigger value="visual" className="rounded-full px-3 text-sm">缸位视图</TabsTrigger>
+                <TabsTrigger value="logs" className="rounded-full px-3 text-sm">养护日志</TabsTrigger>
+              </TabsList>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
+          </div>
+        </div>
 
-      <Tabs defaultValue="visual">
-        <TabsList>
-          <TabsTrigger value="visual">缸位视图</TabsTrigger>
-          <TabsTrigger value="logs">养护日志</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="visual" className="flex flex-col gap-4">
+        <TabsContent value="visual" className="flex flex-col gap-3">
           {/* 过滤栏：状态按钮 + 搜索框 */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
+          <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-end gap-2 border-b bg-background/95 px-1 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
               {STATUS_ORDER.map((st) => {
                 const meta = statusFilterMeta[st];
                 const active = filterStatuses.has(st);
@@ -974,7 +1036,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   <button
                     key={st}
                     onClick={() => toggleStatusFilter(st)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-all select-none
+                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-all select-none
                       ${active ? meta.active : meta.inactive}`}
                   >
                     <span className={`size-3 rounded border-2 shrink-0 ${statusFrameClass(st)}`} />
@@ -985,7 +1047,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               {/* 已售独立过滤按钮 */}
               <button
                 onClick={() => setFilterSoldOnly((v) => !v)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-all select-none
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-all select-none
                   ${filterSoldOnly
                     ? "bg-amber-100 border-amber-400 text-amber-800"
                     : "border-border text-muted-foreground hover:border-amber-300 hover:text-amber-700"}`}
@@ -999,96 +1061,161 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               {(filterStatuses.size > 0 || filterSoldOnly) && (
                 <button
                   onClick={() => { setFilterStatuses(new Set()); setFilterSoldOnly(false); }}
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground px-1.5 py-1 rounded transition-colors"
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
                 >
                   <X className="size-3" /> 清除
                 </button>
               )}
             </div>
-	            <div className="flex items-center gap-2">
-	              {canBatchSelect && (
-	                <Button
-	                  type="button"
-	                  size="sm"
-	                  variant={selectMode ? "default" : "outline"}
-	                  onClick={enterSelectMode}
-	                >
-	                  <ArrowRightLeft className="size-3.5 mr-1" />
-	                  批量操作
-	                </Button>
-	              )}
-	              {selectMode && (
-	                <>
-	                  <span className="text-xs text-muted-foreground">已选 {selectedItems.length} 条</span>
-	                  {permission.canCreate && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openBatchRecordDialog(Array.from(selectedIds))}
-	                    >
-	                      批量维护
-	                    </Button>
-	                  )}
-	                  {permission.canUpdate && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openMoveDialog(Array.from(selectedIds))}
-	                    >
-	                      移到子缸
-	                    </Button>
-	                  )}
-	                  {permission.canDelete && (
-	                    <Button
-	                      type="button"
-	                      size="sm"
-	                      variant="outline"
-	                      className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
-	                      disabled={selectedItems.length === 0}
-	                      onClick={() => openLossDialog(Array.from(selectedIds))}
-	                    >
-	                      批量报损
-	                    </Button>
-	                  )}
-	                </>
-	              )}
-	              <div className="relative">
-	                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-	                <Input
-	                  value={q}
-	                  onChange={(e) => setQ(e.target.value)}
-		                  placeholder="搜索缸位 / 商品名 / 编号 / 备注…"
-		                  aria-label="搜索缸位、商品名、编号或备注"
-		                  className="pl-9 w-64"
-		                />
-	              </div>
-	            </div>
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2 rounded-lg border bg-white p-1.5 shadow-sm">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                  <Input
+                    value={publicLookupCode}
+                    onChange={(event) => setPublicLookupCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        locatePublicLookupCode();
+                      }
+                    }}
+                    placeholder="粘贴公开选鱼码"
+                    aria-label="公开选鱼码"
+                    className="h-8 w-48 border-0 bg-transparent pl-9 shadow-none focus-visible:ring-0"
+                  />
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={locatePublicLookupCode}>
+                  定位
+                </Button>
+              </div>
+              {canBatchSelect && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={selectMode ? "default" : "outline"}
+                  onClick={enterSelectMode}
+                >
+                  <ArrowRightLeft className="size-3.5 mr-1" />
+                  批量操作
+                </Button>
+              )}
+              {selectMode && (
+                <>
+                  <span className="text-xs text-muted-foreground">已选 {selectedItems.length} 条</span>
+                  {permission.canCreate && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openBatchRecordDialog(Array.from(selectedIds))}
+                    >
+                      批量维护
+                    </Button>
+                  )}
+                  {permission.canUpdate && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openMoveDialog(Array.from(selectedIds))}
+                    >
+                      移到子缸
+                    </Button>
+                  )}
+                  {permission.canDelete && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openLossDialog(Array.from(selectedIds))}
+                    >
+                      批量报损
+                    </Button>
+                  )}
+                </>
+              )}
+              <div className="relative min-w-[13rem] flex-1 sm:flex-none">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜索缸位 / 商品名 / 编号 / 备注…"
+                  aria-label="搜索缸位、商品名、编号或备注"
+                  className="h-8 w-full pl-9 sm:w-72"
+                />
+              </div>
+            </div>
           </div>
 
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
             {visibleGroups.length === 0 && anyFilter && (
               <div className="py-12 text-center text-sm text-muted-foreground">没有符合条件的结果</div>
             )}
             {visibleGroups.map((g) => {
               const groupLogs = logsByGroup.get(g.id) ?? [];
               const latestLog = groupLogs[0];
+              const isGroupExpanded = expandedGroupIds.has(g.id);
+              const subTanks = visibleSubTanks(g);
+              const visibleStockCount = subTanks.reduce((sum, t) => sum + stockBySub(t.id).length, 0);
               return (
-              <Card key={g.id} className="p-5 border-2 border-sky-200 bg-sky-50/30">
-                <div className="mb-3 flex items-start justify-between gap-3">
-                  <div>
-                    <h3>{g.name}</h3>
-                    <div className="text-xs text-muted-foreground">{g.location}</div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
+              <Card key={g.id} className="p-3 border border-sky-200 bg-sky-50/30">
+                <div className={`grid gap-2.5 md:items-start ${
+                  isGroupExpanded
+                    ? "mb-2.5 md:grid-cols-[minmax(9rem,13rem)_minmax(16rem,1fr)_auto]"
+                    : "md:grid-cols-[minmax(12rem,1fr)_auto]"
+                }`}>
+                  <button
+                    type="button"
+                    aria-expanded={isGroupExpanded}
+                    aria-controls={`daily-group-${g.id}`}
+                    className="flex min-w-0 items-start gap-2 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-white/70"
+                    onClick={() => toggleGroupExpand(g.id)}
+                  >
+                    <ChevronDown
+                      className={`mt-1 size-4 shrink-0 text-sky-600 transition-transform ${isGroupExpanded ? "rotate-180" : "-rotate-90"}`}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <h3 className="truncate text-base">{g.name}</h3>
+                        <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+                          {visibleStockCount} 条
+                        </span>
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">{g.location}</div>
+                    </div>
+                  </button>
+                  {isGroupExpanded && (
+                    <button
+                      type="button"
+                      className="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
+                      onClick={() => setViewLogGroupId(g.id)}
+                    >
+                      <Clock className="size-4 shrink-0 text-sky-600" />
+                      <div className="min-w-0 flex items-center gap-2 text-sm">
+                        <span className="shrink-0 text-xs font-medium text-sky-700">最近养护</span>
+                        {latestLog ? (
+                          <span className="min-w-0 truncate font-medium">
+                            {latestLog.date} · {latestLog.action}
+                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
+                            {latestLog.notes ? ` · ${latestLog.notes}` : ""}
+                          </span>
+                        ) : (
+                          <span className="truncate text-muted-foreground">暂无养护日志</span>
+                        )}
+                      </div>
+                    </button>
+                  )}
+                  <div className="flex shrink-0 items-center gap-2 md:justify-end">
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="text-slate-700 border-slate-200 hover:bg-white"
+                      className="h-8 border-slate-200 px-2.5 text-slate-700 hover:bg-white"
                       onClick={() => setViewLogGroupId(g.id)}
                     >
                       <ClipboardList className="size-3.5 mr-1" />
@@ -1099,7 +1226,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="text-sky-600 border-sky-200 hover:bg-sky-50"
+                        className="h-8 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50"
                         onClick={() => openNewLogForGroup(g.id)}
                       >
                         <Plus className="size-3.5 mr-1" />
@@ -1108,32 +1235,10 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     )}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="mb-3 flex w-full items-start gap-2 rounded-md border bg-white/80 px-3 py-2 text-left transition-colors hover:bg-white"
-                  onClick={() => setViewLogGroupId(g.id)}
-                >
-                  <Clock className="mt-0.5 size-4 shrink-0 text-sky-600" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium text-slate-600">最近养护</div>
-                    {latestLog ? (
-                      <>
-                        <div className="mt-0.5 truncate text-sm font-medium">
-                          {latestLog.date} · {latestLog.action}
-                          {latestLog.operator ? ` · ${latestLog.operator}` : ""}
-                        </div>
-                        {latestLog.notes && (
-                          <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{latestLog.notes}</div>
-                        )}
-                      </>
-                    ) : (
-                      <div className="mt-0.5 text-sm text-muted-foreground">暂无养护日志</div>
-                    )}
-                  </div>
-                </button>
                 {/* 子缸横向排列，溢出滚动 */}
-                <div className="flex flex-row gap-3 overflow-x-auto pb-1">
-                  {visibleSubTanks(g).map((t) => {
+                {isGroupExpanded && (
+                <div id={`daily-group-${g.id}`} className="flex flex-row gap-2.5 overflow-x-auto pb-0.5">
+                  {subTanks.map((t) => {
                     const items = stockBySub(t.id);
                     const allItems = state.stock.filter((s) =>
                       s.subTankId === t.id && isPhysicallyInTank(s, shippedOutStockIds)
@@ -1144,9 +1249,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     const visibleIds = items.map((item) => item.id);
                     const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
                     return (
-                      <div key={t.id} className="bg-white rounded-md border flex flex-col min-w-[220px] flex-shrink-0">
+                      <div key={t.id} className="flex min-w-[208px] flex-shrink-0 flex-col overflow-hidden rounded-lg border border-slate-300 bg-white">
                         {/* 子缸标题行 */}
-                        <div className="flex items-center justify-between px-3 py-2 border-b">
+                        <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/80 px-2.5 py-1.5">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">{t.name}</span>
                             {allItems.length > 0 && (
@@ -1169,9 +1274,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         </div>
 
                         {/* 商品分组列表 */}
-                        <div className="flex flex-col divide-y">
+                        <div className="flex flex-col divide-y divide-slate-200">
                           {items.length === 0 && (
-                            <div className="px-3 py-3 text-xs text-muted-foreground text-center">
+                            <div className="px-2.5 py-2.5 text-xs text-muted-foreground text-center">
                               {anyFilter && !matchedByTank ? "无匹配" : "空缸"}
                             </div>
                           )}
@@ -1194,7 +1299,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                                 <div
                                   role="button"
                                   tabIndex={0}
-                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-slate-50 text-left"
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 text-left"
                                   onClick={() => toggleExpand(key)}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter" || e.key === " ") {
@@ -1260,48 +1365,52 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                                     className="grid gap-1.5 px-3 pb-2 pt-1 bg-slate-50 border-t"
                                     style={{ gridTemplateColumns: "repeat(auto-fill, 2.25rem)", maxWidth: "27.375rem" }}
                                   >
-	                                    {stockItems.map((s) => {
-	                                      const iconUrl = getItemIcon(s.id, s.productId);
-	                                      const selected = selectedIds.has(s.id);
-	                                      return (
-	                                        <button
-	                                          key={s.id}
-	                                          onClick={(e) => {
-	                                            e.stopPropagation();
-	                                            if (selectMode) toggleSelectItem(s.id);
-	                                            else openBio(s);
-	                                          }}
-	                                          className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
-	                                            selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
-	                                          }`}
-		                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
-	                                        >
-	                                          {iconUrl ? (
-	                                            <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
-	                                          ) : (
-	                                            <div className="size-full flex items-center justify-center">
-	                                              <Fish className="size-3 text-muted-foreground" />
-	                                            </div>
-		                                          )}
-		                                          {s.code && (
-		                                            <span className="absolute inset-x-0 bottom-0 z-20 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
-		                                              {s.code}
-		                                            </span>
-		                                          )}
-		                                          {isSpecialPrice(s) && (
-		                                            <span className="absolute left-0 top-0 z-20 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
-		                                              {priceBadgeText(s)}
-		                                            </span>
-		                                          )}
-		                                          <StatusBadge sold={s.sold} />
-		                                          {selected && (
-		                                            <div className="absolute inset-0 z-10 bg-emerald-500/35 flex items-center justify-center">
-		                                              <Check className="size-4 text-white drop-shadow" />
-		                                            </div>
-		                                          )}
-	                                        </button>
-	                                      );
-	                                    })}
+                                    {stockItems.map((s) => {
+                                      const iconUrl = getItemIcon(s.id, s.productId);
+                                      const selected = selectedIds.has(s.id);
+                                      const highlighted = highlightStockId === s.id;
+                                      return (
+                                        <button
+                                          key={s.id}
+                                          data-daily-stock-item-id={s.id}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (selectMode) toggleSelectItem(s.id);
+                                            else openBio(s);
+                                          }}
+                                          className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
+                                            highlighted
+                                              ? "ring-4 ring-cyan-500 ring-offset-2 ring-offset-white"
+                                              : selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
+                                          }`}
+                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
+                                        >
+                                          {iconUrl ? (
+                                            <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
+                                          ) : (
+                                            <div className="size-full flex items-center justify-center">
+                                              <Fish className="size-3 text-muted-foreground" />
+                                            </div>
+                                          )}
+                                          {s.code && (
+                                            <span className="absolute inset-x-0 bottom-0 z-20 truncate bg-black/65 px-0.5 text-center text-[9px] font-semibold leading-3 text-white">
+                                              {s.code}
+                                            </span>
+                                          )}
+                                          {isSpecialPrice(s) && (
+                                            <span className="absolute left-0 top-0 z-20 max-w-full truncate rounded-br bg-amber-400 px-0.5 text-[8px] font-bold leading-3 text-amber-950 shadow-sm">
+                                              {priceBadgeText(s)}
+                                            </span>
+                                          )}
+                                          <StatusBadge sold={s.sold} />
+                                          {selected && (
+                                            <div className="absolute inset-0 z-10 bg-emerald-500/35 flex items-center justify-center">
+                                              <Check className="size-4 text-white drop-shadow" />
+                                            </div>
+                                          )}
+                                        </button>
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </div>
@@ -1312,6 +1421,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     );
                   })}
                 </div>
+                )}
               </Card>
               );
             })}

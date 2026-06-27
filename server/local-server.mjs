@@ -27,6 +27,7 @@ const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
   { id: "jiangyin", name: "江阴" },
   { id: "nanjing", name: "南京" },
+  { id: "beijing", name: "北京" },
 ];
 const AUTH_SESSION_TTL_MS = numberFromEnv(process.env.AUTH_SESSION_TTL_MS, 4 * 60 * 60 * 1000);
 const AUTH_COOKIE_NAME = "fishroom_auth";
@@ -508,6 +509,56 @@ function isPhysicallyInTank(item, shippedIds) {
   return item && !item.lost && !shippedIds.has(String(item.id));
 }
 
+function isPublicMediaUrl(value) {
+  const src = String(value ?? "").trim();
+  if (!src) return false;
+  if (src.startsWith("/uploads/")) return true;
+  try {
+    const url = new URL(src);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function publicMediaUrls(value, limit = 6) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => String(item ?? "").trim())
+    .filter(isPublicMediaUrl)
+    .slice(0, limit);
+}
+
+function publicCatalogMediaUrl(src) {
+  const value = String(src ?? "").trim();
+  if (!value) return "";
+  return cosKeyFromUrl(value)
+    ? `/api/public/media/cos?url=${encodeURIComponent(value)}`
+    : value;
+}
+
+function publicCatalogMediaUrls(value, limit = 6) {
+  return publicMediaUrls(value, limit).map(publicCatalogMediaUrl);
+}
+
+function publicBioRecordText(value) {
+  return clampText(String(value ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220);
+}
+
+function publicBioRecordPayload(record = {}, media = {}) {
+  return {
+    id: String(record?.id ?? ""),
+    stockItemId: String(record?.stockItemId ?? ""),
+    date: String(record?.date ?? ""),
+    text: publicBioRecordText(record?.text ?? ""),
+    sourceType: String(record?.sourceType ?? ""),
+    tankGroupName: String(record?.tankGroupName ?? ""),
+    subTankName: String(record?.subTankName ?? ""),
+    operator: String(record?.operator ?? ""),
+    photos: (media.photos ?? publicMediaUrls(record?.photos, 6)).map(publicCatalogMediaUrl),
+    videos: (media.videos ?? publicMediaUrls(record?.videos, 3)).map(publicCatalogMediaUrl),
+  };
+}
+
 function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
@@ -515,24 +566,38 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
   const sellableStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds)
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
   );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) => sellableProductIds.has(String(product?.id ?? "")));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const latestBioByStockId = new Map();
+  const latestMediaByStockId = new Map();
   bioRecords
     .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
     .forEach((record) => {
       const stockItemId = String(record?.stockItemId ?? "");
-      const current = latestBioByStockId.get(stockItemId);
-      if (!current || String(record?.date ?? "").localeCompare(String(current?.date ?? "")) > 0) {
-        latestBioByStockId.set(stockItemId, record);
+      const photos = publicMediaUrls(record?.photos, 6);
+      const videos = publicMediaUrls(record?.videos, 3);
+      if (photos.length > 0 || videos.length > 0) {
+        const currentMedia = latestMediaByStockId.get(stockItemId);
+        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
+          latestMediaByStockId.set(stockItemId, { record, photos, videos });
+        }
       }
     });
   const categorySet = new Set(
@@ -558,7 +623,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         category: String(item?.category ?? ""),
         commonNames: Array.isArray(item?.commonNames) ? item.commonNames.map(String).slice(0, 6) : [],
         description: clampText(item?.description ?? "", 260),
-        imageUrl: String(item?.imageUrl ?? ""),
+        imageUrl: publicCatalogMediaUrl(item?.imageUrl),
       })),
     products: availableProducts
       .filter((item) => productIds.has(String(item?.id ?? "")))
@@ -568,27 +633,95 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         name: String(item?.name ?? ""),
         size: String(item?.size ?? ""),
         origin: String(item?.origin ?? ""),
-        imageUrl: String(item?.imageUrl ?? ""),
+        imageUrl: publicCatalogMediaUrl(item?.imageUrl),
         defaultPrice: Number(item?.defaultPrice ?? 0),
-        notes: clampText(item?.notes ?? "", 260),
       })),
-    stock: sellableStock.map((item) => ({
-      id: String(item?.id ?? ""),
-      productId: String(item?.productId ?? ""),
-      code: String(item?.code ?? ""),
-      status: item?.status === "feeding" ? "feeding" : "healthy",
-      inDate: String(item?.inDate ?? ""),
-      basePrice: Number(item?.basePrice ?? 0),
-      notes: clampText(item?.notes ?? "", 120),
-    })),
-    bioRecords: [...latestBioByStockId.values()]
-      .map((record) => ({
-        id: String(record?.id ?? ""),
-        stockItemId: String(record?.stockItemId ?? ""),
-        date: String(record?.date ?? ""),
-        text: clampText(record?.text ?? "", 180),
-      })),
+    stock: sellableStock.map((item) => {
+      const tank = findSubTank(scopedState, item?.subTankId);
+      return {
+        id: String(item?.id ?? ""),
+        productId: String(item?.productId ?? ""),
+        code: String(item?.code ?? ""),
+        status: item?.status === "feeding" ? "feeding" : "healthy",
+        inDate: String(item?.inDate ?? ""),
+        basePrice: Number(item?.basePrice ?? 0),
+        tankGroupName: String(tank?.group?.name ?? ""),
+        subTankName: String(tank?.subTank?.name ?? ""),
+        tankLocation: String(tank?.group?.location ?? ""),
+      };
+    }),
+    bioRecords: [...latestMediaByStockId.values()]
+      .sort((a, b) =>
+        String(b?.record?.date ?? "").localeCompare(String(a?.record?.date ?? "")) ||
+        String(a?.record?.id ?? "").localeCompare(String(b?.record?.id ?? ""))
+      )
+      .map((media) => publicBioRecordPayload(media.record, media)),
   };
+}
+
+function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
+  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
+  const shippedIds = shippedOutStockIds(scopedState);
+  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
+  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const targetId = String(stockItemId ?? "").trim();
+  const item = stock.find((candidate) => String(candidate?.id ?? "") === targetId);
+  if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
+  const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
+  if (!product || product?.publicVisible === false) return null;
+  const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  return records
+    .filter((record) => String(record?.stockItemId ?? "") === targetId)
+    .sort((a, b) =>
+      String(a?.date ?? "").localeCompare(String(b?.date ?? "")) ||
+      String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
+    )
+    .map((record) => publicBioRecordPayload(record));
+}
+
+function publicCatalogAllowedMediaUrls(state = {}, siteId = ALL_SITE_ID) {
+  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
+  const shippedIds = shippedOutStockIds(scopedState);
+  const species = Array.isArray(scopedState.species) ? scopedState.species : [];
+  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
+  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const publicProductIds = new Set(
+    products
+      .filter((product) => product?.publicVisible !== false)
+      .map((product) => String(product?.id ?? ""))
+      .filter(Boolean)
+  );
+  const sellableStock = stock.filter((item) =>
+    !item?.sold &&
+    item?.status !== "sick" &&
+    isPhysicallyInTank(item, shippedIds) &&
+    publicProductIds.has(String(item?.productId ?? ""))
+  );
+  const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
+  const availableProducts = products.filter((product) =>
+    product?.publicVisible !== false &&
+    sellableProductIds.has(String(product?.id ?? ""))
+  );
+  const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
+  const allowed = new Set();
+  const add = (value) => {
+    const src = String(value ?? "").trim();
+    if (src && cosKeyFromUrl(src)) allowed.add(src);
+  };
+
+  availableProducts.forEach((product) => add(product?.imageUrl));
+  species
+    .filter((item) => speciesIds.has(String(item?.id ?? "")))
+    .forEach((item) => add(item?.imageUrl));
+  bioRecords
+    .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
+    .forEach((record) => {
+      publicMediaUrls(record?.photos, 6).forEach(add);
+      publicMediaUrls(record?.videos, 3).forEach(add);
+    });
+  return allowed;
 }
 
 function normalizePickupShipmentRecord(shipment = {}) {
@@ -672,6 +805,22 @@ function isFishCategory(category = "") {
   return !/(虾|蟹|螺|贝|海胆|珊瑚|海星|海葵)/.test(category);
 }
 
+function isFishInventoryItem(product = null, species = null) {
+  const commonNames = Array.isArray(species?.commonNames) ? species.commonNames : [];
+  const text = [
+    species?.category,
+    species?.name,
+    species?.scientificName,
+    ...commonNames,
+    product?.name,
+    product?.size,
+    product?.origin,
+    product?.notes,
+  ].filter(Boolean).join(" ");
+  if (/(耗材|活石|活石头|珊瑚|活性炭|吸附|滤材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(text)) return false;
+  return isFishCategory(String(species?.category ?? text));
+}
+
 function buildLossRows(state = {}, productById = new Map(), speciesById = new Map()) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const lossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
@@ -699,7 +848,7 @@ function buildLossRows(state = {}, productById = new Map(), speciesById = new Ma
         species: itemSpecies,
         date: String(record?.date ?? stockItem?.lossDate ?? "").slice(0, 10),
         estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
-        isFish: isFishCategory(itemSpecies?.category ?? ""),
+        isFish: isFishInventoryItem(product, itemSpecies),
       };
     })
     .filter((row) => row.date && row.stockItem && row.isFish);
@@ -742,7 +891,7 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
   const fishStock = stock.filter((item) => {
     const product = productById.get(item?.productId);
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishCategory(itemSpecies?.category ?? "");
+    return isFishInventoryItem(product, itemSpecies);
   });
   const fishStockByBatchId = new Map();
   for (const item of fishStock) {
@@ -849,6 +998,17 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
   });
 }
 
+function isValidDashboardSalesOrder(order = {}) {
+  return order?.status !== "cancelled" && order?.status !== "damaged";
+}
+
+function isOfflinePickupDashboardOrder(order = {}, orderShipments = []) {
+  const source = String(order?.source ?? "").trim();
+  return source === "线下" ||
+    source === "线下自提" ||
+    (!source && orderShipments.some((shipment) => shipment?.shipMethod === "pickup"));
+}
+
 function buildDashboardSummary(state = {}, options = {}) {
   const today = todayInChina();
   const financeDays = parseFinanceDays(options.financeDays);
@@ -861,6 +1021,12 @@ function buildDashboardSummary(state = {}, options = {}) {
   const tankGroups = Array.isArray(scopedState.tankGroups) ? scopedState.tankGroups : [];
   const orders = Array.isArray(scopedState.orders) ? scopedState.orders : [];
   const shipments = Array.isArray(scopedState.shipments) ? scopedState.shipments : [];
+  const shipmentsByOrderId = new Map();
+  for (const shipment of shipments) {
+    const orderId = String(shipment?.orderId ?? "");
+    if (!orderId) continue;
+    shipmentsByOrderId.set(orderId, [...(shipmentsByOrderId.get(orderId) ?? []), shipment]);
+  }
   const productById = new Map(products.map((product) => [product?.id, product]));
   const speciesById = new Map(species.map((item) => [item?.id, item]));
   const inTankFishStock = stock
@@ -868,7 +1034,7 @@ function buildDashboardSummary(state = {}, options = {}) {
     .filter((item) => {
       const product = productById.get(item?.productId);
       const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
-      return isFishCategory(itemSpecies?.category ?? "");
+      return isFishInventoryItem(product, itemSpecies);
     });
   const todayPayments = orders.flatMap((order) =>
     (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
@@ -884,6 +1050,16 @@ function buildDashboardSummary(state = {}, options = {}) {
         String(payment?.time ?? "").slice(0, 10) === date
       )
     );
+    const salesRows = orders
+      .filter((order) => isValidDashboardSalesOrder(order) && String(order?.date ?? "").slice(0, 10) === date)
+      .map((order) => {
+        const orderShipments = shipmentsByOrderId.get(String(order?.id ?? "")) ?? [];
+        return {
+          order,
+          orderShipments,
+          amount: Math.max(0, calcAmountDueForOrder(order, orderShipments)),
+        };
+      });
     return {
       date,
       label: date.slice(5).replace("-", "/"),
@@ -893,6 +1069,16 @@ function buildDashboardSummary(state = {}, options = {}) {
       refunded: payments
         .filter((payment) => payment?.type === "refund")
         .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
+      orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
+      platformAmount: salesRows
+        .filter((row) => String(row.order?.source ?? "").trim() === "平台下单")
+        .reduce((sum, row) => sum + row.amount, 0),
+      offlinePickupAmount: salesRows
+        .filter((row) => isOfflinePickupDashboardOrder(row.order, row.orderShipments))
+        .reduce((sum, row) => sum + row.amount, 0),
+      privateDomainAmount: salesRows
+        .filter((row) => String(row.order?.source ?? "").trim() === "私域线上")
+        .reduce((sum, row) => sum + row.amount, 0),
     };
   });
   const dailyLossData = buildDailyLossData(scopedState, dailyDates, productById, speciesById);
@@ -1045,6 +1231,7 @@ function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...normalizePickupShipmentsForState(data) };
+  next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
   }
@@ -1336,6 +1523,8 @@ function isPublicApiRoute(req, url) {
   if (req.method === "OPTIONS") return true;
   if (url.pathname === "/api/health" && req.method === "GET") return true;
   if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
+  if (url.pathname === "/api/public/bio-records" && req.method === "GET") return true;
+  if (url.pathname === "/api/public/media/cos" && req.method === "GET") return true;
   if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
   if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
   if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") return true;
@@ -1533,10 +1722,16 @@ function buildAssistantSnapshot(state = {}, options = {}) {
 }
 
 function getSitesFromState(state = {}) {
-  const sites = Array.isArray(state.sites) && state.sites.length > 0 ? state.sites : DEFAULT_SITES;
-  return sites
-    .map((site) => ({ id: normalizeSiteId(site?.id), name: String(site?.name ?? site?.id ?? "") }))
-    .filter((site) => site.id && site.name);
+  const merged = DEFAULT_SITES.map((site) => ({ ...site }));
+  const sites = Array.isArray(state.sites) ? state.sites : [];
+  sites.forEach((site) => {
+    const id = normalizeSiteId(site?.id);
+    const name = String(site?.name ?? site?.id ?? "").trim() || id;
+    if (!merged.some((item) => item.id === id)) {
+      merged.push({ id, name });
+    }
+  });
+  return merged.filter((site) => site.id && site.name);
 }
 
 function assistantSystemPrompt(source = "web") {
@@ -2677,7 +2872,7 @@ function cosKeyFromUrl(value) {
   }
 }
 
-function sendCosObject(req, res, key) {
+function sendCosObject(req, res, key, cacheControl = "private, max-age=3600") {
   const client = getCosClient();
   if (!client) {
     sendJson(req, res, 503, { error: "COS is not configured" });
@@ -2696,7 +2891,7 @@ function sendCosObject(req, res, key) {
     const body = data.Body ?? Buffer.alloc(0);
     res.writeHead(200, {
       "Content-Type": data.ContentType || mimeForExtension(extname(key)),
-      "Cache-Control": "private, max-age=3600",
+      "Cache-Control": cacheControl,
     });
     res.end(body);
   });
@@ -3008,6 +3203,38 @@ async function importLegacyStateIfPresent() {
   console.log(`Imported legacy JSON state from ${legacyStateFile}`);
 }
 
+async function backfillDefaultSites() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data;
+    if (!state || typeof state !== "object") {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    const currentSites = Array.isArray(state.sites) ? state.sites : [];
+    const nextSites = getSitesFromState(state);
+    if (JSON.stringify(currentSites) === JSON.stringify(nextSites)) {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    await client.query(
+      "UPDATE app_state SET data = jsonb_set(data, '{sites}', $2::jsonb, true), updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify(nextSites)]
+    );
+    await client.query("COMMIT");
+    console.log(`Backfilled default sites: ${nextSites.map((site) => site.name).join(", ")}`);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Failed to backfill default sites:", error);
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureSchema() {
   schemaReady ??= (async () => {
     await pool.query(`
@@ -3018,6 +3245,7 @@ async function ensureSchema() {
       )
     `);
     await importLegacyStateIfPresent();
+    await backfillDefaultSites();
     await rehashPlaintextPersonnelPasswords();
     await externalizePersistedUploads();
     await backfillDailyLogBioRecords();
@@ -3172,6 +3400,28 @@ async function handleApi(req, res, url) {
     req.auth = auth;
   }
 
+  if (url.pathname === "/api/public/media/cos" && req.method === "GET") {
+    try {
+      const mediaUrl = String(url.searchParams.get("url") ?? "").trim();
+      const key = cosKeyFromUrl(mediaUrl);
+      if (!key) {
+        sendJson(req, res, 400, { error: "Invalid COS media URL" });
+        return;
+      }
+      const siteId = url.searchParams.get("siteId") ?? ALL_SITE_ID;
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const allowedUrls = publicCatalogAllowedMediaUrls(rows[0]?.data ?? {}, siteId);
+      if (!allowedUrls.has(mediaUrl)) {
+        sendJson(req, res, 403, { error: "COS media is not public catalog content" });
+        return;
+      }
+      sendCosObject(req, res, key, "public, max-age=3600");
+    } catch (error) {
+      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public media" });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/public/catalog" && req.method === "GET") {
     try {
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
@@ -3181,6 +3431,30 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public catalog" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/public/bio-records" && req.method === "GET") {
+    try {
+      const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
+      if (!stockItemId) {
+        sendJson(req, res, 400, { ok: false, error: "stockItemId is required" });
+        return;
+      }
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const bioRecords = buildPublicBioRecordsForStock(
+        rows[0]?.data ?? {},
+        url.searchParams.get("siteId") ?? ALL_SITE_ID,
+        stockItemId
+      );
+      if (!bioRecords) {
+        sendJson(req, res, 404, { ok: false, error: "Stock item is not public" });
+        return;
+      }
+      sendJson(req, res, 200, { ok: true, bioRecords });
+    } catch (error) {
+      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public bio records" });
     }
     return;
   }
@@ -4792,6 +5066,7 @@ async function handleApi(req, res, url) {
           imageUrl: String(product.imageUrl ?? ""),
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
+          publicVisible: product.publicVisible !== false,
           commissionRate: Math.max(0, Number(product.commissionRate ?? 0)),
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);

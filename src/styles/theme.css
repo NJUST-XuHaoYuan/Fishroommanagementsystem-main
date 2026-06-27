@@ -2,48 +2,48 @@
 
 :root {
   --font-size: 14px;
-  --background: oklch(0.968 0.003 260);
-  --foreground: oklch(0.205 0.006 260);
-  --card: oklch(0.992 0.001 260);
-  --card-foreground: oklch(0.205 0.006 260);
-  --popover: oklch(0.992 0.001 260);
-  --popover-foreground: oklch(0.205 0.006 260);
-  --primary: oklch(0.225 0.006 260);
+  --background: oklch(0.956 0.003 260);
+  --foreground: oklch(0.19 0.008 260);
+  --card: oklch(0.998 0.001 260);
+  --card-foreground: oklch(0.19 0.008 260);
+  --popover: oklch(0.998 0.001 260);
+  --popover-foreground: oklch(0.19 0.008 260);
+  --primary: oklch(0.275 0.018 252);
   --primary-foreground: oklch(0.985 0.001 260);
-  --secondary: oklch(0.925 0.003 260);
-  --secondary-foreground: oklch(0.245 0.006 260);
-  --muted: oklch(0.925 0.003 260);
-  --muted-foreground: oklch(0.455 0.006 260);
-  --accent: oklch(0.91 0.006 260);
-  --accent-foreground: oklch(0.235 0.006 260);
+  --secondary: oklch(0.936 0.004 260);
+  --secondary-foreground: oklch(0.23 0.008 260);
+  --muted: oklch(0.936 0.004 260);
+  --muted-foreground: oklch(0.405 0.01 260);
+  --accent: oklch(0.925 0.014 185);
+  --accent-foreground: oklch(0.245 0.034 185);
   --destructive: oklch(0.55 0.18 25);
   --destructive-foreground: oklch(0.985 0.006 25);
-  --border: oklch(0.84 0.004 260);
-  --input: oklch(0.84 0.004 260);
-  --input-background: oklch(0.985 0.001 260);
+  --border: oklch(0.81 0.005 260);
+  --input: oklch(0.81 0.005 260);
+  --input-background: oklch(0.996 0.001 260);
   --switch-background: oklch(0.76 0.004 260);
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: oklch(0.42 0.006 260);
+  --ring: oklch(0.44 0.055 185);
   --chart-1: oklch(0.36 0.006 260);
   --chart-2: oklch(0.58 0.16 38);
   --chart-3: oklch(0.52 0.11 232);
   --chart-4: oklch(0.68 0.13 145);
   --chart-5: oklch(0.62 0.15 18);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0.001 260);
-  --sidebar-foreground: oklch(0.205 0.006 260);
-  --sidebar-primary: oklch(0.225 0.006 260);
+  --sidebar: oklch(0.982 0.002 260);
+  --sidebar-foreground: oklch(0.19 0.008 260);
+  --sidebar-primary: oklch(0.275 0.018 252);
   --sidebar-primary-foreground: oklch(0.985 0.001 260);
-  --sidebar-accent: oklch(0.925 0.003 260);
-  --sidebar-accent-foreground: oklch(0.245 0.006 260);
-  --sidebar-border: oklch(0.84 0.004 260);
-  --sidebar-ring: oklch(0.42 0.006 260);
+  --sidebar-accent: oklch(0.93 0.006 260);
+  --sidebar-accent-foreground: oklch(0.23 0.008 260);
+  --sidebar-border: oklch(0.82 0.005 260);
+  --sidebar-ring: oklch(0.44 0.055 185);
   --fishroom-coral: oklch(0.66 0.178 42);
   --fishroom-coral-foreground: oklch(0.985 0.006 40);
-  --fishroom-reef: oklch(0.42 0.075 185);
-  --fishroom-reef-soft: oklch(0.93 0.018 185);
-  --fishroom-ink: oklch(0.205 0.006 260);
+  --fishroom-reef: oklch(0.405 0.082 185);
+  --fishroom-reef-soft: oklch(0.925 0.018 185);
+  --fishroom-ink: oklch(0.19 0.008 260);
 }
 
 .dark {
@@ -188,6 +188,12 @@
     letter-spacing: 0;
   }
 
+  input,
+  textarea,
+  select {
+    font-variant-numeric: tabular-nums;
+  }
+
   input {
     font-size: var(--text-base);
     font-weight: var(--font-weight-normal);
@@ -217,7 +223,7 @@
 
   .fishroom-app {
     color: var(--fishroom-ink);
-    background: oklch(0.968 0.003 260);
+    background: var(--background);
     height: 100dvh;
     min-height: 100dvh;
     overflow: hidden;
@@ -225,105 +231,238 @@
 
   .fishroom-sidebar {
     border-right: 1px solid var(--sidebar-border);
-    background: var(--sidebar);
+    background: oklch(0.976 0.003 260);
   }
 
   .fishroom-brand {
-    min-height: 4.75rem;
+    min-height: 4rem;
     border-bottom: 1px solid var(--sidebar-border);
     background: oklch(0.992 0.001 260);
   }
 
   .fishroom-brand-mark {
-    border: 1px solid oklch(0.82 0.004 260);
-    background: oklch(0.962 0.002 260);
+    border: 1px solid oklch(0.82 0.006 260);
+    border-radius: 0.7rem;
+    background: oklch(1 0 0);
   }
 
   .fishroom-nav-section {
     display: grid;
-    gap: 0.25rem;
+    gap: 0.08rem;
+    padding-top: 0.35rem;
+  }
+
+  .fishroom-nav-section + .fishroom-nav-section {
+    margin-top: 0.2rem;
   }
 
   .fishroom-nav-title {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.45rem 0.75rem;
-    color: oklch(0.42 0.006 260);
-    font-size: 0.78rem;
-    font-weight: 700;
+    gap: 0.45rem;
+    min-height: 1.85rem;
+    padding: 0.25rem 0.45rem 0.2rem;
+    color: oklch(0.42 0.011 260);
+    font-size: 0.75rem;
+    font-weight: 680;
+    line-height: 1.1;
+  }
+
+  .fishroom-nav-title-icon {
+    display: grid;
+    place-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 1px solid oklch(0.86 0.006 260);
+    border-radius: 0.45rem;
+    background: oklch(0.948 0.005 260);
+  }
+
+  .fishroom-nav-title-icon svg {
+    color: var(--fishroom-reef);
   }
 
   .fishroom-nav-button {
-    min-height: 2.45rem;
+    position: relative;
+    min-height: 2.3rem;
     border: 1px solid transparent;
-    color: oklch(0.32 0.006 260);
+    border-radius: 0.55rem;
+    color: oklch(0.315 0.01 260);
+  }
+
+  .fishroom-nav-button svg {
+    color: oklch(0.39 0.012 260);
+  }
+
+  .fishroom-nav-button.is-main {
+    width: 100%;
+    min-height: 2.35rem;
+  }
+
+  .fishroom-nav-section > .fishroom-nav-button {
+    width: calc(100% - 2.25rem);
+    min-height: 2.15rem;
+    margin-left: 1.75rem;
+    color: oklch(0.395 0.01 260);
+    font-size: 0.93rem;
+    font-weight: 500;
+  }
+
+  .fishroom-nav-button.is-sub::before {
+    content: "";
+    position: absolute;
+    left: -0.72rem;
+    top: 50%;
+    width: 0.42rem;
+    height: 1px;
+    border-radius: 999px;
+    background: oklch(0.78 0.006 260);
+    transform: translateY(-50%);
   }
 
   .fishroom-nav-button:hover {
-    border-color: oklch(0.84 0.004 260);
-    background: oklch(0.94 0.003 260);
+    border-color: oklch(0.84 0.006 260);
+    background: oklch(0.955 0.004 260);
   }
 
-  .fishroom-nav-button.is-active {
-    border-color: oklch(0.225 0.006 260);
-    background: oklch(0.225 0.006 260);
-    color: oklch(0.985 0.001 260);
+  .fishroom-nav-button.is-main.is-active {
+    border-color: oklch(0.32 0.045 185);
+    background: oklch(0.31 0.045 185);
+    color: oklch(0.985 0.003 185);
+  }
+
+  .fishroom-nav-button.is-main.is-active svg {
+    color: oklch(0.985 0.003 185);
+  }
+
+  .fishroom-nav-button.is-sub.is-active {
+    border-color: oklch(0.82 0.018 185);
+    background: var(--fishroom-reef-soft);
+    color: oklch(0.245 0.048 185);
+    font-weight: 650;
+  }
+
+  .fishroom-nav-button.is-sub.is-active::before {
+    left: -0.75rem;
+    width: 0.42rem;
+    height: 0.42rem;
+    background: var(--fishroom-reef);
+  }
+
+  .fishroom-nav-button.is-sub.is-active svg {
+    color: var(--fishroom-reef);
+  }
+
+  .fishroom-sidebar-footer {
+    background: oklch(0.982 0.002 260);
+  }
+
+  .fishroom-sidebar-action {
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid transparent;
+    color: oklch(0.34 0.01 260);
+  }
+
+  .fishroom-sidebar-profile-action {
+    height: 2rem;
+    gap: 0.35rem;
+    border: 1px solid transparent;
+    padding: 0 0.5rem;
+    color: oklch(0.34 0.01 260);
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .fishroom-sidebar-profile-action:hover,
+  .fishroom-sidebar-action:hover {
+    border-color: oklch(0.82 0.006 260);
+    background: oklch(0.955 0.004 260);
+  }
+
+  .fishroom-sidebar-profile-action.is-active,
+  .fishroom-sidebar-action.is-active {
+    border-color: oklch(0.82 0.018 185);
+    background: var(--fishroom-reef-soft);
+    color: oklch(0.245 0.048 185);
   }
 
   .fishroom-topbar {
     border-bottom: 1px solid var(--border);
     background: oklch(0.992 0.001 260 / 0.98);
+    box-shadow: 0 1px 0 oklch(1 0 0 / 0.72);
   }
 
   .fishroom-content {
-    background: oklch(0.96 0.003 260);
+    background: var(--background);
     min-height: 0;
     overscroll-behavior: contain;
   }
 
   .fishroom-page-title {
     color: var(--fishroom-ink);
-    font-size: 1.35rem;
+    font-size: 1.28rem;
     font-weight: 760;
     line-height: 1.25;
     text-wrap: balance;
   }
 
   .fishroom-control {
-    border-color: var(--border);
-    background: oklch(0.992 0.001 260);
+    border-color: oklch(0.79 0.006 260);
+    background: var(--input-background);
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.7);
+  }
+
+  .fishroom-control:focus-within,
+  .fishroom-app input:focus-visible,
+  .fishroom-app textarea:focus-visible,
+  .fishroom-app select:focus-visible {
+    border-color: var(--fishroom-reef);
+    box-shadow: 0 0 0 3px oklch(0.78 0.06 185 / 0.2);
   }
 
   .fishroom-card {
     border: 1px solid var(--border);
     background: var(--card);
-    box-shadow: none;
+    border-radius: 0.8rem;
+    box-shadow: 0 1px 2px oklch(0.2 0.01 260 / 0.04);
   }
 
   .fishroom-metric-card {
     position: relative;
     overflow: hidden;
-    min-height: 6.25rem;
+    min-height: 5.7rem;
   }
 
   .fishroom-metric-icon {
-    border: 1px solid oklch(0.82 0.004 260);
-    background: oklch(0.94 0.003 260);
+    border: 1px solid oklch(0.79 0.006 260);
+    border-radius: 0.7rem;
+    background: oklch(0.94 0.006 260);
     color: var(--primary);
   }
 
   .fishroom-table-shell {
     border: 1px solid var(--border);
+    border-radius: 0.75rem;
     background: var(--card);
   }
 
   .fishroom-table-shell thead {
-    background: oklch(0.935 0.003 260);
+    background: oklch(0.94 0.004 260);
+    color: oklch(0.38 0.01 260);
+  }
+
+  .fishroom-table-shell th {
+    font-weight: 650;
+  }
+
+  .fishroom-table-shell td,
+  .fishroom-table-shell th {
+    border-color: oklch(0.86 0.004 260);
   }
 
   .fishroom-table-shell tbody tr:hover {
-    background: oklch(0.955 0.003 260);
+    background: oklch(0.962 0.004 260);
   }
 
   .fishroom-login {
@@ -342,10 +481,88 @@
     color: oklch(0.94 0.002 260);
   }
 
+  .fishroom-login-logo-mark {
+    border: 1px solid oklch(0.84 0.006 260 / 0.45);
+    border-radius: 0.82rem;
+    background: oklch(0.998 0.001 260);
+  }
+
+  .fishroom-login-logo-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transform: scale(1.14);
+  }
+
+  .fishroom-login-brand-copy {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.45rem;
+    min-height: 5.45rem;
+  }
+
+  .fishroom-login-brand-title {
+    font-size: 2.2rem;
+    font-weight: 780;
+    line-height: 1.05;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+
+  .fishroom-login-brand-subtitle {
+    font-size: 1.08rem;
+    font-weight: 500;
+    line-height: 1.35;
+    letter-spacing: 0;
+    opacity: 0.78;
+    white-space: nowrap;
+  }
+
+  .fishroom-login-panel .fishroom-login-brand-copy {
+    gap: 0.35rem;
+    min-height: 4.75rem;
+  }
+
+  .fishroom-login-panel .fishroom-login-brand-title {
+    font-size: 1.75rem;
+  }
+
+  .fishroom-login-panel .fishroom-login-brand-subtitle {
+    font-size: 0.95rem;
+  }
+
   .fishroom-status-pill {
-    border: 1px solid oklch(0.82 0.004 260);
-    background: oklch(0.94 0.003 260);
-    color: oklch(0.32 0.006 260);
+    border: 1px solid oklch(0.8 0.006 260);
+    background: oklch(0.94 0.004 260);
+    color: oklch(0.31 0.01 260);
+  }
+
+  .fishroom-app [data-slot="button"] {
+    border-radius: 0.55rem;
+  }
+
+  .fishroom-app [data-slot="card"] {
+    border-radius: 0.8rem;
+  }
+
+  .fishroom-app [data-slot="badge"] {
+    border-radius: 0.45rem;
+  }
+
+  .fishroom-app [data-slot="input"],
+  .fishroom-app [data-slot="select-trigger"],
+  .fishroom-app textarea {
+    border-color: oklch(0.79 0.006 260);
+    background-color: var(--input-background);
+  }
+
+  .fishroom-app .rounded-2xl {
+    border-radius: 0.9rem;
+  }
+
+  .fishroom-app .rounded-xl {
+    border-radius: 0.8rem;
   }
 
   .fishroom-app .bg-sky-50,

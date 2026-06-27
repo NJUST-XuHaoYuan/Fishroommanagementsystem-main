@@ -117,12 +117,12 @@ function SaveStatus({ saveStatus }: { saveStatus: Props["saveStatus"] }) {
 
 function Brand() {
   return (
-    <div className="fishroom-brand flex items-center gap-3 px-4">
-      <div className="fishroom-brand-mark size-11 overflow-hidden rounded-xl shrink-0">
+    <div className="fishroom-brand flex items-center gap-3 px-3.5">
+      <div className="fishroom-brand-mark size-10 overflow-hidden shrink-0">
         <img src="/assets/brand-logo.jpg" alt="Marine Forest" className="size-full object-contain p-1" />
       </div>
       <div className="min-w-0">
-        <div className="truncate text-[15px] font-semibold text-foreground">海水鱼房</div>
+        <div className="truncate text-[14px] font-semibold text-foreground">海水鱼房</div>
         <div className="mt-0.5 text-xs text-muted-foreground">库存 · 维护 · 销售</div>
       </div>
     </div>
@@ -180,17 +180,18 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const navButtonClass = (active: boolean, level: "main" | "sub" = "sub") =>
     [
-      "fishroom-nav-button flex w-full items-center rounded-lg text-left transition-colors",
+      "fishroom-nav-button flex items-center text-left transition-colors",
+      level === "main" ? "is-main" : "is-sub",
       active ? "is-active" : "",
       level === "main"
-        ? "gap-2 px-3 py-2.5 text-sm font-semibold"
-        : "justify-between px-8 py-2 text-sm",
+        ? "gap-2 px-2.5 py-2 text-sm font-semibold"
+        : "justify-between px-2.5 py-1.5 text-[13px]",
     ].join(" ");
 
   const NavContent = () => (
     <>
       <Brand />
-      <nav className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+      <nav className="flex-1 overflow-y-auto px-2.5 py-3 flex flex-col gap-2">
         <button
           onClick={() => navigate("dashboard")}
           className={navButtonClass(view === "dashboard", "main")}
@@ -198,20 +199,15 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           <LayoutDashboard className="size-4 shrink-0" />
           <span>首页概览</span>
         </button>
-        <button
-          onClick={() => navigate("profile")}
-          className={navButtonClass(view === "profile", "main")}
-        >
-          <UserCircle className="size-4 shrink-0" />
-          <span>个人中心</span>
-        </button>
         {NAV.map((section) => {
           const Icon = section.icon;
           return (
             <div key={section.title} className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <Icon className="size-4 shrink-0" />
-                {section.title}
+                <span className="fishroom-nav-title-icon">
+                  <Icon className="size-3.5 shrink-0" />
+                </span>
+                <span>{section.title}</span>
               </div>
               {section.items.map((item) => (
                 <button
@@ -230,8 +226,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           <>
             <div className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <Users className="size-4 shrink-0" />
-                人员管理
+                <span className="fishroom-nav-title-icon">
+                  <Users className="size-3.5 shrink-0" />
+                </span>
+                <span>人员管理</span>
               </div>
               <button
                 onClick={() => navigate("permissions")}
@@ -250,8 +248,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             </div>
             <div className="fishroom-nav-section">
               <div className="fishroom-nav-title">
-                <ScrollText className="size-4 shrink-0" />
-                日志管理
+                <span className="fishroom-nav-title-icon">
+                  <ScrollText className="size-3.5 shrink-0" />
+                </span>
+                <span>日志管理</span>
               </div>
               <button
                 onClick={() => navigate("operationLogs")}
@@ -264,7 +264,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </>
         )}
       </nav>
-      <div className="border-t p-3 flex flex-col gap-2 bg-sidebar">
+      <div className="fishroom-sidebar-footer border-t p-2.5 flex flex-col gap-2 bg-sidebar">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col">
             <div className="text-sm font-medium truncate">{user.username}</div>
@@ -272,18 +272,33 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               {user.role === "admin" ? "管理员" : "店员"}
             </Badge>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => {
-              void fetch("/api/auth/logout", { method: "POST", headers: authJsonHeaders() }).catch(() => undefined);
-              clearAuthSession();
-              setState((s) => ({ ...s, user: null }));
-            }}
-            title="退出"
-          >
-            <LogOut className="size-4" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => navigate("profile")}
+              className={`fishroom-sidebar-profile-action ${view === "profile" ? "is-active" : ""}`}
+              title="个人中心"
+              aria-label="个人中心"
+            >
+              <UserCircle className="size-3.5" />
+              <span>个人中心</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                void fetch("/api/auth/logout", { method: "POST", headers: authJsonHeaders() }).catch(() => undefined);
+                clearAuthSession();
+                setState((s) => ({ ...s, user: null }));
+              }}
+              className="fishroom-sidebar-action"
+              title="退出"
+              aria-label="退出"
+            >
+              <LogOut className="size-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </>
@@ -291,7 +306,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   const SiteSelector = ({ compact = false }: { compact?: boolean }) => (
     <label className={[
-      "fishroom-control flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs text-muted-foreground",
+      "fishroom-control flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs text-muted-foreground",
       compact ? "max-w-[140px]" : "",
     ].join(" ")}>
       <MapPin className="size-3.5 shrink-0 text-sky-600" />
@@ -311,7 +326,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
 
   return (
     <div className="fishroom-app size-full min-h-screen flex overflow-hidden">
-      <aside className="fishroom-sidebar hidden w-72 shrink-0 lg:flex lg:flex-col">
+      <aside className="fishroom-sidebar hidden w-64 shrink-0 lg:flex lg:flex-col">
         <NavContent />
       </aside>
 
@@ -325,7 +340,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       </Sheet>
 
       <main className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <header className="fishroom-topbar sticky top-0 z-30 h-14 px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
+        <header className="fishroom-topbar sticky top-0 z-30 h-[3.25rem] px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <Button
               variant="ghost"
@@ -351,7 +366,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <header className="fishroom-topbar hidden h-14 px-6 lg:flex items-center justify-between text-sm">
+        <header className="fishroom-topbar hidden h-[3.25rem] px-5 lg:flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
             {currentSection && (
               <>
@@ -368,7 +383,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-6">
+        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-5">
           {children}
         </div>
       </main>
