@@ -299,13 +299,32 @@ function countsAsActiveShipmentForAmount(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
 }
 
+function isPlatformOrderNature(source?: string): boolean {
+  return String(source ?? "").trim() === "平台下单";
+}
+
+function isOfflineOrderNature(source?: string): boolean {
+  const value = String(source ?? "").trim();
+  return value === "线下" || value === "线下自提";
+}
+
+function orderNeedsFinancials(source?: string): boolean {
+  return !isPlatformOrderNature(source);
+}
+
+function orderNeedsLogistics(source?: string): boolean {
+  return !isPlatformOrderNature(source) && !isOfflineOrderNature(source);
+}
+
 function calcAmountRefundedForOrder(order: Order): number {
+  if (!orderNeedsFinancials(order.source)) return 0;
   return (order.payments ?? [])
     .filter((payment) => payment.type === "refund")
     .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
 }
 
 function calcBillableShippingFeeForOrder(order: Order, shipments: Shipment[]): number {
+  if (!orderNeedsLogistics(order.source)) return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipmentForAmount(shipment)
   );
@@ -314,6 +333,7 @@ function calcBillableShippingFeeForOrder(order: Order, shipments: Shipment[]): n
 }
 
 function calcDamageRefundAdjustmentForOrder(order: Order, shipments: Shipment[]): number {
+  if (!orderNeedsFinancials(order.source)) return 0;
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   const explicitAdjustment = orderShipments.reduce((sum, shipment) => {
     if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") return sum;
@@ -329,6 +349,7 @@ function calcDamageRefundAdjustmentForOrder(order: Order, shipments: Shipment[])
 }
 
 function calcOrderDealAmount(order: Order, shipments: Shipment[]): number {
+  if (!orderNeedsFinancials(order.source)) return 0;
   const itemTotal = (order.items ?? []).reduce((sum, item) => sum + Number(item.price || 0), 0);
   return Number(Math.max(0,
     itemTotal +
@@ -931,7 +952,9 @@ export function Dashboard() {
   let tankGroupCount = dashboardTankGroups.length;
   let subTankCount = dashboardTankGroups.reduce((n, g) => n + (g.subTanks?.length ?? 0), 0);
   const todayPayments = dashboardOrders.flatMap((order) =>
-    (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === today)
+    orderNeedsFinancials(order.source)
+      ? (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === today)
+      : []
   );
   let todayReceived = todayPayments
     .filter((payment) => payment.type !== "refund")
@@ -952,7 +975,9 @@ export function Dashboard() {
   let dailyFinanceData = Array.from({ length: financeDays }, (_, index) => {
     const date = toLocalDateString(addDays(todayDate, index - financeDays + 1));
     const payments = dashboardOrders.flatMap((order) =>
-      (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === date)
+      orderNeedsFinancials(order.source)
+        ? (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === date)
+        : []
     );
     const ordersForDate = dashboardOrders.filter((order) =>
       isValidSalesOrder(order) && String(order.date ?? "").slice(0, 10) === date
