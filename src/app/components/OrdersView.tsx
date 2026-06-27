@@ -5877,7 +5877,6 @@ export function OrdersView() {
 
   const mobileVisibleOrders = mobileFilteredOrders.slice(0, mobileVisibleCount);
   const hasMoreMobileOrders = mobileVisibleOrders.length < mobileFilteredOrders.length;
-  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || todayShipOnly || pendingTrackingOnly || myActiveOnly || statusFilter !== "all";
 
   useEffect(() => {
     setSelectedOrderIds((prev) => {
@@ -5959,6 +5958,7 @@ export function OrdersView() {
   ] as const;
 
   const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly || myActiveOnly;
+  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || statusFilter !== "all";
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
@@ -6075,7 +6075,7 @@ export function OrdersView() {
               {extraItemCount > 0 && <span> 等 {itemNames.length} 条</span>}
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mt-3 flex flex-col items-start gap-2">
               <div className="text-xs text-muted-foreground">下单 {order.date}</div>
               <div className="flex items-center gap-2">
                 {customer && (
@@ -6138,7 +6138,7 @@ export function OrdersView() {
         </p>
       </div>
 
-      <div className="flex flex-col gap-3 md:hidden">
+      <div className="flex flex-col gap-3 pb-16 md:hidden">
         <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
           {STATUS_FILTERS.map(({ key, label }) => (
             <button
