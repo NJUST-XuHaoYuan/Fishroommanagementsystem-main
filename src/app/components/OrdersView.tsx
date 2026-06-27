@@ -27,7 +27,7 @@ import {
   Fish, CheckCircle, XCircle, Eye, ShoppingCart, Plus, Trash2,
   ChevronDown, Check, Truck, X, MapPin, Pencil, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
-  Phone, MessageCircle, UserRound, RotateCcw,
+  Phone, MessageCircle, UserRound, RotateCcw, Search,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -5724,6 +5724,8 @@ export function OrdersView() {
   const [deleteOrder, setDeleteOrder] = useState<Order | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
   const [exportFormatOpen, setExportFormatOpen] = useState(false);
+  const [mobileSearch, setMobileSearch] = useState("");
+  const [mobileVisibleCount, setMobileVisibleCount] = useState(12);
 
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
   const [dateFrom, setDateFrom] = useState("");
@@ -5863,6 +5865,20 @@ export function OrdersView() {
 	    });
 	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
 
+  const mobileFilteredOrders = useMemo(() => {
+    const term = mobileSearch.trim().toLowerCase();
+    if (!term) return filteredOrders;
+    return filteredOrders.filter((order) => order.searchText.toLowerCase().includes(term));
+  }, [filteredOrders, mobileSearch]);
+
+  useEffect(() => {
+    setMobileVisibleCount(12);
+  }, [mobileSearch, statusFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
+
+  const mobileVisibleOrders = mobileFilteredOrders.slice(0, mobileVisibleCount);
+  const hasMoreMobileOrders = mobileVisibleOrders.length < mobileFilteredOrders.length;
+  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || todayShipOnly || pendingTrackingOnly || myActiveOnly || statusFilter !== "all";
+
   useEffect(() => {
     setSelectedOrderIds((prev) => {
       if (prev.size === 0) return prev;
@@ -5877,11 +5893,24 @@ export function OrdersView() {
     [orderList, selectedOrderIds]
   );
   const allFilteredSelected = filteredOrders.length > 0 && filteredOrders.every((order) => selectedOrderIds.has(order.id));
+  const allMobileFilteredSelected = mobileFilteredOrders.length > 0 && mobileFilteredOrders.every((order) => selectedOrderIds.has(order.id));
 
   const toggleSelectedOrder = (id: string, checked: boolean) => {
     setSelectedOrderIds((prev) => {
       const next = new Set(prev);
       checked ? next.add(id) : next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleMobileFilteredOrders = () => {
+    setSelectedOrderIds((prev) => {
+      const next = new Set(prev);
+      if (allMobileFilteredSelected) {
+        mobileFilteredOrders.forEach((order) => next.delete(order.id));
+      } else {
+        mobileFilteredOrders.forEach((order) => next.add(order.id));
+      }
       return next;
     });
   };
@@ -5943,6 +5972,162 @@ export function OrdersView() {
     () => orderList.filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments)).length,
     [orderList, state.shipments]
   );
+  const mobileProductById = useMemo(
+    () => new Map(state.products.map((product) => [product.id, product])),
+    [state.products]
+  );
+
+  const renderMobileOrderCard = (order: OrderListRow) => {
+    const customer = getCustomer(order.customerId);
+    const due = calcAmountDue(order, state.shipments);
+    const paid = calcAmountPaid(order);
+    const balance = due - paid;
+    const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
+    const activeShipments = orderShipments.filter(countsAsActiveShipment);
+    const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
+    const unshippedCount = order.items.filter((item) => !shippedIds.has(item.stockItemId)).length;
+    const nextShipDate = order.status === "completed"
+      ? ""
+      : order.items
+          .map((item) => effectiveItemPlannedShipDate(order, item) || item.plannedShipDate)
+          .filter(Boolean)
+          .sort()[0] || order.plannedShipDate || "";
+    const plannedTodayCount = order.items.filter((item) =>
+      effectiveItemPlannedShipDate(order, item) === today || item.plannedShipDate === today
+    ).length;
+    const itemNames = order.items
+      .map((item) => mobileProductById.get(item.productId)?.name ?? item.productId)
+      .filter(Boolean);
+    const shownItems = itemNames.slice(0, 2).join("、");
+    const extraItemCount = Math.max(0, itemNames.length - 2);
+    const financialClass = balance > 0.005
+      ? "text-orange-600"
+      : balance < -0.005
+        ? "text-red-600"
+        : "text-emerald-700";
+
+    return (
+      <article
+        key={order.id}
+        className="rounded-lg border bg-card p-3 shadow-sm transition-colors active:bg-muted/50"
+      >
+        <div className="flex items-start gap-3">
+          <Checkbox
+            checked={selectedOrderIds.has(order.id)}
+            onCheckedChange={(checked) => toggleSelectedOrder(order.id, checked === true)}
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`选择订单 ${order.orderNo}`}
+            className="mt-1"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium text-muted-foreground">{order.orderNo}</div>
+                <div className="mt-0.5 truncate text-base font-semibold text-foreground">
+                  {customer?.name ?? "未找到客户"}
+                </div>
+              </div>
+              <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
+                {order.items.length} 条
+              </span>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <OrderStatusTags order={order} shipments={state.shipments} />
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <div className="rounded-md bg-muted/35 px-2.5 py-2">
+                <div className="text-xs text-muted-foreground">预计发货</div>
+                <div className={nextShipDate === today ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
+                  {order.status === "completed"
+                    ? "已完成"
+                    : nextShipDate
+                      ? `${nextShipDate}${plannedTodayCount > 0 ? ` · ${plannedTodayCount}件` : ""}`
+                      : "未设置"}
+                </div>
+              </div>
+              <div className="rounded-md bg-muted/35 px-2.5 py-2">
+                <div className="text-xs text-muted-foreground">未发货</div>
+                <div className={unshippedCount > 0 ? "mt-0.5 font-semibold text-amber-700" : "mt-0.5 font-semibold text-emerald-700"}>
+                  {unshippedCount > 0 ? `${unshippedCount} 条` : "已处理"}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+              <div>
+                <div className="text-xs text-muted-foreground">应付</div>
+                <div className="mt-0.5 font-semibold text-sky-700">¥{due.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">实付</div>
+                <div className="mt-0.5 font-semibold text-foreground">¥{paid.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">{balance < -0.005 ? "应退" : "待收"}</div>
+                <div className={`mt-0.5 font-semibold ${financialClass}`}>¥{Math.abs(balance).toFixed(2)}</div>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-md bg-background px-2.5 py-2 text-xs text-muted-foreground">
+              <span className="text-foreground">{shownItems || "无商品"}</span>
+              {extraItemCount > 0 && <span> 等 {itemNames.length} 条</span>}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs text-muted-foreground">下单 {order.date}</div>
+              <div className="flex items-center gap-2">
+                {customer && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-9 px-2 text-sky-700"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setViewCustomerId(customer.id);
+                    }}
+                  >
+                    客户
+                  </Button>
+                )}
+                {permission.canDelete && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className={hasPaymentRecords(order) ? "h-9 px-2 text-muted-foreground" : "h-9 px-2 text-red-600 hover:bg-red-50 hover:text-red-700"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (hasPaymentRecords(order)) {
+                        toast.error("该订单已有收款记录，不能删除");
+                        return;
+                      }
+                      setDeleteOrder(order);
+                    }}
+                  >
+                    删除
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-9 px-3"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setViewOrder(order);
+                  }}
+                >
+                  详情
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+    );
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -5953,8 +6138,221 @@ export function OrdersView() {
         </p>
       </div>
 
+      <div className="flex flex-col gap-3 md:hidden">
+        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+          {STATUS_FILTERS.map(({ key, label }) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => {
+                setStatusFilter(key);
+                if (key !== "active") setMyActiveOnly(false);
+              }}
+              className={`h-10 shrink-0 rounded-full px-4 text-sm font-medium transition-colors ${
+                statusFilter === key
+                  ? "bg-sky-600 text-white"
+                  : "border border-border bg-card text-muted-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <section className="rounded-lg border bg-card p-3 shadow-sm">
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={mobileSearch}
+                onChange={(event) => setMobileSearch(event.target.value)}
+                placeholder="搜索订单、客户、商品..."
+                className="h-10 pl-9"
+              />
+            </div>
+            {permission.canCreate && (
+              <Button type="button" className="h-10 shrink-0 px-3" onClick={() => setNewOpen(true)}>
+                <Plus className="size-4" />
+                新建
+              </Button>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={myActiveOnly ? "default" : "outline"}
+              className={myActiveOnly
+                ? "h-10 bg-sky-600 text-white hover:bg-sky-700"
+                : "h-10 border-sky-200 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
+              }
+              onClick={() => {
+                const next = !myActiveOnly;
+                setMyActiveOnly(next);
+                if (next) {
+                  setStatusFilter("active");
+                  setDateFrom("");
+                  setDateTo("");
+                  setTodayShipOnly(false);
+                  setPendingTrackingOnly(false);
+                }
+              }}
+            >
+              <UserRound className="size-3.5 mr-1" />
+              我的 {myActiveOrderCount}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={todayShipOnly ? "default" : "outline"}
+              className={todayShipOnly
+                ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
+                : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+              }
+              onClick={() => {
+                const next = !todayShipOnly;
+                setTodayShipOnly(next);
+                if (next) {
+                  setPendingTrackingOnly(false);
+                  setMyActiveOnly(false);
+                  setStatusFilter("all");
+                  setDateFrom("");
+                  setDateTo("");
+                }
+              }}
+            >
+              <Truck className="size-3.5 mr-1" />
+              今日发货 {todayShipCount}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={pendingTrackingOnly ? "default" : "outline"}
+              className={pendingTrackingOnly
+                ? "h-10 bg-emerald-600 text-white hover:bg-emerald-700"
+                : "h-10 border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+              }
+              onClick={() => {
+                const next = !pendingTrackingOnly;
+                setPendingTrackingOnly(next);
+                if (next) {
+                  setTodayShipOnly(false);
+                  setMyActiveOnly(false);
+                  setStatusFilter("all");
+                  setDateFrom("");
+                  setDateTo("");
+                  setSelectedOrderIds(new Set(
+                    orderList
+                      .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
+                      .map((order) => order.id)
+                  ));
+                }
+              }}
+            >
+              <Truck className="size-3.5 mr-1" />
+              出库待发 {pendingTrackingCount}
+            </Button>
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="grid gap-1">
+              <Label className="text-xs text-muted-foreground">开始日期</Label>
+              <Input
+                type="date"
+                value={dateFrom}
+                max={dateFromMax}
+                onChange={(event) => changeDateFrom(event.target.value)}
+                className="h-10 text-sm"
+              />
+            </div>
+            <div className="grid gap-1">
+              <Label className="text-xs text-muted-foreground">结束日期</Label>
+              <Input
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                max={today}
+                onChange={(event) => changeDateTo(event.target.value)}
+                className="h-10 text-sm"
+              />
+            </div>
+          </div>
+
+          {hasMobileFilter && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter("all");
+                setDateFrom("");
+                setDateTo("");
+                setTodayShipOnly(false);
+                setPendingTrackingOnly(false);
+                setMyActiveOnly(false);
+                setMobileSearch("");
+              }}
+              className="mt-3 h-9 text-sm font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              清除筛选
+            </button>
+          )}
+        </section>
+
+        <section className="rounded-lg border bg-muted/20 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground">共 {mobileFilteredOrders.length} 单</div>
+              <div className="text-xs text-muted-foreground">已选 {selectedOrders.length} 单用于导出</div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-9 px-3"
+                disabled={mobileFilteredOrders.length === 0}
+                onClick={toggleMobileFilteredOrders}
+              >
+                {allMobileFilteredSelected ? "取消" : "全选"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-9 px-3"
+                onClick={() => setExportFormatOpen(true)}
+                disabled={selectedOrders.length === 0}
+              >
+                导出
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        <div className="flex flex-col gap-3">
+          {mobileVisibleOrders.length === 0 ? (
+            <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+              没有符合条件的订单
+            </div>
+          ) : (
+            mobileVisibleOrders.map(renderMobileOrderCard)
+          )}
+        </div>
+
+        {hasMoreMobileOrders && (
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10"
+            onClick={() => setMobileVisibleCount((count) => count + 12)}
+          >
+            加载更多（{mobileVisibleOrders.length}/{mobileFilteredOrders.length}）
+          </Button>
+        )}
+      </div>
+
       {/* Filter bar */}
-      <div className="flex items-center gap-3 flex-wrap">
+      <div className="hidden items-center gap-3 flex-wrap md:flex">
         <div className="flex gap-1">
           {STATUS_FILTERS.map(({ key, label }) => (
             <button
@@ -6076,7 +6474,7 @@ export function OrdersView() {
         </div>
 	      </div>
 
-	      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
+	      <div className="hidden flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2 md:flex">
 	        <div className="flex flex-wrap items-center gap-2 text-sm">
 	          <span className="text-muted-foreground">批量导出</span>
 	          <span className="font-medium">已选 {selectedOrders.length} 个订单</span>
@@ -6103,6 +6501,7 @@ export function OrdersView() {
         </Button>
 	      </div>
 
+	      <div className="hidden md:block">
 	      <DataTable
 	        data={filteredOrders}
         searchKeys={["searchText"] as (keyof OrderListRow)[]}
@@ -6250,6 +6649,7 @@ export function OrdersView() {
           </div>
         )}
       />
+      </div>
 
       <Dialog open={exportFormatOpen} onOpenChange={setExportFormatOpen}>
         <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
