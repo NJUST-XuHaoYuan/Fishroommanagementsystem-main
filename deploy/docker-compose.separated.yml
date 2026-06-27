@@ -11,16 +11,6 @@ services:
       - "${FRONTEND_PORT:-8787}:80"
     restart: unless-stopped
 
-  public:
-    image: fishroom-frontend:local
-    container_name: fishroom-public-10000
-    depends_on:
-      backend:
-        condition: service_healthy
-    ports:
-      - "${PUBLIC_PORT:-10000}:80"
-    restart: unless-stopped
-
   backend:
     image: fishroom-backend:local
     container_name: fishroom-backend
