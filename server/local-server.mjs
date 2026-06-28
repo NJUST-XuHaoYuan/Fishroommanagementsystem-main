@@ -1037,22 +1037,18 @@ function buildDashboardSummary(state = {}, options = {}) {
       return isFishInventoryItem(product, itemSpecies);
     });
   const todayPayments = orders.flatMap((order) =>
-    orderNeedsFinancials(order?.source)
-      ? (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
-          String(payment?.time ?? "").slice(0, 10) === today
-        )
-      : []
+    (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
+      String(payment?.time ?? "").slice(0, 10) === today
+    )
   );
   const dailyDates = Array.from({ length: financeDays }, (_, index) =>
     addDaysToDateString(today, index - financeDays + 1)
   );
   const dailyFinanceData = dailyDates.map((date) => {
     const payments = orders.flatMap((order) =>
-      orderNeedsFinancials(order?.source)
-        ? (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
-            String(payment?.time ?? "").slice(0, 10) === date
-          )
-        : []
+      (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
+        String(payment?.time ?? "").slice(0, 10) === date
+      )
     );
     const salesRows = orders
       .filter((order) => isValidDashboardSalesOrder(order) && String(order?.date ?? "").slice(0, 10) === date)
@@ -2231,7 +2227,6 @@ function nextOrderNo(state = {}) {
 }
 
 function getBillableShippingFeeForOrder(order = {}, shipments = []) {
-  if (!orderNeedsLogistics(order?.source)) return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment?.orderId === order.id && shipmentBlocksInventory(shipment)
   );
@@ -2246,7 +2241,6 @@ function calcAmountRefundedForOrder(order = {}) {
 }
 
 function calcDamageRefundAdjustmentForOrder(order = {}, shipments = []) {
-  if (!orderNeedsFinancials(order?.source)) return 0;
   const orderShipments = shipments.filter((shipment) => shipment?.orderId === order.id);
   const explicitAdjustment = orderShipments.reduce((sum, shipment) => {
     if (shipment?.status !== "damaged" || shipment?.damageResolution !== "refund") return sum;
@@ -2262,7 +2256,6 @@ function calcDamageRefundAdjustmentForOrder(order = {}, shipments = []) {
 }
 
 function calcAmountDueForOrder(order = {}, shipments = []) {
-  if (!orderNeedsFinancials(order?.source)) return 0;
   const itemTotal = (Array.isArray(order.items) ? order.items : [])
     .reduce((sum, item) => sum + Number(item?.price ?? 0), 0);
   return Number((
@@ -2275,7 +2268,6 @@ function calcAmountDueForOrder(order = {}, shipments = []) {
 }
 
 function calcAmountPaidForOrder(order = {}) {
-  if (!orderNeedsFinancials(order?.source)) return 0;
   return Number((Array.isArray(order.payments) ? order.payments : [])
     .reduce((sum, payment) => payment?.type === "refund"
       ? sum - Number(payment?.amount ?? 0)
@@ -2327,23 +2319,6 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
 
 const ORDER_SOURCE_VALUES = new Set(["线下", "平台下单", "私域线上"]);
 
-function isPlatformOrderNature(source = "") {
-  return String(source ?? "").trim() === "平台下单";
-}
-
-function isOfflineOrderNature(source = "") {
-  const value = String(source ?? "").trim();
-  return value === "线下" || value === "线下自提";
-}
-
-function orderNeedsFinancials(source = "") {
-  return !isPlatformOrderNature(source);
-}
-
-function orderNeedsLogistics(source = "") {
-  return !isPlatformOrderNature(source) && !isOfflineOrderNature(source);
-}
-
 function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
   const incomingSiteId = body.siteId === ALL_SITE_ID ? DEFAULT_SITE_ID : body.siteId;
   const siteId = normalizeSiteId(incomingSiteId ?? currentOrder?.siteId);
@@ -2358,16 +2333,10 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const source = String(body.source ?? currentOrder?.source ?? "").trim();
   if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
-  const needsFinancials = orderNeedsFinancials(source);
-  const needsLogistics = orderNeedsLogistics(source);
-  const shippingAddress = isPlatformOrderNature(source)
-    ? "平台下单"
-    : needsLogistics
-      ? String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim()
-      : "";
-  const plannedShipDate = needsLogistics ? String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim() : "";
-  if (needsLogistics && !plannedShipDate) throw new Error("请选择预计发货日期");
-  if (needsLogistics && plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
+  const shippingAddress = String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim();
+  const plannedShipDate = String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
+  if (!plannedShipDate) throw new Error("请选择预计发货日期");
+  if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
   assertActivePersonnelName(state, contactPerson, "对接人", currentOrder?.contactPerson);
   const itemsInput = Array.isArray(body.items) ? body.items : [];
@@ -2380,28 +2349,26 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const items = itemsInput.map((item) => {
     const stockId = String(item?.stockItemId ?? "").trim();
     if (!currentItemIds.has(stockId)) {
-      const normalizedItem = normalizeOrderItemInput(state, item, {
+      return normalizeOrderItemInput(state, item, {
         siteId,
         excludeOrderId: currentOrder?.id ?? "",
       });
-      return needsFinancials ? normalizedItem : { ...normalizedItem, price: 0, commissionRate: 0 };
     }
     const stockItem = (Array.isArray(state.stock) ? state.stock : []).find((stock) => String(stock?.id ?? "") === stockId);
     const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
       .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockId);
     if (!stockItem && !existingItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
-    const normalizedItem = {
+    return {
       stockItemId: stockId,
       productId: String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim(),
       price: normalizeMoney(item.price ?? existingItem?.price, "Order item price"),
       commissionRate: normalizeCommissionRate(item.commissionRate ?? existingItem?.commissionRate),
     };
-    return needsFinancials ? normalizedItem : { ...normalizedItem, price: 0, commissionRate: 0 };
   });
-  const shippingFee = needsLogistics ? normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee") : 0;
-  const packagingFee = needsFinancials ? normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee") : 0;
-  const discount = needsFinancials ? normalizeMoney(body.discount ?? currentOrder?.discount, "Discount") : 0;
-  if (needsFinancials && items.reduce((sum, item) => sum + item.price, 0) + shippingFee + packagingFee - discount < -0.005) {
+  const shippingFee = normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
+  const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
+  const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
+  if (items.reduce((sum, item) => sum + item.price, 0) + shippingFee + packagingFee - discount < -0.005) {
     throw new Error("折扣过大，应付金额不能为负数");
   }
   return {
@@ -2467,7 +2434,6 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   if (financialState.kind !== "paid") {
     throw new Error("订单资金未结清，不能标记完成");
   }
-  if (!orderNeedsLogistics(order?.source)) return;
   const activeShipments = shipments.filter((shipment) =>
     String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
   );
@@ -2606,30 +2572,23 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
 ]);
 
 function orderMutableFieldsComparable(order = {}) {
-  const source = String(order.source ?? "").trim();
-  const needsFinancials = orderNeedsFinancials(source);
-  const needsLogistics = orderNeedsLogistics(source);
   return {
     siteId: normalizeSiteId(order.siteId),
     customerId: String(order.customerId ?? "").trim(),
     date: String(order.date ?? "").trim(),
-    source,
-    shippingAddress: isPlatformOrderNature(source)
-      ? "平台下单"
-      : needsLogistics
-        ? String(order.shippingAddress ?? "").trim()
-        : "",
-    plannedShipDate: needsLogistics ? String(order.plannedShipDate ?? "").trim() : "",
+    source: String(order.source ?? "").trim(),
+    shippingAddress: String(order.shippingAddress ?? "").trim(),
+    plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
     items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
       stockItemId: String(item?.stockItemId ?? "").trim(),
       productId: String(item?.productId ?? "").trim(),
-      price: needsFinancials ? normalizeMoney(item?.price, "Order item price") : 0,
-      commissionRate: needsFinancials ? normalizeCommissionRate(item?.commissionRate) : 0,
+      price: normalizeMoney(item?.price, "Order item price"),
+      commissionRate: normalizeCommissionRate(item?.commissionRate),
     })),
-    shippingFee: needsLogistics ? normalizeMoney(order.shippingFee, "Shipping fee") : 0,
-    packagingFee: needsFinancials ? normalizeMoney(order.packagingFee, "Packaging fee") : 0,
-    discount: needsFinancials ? normalizeMoney(order.discount, "Discount") : 0,
+    shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
+    packagingFee: normalizeMoney(order.packagingFee, "Packaging fee"),
+    discount: normalizeMoney(order.discount, "Discount"),
     notes: String(order.notes ?? ""),
   };
 }
@@ -4058,9 +4017,7 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
-      const payments = orderNeedsFinancials(orderInput.source) && Array.isArray(body.payments)
-        ? body.payments.map(normalizePaymentRecord)
-        : [];
+      const payments = Array.isArray(body.payments) ? body.payments.map(normalizePaymentRecord) : [];
       const order = {
         id: String(body.id || uid("order")),
         orderNo: nextOrderNo(state),
@@ -4113,17 +4070,6 @@ async function handleApi(req, res, url) {
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑");
 
       const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder);
-      const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
-      if (!orderNeedsFinancials(nextOrderInput.source) && currentPayments.length > 0) {
-        throw new Error("已有资金记录的订单不能改为平台下单");
-      }
-      const currentShipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const hasActiveShipments = currentShipments.some((shipment) =>
-        String(shipment?.orderId ?? "") === orderId && shipmentBlocksInventory(shipment)
-      );
-      if (!orderNeedsLogistics(nextOrderInput.source) && hasActiveShipments) {
-        throw new Error("已有发货记录的订单不能改为无需物流的订单性质");
-      }
       const nextItemIds = new Set(nextOrderInput.items.map((item) => item.stockItemId));
       const removedItemIds = (Array.isArray(currentOrder.items) ? currentOrder.items : [])
         .map((item) => String(item?.stockItemId ?? ""))
@@ -4184,7 +4130,6 @@ async function handleApi(req, res, url) {
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑资金记录");
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再编辑资金记录");
-      if (!orderNeedsFinancials(currentOrder.source)) throw new Error("平台下单不记录资金往来");
 
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       let nextPayments = currentPayments;
@@ -4300,7 +4245,6 @@ async function handleApi(req, res, url) {
       const order = orders.find((item) => String(item?.id ?? "") === orderId);
       if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed" || order.status === "cancelled") throw new Error("该订单当前状态不能出库");
-      if (!orderNeedsLogistics(order.source)) throw new Error("该订单性质不需要物流出库流程");
       const financialState = getOrderFinancialStateForOrder(order, state.shipments);
       if (financialState.kind !== "paid") throw new Error("订单未结清或存在待退款，不能出库");
 

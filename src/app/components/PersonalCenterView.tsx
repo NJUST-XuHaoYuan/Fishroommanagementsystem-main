@@ -28,25 +28,7 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
 }
 
-function isPlatformOrderNature(source?: string): boolean {
-  return String(source ?? "").trim() === "平台下单";
-}
-
-function isOfflineOrderNature(source?: string): boolean {
-  const value = String(source ?? "").trim();
-  return value === "线下" || value === "线下自提";
-}
-
-function orderNeedsFinancials(source?: string): boolean {
-  return !isPlatformOrderNature(source);
-}
-
-function orderNeedsLogistics(source?: string): boolean {
-  return !isPlatformOrderNature(source) && !isOfflineOrderNature(source);
-}
-
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
-  if (!orderNeedsLogistics(order.source)) return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipment(shipment)
   );
@@ -55,13 +37,11 @@ function getBillableShippingFee(order: Order, shipments: Shipment[] = []): numbe
 }
 
 function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   const items = order.items.reduce((sum, item) => sum + item.price, 0);
   return items + getBillableShippingFee(order, shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0);
 }
 
 function calcAmountPaid(order: Order): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   return (order.payments ?? []).reduce(
     (sum, payment) => payment.type === "refund" ? sum - payment.amount : sum + payment.amount,
     0

@@ -77,25 +77,6 @@ function effectiveOrderAddress(order?: Pick<Order, "shippingAddress"> | null, cu
   return String(order?.shippingAddress ?? "").trim() || String(customer?.address ?? "").trim();
 }
 
-function isPlatformOrderNature(source?: string | null): boolean {
-  return String(source ?? "").trim() === "平台下单";
-}
-
-function isOfflineOrderNature(source?: string | null): boolean {
-  const value = String(source ?? "").trim();
-  return value === "线下" || value === "线下自提";
-}
-
-function orderNeedsFinancials(source?: string | null): boolean {
-  return !isPlatformOrderNature(source);
-}
-
-function orderNeedsLogistics(source?: string | null): boolean {
-  const value = String(source ?? "").trim();
-  if (isPlatformOrderNature(value) || isOfflineOrderNature(value)) return false;
-  return true;
-}
-
 type OrderPickerItem = {
   stockItemId: string;
   productId: string;
@@ -165,7 +146,6 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
 }
 
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
-  if (!orderNeedsLogistics(order.source)) return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipment(shipment)
   );
@@ -174,7 +154,6 @@ function getBillableShippingFee(order: Order, shipments: Shipment[] = []): numbe
 }
 
 function hasActualShippingFee(order: Order, shipments: Shipment[] = []): boolean {
-  if (!orderNeedsLogistics(order.source)) return false;
   return shipments.some((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipment(shipment)
   );
@@ -186,7 +165,6 @@ function calcShippingAdjustment(order: Order, shipments: Shipment[] = []): numbe
 }
 
 function calcDamageRefundAdjustment(order: Order, shipments: Shipment[] = []): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   const explicitAdjustment = orderShipments.reduce((sum, shipment) => {
     if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") return sum;
@@ -203,27 +181,23 @@ function calcDamageRefundAdjustment(order: Order, shipments: Shipment[] = []): n
 }
 
 function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   const items = order.items.reduce((s, i) => s + i.price, 0);
   return items + getBillableShippingFee(order, shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0) - calcDamageRefundAdjustment(order, shipments);
 }
 
 function calcAmountPaid(order: Order): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   return (order.payments ?? []).reduce(
     (s, p) => (p.type === "refund" ? s - p.amount : s + p.amount), 0
   );
 }
 
 function calcAmountReceived(order: Order): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   return (order.payments ?? [])
     .filter((payment) => payment.type !== "refund")
     .reduce((sum, payment) => sum + payment.amount, 0);
 }
 
 function calcAmountRefunded(order: Order): number {
-  if (!orderNeedsFinancials(order.source)) return 0;
   return (order.payments ?? [])
     .filter((payment) => payment.type === "refund")
     .reduce((sum, payment) => sum + payment.amount, 0);
@@ -263,23 +237,20 @@ const ORDER_STATUS_TAG_STYLE = {
   cancelled: "bg-gray-100 text-gray-500",
   damaged: "bg-red-100 text-red-700",
   outbound: "bg-sky-100 text-sky-700",
-  locked: "bg-sky-100 text-sky-700",
 };
 
 function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   const hasDamagedShipment = orderShipments.some((shipment) => shipment.status === "damaged");
   const financialState = getOrderFinancialState(order, shipments);
-  const tags: OrderStatusTag[] = orderNeedsFinancials(order.source)
-    ? [{
-        label: financialState.kind === "paid" ? "已结清" : financialState.kind === "payable" ? "待付款" : "待退款",
-        className: financialState.kind === "paid"
-          ? ORDER_STATUS_TAG_STYLE.paid
-          : financialState.kind === "payable"
-            ? ORDER_STATUS_TAG_STYLE.payable
-            : ORDER_STATUS_TAG_STYLE.refundable,
-      }]
-    : [{ label: "锁定库存", className: ORDER_STATUS_TAG_STYLE.locked }];
+  const tags: OrderStatusTag[] = [{
+    label: financialState.kind === "paid" ? "已结清" : financialState.kind === "payable" ? "待付款" : "待退款",
+    className: financialState.kind === "paid"
+      ? ORDER_STATUS_TAG_STYLE.paid
+      : financialState.kind === "payable"
+        ? ORDER_STATUS_TAG_STYLE.payable
+        : ORDER_STATUS_TAG_STYLE.refundable,
+  }];
 
   if (order.status === "cancelled") {
     tags.push({ label: "已取消", className: ORDER_STATUS_TAG_STYLE.cancelled });
@@ -293,11 +264,6 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
 
   if (order.status === "damaged" || hasDamagedShipment) {
     tags.push({ label: "已报损", className: ORDER_STATUS_TAG_STYLE.damaged });
-  }
-
-  if (!orderNeedsLogistics(order.source)) {
-    tags.push({ label: "无需物流", className: ORDER_STATUS_TAG_STYLE.cancelled });
-    return tags;
   }
 
   const activeShipments = orderShipments.filter(countsAsActiveShipment);
@@ -987,7 +953,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "订单性质", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
         ${table("资金往来", ["订单号", "客户", "序号", "时间", "类型", "金额", "备注"], paymentRows)}
@@ -3577,8 +3543,6 @@ function ItemsWithShipments({
   canReturnItem?: boolean;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
-  const needsFinancials = orderNeedsFinancials(order.source);
-  const needsLogistics = orderNeedsLogistics(order.source);
 
   const renderItemRow = (item: OrderItem, idx: number, options?: { damageRefunded?: boolean }) => {
     const p = getProduct(item.productId);
@@ -3608,13 +3572,9 @@ function ItemsWithShipments({
           </div>
         </td>
         <td className="px-4 py-2.5 text-sm text-muted-foreground">{s ? subTankName(s.subTankId) : "—"}</td>
-        {needsFinancials && (
-          <>
-            <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
-            <td className="px-4 py-2.5 text-sm text-right">{normalizeCommissionRate(item.commissionRate).toFixed(2)}%</td>
-            <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{itemCommissionAmount(item).toFixed(2)}</td>
-          </>
-        )}
+        <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
+        <td className="px-4 py-2.5 text-sm text-right">{normalizeCommissionRate(item.commissionRate).toFixed(2)}%</td>
+        <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{itemCommissionAmount(item).toFixed(2)}</td>
         <td className="px-3 py-2.5 text-right">
           {isUnshipped && canReturnItem ? (
             <Button
@@ -3644,13 +3604,9 @@ function ItemsWithShipments({
       <tr className="border-t bg-muted/10">
         <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
         <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">缸位</th>
-        {needsFinancials && (
-          <>
-            <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">售价</th>
-            <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成比例</th>
-            <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成</th>
-          </>
-        )}
+        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">售价</th>
+        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成比例</th>
+        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成</th>
         <th className="w-12 px-3 py-2" />
       </tr>
     </thead>
@@ -3708,13 +3664,9 @@ function ItemsWithShipments({
       {/* Unshipped items */}
       {unshippedOrderItems.length > 0 && (
         <div>
-          <div className={`px-4 py-2 flex items-center gap-2 text-xs font-medium border-t ${needsLogistics ? "bg-amber-50/50 text-amber-800" : "bg-sky-50/60 text-sky-800"}`}>
+          <div className="px-4 py-2 flex items-center gap-2 text-xs font-medium border-t bg-amber-50/50 text-amber-800">
             <Plus className="size-3.5 shrink-0 opacity-60" />
-            {needsLogistics
-              ? `待发货（${unshippedOrderItems.length} 件）`
-              : isPlatformOrderNature(order.source)
-                ? `锁定库存（${unshippedOrderItems.length} 件）`
-                : `订单商品（${unshippedOrderItems.length} 件）`}
+            待发货（{unshippedOrderItems.length} 件）
           </div>
           <table className="w-full">
             {colHeader}
@@ -3819,15 +3771,13 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
-    if (!editForm.source.trim()) return toast.error("请选择订单性质");
+    if (!editForm.source.trim()) return toast.error("请选择订单来源");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
-    const editNeedsFinancials = orderNeedsFinancials(editForm.source);
-    const editNeedsLogistics = orderNeedsLogistics(editForm.source);
-    if (editNeedsFinancials && displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
-    if (editNeedsFinancials && editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
+    if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
+    if (editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
       return toast.error("提成比例不能小于 0");
-    if (editNeedsLogistics && !editForm.plannedShipDate) return toast.error("请选择预计发货日期");
-    if (editNeedsLogistics && editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
+    if (!editForm.plannedShipDate) return toast.error("请选择预计发货日期");
+    if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
     if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
     try {
@@ -3836,18 +3786,14 @@ function OrderDetailDialog({
         customerId: editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
-        shippingAddress: isPlatformOrderNature(editForm.source) ? "平台下单" : editNeedsLogistics ? editForm.shippingAddress.trim() : "",
-        plannedShipDate: editNeedsLogistics ? editForm.plannedShipDate : "",
+        shippingAddress: editForm.shippingAddress.trim(),
+        plannedShipDate: editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
-        shippingFee: editNeedsLogistics ? editForm.shippingFee : 0,
-        packagingFee: editNeedsFinancials ? editForm.packagingFee : 0,
-        discount: editNeedsFinancials ? editForm.discount : 0,
-        items: editForm.items.map((item) => ({
-          ...item,
-          price: editNeedsFinancials ? item.price : 0,
-          commissionRate: editNeedsFinancials ? normalizeCommissionRate(item.commissionRate) : 0,
-        })),
+        shippingFee: editForm.shippingFee,
+        packagingFee: editForm.packagingFee,
+        discount: editForm.discount,
+        items: editForm.items.map((item) => ({ ...item, commissionRate: normalizeCommissionRate(item.commissionRate) })),
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -3894,37 +3840,6 @@ function OrderDetailDialog({
     }
     setEditForm((f) => f ? { ...f, plannedShipDate: newDate } : f);
   };
-  const changeEditOrderNature = (value: string) => {
-    setEditForm((f) => {
-      if (!f) return f;
-      if (isPlatformOrderNature(value)) {
-        return {
-          ...f,
-          source: value,
-          shippingAddress: "平台下单",
-          plannedShipDate: "",
-          shippingFee: 0,
-          packagingFee: 0,
-          discount: 0,
-          items: f.items.map((item) => ({ ...item, price: 0, commissionRate: 0 })),
-        };
-      }
-      if (isOfflineOrderNature(value)) {
-        return {
-          ...f,
-          source: value,
-          shippingAddress: f.shippingAddress === "平台下单" ? "" : f.shippingAddress,
-          plannedShipDate: "",
-          shippingFee: 0,
-        };
-      }
-      return {
-        ...f,
-        source: value,
-        shippingAddress: f.shippingAddress === "平台下单" ? "" : f.shippingAddress,
-      };
-    });
-  };
   const removeEditItem = (id: string) => {
     if (shippedItemIds.has(id)) return toast.error("该商品已在出库/发货单中，无法从订单移除");
     const existingOrderItem = order?.items.find((item) => item.stockItemId === id);
@@ -3955,22 +3870,17 @@ function OrderDetailDialog({
   const customer = (state.customers ?? []).find(
     (c) => c.id === (editMode && editForm ? editForm.customerId : order?.customerId)
   );
-  const activeOrderNature = editMode && editForm ? editForm.source : order?.source ?? "";
-  const detailNeedsFinancials = orderNeedsFinancials(activeOrderNature);
-  const detailNeedsLogistics = orderNeedsLogistics(activeOrderNature);
-  const detailIsPlatformOrder = isPlatformOrderNature(activeOrderNature);
-  const detailIsOfflineOrder = isOfflineOrderNature(activeOrderNature);
   const displayAddress = effectiveOrderAddress(order, customer);
   const hasOrderAddressOverride = Boolean(String(order?.shippingAddress ?? "").trim());
   const editDefaultAddress = String(customer?.address ?? "").trim();
 
   const displayItems = editMode && editForm ? editForm.items : (order?.items ?? []);
   const displayItemsTotal = displayItems.reduce((s, i) => s + i.price, 0);
-  const displayCommissionTotal = detailNeedsFinancials ? displayItems.reduce((s, i) => s + itemCommissionAmount(i), 0) : 0;
+  const displayCommissionTotal = displayItems.reduce((s, i) => s + itemCommissionAmount(i), 0);
   const displayShipping  = (editMode && editForm ? editForm.shippingFee  : order?.shippingFee)  ?? 0;
   const displayPackaging = (editMode && editForm ? editForm.packagingFee : order?.packagingFee) ?? 0;
   const displayDiscount  = (editMode && editForm ? editForm.discount     : order?.discount)     ?? 0;
-  const draftAmountDue = detailNeedsFinancials ? displayItemsTotal + (detailNeedsLogistics ? displayShipping : 0) + displayPackaging - displayDiscount : 0;
+  const draftAmountDue = displayItemsTotal + displayShipping + displayPackaging - displayDiscount;
 
   const orderShipments = state.shipments.filter((s) => s.orderId === order?.id);
   const damageRefundOrder = !!order && isDamageRefundOrder(order, state.shipments);
@@ -3997,14 +3907,13 @@ function OrderDetailDialog({
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || (s.status === "damaged" && s.damageResolution === "refund")
   );
-  const canCompleteWithoutLogistics = !!order && !orderNeedsLogistics(order.source);
   const canCompleteOrder = !!order &&
     order.status !== "cancelled" &&
     order.status !== "completed" &&
-    (canCompleteWithoutLogistics || (allItemsShipped && allShipmentsResolved)) &&
+    allItemsShipped &&
+    allShipmentsResolved &&
     isFinancialSettled;
   const canShip = !!order && shippableUnshippedItems.length > 0 && isFinancialSettled
-    && orderNeedsLogistics(order.source)
     && order.status !== "cancelled" && order.status !== "completed";
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
   const returnStock = returnItem ? state.stock.find((stock) => stock.id === returnItem.stockItemId) : undefined;
@@ -4025,7 +3934,6 @@ function OrderDetailDialog({
     if (!permission.requirePermission("create")) return false;
     if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
     if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
-    if (!orderNeedsFinancials(order.source)) { toast.error("平台下单不记录资金往来"); return false; }
     if (!confirmWrite("新增", "将新增一条资金往来记录。")) return false;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "add", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
@@ -4037,7 +3945,6 @@ function OrderDetailDialog({
     if (!permission.requirePermission("create")) return;
     if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
     if (order?.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
-    if (order && !orderNeedsFinancials(order.source)) return toast.error("平台下单不记录资金往来");
     setEditingPayment(null);
     setAddPayOpen(true);
   };
@@ -4045,7 +3952,6 @@ function OrderDetailDialog({
   const openEditPayment = (record: PaymentRecord) => {
     if (!permission.requirePermission("update")) return;
     if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
-    if (order && !orderNeedsFinancials(order.source)) return toast.error("平台下单不记录资金往来");
     setEditingPayment(record);
     setAddPayOpen(true);
   };
@@ -4055,7 +3961,6 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return false;
     if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
     if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
-    if (!orderNeedsFinancials(order.source)) { toast.error("平台下单不记录资金往来"); return false; }
     if (!confirmWrite("修改", "将保存资金往来记录的修改。")) return false;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "update", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
@@ -4067,7 +3972,6 @@ function OrderDetailDialog({
     if (!permission.requirePermission("delete")) return;
     if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
     if (order?.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
-    if (order && !orderNeedsFinancials(order.source)) return toast.error("平台下单不记录资金往来");
     setDeletingPayment(record);
   };
 
@@ -4076,7 +3980,6 @@ function OrderDetailDialog({
     if (!permission.requirePermission("delete")) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
     if (order.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
-    if (!orderNeedsFinancials(order.source)) return toast.error("平台下单不记录资金往来");
     if (!confirmWrite("删除", "将删除这条资金往来记录。")) return;
     const deletePaymentId = deletingPayment.id;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "delete", paymentId: deletePaymentId });
@@ -4121,9 +4024,9 @@ function OrderDetailDialog({
       const action = financialState.kind === "refundable" ? "退款" : "收款";
       return toast.error(`${action}未结清（差额 ¥${financialState.amount.toFixed(2)}），请先完成${action}`);
     }
-    if (orderNeedsLogistics(order.source) && !allItemsShipped)
+    if (!allItemsShipped)
       return toast.error("尚有商品未发货，请先完成所有发货再确认完成");
-    if (orderNeedsLogistics(order.source) && !allShipmentsResolved)
+    if (!allShipmentsResolved)
       return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
     if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
     const ok = await saveStateTransform((latest) => ({
@@ -4342,13 +4245,13 @@ function OrderDetailDialog({
                     customers={state.customers ?? []} />
                 </div>
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">订单性质<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Label className="text-xs">订单来源<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
                     value={editForm.source}
-                    onValueChange={changeEditOrderNature}
+                    onValueChange={(value) => setEditForm((f) => f ? { ...f, source: value } : f)}
                   >
                     <SelectTrigger className={!editForm.source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                      <SelectValue placeholder="请选择订单性质" />
+                      <SelectValue placeholder="请选择来源" />
                     </SelectTrigger>
                     <SelectContent>
                       {ORDER_SOURCE_OPTIONS.map((source) => (
@@ -4367,25 +4270,23 @@ function OrderDetailDialog({
                     <p className="text-xs text-red-500">下单日期不能晚于今天</p>
                   )}
                 </div>
-                {detailNeedsLogistics && (
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                    <Input
-                      type="date"
-                      value={editForm.plannedShipDate}
-                      min={editForm.date}
-                      required
-                      onChange={(e) => changeEditPlannedShipDate(e.target.value)}
-                      className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
-                    />
-                    {!editForm.plannedShipDate && (
-                      <p className="text-xs text-red-500">请选择预计发货日期</p>
-                    )}
-                    {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
-                      <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
-                    )}
-                  </div>
-                )}
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Input
+                    type="date"
+                    value={editForm.plannedShipDate}
+                    min={editForm.date}
+                    required
+                    onChange={(e) => changeEditPlannedShipDate(e.target.value)}
+                    className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  />
+                  {!editForm.plannedShipDate && (
+                    <p className="text-xs text-red-500">请选择预计发货日期</p>
+                  )}
+                  {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
+                    <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
+                  )}
+                </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs">对接人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
@@ -4410,22 +4311,17 @@ function OrderDetailDialog({
                     {formatOrderCreatedAt(order.createdAt)}
                   </div>
                 </div>
-                {(detailNeedsLogistics || detailIsPlatformOrder) && (
-                  <div className="grid gap-1.5 col-span-4">
-                    <Label className="text-xs">{detailIsPlatformOrder ? "平台地址标记" : "本单收货地址"}</Label>
-                    <Input
-                      value={detailIsPlatformOrder ? "平台下单" : editForm.shippingAddress}
-                      placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
-                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
-                      disabled={detailIsPlatformOrder}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {detailIsPlatformOrder
-                        ? "平台订单默认标记为平台下单。"
-                        : editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
-                    </p>
-                  </div>
-                )}
+                <div className="grid gap-1.5 col-span-4">
+                  <Label className="text-xs">本单收货地址</Label>
+                  <Input
+                    value={editForm.shippingAddress}
+                    placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
+                    onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
+                  </p>
+                </div>
                 <div className="grid gap-1.5 col-span-5">
                   <Label className="text-xs">备注</Label>
                   <Input value={editForm.notes} placeholder="选填"
@@ -4438,10 +4334,10 @@ function OrderDetailDialog({
                 <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
                 <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
                 <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
-                <div><span className="text-muted-foreground">订单性质：</span>{order.source || "—"}</div>
+                <div><span className="text-muted-foreground">订单来源：</span>{order.source || "—"}</div>
                 <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
                 <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
-                {order.status !== "completed" && orderNeedsLogistics(order.source) && (
+                {order.status !== "completed" && (
                   <div>
                     <span className="text-muted-foreground">预计发货：</span>
                     {order.plannedShipDate
@@ -4450,7 +4346,7 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div><span className="text-muted-foreground">对接人：</span>{order.contactPerson || "—"}</div>
-                {displayAddress && (orderNeedsLogistics(order.source) || isPlatformOrderNature(order.source)) && (
+                {displayAddress && (
                   <div className="col-span-2">
                     <span className="text-muted-foreground">收货地址：</span>
                     {displayAddress}
@@ -4467,7 +4363,7 @@ function OrderDetailDialog({
             <div className="rounded-lg border flex flex-col">
               <div className="px-4 py-2 bg-muted/50 text-xs font-medium text-muted-foreground flex items-center justify-between shrink-0 border-b rounded-t-lg">
                 <span>订单商品（{displayItems.length} 条）</span>
-                {editMode && editForm && detailNeedsFinancials && (
+                {editMode && editForm && (
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
                     <span className="text-emerald-700">提成 ¥{displayCommissionTotal.toFixed(2)}</span>
@@ -4484,13 +4380,9 @@ function OrderDetailDialog({
                         <tr className="border-b">
                           <th className="text-left px-4 py-2 text-xs text-muted-foreground">商品</th>
                           <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
-                          {detailNeedsFinancials && (
-                            <>
-                              <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
-                              <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成比例</th>
-                              <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成</th>
-                            </>
-                          )}
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成比例</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
@@ -4524,30 +4416,26 @@ function OrderDetailDialog({
                                 </div>
                               </td>
                               <td className="px-4 py-2 text-sm text-muted-foreground">{s ? subTankName(s.subTankId) : "—"}</td>
-                              {detailNeedsFinancials && (
-                                <>
-                                  <td className="px-4 py-2 text-sm text-right">
-                                    <Input type="number" min={0} value={item.price}
-                                      onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
-                                      disabled={isLost}
-                                      className="h-7 w-24 text-sm text-right ml-auto" />
-                                  </td>
-                                  <td className="px-4 py-2 text-sm text-right">
-                                    <Input
-                                      type="number"
-                                      min={0}
-                                      step={0.01}
-                                      value={commissionRate}
-                                      onChange={(e) => setEditItemCommissionRate(item.stockItemId, Number(e.target.value))}
-                                      disabled={isLost || !isAdmin}
-                                      className="h-7 w-24 text-sm text-right ml-auto"
-                                    />
-                                  </td>
-                                  <td className="px-4 py-2 text-sm text-right text-emerald-700">
-                                    ¥{itemCommissionAmount(item).toFixed(2)}
-                                  </td>
-                                </>
-                              )}
+                              <td className="px-4 py-2 text-sm text-right">
+                                <Input type="number" min={0} value={item.price}
+                                  onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
+                                  disabled={isLost}
+                                  className="h-7 w-24 text-sm text-right ml-auto" />
+                              </td>
+                              <td className="px-4 py-2 text-sm text-right">
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  step={0.01}
+                                  value={commissionRate}
+                                  onChange={(e) => setEditItemCommissionRate(item.stockItemId, Number(e.target.value))}
+                                  disabled={isLost || !isAdmin}
+                                  className="h-7 w-24 text-sm text-right ml-auto"
+                                />
+                              </td>
+                              <td className="px-4 py-2 text-sm text-right text-emerald-700">
+                                ¥{itemCommissionAmount(item).toFixed(2)}
+                              </td>
 	                              <td className="px-2 py-2">
 	                                {!isShipped && (
 	                                  <button onClick={() => removeEditItem(item.stockItemId)}
@@ -4593,17 +4481,15 @@ function OrderDetailDialog({
             </div>
 
             {/* ── 费用 ── */}
-            {detailNeedsFinancials ? editMode && editForm ? (
+            {editMode && editForm ? (
               <div className="rounded-lg border p-4 bg-amber-50/50">
                 <div className="text-xs font-medium text-muted-foreground mb-3">费用设置</div>
                 <div className="grid grid-cols-3 gap-3 mb-4">
-                  {detailNeedsLogistics && (
-                    <div className="grid gap-1.5">
-                      <Label className="text-xs">预收运费（¥）</Label>
-                      <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
-                        onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
-                    </div>
-                  )}
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">预收运费（¥）</Label>
+                    <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
+                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
+                  </div>
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={editForm.packagingFee || ""} placeholder="0" className="h-8 text-sm"
@@ -4620,7 +4506,7 @@ function OrderDetailDialog({
                 <div className="border-t pt-3 flex flex-col gap-1.5 text-sm">
                   <div className="flex justify-between"><span className="text-muted-foreground">商品小计</span><span>¥{displayItemsTotal.toFixed(2)}</span></div>
                   <div className="flex justify-between text-emerald-700"><span>销售提成</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
-                  {detailNeedsLogistics && displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
+                  {displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
                   {displayPackaging > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>}
                   {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 折扣</span><span>¥{displayDiscount.toFixed(2)}</span></div>}
                   <div className="flex justify-between font-semibold text-base border-t pt-2 mt-1">
@@ -4634,14 +4520,14 @@ function OrderDetailDialog({
                 <div className="text-xs font-medium text-muted-foreground mb-1">费用明细</div>
                 <div className="flex justify-between"><span className="text-muted-foreground">商品小计</span><span>¥{displayItemsTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-emerald-700"><span>销售提成</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
-                {detailNeedsLogistics && <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
-                {detailNeedsLogistics && hasActualShipping && (
+                <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                {hasActualShipping && (
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">实际运费</span>
                     <span>¥{billableShipping.toFixed(2)}</span>
                   </div>
                 )}
-                {detailNeedsLogistics && Math.abs(shippingAdjustment) > 0.005 && (
+                {Math.abs(shippingAdjustment) > 0.005 && (
                   <div className={`flex justify-between ${shippingAdjustment > 0 ? "text-orange-600" : "text-emerald-600"}`}>
                     <span>{shippingAdjustment > 0 ? "运费补收" : "运费应退"}</span>
                     <span>{shippingAdjustment > 0 ? "+" : "−"}¥{Math.abs(shippingAdjustment).toFixed(2)}</span>
@@ -4659,14 +4545,10 @@ function OrderDetailDialog({
                   <span>{damageRefundOrder ? "调整后应付" : "应付总额"}</span><span className="text-sky-700">¥{displayAmountDue.toFixed(2)}</span>
                 </div>
               </div>
-            ) : (
-              <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
-                平台下单不记录应收、实收和资金往来；该订单仅用于锁定库存。
-              </div>
             )}
 
             {/* ── 收付款（只读模式显示）── */}
-            {!editMode && detailNeedsFinancials && (
+            {!editMode && (
               <>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="rounded-lg border p-3 text-center">
@@ -4743,7 +4625,7 @@ function OrderDetailDialog({
 	                    编辑订单
                   </Button>
                 )}
-	                {permission.canUpdate && orderNeedsLogistics(order.source) && unshippedItems.length > 0 && order.status !== "cancelled" && order.status !== "completed" && (
+	                {permission.canUpdate && unshippedItems.length > 0 && order.status !== "cancelled" && order.status !== "completed" && (
                   <div className="flex flex-col items-end gap-1">
 	                    {lostUnshippedItems.length > 0 && (
 	                      <p className="text-xs text-red-600">
@@ -4770,19 +4652,19 @@ function OrderDetailDialog({
                     </Button>
                   </div>
                 )}
-	                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && (activeOrderShipments.length > 0 || !orderNeedsLogistics(order.source)) && (
+	                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && activeOrderShipments.length > 0 && (
                   <div className="flex flex-col items-end gap-1">
-                    {orderNeedsLogistics(order.source) && !allItemsShipped && (
+                    {!allItemsShipped && (
                       <p className="text-xs text-purple-500">尚有 {unshippedItems.length} 件未发货</p>
                     )}
-                    {(canCompleteWithoutLogistics || allItemsShipped) && !isFinancialSettled && (
+                    {allItemsShipped && !isFinancialSettled && (
                       <p className={financialState.kind === "refundable" ? "text-xs text-red-500" : "text-xs text-orange-500"}>
                         {financialState.kind === "refundable"
                           ? `待退款 ¥${financialState.amount.toFixed(2)}`
                           : `还差 ¥${financialState.amount.toFixed(2)} 未付`}
                       </p>
                     )}
-                    {orderNeedsLogistics(order.source) && allItemsShipped && isFinancialSettled && !allShipmentsResolved && (
+                    {allItemsShipped && isFinancialSettled && !allShipmentsResolved && (
                       <p className="text-xs text-purple-500">尚有发货未签收或报损未完成处理</p>
                     )}
                     <Button
@@ -5348,33 +5230,6 @@ function NewOrderDialog({
     [state.customers, customerId]
   );
   const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
-  const hasOrderNature = Boolean(source.trim());
-  const isPlatformOrder = isPlatformOrderNature(source);
-  const isOfflineOrder = isOfflineOrderNature(source);
-  const needsFinancials = hasOrderNature ? orderNeedsFinancials(source) : true;
-  const needsLogistics = hasOrderNature ? orderNeedsLogistics(source) : false;
-
-  const changeOrderNature = (value: string) => {
-    setSource(value);
-    if (isPlatformOrderNature(value)) {
-      setShippingAddress("平台下单");
-      setPlannedShipDate("");
-      setShippingFee(0);
-      setPackagingFee(0);
-      setDiscount(0);
-      setDraftPayments([]);
-      setPaymentOpen(false);
-      setEditingPayment(null);
-      return;
-    }
-    if (isOfflineOrderNature(value)) {
-      setPlannedShipDate("");
-      setShippingFee(0);
-      setShippingAddress((current) => current === "平台下单" ? "" : current);
-      return;
-    }
-    setShippingAddress((current) => current === "平台下单" ? "" : current);
-  };
 
   const subTankName = (id: string) => {
     for (const g of state.tankGroups) {
@@ -5410,10 +5265,8 @@ function NewOrderDialog({
     setSelectedItems((prev) => { const n = new Map(prev); n.delete(stockItemId); return n; });
 
   const itemsTotal = Array.from(selectedItems.values()).reduce((s, item) => s + item.price, 0);
-  const commissionTotal = needsFinancials
-    ? Array.from(selectedItems.values()).reduce((s, item) => s + item.price * normalizeCommissionRate(item.commissionRate) / 100, 0)
-    : 0;
-  const amountDue = needsFinancials ? itemsTotal + shippingFee + packagingFee - discount : 0;
+  const commissionTotal = Array.from(selectedItems.values()).reduce((s, item) => s + item.price * normalizeCommissionRate(item.commissionRate) / 100, 0);
+  const amountDue = itemsTotal + shippingFee + packagingFee - discount;
   const contactOptions = getContactPersonOptions(personnel, contactPerson);
 
   const createCustomer = async (customer: Customer) => {
@@ -5491,26 +5344,23 @@ function NewOrderDialog({
     setSubmitAttempted(true);
     if (!customerId) return toast.error("请选择客户");
     if (date > today) return toast.error("下单日期不能晚于今天");
-    if (!source.trim()) return toast.error("请选择订单性质");
+    if (!source.trim()) return toast.error("请选择订单来源");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
-    if (needsLogistics && !plannedShipDate) return toast.error("请选择预计发货日期");
-    if (needsLogistics && plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
-    if (needsFinancials && amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
+    if (!plannedShipDate) return toast.error("请选择预计发货日期");
+    if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
+    if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
       const s = state.stock.find((x) => x.id === stockItemId)!;
       return {
         stockItemId,
         productId: s.productId,
-        price: needsFinancials ? draft.price : 0,
-        commissionRate: needsFinancials ? normalizeCommissionRate(draft.commissionRate) : 0,
+        price: draft.price,
+        commissionRate: normalizeCommissionRate(draft.commissionRate),
       };
     });
-    const paymentsToSave = needsFinancials
-      ? draftPayments.map((payment) => ({ ...payment, amount: Number(payment.amount) }))
-      : [];
-    const paymentText = paymentsToSave.length > 0 ? `，并保存 ${paymentsToSave.length} 条资金往来记录` : "";
-    if (!confirmWrite("创建", `将创建${source.trim()}订单${paymentText}。`)) return;
+    const paymentText = draftPayments.length > 0 ? `，并保存 ${draftPayments.length} 条资金往来记录` : "";
+    if (!confirmWrite("创建", `将创建销售订单${paymentText}。`)) return;
     let createdOrderNo = "";
     try {
       const result = await postOrderApi("orders/create", {
@@ -5518,15 +5368,15 @@ function NewOrderDialog({
         customerId,
         date,
         source: source.trim(),
-        shippingAddress: isPlatformOrder ? "平台下单" : needsLogistics ? shippingAddress.trim() : "",
-        plannedShipDate: needsLogistics ? plannedShipDate : "",
+        shippingAddress: shippingAddress.trim(),
+        plannedShipDate,
         contactPerson: contactPerson.trim(),
         items,
-        shippingFee: needsLogistics ? shippingFee : 0,
-        packagingFee: needsFinancials ? packagingFee : 0,
-        discount: needsFinancials ? discount : 0,
+        shippingFee,
+        packagingFee,
+        discount,
         notes,
-        payments: paymentsToSave,
+        payments: draftPayments.map((payment) => ({ ...payment, amount: Number(payment.amount) })),
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -5567,19 +5417,6 @@ function NewOrderDialog({
             {/* ── 1. Customer + date + notes ── */}
             <div className="grid grid-cols-1 items-end gap-3 rounded-lg border bg-card p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-4">
               <div className="grid gap-2">
-                <Label>订单性质<span className="text-red-500 ml-0.5">*</span></Label>
-                <Select value={source} onValueChange={changeOrderNature}>
-                  <SelectTrigger className={submitAttempted && !source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                    <SelectValue placeholder="请先选择订单性质" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ORDER_SOURCE_OPTIONS.map((option) => (
-                      <SelectItem key={option} value={option}>{option}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-2">
                   <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
                   {customerPermission.canCreate && (
@@ -5596,6 +5433,19 @@ function NewOrderDialog({
                 <CustomerCombobox value={customerId} onChange={setCustomerId} customers={state.customers ?? []} />
               </div>
               <div className="grid gap-2">
+                <Label>来源<span className="text-red-500 ml-0.5">*</span></Label>
+                <Select value={source} onValueChange={setSource}>
+                  <SelectTrigger className={submitAttempted && !source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectValue placeholder="请选择来源" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ORDER_SOURCE_OPTIONS.map((option) => (
+                      <SelectItem key={option} value={option}>{option}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
                 <Label>下单日期</Label>
                 <Input
                   type="date"
@@ -5608,25 +5458,23 @@ function NewOrderDialog({
                   <p className="text-xs text-red-500 -mt-1">下单日期不能晚于今天</p>
                 )}
               </div>
-              {needsLogistics && (
-                <div className="grid gap-2">
-                  <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    type="date"
-                    value={plannedShipDate}
-                    min={date}
-                    required
-                    onChange={(e) => changePlannedShipDate(e.target.value)}
-                    className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
-                  />
-                  {submitAttempted && !plannedShipDate && (
-                    <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
-                  )}
-                  {plannedShipDate && plannedShipDate < date && (
-                    <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
-                  )}
-                </div>
-              )}
+              <div className="grid gap-2">
+                <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                <Input
+                  type="date"
+                  value={plannedShipDate}
+                  min={date}
+                  required
+                  onChange={(e) => changePlannedShipDate(e.target.value)}
+                  className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
+                />
+                {submitAttempted && !plannedShipDate && (
+                  <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
+                )}
+                {plannedShipDate && plannedShipDate < date && (
+                  <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
+                )}
+              </div>
               <div className="grid gap-2">
                 <Label>对接人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
@@ -5645,22 +5493,17 @@ function NewOrderDialog({
                   </SelectContent>
                 </Select>
               </div>
-              {(needsLogistics || isPlatformOrder) && (
-                <div className="grid gap-2 md:col-span-2 xl:col-span-3">
-                  <Label>{isPlatformOrder ? "平台地址标记" : "本单收货地址"}</Label>
-                  <Input
-                    value={isPlatformOrder ? "平台下单" : shippingAddress}
-                    onChange={(e) => setShippingAddress(e.target.value)}
-                    placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
-                    disabled={isPlatformOrder}
-                  />
-                  <p className="text-xs text-muted-foreground -mt-1">
-                    {isPlatformOrder
-                      ? "平台订单默认标记为平台下单。"
-                      : selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
-                  </p>
-                </div>
-              )}
+              <div className="grid gap-2 md:col-span-2 xl:col-span-3">
+                <Label>本单收货地址</Label>
+                <Input
+                  value={shippingAddress}
+                  onChange={(e) => setShippingAddress(e.target.value)}
+                  placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
+                />
+                <p className="text-xs text-muted-foreground -mt-1">
+                  {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
+                </p>
+              </div>
               <div className="grid gap-2 md:col-span-2 xl:col-span-4">
                 <Label>备注</Label>
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
@@ -5675,9 +5518,7 @@ function NewOrderDialog({
                 </span>
                 {selectedItems.size > 0 && (
                   <span className="text-sm text-muted-foreground">
-                    {needsFinancials
-                      ? `小计 ¥${itemsTotal.toFixed(2)} · 预计提成 ¥${commissionTotal.toFixed(2)}`
-                      : "仅锁定库存，不记录应收实收"}
+                    小计 ¥{itemsTotal.toFixed(2)} · 预计提成 ¥{commissionTotal.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -5719,41 +5560,33 @@ function NewOrderDialog({
                               <X className="size-4" />
                             </button>
                           </div>
-                          {needsFinancials ? (
-                            <>
-                              <div className="mt-3 grid grid-cols-2 gap-2">
-                                <div className="grid gap-1">
-                                  <Label className="text-xs">售价（¥）</Label>
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    value={draftItem.price}
-                                    onChange={(e) => setItemPrice(stockItemId, Number(e.target.value))}
-                                    className="h-9 text-sm"
-                                  />
-                                </div>
-                                <div className="grid gap-1">
-                                  <Label className="text-xs">提成比例</Label>
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    step={0.01}
-                                    value={commissionRate}
-                                    onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
-                                    disabled={!isAdmin}
-                                    className="h-9 text-sm"
-                                  />
-                                </div>
-                              </div>
-                              <div className="mt-2 text-right text-sm text-emerald-700">
-                                提成 ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
-                              </div>
-                            </>
-                          ) : (
-                            <div className="mt-3 rounded-md bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground">
-                              平台下单仅锁定库存
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <div className="grid gap-1">
+                              <Label className="text-xs">售价（¥）</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={draftItem.price}
+                                onChange={(e) => setItemPrice(stockItemId, Number(e.target.value))}
+                                className="h-9 text-sm"
+                              />
                             </div>
-                          )}
+                            <div className="grid gap-1">
+                              <Label className="text-xs">提成比例</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.01}
+                                value={commissionRate}
+                                onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
+                                disabled={!isAdmin}
+                                className="h-9 text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-2 text-right text-sm text-emerald-700">
+                            提成 ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -5762,13 +5595,9 @@ function NewOrderDialog({
                         <tr>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">商品</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">缸位</th>
-                          {needsFinancials && (
-                            <>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">售价（¥）</th>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">提成比例</th>
-                              <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">提成</th>
-                            </>
-                          )}
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">售价（¥）</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">提成比例</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
@@ -5793,32 +5622,28 @@ function NewOrderDialog({
                               </div>
                             </td>
                             <td className="px-4 py-2.5 text-sm text-muted-foreground">{subTankName(stockItem.subTankId)}</td>
-                            {needsFinancials && (
-                              <>
-                                <td className="px-4 py-2.5">
-                                  <Input
-                                    type="number" min={0}
-                                    value={draftItem.price}
-                                    onChange={(e) => setItemPrice(stockItemId, Number(e.target.value))}
-                                    className="h-7 w-28 text-sm"
-                                  />
-                                </td>
-                                <td className="px-4 py-2.5">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    step={0.01}
-                                    value={commissionRate}
-                                    onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
-                                    disabled={!isAdmin}
-                                    className="h-7 w-24 text-sm"
-                                  />
-                                </td>
-                                <td className="px-4 py-2.5 text-right text-sm text-emerald-700">
-                                  ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
-                                </td>
-                              </>
-                            )}
+                            <td className="px-4 py-2.5">
+                              <Input
+                                type="number" min={0}
+                                value={draftItem.price}
+                                onChange={(e) => setItemPrice(stockItemId, Number(e.target.value))}
+                                className="h-7 w-28 text-sm"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.01}
+                                value={commissionRate}
+                                onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
+                                disabled={!isAdmin}
+                                className="h-7 w-24 text-sm"
+                              />
+                            </td>
+                            <td className="px-4 py-2.5 text-right text-sm text-emerald-700">
+                              ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
+                            </td>
                             <td className="px-2 py-2.5">
                               <button
                                 type="button"
@@ -5847,26 +5672,21 @@ function NewOrderDialog({
                 </button>
                 {selectedItems.size > 0 && (
                   <span className="text-xs text-muted-foreground">
-                    {needsFinancials
-                      ? `共 ${selectedItems.size} 条 · 小计 ¥${itemsTotal.toFixed(2)} · 预计提成 ¥${commissionTotal.toFixed(2)}`
-                      : `共 ${selectedItems.size} 条 · 仅锁定库存`}
+                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 预计提成 ¥{commissionTotal.toFixed(2)}
                   </span>
                 )}
               </div>
             </div>
 
             {/* ── 3. Fees + settlement ── */}
-            {needsFinancials ? (
-              <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
-                <div className="flex flex-col gap-3">
-                  <div className="text-xs font-medium text-muted-foreground">费用设置</div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    {needsLogistics && (
-                      <div className="grid gap-1.5">
-                        <Label className="text-xs">预收运费（¥）</Label>
-                        <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
-                      </div>
-                    )}
+            <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
+              <div className="flex flex-col gap-3">
+                <div className="text-xs font-medium text-muted-foreground">费用设置</div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">预收运费（¥）</Label>
+                    <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                  </div>
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={packagingFee || ""} onChange={(e) => setPackagingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
@@ -5878,28 +5698,22 @@ function NewOrderDialog({
                     {amountDue < 0 && <p className="text-xs text-red-500">折扣超出应付金额 ¥{Math.abs(amountDue).toFixed(2)}</p>}
                   </div>
                 </div>
-                </div>
-                <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
-                  <div className="text-xs font-medium text-muted-foreground mb-1">结算预览</div>
-                  <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
-                  <div className="flex justify-between text-sm text-emerald-700"><span>预计提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
-                  {needsLogistics && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
-                  {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
-                  {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
-                  <div className="flex justify-between font-semibold text-base border-t pt-2">
-                    <span>应付总额</span>
-                    <span className={amountDue < 0 ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
-                  </div>
+              </div>
+              <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+                <div className="text-xs font-medium text-muted-foreground mb-1">结算预览</div>
+                <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between text-sm text-emerald-700"><span>预计提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
+                {shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
+                {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
+                {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
+                <div className="flex justify-between font-semibold text-base border-t pt-2">
+                  <span>应付总额</span>
+                  <span className={amountDue < 0 ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
                 </div>
               </div>
-            ) : (
-              <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground sm:p-4">
-                平台下单不记录应收、实收和资金往来；创建后仅锁定所选库存。
-              </div>
-            )}
+            </div>
 
             {/* ── 4. Payment records ── */}
-            {needsFinancials && (
             <div className="rounded-lg border bg-card p-3 sm:p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
@@ -5928,7 +5742,6 @@ function NewOrderDialog({
                 canDelete={permission.canCreate}
               />
             </div>
-            )}
             </div>
           </div>
 
@@ -6237,13 +6050,11 @@ export function OrdersView() {
     const due = calcAmountDue(order, state.shipments);
     const paid = calcAmountPaid(order);
     const balance = due - paid;
-    const cardNeedsFinancials = orderNeedsFinancials(order.source);
-    const cardNeedsLogistics = orderNeedsLogistics(order.source);
     const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
     const activeShipments = orderShipments.filter(countsAsActiveShipment);
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
-    const unshippedCount = cardNeedsLogistics ? order.items.filter((item) => !shippedIds.has(item.stockItemId)).length : 0;
-    const nextShipDate = !cardNeedsLogistics || order.status === "completed"
+    const unshippedCount = order.items.filter((item) => !shippedIds.has(item.stockItemId)).length;
+    const nextShipDate = order.status === "completed"
       ? ""
       : order.items
           .map((item) => effectiveItemPlannedShipDate(order, item) || item.plannedShipDate)
@@ -6297,9 +6108,7 @@ export function OrdersView() {
               <div className="rounded-md bg-muted/35 px-2.5 py-2">
                 <div className="text-xs text-muted-foreground">预计发货</div>
                 <div className={nextShipDate === today ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
-                  {!cardNeedsLogistics
-                    ? "无需物流"
-                    : order.status === "completed"
+                  {order.status === "completed"
                     ? "已完成"
                     : nextShipDate
                       ? `${nextShipDate}${plannedTodayCount > 0 ? ` · ${plannedTodayCount}件` : ""}`
@@ -6309,12 +6118,11 @@ export function OrdersView() {
               <div className="rounded-md bg-muted/35 px-2.5 py-2">
                 <div className="text-xs text-muted-foreground">未发货</div>
                 <div className={unshippedCount > 0 ? "mt-0.5 font-semibold text-amber-700" : "mt-0.5 font-semibold text-emerald-700"}>
-                  {cardNeedsLogistics ? unshippedCount > 0 ? `${unshippedCount} 条` : "已处理" : "无需发货"}
+                  {unshippedCount > 0 ? `${unshippedCount} 条` : "已处理"}
                 </div>
               </div>
             </div>
 
-            {cardNeedsFinancials ? (
             <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
               <div>
                 <div className="text-xs text-muted-foreground">应付</div>
@@ -6329,12 +6137,6 @@ export function OrdersView() {
                 <div className={`mt-0.5 font-semibold ${financialClass}`}>¥{Math.abs(balance).toFixed(2)}</div>
               </div>
             </div>
-            ) : (
-              <div className="mt-3 rounded-md bg-muted/35 px-2.5 py-2 text-sm">
-                <div className="text-xs text-muted-foreground">平台下单</div>
-                <div className="mt-0.5 font-semibold text-sky-700">锁定库存 {order.items.length} 条</div>
-              </div>
-            )}
 
             <div className="mt-3 rounded-md bg-background px-2.5 py-2 text-xs text-muted-foreground">
               <span className="text-foreground">{shownItems || "无商品"}</span>
@@ -6823,7 +6625,7 @@ export function OrdersView() {
           },
           {
             key: "source",
-            title: "性质",
+            title: "来源",
             render: (r) => r.source ? (
               <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
                 {r.source}
@@ -6837,7 +6639,6 @@ export function OrdersView() {
             key: "plannedShipDate",
             title: "预计发货",
             render: (r) => {
-              if (!orderNeedsLogistics(r.source)) return <span className="text-muted-foreground">无需物流</span>;
               if (r.status === "completed") return <span className="text-muted-foreground">—</span>;
               const todayItems = r.items.filter((item) =>
                 effectiveItemPlannedShipDate(r, item) === today || item.plannedShipDate === today
@@ -6862,9 +6663,7 @@ export function OrdersView() {
             key: "shippingFee",
             title: "应付",
             render: (r) => (
-              orderNeedsFinancials(r.source)
-                ? <span className="text-sky-700 font-medium">¥{calcAmountDue(r, state.shipments).toFixed(2)}</span>
-                : <span className="text-muted-foreground">锁库存</span>
+              <span className="text-sky-700 font-medium">¥{calcAmountDue(r, state.shipments).toFixed(2)}</span>
             ),
           },
           {
@@ -6873,7 +6672,6 @@ export function OrdersView() {
             render: (r) => {
               const paid = calcAmountPaid(r);
               const due = calcAmountDue(r, state.shipments);
-              if (!orderNeedsFinancials(r.source)) return <span className="text-muted-foreground">—</span>;
               return (
                 <span className={paid + 0.005 >= due ? "text-emerald-600" : "text-orange-500"}>
                   ¥{paid.toFixed(2)}
