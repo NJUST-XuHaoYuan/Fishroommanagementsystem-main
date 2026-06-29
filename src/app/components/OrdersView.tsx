@@ -27,7 +27,7 @@ import {
   Fish, CheckCircle, XCircle, Eye, ShoppingCart, Plus, Trash2,
   ChevronDown, Check, Truck, X, MapPin, Pencil, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
-  Phone, MessageCircle, UserRound, RotateCcw,
+  Phone, MessageCircle, UserRound, RotateCcw, Search,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -3776,6 +3776,7 @@ function OrderDetailDialog({
     if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
       return toast.error("提成比例不能小于 0");
+    if (!editForm.plannedShipDate) return toast.error("请选择预计发货日期");
     if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
     if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
@@ -3786,7 +3787,7 @@ function OrderDetailDialog({
         date: editForm.date,
         source: editForm.source.trim(),
         shippingAddress: editForm.shippingAddress.trim(),
-        plannedShipDate: editForm.plannedShipDate || undefined,
+        plannedShipDate: editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
         shippingFee: editForm.shippingFee,
@@ -4042,7 +4043,7 @@ function OrderDetailDialog({
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     const ok = await saveStateTransform((latest) => {
       const shipments = latest.shipments.map((sh) =>
-        sh.id === shipment.id ? { ...sh, status: "delivered" as const } : sh
+        sh.id === shipment.id ? { ...sh, status: "delivered" as const, deliveredAt: nowDatetimeLocal() } : sh
       );
       const relatedShipments = shipments.filter((sh) => sh.orderId === order.id && countsAsActiveShipment(sh));
       const shippedIds = new Set(relatedShipments.flatMap((sh) => sh.itemStockIds ?? []));
@@ -4270,14 +4271,18 @@ function OrderDetailDialog({
                   )}
                 </div>
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">预计发货日期</Label>
+                  <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
                   <Input
                     type="date"
                     value={editForm.plannedShipDate}
                     min={editForm.date}
+                    required
                     onChange={(e) => changeEditPlannedShipDate(e.target.value)}
-                    className={editForm.plannedShipDate && editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
                   />
+                  {!editForm.plannedShipDate && (
+                    <p className="text-xs text-red-500">请选择预计发货日期</p>
+                  )}
                   {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
                     <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
                   )}
@@ -5203,6 +5208,7 @@ function NewOrderDialog({
   const [draftPayments, setDraftPayments] = useState<PaymentRecord[]>([]);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [editingPayment, setEditingPayment] = useState<PaymentRecord | null>(null);
+  const [submitAttempted, setSubmitAttempted] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -5214,6 +5220,7 @@ function NewOrderDialog({
       setDraftPayments([]);
       setPaymentOpen(false);
       setEditingPayment(null);
+      setSubmitAttempted(false);
     }
   }, [open, defaultContactPerson, today]);
 
@@ -5334,11 +5341,13 @@ function NewOrderDialog({
 
   const save = async () => {
     if (!permission.requirePermission("create")) return;
+    setSubmitAttempted(true);
     if (!customerId) return toast.error("请选择客户");
     if (date > today) return toast.error("下单日期不能晚于今天");
     if (!source.trim()) return toast.error("请选择订单来源");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
+    if (!plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
@@ -5360,7 +5369,7 @@ function NewOrderDialog({
         date,
         source: source.trim(),
         shippingAddress: shippingAddress.trim(),
-        plannedShipDate: plannedShipDate || undefined,
+        plannedShipDate,
         contactPerson: contactPerson.trim(),
         items,
         shippingFee,
@@ -5381,23 +5390,32 @@ function NewOrderDialog({
   };
 
   const excludeIds = useMemo(() => new Set(selectedItems.keys()), [selectedItems]);
+  const selectedRows = useMemo(() => (
+    Array.from(selectedItems.entries()).flatMap(([stockItemId, draftItem]) => {
+      const stockItem = state.stock.find((item) => item.id === stockItemId);
+      if (!stockItem) return [];
+      const product = state.products.find((item) => item.id === stockItem.productId);
+      const commissionRate = normalizeCommissionRate(draftItem.commissionRate);
+      return [{ stockItemId, stockItem, product, draftItem, commissionRate }];
+    })
+  ), [selectedItems, state.stock, state.products]);
 
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
           aria-describedby={undefined}
-          className="max-w-none sm:max-w-none flex flex-col p-8"
-          style={{ width: "min(92vw, 1080px)", maxWidth: "min(92vw, 1080px)", height: "90vh" }}
+          className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[90vh] sm:w-[min(92vw,1080px)] sm:max-w-[min(92vw,1080px)] sm:rounded-lg sm:border sm:p-0"
         >
-          <DialogHeader>
-            <DialogTitle>新建销售订单</DialogTitle>
+          <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left sm:px-6">
+            <DialogTitle className="text-base sm:text-lg">新建销售订单</DialogTitle>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto flex flex-col gap-5 pr-1">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-6">
+            <div className="flex flex-col gap-4 sm:gap-5">
 
             {/* ── 1. Customer + date + notes ── */}
-            <div className="rounded-lg border p-4 grid grid-cols-4 gap-3 items-end">
+            <div className="grid grid-cols-1 items-end gap-3 rounded-lg border bg-card p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-4">
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-2">
                   <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
@@ -5417,7 +5435,7 @@ function NewOrderDialog({
               <div className="grid gap-2">
                 <Label>来源<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select value={source} onValueChange={setSource}>
-                  <SelectTrigger className={!source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger className={submitAttempted && !source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择来源" />
                   </SelectTrigger>
                   <SelectContent>
@@ -5441,14 +5459,18 @@ function NewOrderDialog({
                 )}
               </div>
               <div className="grid gap-2">
-                <Label>预计发货日期</Label>
+                <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
                 <Input
                   type="date"
                   value={plannedShipDate}
                   min={date}
+                  required
                   onChange={(e) => changePlannedShipDate(e.target.value)}
-                  className={plannedShipDate && plannedShipDate < date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
                 />
+                {submitAttempted && !plannedShipDate && (
+                  <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
+                )}
                 {plannedShipDate && plannedShipDate < date && (
                   <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
                 )}
@@ -5459,7 +5481,7 @@ function NewOrderDialog({
                   value={contactPerson}
                   onValueChange={setContactPerson}
                 >
-                  <SelectTrigger className={!contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger className={submitAttempted && !contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择对接人" />
                   </SelectTrigger>
                   <SelectContent>
@@ -5471,7 +5493,7 @@ function NewOrderDialog({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="col-span-3 grid gap-2">
+              <div className="grid gap-2 md:col-span-2 xl:col-span-3">
                 <Label>本单收货地址</Label>
                 <Input
                   value={shippingAddress}
@@ -5482,15 +5504,15 @@ function NewOrderDialog({
                   {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
                 </p>
               </div>
-              <div className="col-span-4 grid gap-2">
+              <div className="grid gap-2 md:col-span-2 xl:col-span-4">
                 <Label>备注</Label>
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
               </div>
             </div>
 
             {/* ── 2. Items table ── */}
-            <div className="rounded-lg border flex flex-col">
-              <div className="px-4 py-2.5 bg-muted/50 border-b flex items-center justify-between shrink-0 rounded-t-lg">
+            <div className="flex flex-col rounded-lg border bg-card">
+              <div className="flex shrink-0 flex-col gap-1 border-b bg-muted/50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:px-4">
                 <span className="text-sm font-medium">
                   已添加商品{selectedItems.size > 0 ? `（${selectedItems.size} 条）` : ""}
                 </span>
@@ -5508,44 +5530,98 @@ function NewOrderDialog({
                     暂无商品，点击下方「添加商品」按钮
                   </div>
                 ) : (
-                  <table className="w-full">
-                    <thead className="bg-muted/20 sticky top-0 z-10">
-                      <tr>
-                        <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
-                        <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">缸位</th>
-                        <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">售价（¥）</th>
-                        <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">提成比例</th>
-                        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成</th>
-                        <th className="w-10 px-2 py-2" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Array.from(selectedItems.keys()).map((stockItemId) => {
-                        const s = state.stock.find((x) => x.id === stockItemId);
-                        if (!s) return null;
-                        const p = getProduct(s.productId);
-                        const draftItem = selectedItems.get(stockItemId) ?? { price: 0, commissionRate: 0 };
-                        const commissionRate = normalizeCommissionRate(draftItem.commissionRate);
-                        return (
+                  <>
+                    <div className="flex flex-col divide-y md:hidden">
+                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, commissionRate }) => (
+                        <div key={stockItemId} className="p-3">
+                          <div className="flex items-start gap-2">
+                            <div className="size-10 shrink-0 overflow-hidden rounded border bg-muted">
+                              {product?.imageUrl
+                                ? <ImageWithFallback src={product.imageUrl} alt="" className="size-full object-cover" />
+                                : <div className="flex size-full items-center justify-center"><Fish className="size-4 text-muted-foreground" /></div>}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium">{product?.name ?? "—"}</div>
+                              <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                                {stockItem.code && (
+                                  <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-600">
+                                    {stockItem.code}
+                                  </span>
+                                )}
+                                <span>{subTankName(stockItem.subTankId)}</span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeItem(stockItemId)}
+                              className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600"
+                              title="移除"
+                            >
+                              <X className="size-4" />
+                            </button>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <div className="grid gap-1">
+                              <Label className="text-xs">售价（¥）</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={draftItem.price}
+                                onChange={(e) => setItemPrice(stockItemId, Number(e.target.value))}
+                                className="h-9 text-sm"
+                              />
+                            </div>
+                            <div className="grid gap-1">
+                              <Label className="text-xs">提成比例</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.01}
+                                value={commissionRate}
+                                onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
+                                disabled={!isAdmin}
+                                className="h-9 text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-2 text-right text-sm text-emerald-700">
+                            提成 ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <table className="hidden w-full md:table">
+                      <thead className="sticky top-0 z-10 bg-muted/20">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">商品</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">缸位</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">售价（¥）</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">提成比例</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">提成</th>
+                          <th className="w-10 px-2 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, commissionRate }) => (
                           <tr key={stockItemId} className="border-t">
                             <td className="px-4 py-2.5">
                               <div className="flex items-center gap-2">
-                                <div className="size-7 rounded overflow-hidden border bg-muted shrink-0">
-                                  {p?.imageUrl
-                                    ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
-                                    : <div className="size-full flex items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
+                                <div className="size-7 shrink-0 overflow-hidden rounded border bg-muted">
+                                  {product?.imageUrl
+                                    ? <ImageWithFallback src={product.imageUrl} alt="" className="size-full object-cover" />
+                                    : <div className="flex size-full items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
                                 </div>
                                 <div className="min-w-0">
-                                  <span className="text-sm">{p?.name ?? "—"}</span>
-                                  {s.code && (
+                                  <span className="text-sm">{product?.name ?? "—"}</span>
+                                  {stockItem.code && (
                                     <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
-                                      {s.code}
+                                      {stockItem.code}
                                     </span>
                                   )}
                                 </div>
                               </div>
                             </td>
-                            <td className="px-4 py-2.5 text-sm text-muted-foreground">{subTankName(s.subTankId)}</td>
+                            <td className="px-4 py-2.5 text-sm text-muted-foreground">{subTankName(stockItem.subTankId)}</td>
                             <td className="px-4 py-2.5">
                               <Input
                                 type="number" min={0}
@@ -5570,23 +5646,24 @@ function NewOrderDialog({
                             </td>
                             <td className="px-2 py-2.5">
                               <button
+                                type="button"
                                 onClick={() => removeItem(stockItemId)}
-                                className="text-muted-foreground hover:text-red-500 transition-colors"
+                                className="text-muted-foreground transition-colors hover:text-red-500"
                                 title="移除"
                               >
                                 <X className="size-4" />
                               </button>
                             </td>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
                 )}
               </div>
 
               {/* Always-visible add button */}
-              <div className="px-4 py-2.5 border-t bg-muted/10 flex items-center justify-between shrink-0 rounded-b-lg">
+              <div className="flex shrink-0 flex-col gap-2 rounded-b-lg border-t bg-muted/10 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:px-4">
                 <button
                   onClick={() => setPickerOpen(true)}
                   className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium transition-colors"
@@ -5602,10 +5679,10 @@ function NewOrderDialog({
             </div>
 
             {/* ── 3. Fees + settlement ── */}
-            <div className="rounded-lg border p-4 grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
               <div className="flex flex-col gap-3">
                 <div className="text-xs font-medium text-muted-foreground">费用设置</div>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div className="grid gap-1.5">
                     <Label className="text-xs">预收运费（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
@@ -5622,7 +5699,7 @@ function NewOrderDialog({
                   </div>
                 </div>
               </div>
-              <div className="flex flex-col gap-2 justify-center border-l pl-6">
+              <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
                 <div className="text-xs font-medium text-muted-foreground mb-1">结算预览</div>
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-sm text-emerald-700"><span>预计提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
@@ -5637,7 +5714,7 @@ function NewOrderDialog({
             </div>
 
             {/* ── 4. Payment records ── */}
-            <div className="rounded-lg border p-4">
+            <div className="rounded-lg border bg-card p-3 sm:p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
                   <div className="text-xs font-medium text-muted-foreground">资金往来记录</div>
@@ -5665,11 +5742,12 @@ function NewOrderDialog({
                 canDelete={permission.canCreate}
               />
             </div>
+            </div>
           </div>
 
-          <DialogFooter className="pt-2 border-t">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button onClick={save}><ShoppingCart className="size-4 mr-1" />创建订单</Button>
+          <DialogFooter className="flex-col border-t bg-background px-4 py-3 sm:flex-row sm:px-6">
+            <Button variant="outline" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button className="w-full sm:w-auto" onClick={save}><ShoppingCart className="size-4 mr-1" />创建订单</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -5714,6 +5792,8 @@ export function OrdersView() {
   const [deleteOrder, setDeleteOrder] = useState<Order | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
   const [exportFormatOpen, setExportFormatOpen] = useState(false);
+  const [mobileSearch, setMobileSearch] = useState("");
+  const [mobileVisibleCount, setMobileVisibleCount] = useState(12);
 
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
   const [dateFrom, setDateFrom] = useState("");
@@ -5853,6 +5933,19 @@ export function OrdersView() {
 	    });
 	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
 
+  const mobileFilteredOrders = useMemo(() => {
+    const term = mobileSearch.trim().toLowerCase();
+    if (!term) return filteredOrders;
+    return filteredOrders.filter((order) => order.searchText.toLowerCase().includes(term));
+  }, [filteredOrders, mobileSearch]);
+
+  useEffect(() => {
+    setMobileVisibleCount(12);
+  }, [mobileSearch, statusFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
+
+  const mobileVisibleOrders = mobileFilteredOrders.slice(0, mobileVisibleCount);
+  const hasMoreMobileOrders = mobileVisibleOrders.length < mobileFilteredOrders.length;
+
   useEffect(() => {
     setSelectedOrderIds((prev) => {
       if (prev.size === 0) return prev;
@@ -5867,11 +5960,24 @@ export function OrdersView() {
     [orderList, selectedOrderIds]
   );
   const allFilteredSelected = filteredOrders.length > 0 && filteredOrders.every((order) => selectedOrderIds.has(order.id));
+  const allMobileFilteredSelected = mobileFilteredOrders.length > 0 && mobileFilteredOrders.every((order) => selectedOrderIds.has(order.id));
 
   const toggleSelectedOrder = (id: string, checked: boolean) => {
     setSelectedOrderIds((prev) => {
       const next = new Set(prev);
       checked ? next.add(id) : next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleMobileFilteredOrders = () => {
+    setSelectedOrderIds((prev) => {
+      const next = new Set(prev);
+      if (allMobileFilteredSelected) {
+        mobileFilteredOrders.forEach((order) => next.delete(order.id));
+      } else {
+        mobileFilteredOrders.forEach((order) => next.add(order.id));
+      }
       return next;
     });
   };
@@ -5920,6 +6026,7 @@ export function OrdersView() {
   ] as const;
 
   const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly || myActiveOnly;
+  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || statusFilter !== "all";
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
@@ -5933,6 +6040,162 @@ export function OrdersView() {
     () => orderList.filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments)).length,
     [orderList, state.shipments]
   );
+  const mobileProductById = useMemo(
+    () => new Map(state.products.map((product) => [product.id, product])),
+    [state.products]
+  );
+
+  const renderMobileOrderCard = (order: OrderListRow) => {
+    const customer = getCustomer(order.customerId);
+    const due = calcAmountDue(order, state.shipments);
+    const paid = calcAmountPaid(order);
+    const balance = due - paid;
+    const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
+    const activeShipments = orderShipments.filter(countsAsActiveShipment);
+    const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
+    const unshippedCount = order.items.filter((item) => !shippedIds.has(item.stockItemId)).length;
+    const nextShipDate = order.status === "completed"
+      ? ""
+      : order.items
+          .map((item) => effectiveItemPlannedShipDate(order, item) || item.plannedShipDate)
+          .filter(Boolean)
+          .sort()[0] || order.plannedShipDate || "";
+    const plannedTodayCount = order.items.filter((item) =>
+      effectiveItemPlannedShipDate(order, item) === today || item.plannedShipDate === today
+    ).length;
+    const itemNames = order.items
+      .map((item) => mobileProductById.get(item.productId)?.name ?? item.productId)
+      .filter(Boolean);
+    const shownItems = itemNames.slice(0, 2).join("、");
+    const extraItemCount = Math.max(0, itemNames.length - 2);
+    const financialClass = balance > 0.005
+      ? "text-orange-600"
+      : balance < -0.005
+        ? "text-red-600"
+        : "text-emerald-700";
+
+    return (
+      <article
+        key={order.id}
+        className="rounded-lg border bg-card p-3 shadow-sm transition-colors active:bg-muted/50"
+      >
+        <div className="flex items-start gap-3">
+          <Checkbox
+            checked={selectedOrderIds.has(order.id)}
+            onCheckedChange={(checked) => toggleSelectedOrder(order.id, checked === true)}
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`选择订单 ${order.orderNo}`}
+            className="mt-1"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium text-muted-foreground">{order.orderNo}</div>
+                <div className="mt-0.5 truncate text-base font-semibold text-foreground">
+                  {customer?.name ?? "未找到客户"}
+                </div>
+              </div>
+              <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
+                {order.items.length} 条
+              </span>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <OrderStatusTags order={order} shipments={state.shipments} />
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <div className="rounded-md bg-muted/35 px-2.5 py-2">
+                <div className="text-xs text-muted-foreground">预计发货</div>
+                <div className={nextShipDate === today ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
+                  {order.status === "completed"
+                    ? "已完成"
+                    : nextShipDate
+                      ? `${nextShipDate}${plannedTodayCount > 0 ? ` · ${plannedTodayCount}件` : ""}`
+                      : "未设置"}
+                </div>
+              </div>
+              <div className="rounded-md bg-muted/35 px-2.5 py-2">
+                <div className="text-xs text-muted-foreground">未发货</div>
+                <div className={unshippedCount > 0 ? "mt-0.5 font-semibold text-amber-700" : "mt-0.5 font-semibold text-emerald-700"}>
+                  {unshippedCount > 0 ? `${unshippedCount} 条` : "已处理"}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+              <div>
+                <div className="text-xs text-muted-foreground">应付</div>
+                <div className="mt-0.5 font-semibold text-sky-700">¥{due.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">实付</div>
+                <div className="mt-0.5 font-semibold text-foreground">¥{paid.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">{balance < -0.005 ? "应退" : "待收"}</div>
+                <div className={`mt-0.5 font-semibold ${financialClass}`}>¥{Math.abs(balance).toFixed(2)}</div>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-md bg-background px-2.5 py-2 text-xs text-muted-foreground">
+              <span className="text-foreground">{shownItems || "无商品"}</span>
+              {extraItemCount > 0 && <span> 等 {itemNames.length} 条</span>}
+            </div>
+
+            <div className="mt-3 flex flex-col items-start gap-2">
+              <div className="text-xs text-muted-foreground">下单 {order.date}</div>
+              <div className="flex items-center gap-2">
+                {customer && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-9 px-2 text-sky-700"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setViewCustomerId(customer.id);
+                    }}
+                  >
+                    客户
+                  </Button>
+                )}
+                {permission.canDelete && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className={hasPaymentRecords(order) ? "h-9 px-2 text-muted-foreground" : "h-9 px-2 text-red-600 hover:bg-red-50 hover:text-red-700"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (hasPaymentRecords(order)) {
+                        toast.error("该订单已有收款记录，不能删除");
+                        return;
+                      }
+                      setDeleteOrder(order);
+                    }}
+                  >
+                    删除
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-9 px-3"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setViewOrder(order);
+                  }}
+                >
+                  详情
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+    );
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -5943,8 +6206,221 @@ export function OrdersView() {
         </p>
       </div>
 
+      <div className="flex flex-col gap-3 pb-16 md:hidden">
+        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+          {STATUS_FILTERS.map(({ key, label }) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => {
+                setStatusFilter(key);
+                if (key !== "active") setMyActiveOnly(false);
+              }}
+              className={`h-10 shrink-0 rounded-full px-4 text-sm font-medium transition-colors ${
+                statusFilter === key
+                  ? "bg-sky-600 text-white"
+                  : "border border-border bg-card text-muted-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <section className="rounded-lg border bg-card p-3 shadow-sm">
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={mobileSearch}
+                onChange={(event) => setMobileSearch(event.target.value)}
+                placeholder="搜索订单、客户、商品..."
+                className="h-10 pl-9"
+              />
+            </div>
+            {permission.canCreate && (
+              <Button type="button" className="h-10 shrink-0 px-3" onClick={() => setNewOpen(true)}>
+                <Plus className="size-4" />
+                新建
+              </Button>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={myActiveOnly ? "default" : "outline"}
+              className={myActiveOnly
+                ? "h-10 bg-sky-600 text-white hover:bg-sky-700"
+                : "h-10 border-sky-200 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
+              }
+              onClick={() => {
+                const next = !myActiveOnly;
+                setMyActiveOnly(next);
+                if (next) {
+                  setStatusFilter("active");
+                  setDateFrom("");
+                  setDateTo("");
+                  setTodayShipOnly(false);
+                  setPendingTrackingOnly(false);
+                }
+              }}
+            >
+              <UserRound className="size-3.5 mr-1" />
+              我的 {myActiveOrderCount}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={todayShipOnly ? "default" : "outline"}
+              className={todayShipOnly
+                ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
+                : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+              }
+              onClick={() => {
+                const next = !todayShipOnly;
+                setTodayShipOnly(next);
+                if (next) {
+                  setPendingTrackingOnly(false);
+                  setMyActiveOnly(false);
+                  setStatusFilter("all");
+                  setDateFrom("");
+                  setDateTo("");
+                }
+              }}
+            >
+              <Truck className="size-3.5 mr-1" />
+              今日发货 {todayShipCount}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={pendingTrackingOnly ? "default" : "outline"}
+              className={pendingTrackingOnly
+                ? "h-10 bg-emerald-600 text-white hover:bg-emerald-700"
+                : "h-10 border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+              }
+              onClick={() => {
+                const next = !pendingTrackingOnly;
+                setPendingTrackingOnly(next);
+                if (next) {
+                  setTodayShipOnly(false);
+                  setMyActiveOnly(false);
+                  setStatusFilter("all");
+                  setDateFrom("");
+                  setDateTo("");
+                  setSelectedOrderIds(new Set(
+                    orderList
+                      .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
+                      .map((order) => order.id)
+                  ));
+                }
+              }}
+            >
+              <Truck className="size-3.5 mr-1" />
+              出库待发 {pendingTrackingCount}
+            </Button>
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="grid gap-1">
+              <Label className="text-xs text-muted-foreground">开始日期</Label>
+              <Input
+                type="date"
+                value={dateFrom}
+                max={dateFromMax}
+                onChange={(event) => changeDateFrom(event.target.value)}
+                className="h-10 text-sm"
+              />
+            </div>
+            <div className="grid gap-1">
+              <Label className="text-xs text-muted-foreground">结束日期</Label>
+              <Input
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                max={today}
+                onChange={(event) => changeDateTo(event.target.value)}
+                className="h-10 text-sm"
+              />
+            </div>
+          </div>
+
+          {hasMobileFilter && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter("all");
+                setDateFrom("");
+                setDateTo("");
+                setTodayShipOnly(false);
+                setPendingTrackingOnly(false);
+                setMyActiveOnly(false);
+                setMobileSearch("");
+              }}
+              className="mt-3 h-9 text-sm font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              清除筛选
+            </button>
+          )}
+        </section>
+
+        <section className="rounded-lg border bg-muted/20 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground">共 {mobileFilteredOrders.length} 单</div>
+              <div className="text-xs text-muted-foreground">已选 {selectedOrders.length} 单用于导出</div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-9 px-3"
+                disabled={mobileFilteredOrders.length === 0}
+                onClick={toggleMobileFilteredOrders}
+              >
+                {allMobileFilteredSelected ? "取消" : "全选"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-9 px-3"
+                onClick={() => setExportFormatOpen(true)}
+                disabled={selectedOrders.length === 0}
+              >
+                导出
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        <div className="flex flex-col gap-3">
+          {mobileVisibleOrders.length === 0 ? (
+            <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+              没有符合条件的订单
+            </div>
+          ) : (
+            mobileVisibleOrders.map(renderMobileOrderCard)
+          )}
+        </div>
+
+        {hasMoreMobileOrders && (
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10"
+            onClick={() => setMobileVisibleCount((count) => count + 12)}
+          >
+            加载更多（{mobileVisibleOrders.length}/{mobileFilteredOrders.length}）
+          </Button>
+        )}
+      </div>
+
       {/* Filter bar */}
-      <div className="flex items-center gap-3 flex-wrap">
+      <div className="hidden items-center gap-3 flex-wrap md:flex">
         <div className="flex gap-1">
           {STATUS_FILTERS.map(({ key, label }) => (
             <button
@@ -6066,7 +6542,7 @@ export function OrdersView() {
         </div>
 	      </div>
 
-	      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
+	      <div className="hidden flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2 md:flex">
 	        <div className="flex flex-wrap items-center gap-2 text-sm">
 	          <span className="text-muted-foreground">批量导出</span>
 	          <span className="font-medium">已选 {selectedOrders.length} 个订单</span>
@@ -6093,6 +6569,7 @@ export function OrdersView() {
         </Button>
 	      </div>
 
+	      <div className="hidden md:block">
 	      <DataTable
 	        data={filteredOrders}
         searchKeys={["searchText"] as (keyof OrderListRow)[]}
@@ -6240,6 +6717,7 @@ export function OrdersView() {
           </div>
         )}
       />
+      </div>
 
       <Dialog open={exportFormatOpen} onOpenChange={setExportFormatOpen}>
         <DialogContent className="sm:max-w-md" aria-describedby={undefined}>

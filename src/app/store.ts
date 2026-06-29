@@ -227,6 +227,7 @@ export type Shipment = {
   createdAt?: string;
   outboundDate?: string;
   shippedAt?: string;
+  deliveredAt?: string;
   shipDate: string;
   carrier: string;
   trackingNo: string;

@@ -74,6 +74,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
+    "playwright-core": "^1.61.1",
     "tailwindcss": "4.1.12",
     "vite": "6.3.5"
   },
