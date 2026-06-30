@@ -530,6 +530,21 @@ type PendingTrackingShipmentRow = {
   stockNotes: string;
 };
 
+type ShipmentWeatherDay = {
+  date?: string;
+  weather?: string;
+  tempMin?: number;
+  tempMax?: number;
+  precipitationProbabilityMax?: number;
+};
+
+type ShipmentWeatherResponse = {
+  ok?: boolean;
+  locationName?: string;
+  forecast?: ShipmentWeatherDay[];
+  error?: string;
+};
+
 function collectPendingTrackingShipmentRows(orders: Order[], state: Store): PendingTrackingShipmentRow[] {
   const customers = state.customers ?? [];
   const product = (id: string) => state.products.find((entry) => entry.id === id);
@@ -598,7 +613,75 @@ function groupPendingTrackingRows(rows: PendingTrackingShipmentRow[]): PendingTr
   return [...shipmentGroups.values()];
 }
 
-function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
+function normalizeWeatherAddress(address: unknown): string {
+  return String(address ?? "").trim();
+}
+
+function formatWeatherDate(date?: string): string {
+  const match = String(date ?? "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return String(date ?? "").trim() || "日期未知";
+  return `${Number(match[2])}月${Number(match[3])}日`;
+}
+
+function formatShipmentWeatherDay(day: ShipmentWeatherDay): string {
+  const weather = String(day.weather ?? "").trim() || "天气未知";
+  const tempParts = [
+    typeof day.tempMin === "number" ? `${Math.round(day.tempMin)}℃` : "",
+    typeof day.tempMax === "number" ? `${Math.round(day.tempMax)}℃` : "",
+  ].filter(Boolean);
+  const temp = tempParts.length === 2 ? `${tempParts[0]}~${tempParts[1]}` : tempParts[0] || "";
+  const rain = typeof day.precipitationProbabilityMax === "number"
+    ? `降水概率${Math.round(day.precipitationProbabilityMax)}%`
+    : "";
+  return [formatWeatherDate(day.date), weather, temp, rain].filter(Boolean).join(" ");
+}
+
+function formatShipmentWeatherForecast(result?: ShipmentWeatherResponse): string {
+  if (!result?.ok || !Array.isArray(result.forecast) || result.forecast.length === 0) {
+    return result?.error ? `未获取到预报：${result.error}` : "未获取到预报";
+  }
+  const location = String(result.locationName ?? "").trim();
+  const days = result.forecast.slice(0, 2).map(formatShipmentWeatherDay).filter(Boolean);
+  return [location ? `预报地点：${location}` : "", ...days].filter(Boolean).join("；") || "未获取到预报";
+}
+
+async function fetchWeatherForecastsForPendingTrackingRows(rows: PendingTrackingShipmentRow[]): Promise<Map<string, string>> {
+  const addresses = [...new Set(rows
+    .map((row) => normalizeWeatherAddress(row.address))
+    .filter((address) => address && address !== "待确认")
+  )];
+  const forecasts = new Map<string, string>();
+  if (addresses.length === 0) return forecasts;
+
+  toast.info("正在获取发货目的地未来两天天气预报…");
+  await Promise.all(addresses.map(async (address) => {
+    try {
+      const response = await fetch(`/api/weather/forecast?address=${encodeURIComponent(address)}`, {
+        method: "GET",
+        headers: authJsonHeaders(),
+      });
+      const result = await response.json().catch(() => ({})) as ShipmentWeatherResponse;
+      forecasts.set(address, response.ok && result.ok ? formatShipmentWeatherForecast(result) : formatShipmentWeatherForecast({
+        ok: false,
+        error: String(result?.error ?? `HTTP ${response.status}`),
+      }));
+    } catch (error) {
+      forecasts.set(address, formatShipmentWeatherForecast({
+        ok: false,
+        error: error instanceof Error ? error.message : "请求失败",
+      }));
+    }
+  }));
+  return forecasts;
+}
+
+function weatherForPendingTrackingRow(row: PendingTrackingShipmentRow, forecasts: Map<string, string>): string {
+  const address = normalizeWeatherAddress(row.address);
+  if (!address || address === "待确认") return "地址待确认，未获取到预报";
+  return forecasts.get(address) ?? "未获取到预报";
+}
+
+async function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
   const rows = collectPendingTrackingShipmentRows(orders, state);
 
   if (rows.length === 0) {
@@ -607,6 +690,7 @@ function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
   }
 
   const shipmentGroupList = groupPendingTrackingRows(rows);
+  const weatherForecasts = await fetchWeatherForecastsForPendingTrackingRows(rows);
 
   const tableRow = (cells: unknown[], header = false, className = "") =>
     `<tr${className ? ` class="${className}"` : ""}>${cells.map((cell) => `<${header ? "th" : "td"} class="text">${excelEscape(cell)}</${header ? "th" : "td"}>`).join("")}</tr>`;
@@ -639,6 +723,10 @@ function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
         cells: ["订单备注", first.orderNotes || "—", "商品数", `${items.length} 条`],
       },
       {
+        className: "weather-row",
+        cells: ["未来两天天气", weatherForPendingTrackingRow(first, weatherForecasts), "预报来源", "Open-Meteo"],
+      },
+      {
         className: "item-header",
         cells: ["商品名", "缸位", "尺寸", "备注"],
       },
@@ -667,6 +755,7 @@ function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
           .section { background: #0f70a8; color: #fff; font-size: 14px; font-weight: 700; }
           .order-row td { background: #eaf5ff; font-weight: 700; }
           .note-row td { background: #f7fbff; color: #333; }
+          .weather-row td { background: #ecfdf5; color: #064e3b; }
           .item-header td { background: #eef2f6; font-weight: 700; text-align: center; }
           .item-row td { background: #fff; }
           .item-row td:first-child { font-weight: 700; }
@@ -693,7 +782,7 @@ function exportPendingTrackingShipmentsExcel(orders: Order[], state: Store) {
   toast.success(`已导出 ${rows.length} 条已出库待发货商品`);
 }
 
-function exportPendingTrackingShipmentsWord(orders: Order[], state: Store) {
+async function exportPendingTrackingShipmentsWord(orders: Order[], state: Store) {
   const rows = collectPendingTrackingShipmentRows(orders, state);
   if (rows.length === 0) {
     toast.error("没有符合条件的发货商品：需已出库、未确认发货且不是上门自取");
@@ -701,6 +790,7 @@ function exportPendingTrackingShipmentsWord(orders: Order[], state: Store) {
   }
 
   const shipmentGroupList = groupPendingTrackingRows(rows);
+  const weatherForecasts = await fetchWeatherForecastsForPendingTrackingRows(rows);
   const blocks = shipmentGroupList.map((items, index) => {
     const first = items[0];
     const sortedItems = [...items].sort((a, b) =>
@@ -726,6 +816,10 @@ function exportPendingTrackingShipmentsWord(orders: Order[], state: Store) {
             <tr class="meta-row">
               <th class="meta-label">订单备注</th>
               <td colspan="4">${excelEscape(first.orderNotes || "—")}</td>
+            </tr>
+            <tr class="meta-row weather-row">
+              <th class="meta-label">未来两天天气</th>
+              <td colspan="4">${excelEscape(weatherForPendingTrackingRow(first, weatherForecasts))}</td>
             </tr>
             <tr>
               <th class="idx">#</th>
@@ -771,6 +865,7 @@ function exportPendingTrackingShipmentsWord(orders: Order[], state: Store) {
           .order-head th { background: #eaf5ff; }
           .meta-row th, .meta-row td { background: #fff; }
           .meta-row .meta-label { background: #f8fafc; }
+          .weather-row th, .weather-row td { background: #ecfdf5; color: #064e3b; }
           .idx { width: 22pt; text-align: center; }
           .size { width: 48pt; text-align: center; }
         </style>
@@ -6738,8 +6833,14 @@ export function OrdersView() {
                 className="h-auto flex-col items-start gap-1 p-4 text-left"
                 onClick={() => {
                   setExportFormatOpen(false);
-                  if (pendingTrackingOnly) exportPendingTrackingShipmentsExcel(selectedOrders, state);
-                  else exportOrdersExcel(selectedOrders, state);
+                  void (async () => {
+                    try {
+                      if (pendingTrackingOnly) await exportPendingTrackingShipmentsExcel(selectedOrders, state);
+                      else exportOrdersExcel(selectedOrders, state);
+                    } catch (error) {
+                      toast.error(error instanceof Error ? error.message : "导出失败，请重试");
+                    }
+                  })();
                 }}
               >
                 <span className="font-semibold">Excel</span>
@@ -6757,7 +6858,13 @@ export function OrdersView() {
                     return;
                   }
                   setExportFormatOpen(false);
-                  exportPendingTrackingShipmentsWord(selectedOrders, state);
+                  void (async () => {
+                    try {
+                      await exportPendingTrackingShipmentsWord(selectedOrders, state);
+                    } catch (error) {
+                      toast.error(error instanceof Error ? error.message : "导出失败，请重试");
+                    }
+                  })();
                 }}
               >
                 <span className="font-semibold">Word</span>

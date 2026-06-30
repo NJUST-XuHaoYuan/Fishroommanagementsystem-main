@@ -112,6 +112,13 @@ const feishuConfig = {
   defaultSiteId: process.env.FEISHU_DEFAULT_SITE_ID || ALL_SITE_ID,
 };
 let feishuTenantTokenCache = { token: "", expiresAt: 0 };
+const weatherForecastConfig = {
+  geocodingBaseUrl: String(process.env.WEATHER_GEOCODING_BASE_URL || "https://geocoding-api.open-meteo.com/v1/search").replace(/\/+$/, ""),
+  forecastBaseUrl: String(process.env.WEATHER_FORECAST_BASE_URL || "https://api.open-meteo.com/v1/forecast").replace(/\/+$/, ""),
+  timeoutMs: numberFromEnv(process.env.WEATHER_FORECAST_TIMEOUT_MS, 8000),
+  cacheTtlMs: numberFromEnv(process.env.WEATHER_FORECAST_CACHE_TTL_MS, 6 * 60 * 60 * 1000),
+};
+const weatherForecastCache = new Map();
 const STATE_KEYS = [
   "systemSettings",
   "sites",
@@ -1547,6 +1554,168 @@ function clampText(value, maxLength = 1800) {
   const text = String(value ?? "").trim();
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function addUniqueWeatherCandidate(candidates, value) {
+  const candidate = String(value ?? "")
+    .replace(/[()（）【】\[\]{}<>《》]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+}
+
+function stripChineseProvince(value) {
+  return String(value ?? "").replace(/^.*?(?:省|自治区|特别行政区)/, "").trim();
+}
+
+function stripChinesePlaceSuffix(value) {
+  return String(value ?? "").replace(/(?:市|自治州|地区|盟|县|区)$/u, "").trim();
+}
+
+function weatherSearchCandidates(address) {
+  const clean = String(address ?? "")
+    .replace(/\d{6,}/g, " ")
+    .replace(/[，,。；;、\n\r\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const candidates = [];
+  if (!clean) return candidates;
+
+  for (const match of [...clean.matchAll(/([\u4e00-\u9fa5]{2,24}?(?:市|自治州|地区|盟))/gu)].reverse()) {
+    const place = stripChineseProvince(match[1]);
+    addUniqueWeatherCandidate(candidates, place);
+    addUniqueWeatherCandidate(candidates, stripChinesePlaceSuffix(place));
+  }
+  const municipality = clean.match(/(北京|上海|天津|重庆)市?/u);
+  if (municipality) addUniqueWeatherCandidate(candidates, municipality[1]);
+  for (const match of [...clean.matchAll(/([\u4e00-\u9fa5]{2,18}?(?:县|区))/gu)].reverse()) {
+    const place = stripChineseProvince(match[1]);
+    addUniqueWeatherCandidate(candidates, place);
+    addUniqueWeatherCandidate(candidates, stripChinesePlaceSuffix(place));
+  }
+
+  addUniqueWeatherCandidate(candidates, stripChineseProvince(clean));
+  addUniqueWeatherCandidate(candidates, clean);
+  return candidates.slice(0, 8);
+}
+
+function weatherCodeLabel(code) {
+  const normalized = Number(code);
+  if (normalized === 0) return "晴";
+  if (normalized === 1) return "大部晴";
+  if (normalized === 2) return "多云";
+  if (normalized === 3) return "阴";
+  if (normalized === 45 || normalized === 48) return "雾";
+  if ([51, 53, 55].includes(normalized)) return "毛毛雨";
+  if ([56, 57].includes(normalized)) return "冻毛毛雨";
+  if ([61, 63, 65].includes(normalized)) return "雨";
+  if ([66, 67].includes(normalized)) return "冻雨";
+  if ([71, 73, 75].includes(normalized)) return "雪";
+  if (normalized === 77) return "雪粒";
+  if ([80, 81, 82].includes(normalized)) return "阵雨";
+  if ([85, 86].includes(normalized)) return "阵雪";
+  if (normalized === 95) return "雷阵雨";
+  if ([96, 99].includes(normalized)) return "雷阵雨伴冰雹";
+  return "天气未知";
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${clampText(raw, 240)}`);
+    }
+    return raw ? JSON.parse(raw) : {};
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function geocodeWeatherLocation(address) {
+  let lastError = null;
+  for (const candidate of weatherSearchCandidates(address)) {
+    try {
+      const params = new URLSearchParams({
+        name: candidate,
+        count: "5",
+        language: "zh",
+        format: "json",
+      });
+      const result = await fetchJsonWithTimeout(`${weatherForecastConfig.geocodingBaseUrl}?${params}`, weatherForecastConfig.timeoutMs);
+      const locations = Array.isArray(result?.results) ? result.results : [];
+      const location = locations.find((item) => String(item?.country_code ?? "").toUpperCase() === "CN") ?? locations[0];
+      if (location?.latitude != null && location?.longitude != null) return location;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error("无法识别发货目的地");
+}
+
+function locationDisplayName(location) {
+  const parts = [
+    location?.name,
+    location?.admin2,
+    location?.admin1,
+    location?.country,
+  ].map((part) => String(part ?? "").trim()).filter(Boolean);
+  return [...new Set(parts)].join(" / ");
+}
+
+async function weatherForecastForAddress(address) {
+  const normalizedAddress = String(address ?? "").replace(/\s+/g, " ").trim();
+  if (!normalizedAddress) throw new Error("发货目的地不能为空");
+  const cached = weatherForecastCache.get(normalizedAddress);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const location = await geocodeWeatherLocation(normalizedAddress);
+  const params = new URLSearchParams({
+    latitude: String(location.latitude),
+    longitude: String(location.longitude),
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+    forecast_days: "4",
+    timezone: "auto",
+  });
+  const result = await fetchJsonWithTimeout(`${weatherForecastConfig.forecastBaseUrl}?${params}`, weatherForecastConfig.timeoutMs);
+  const daily = result?.daily ?? {};
+  const dates = Array.isArray(daily.time) ? daily.time : [];
+  const today = todayInChina();
+  const days = dates.map((date, index) => ({
+    date: String(date ?? ""),
+    weather: weatherCodeLabel(daily.weather_code?.[index]),
+    tempMax: Number(daily.temperature_2m_max?.[index]),
+    tempMin: Number(daily.temperature_2m_min?.[index]),
+    precipitationProbabilityMax: Number(daily.precipitation_probability_max?.[index]),
+  })).filter((day) => day.date);
+  const futureDays = days.filter((day) => day.date > today).slice(0, 2);
+  const forecast = (futureDays.length >= 2 ? futureDays : days.slice(0, 2)).map((day) => ({
+    ...day,
+    tempMax: Number.isFinite(day.tempMax) ? day.tempMax : undefined,
+    tempMin: Number.isFinite(day.tempMin) ? day.tempMin : undefined,
+    precipitationProbabilityMax: Number.isFinite(day.precipitationProbabilityMax) ? day.precipitationProbabilityMax : undefined,
+  }));
+  if (forecast.length === 0) throw new Error("未获取到未来两天天气");
+
+  const value = {
+    address: normalizedAddress,
+    locationName: locationDisplayName(location),
+    latitude: location.latitude,
+    longitude: location.longitude,
+    forecast,
+    source: "Open-Meteo",
+  };
+  weatherForecastCache.set(normalizedAddress, {
+    expiresAt: Date.now() + weatherForecastConfig.cacheTtlMs,
+    value,
+  });
+  return value;
 }
 
 function indexById(items = []) {
@@ -3399,6 +3568,17 @@ async function handleApi(req, res, url) {
       return;
     }
     req.auth = auth;
+  }
+
+  if (url.pathname === "/api/weather/forecast" && req.method === "GET") {
+    try {
+      const address = String(url.searchParams.get("address") ?? "").trim();
+      const forecast = await weatherForecastForAddress(address);
+      sendJson(req, res, 200, { ok: true, ...forecast });
+    } catch (error) {
+      sendJson(req, res, 502, { ok: false, error: error.message || "天气预报获取失败" });
+    }
+    return;
   }
 
   if (url.pathname === "/api/public/media/cos" && req.method === "GET") {
