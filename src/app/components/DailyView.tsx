@@ -1014,11 +1014,11 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
       <Tabs defaultValue="visual" className="gap-3">
         <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
               <h2 className="leading-tight">日常管理</h2>
-              <TabsList className="h-8 rounded-full">
-                <TabsTrigger value="visual" className="rounded-full px-3 text-sm">缸位视图</TabsTrigger>
-                <TabsTrigger value="logs" className="rounded-full px-3 text-sm">养护日志</TabsTrigger>
+              <TabsList className="h-8 w-full rounded-full sm:w-auto">
+                <TabsTrigger value="visual" className="flex-1 rounded-full px-3 text-sm sm:flex-none">缸位视图</TabsTrigger>
+                <TabsTrigger value="logs" className="flex-1 rounded-full px-3 text-sm sm:flex-none">养护日志</TabsTrigger>
               </TabsList>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
@@ -1027,8 +1027,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 
         <TabsContent value="visual" className="flex flex-col gap-3">
           {/* 过滤栏：状态按钮 + 搜索框 */}
-          <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-end gap-2 border-b bg-background/95 px-1 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-            <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+          <div className="sticky top-0 z-20 -mx-3 flex flex-col items-stretch gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-1 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end sm:px-1 sm:py-1.5">
+            <div className="flex min-w-0 flex-wrap items-center justify-start gap-1.5 sm:justify-end">
               {STATUS_ORDER.map((st) => {
                 const meta = statusFilterMeta[st];
                 const active = filterStatuses.has(st);
@@ -1067,9 +1067,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                 </button>
               )}
             </div>
-            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-              <div className="flex items-center gap-2 rounded-lg border bg-white p-1.5 shadow-sm">
-                <div className="relative">
+            <div className="flex min-w-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
+              <div className="flex w-full items-center gap-2 rounded-lg border bg-white p-1.5 shadow-sm sm:w-auto">
+                <div className="relative min-w-0 flex-1 sm:flex-none">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                   <Input
                     value={publicLookupCode}
@@ -1082,7 +1082,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     }}
                     placeholder="粘贴公开选鱼码"
                     aria-label="公开选鱼码"
-                    className="h-8 w-48 border-0 bg-transparent pl-9 shadow-none focus-visible:ring-0"
+                    className="h-8 w-full border-0 bg-transparent pl-9 shadow-none focus-visible:ring-0 sm:w-48"
                   />
                 </div>
                 <Button type="button" size="sm" variant="outline" onClick={locatePublicLookupCode}>
@@ -1139,7 +1139,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   )}
                 </>
               )}
-              <div className="relative min-w-[13rem] flex-1 sm:flex-none">
+              <div className="relative min-w-0 flex-1 basis-full sm:min-w-[13rem] sm:basis-auto sm:flex-none">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                 <Input
                   value={q}
@@ -1210,12 +1210,12 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                       </div>
                     </button>
                   )}
-                  <div className="flex shrink-0 items-center gap-2 md:justify-end">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 md:justify-end">
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="h-8 border-slate-200 px-2.5 text-slate-700 hover:bg-white"
+                      className="h-8 flex-1 border-slate-200 px-2.5 text-slate-700 hover:bg-white sm:flex-none"
                       onClick={() => setViewLogGroupId(g.id)}
                     >
                       <ClipboardList className="size-3.5 mr-1" />
@@ -1226,7 +1226,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="h-8 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50"
+                        className="h-8 flex-1 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50 sm:flex-none"
                         onClick={() => openNewLogForGroup(g.id)}
                       >
                         <Plus className="size-3.5 mr-1" />
@@ -1433,12 +1433,12 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
             const canManageLogs = permission.canUpdate || permission.canDelete;
             return (
               <>
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+            <div className="grid gap-3 sm:flex sm:flex-wrap sm:items-end">
               <div className="grid gap-1.5">
                 <Label className="text-xs">缸组</Label>
                 <Select value={logGroupFilter} onValueChange={setLogGroupFilter}>
-                  <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-full sm:w-44"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部缸组</SelectItem>
                     {state.tankGroups.map((group) => (
@@ -1459,7 +1459,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     setLogStartDate(value);
                     if (logEndDate && value && logEndDate < value) setLogEndDate("");
                   }}
-                  className="w-40"
+                  className="w-full sm:w-40"
                 />
               </div>
               <div className="grid gap-1.5">
@@ -1475,7 +1475,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     if (logStartDate && value && value < logStartDate) return toast.error("结束日期不能早于开始日期");
                     setLogEndDate(value);
                   }}
-                  className="w-40"
+                  className="w-full sm:w-40"
                 />
               </div>
               {hasLogFilter && (
@@ -1493,7 +1493,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               )}
             </div>
             {permission.canCreate && (
-              <Button onClick={() => {
+              <Button className="w-full sm:w-auto" onClick={() => {
                 if (logGroupFilter === "all") {
                   toast.error("请先选择缸组，或从缸组卡片新增日志");
                   return;
@@ -1503,7 +1503,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               }}>新增日志</Button>
             )}
           </div>
-          <div className="rounded-lg border bg-card overflow-hidden">
+          <div className="hidden overflow-hidden rounded-lg border bg-card md:block">
             <table className="w-full">
               <thead className="bg-muted/50">
                 <tr>
@@ -1559,6 +1559,52 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               </tbody>
             </table>
           </div>
+          <div className="flex flex-col gap-3 md:hidden">
+            {filteredLogs.length === 0 ? (
+              <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+                暂无日志
+              </div>
+            ) : filteredLogs.map((l) => (
+              <div key={l.id} className="rounded-lg border bg-card p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold">{l.date}</span>
+                  <Badge variant="secondary">{groupName(logGroupId(l))}</Badge>
+                  {l.operator && <span className="text-xs text-muted-foreground">{l.operator}</span>}
+                </div>
+                <div className="mt-2 text-sm font-medium">{l.action || "未填写操作"}</div>
+                {l.notes && (
+                  <div className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{l.notes}</div>
+                )}
+                {canManageLogs && (
+                  <div className="mt-3 flex flex-wrap justify-end gap-2 border-t pt-3">
+                    {permission.canUpdate && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={logSaving}
+                        onClick={() => editLog(l)}
+                      >
+                        编辑
+                      </Button>
+                    )}
+                    {permission.canDelete && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                        disabled={logSaving}
+                        onClick={() => deleteLog(l)}
+                      >
+                        删除
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
               </>
             );
           })()}
@@ -1569,7 +1615,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
       <Dialog open={bioOpen} onOpenChange={setBioOpen}>
         <DialogContent aria-describedby={undefined} className="w-[min(96vw,56rem)] max-w-[96vw] sm:max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
+            <DialogTitle className="flex flex-wrap items-center gap-2 pr-6 text-left">
               {bioProduct?.imageUrl && (
                 <div className="size-8 rounded overflow-hidden border">
                   <ImageWithFallback src={bioProduct.imageUrl} alt="" className="size-full object-cover" />
@@ -1577,7 +1623,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               )}
               <span>生物详情</span>
               {bioProduct && (
-                <span className="text-muted-foreground flex items-center gap-1.5">
+                <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-muted-foreground">
                   — {bioProduct.name}
                   {bioProduct.size && <span className="text-[11px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{bioProduct.size}</span>}
                   {bioProduct.origin && <span className="text-[11px] text-muted-foreground">{bioProduct.origin}</span>}
@@ -1665,8 +1711,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                       ev.type === "record" && ev.sourceType === "dailyLog" ? "border-blue-200 bg-blue-50" :
                       "border-border bg-card"
                     }`}>
-                      <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
+                      <div className="mb-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex flex-wrap items-center gap-2">
                           {ev.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
                           {ev.type === "record" && ev.sourceType === "dailyLog" && <ClipboardList className="size-3.5 text-blue-600" />}
                           {ev.type === "record" && ev.sourceType !== "dailyLog" && <Camera className="size-3.5 text-emerald-600" />}
@@ -1692,14 +1738,14 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         </div>
                         <div className="flex items-center gap-2">
                           {ev.type === "record" && ev.sourceType !== "dailyLog" && editingRecordId === ev.id ? (
-                            <div className="flex items-center gap-1">
+                            <div className="flex flex-wrap items-center gap-1">
                               <Input
                                 type="datetime-local"
                                 min={minDatetimeForDate(bioItem?.inDate)}
                                 max={nowForRecord}
                                 value={editingRecordTime}
                                 onChange={(event) => setEditingRecordTime(event.target.value)}
-                                className="h-7 w-40 text-xs"
+                                className="h-7 w-full text-xs sm:w-40"
                               />
                               <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
                               <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
@@ -1823,7 +1869,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                 <Plus className="size-4 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground">添加观察/治疗记录</span>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label className="text-xs">记录时间</Label>
 	                  <Input
@@ -1914,7 +1960,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                   onChange={(e) => setNewRecord((p) => ({ ...p, text: e.target.value }))}
                 />
               </div>
-              <Button variant="outline" size="sm" onClick={addBioRecord} className="self-end">
+              <Button variant="outline" size="sm" onClick={addBioRecord} className="w-full self-end sm:w-auto">
                 <Plus className="size-4" /> 添加观察/治疗记录
               </Button>
 	            </div>
@@ -1969,7 +2015,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                })}
 	              </div>
 	            </div>
-	            <div className="grid grid-cols-2 gap-3">
+	            <div className="grid gap-3 sm:grid-cols-2">
 	              <div className="grid gap-2">
 	                <Label>记录时间<span className="text-red-500 ml-0.5">*</span></Label>
 	                <Input
@@ -1982,7 +2028,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	              </div>
 	              <div className="grid gap-2">
 	                <Label>附件</Label>
-	                <div className="grid grid-cols-2 gap-2">
+	                <div className="grid gap-2 sm:grid-cols-2">
 	                  <input
 	                    ref={batchPhotoRef}
 	                    type="file"
@@ -2076,7 +2122,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                })}
 	              </div>
 	            </div>
-	            <div className="grid grid-cols-2 gap-3">
+	            <div className="grid gap-3 sm:grid-cols-2">
 	              <div className="grid gap-2">
 	                <Label>目标缸组<span className="text-red-500 ml-0.5">*</span></Label>
 	                <Select
@@ -2163,7 +2209,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                  })}
 	                </div>
 	              </div>
-	              <div className="grid grid-cols-2 gap-3">
+	              <div className="grid gap-3 sm:grid-cols-2">
 	                <div className="grid gap-2">
 		                  <Label>损耗日期<span className="text-red-500 ml-0.5">*</span></Label>
 		                  <Input
@@ -2234,7 +2280,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               {viewLogGroup?.name ?? "缸组"}养护日志
             </DialogTitle>
           </DialogHeader>
-          <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2">
+          <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium">{viewLogGroup?.location || "—"}</div>
               <div className="text-xs text-muted-foreground">共 {viewGroupLogs.length} 条记录，按日期从新到旧排列</div>
@@ -2257,7 +2303,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
               <div className="divide-y">
                 {viewGroupLogs.map((log) => (
                   <div key={log.id} className="grid gap-2 px-4 py-3">
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-semibold">{log.date}</span>
@@ -2272,7 +2318,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         {log.notes && <div className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{log.notes}</div>}
                       </div>
                       {(permission.canUpdate || permission.canDelete) && (
-                        <div className="flex shrink-0 items-center gap-2">
+                        <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                           {permission.canUpdate && (
                             <Button
                               type="button"
@@ -2319,7 +2365,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
           <DialogHeader><DialogTitle>{editingLog?.id ? "编辑日志" : "新增养护日志"}</DialogTitle></DialogHeader>
           {editingLog && (
             <div className="grid gap-4 py-2">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
 	                  <Label>日期</Label>
 	                  <Input

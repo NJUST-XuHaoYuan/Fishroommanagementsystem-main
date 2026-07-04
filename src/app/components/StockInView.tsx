@@ -726,12 +726,12 @@ export function StockInView() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-end justify-between gap-3">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
           <h2>库存明细</h2>
           <p className="text-sm text-muted-foreground">按缸位或品种查看和管理在缸库存</p>
         </div>
-        <div className="flex items-center justify-end gap-2 flex-wrap">
+        <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
           <ToggleGroup
             type="single"
             value={viewMode}
@@ -740,13 +740,13 @@ export function StockInView() {
             }}
             variant="outline"
             size="sm"
-            className="shrink-0"
+            className="w-full shrink-0 sm:w-auto"
           >
-            <ToggleGroupItem value="tank" aria-label="缸位视图" className="gap-1.5 px-3">
+            <ToggleGroupItem value="tank" aria-label="缸位视图" className="flex-1 gap-1.5 px-3 sm:flex-none">
               <MapPin className="size-3.5" />
               缸位视图
             </ToggleGroupItem>
-            <ToggleGroupItem value="species" aria-label="品种视图" className="gap-1.5 px-3">
+            <ToggleGroupItem value="species" aria-label="品种视图" className="flex-1 gap-1.5 px-3 sm:flex-none">
               <List className="size-3.5" />
               品种视图
             </ToggleGroupItem>
@@ -780,13 +780,13 @@ export function StockInView() {
               )}
             </>
           )}
-          <div className="relative">
+          <div className="relative w-full sm:w-auto">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder={viewMode === "tank" ? "搜索缸 / 商品 / 编号..." : "搜索品种 / 商品 / 缸位..."}
-              className="pl-9 w-64"
+              className="w-full pl-9 sm:w-64"
             />
           </div>
         </div>
@@ -797,7 +797,7 @@ export function StockInView() {
         /* 缸组列表：每个缸组独占一行 */
         <div className="flex flex-col gap-4">
           {filteredGroups.map((g) => (
-          <Card key={g.id} className="p-5 border-2 border-sky-200 bg-sky-50/30">
+          <Card key={g.id} className="border-2 border-sky-200 bg-sky-50/30 p-3 sm:p-5">
             <div className="mb-3">
               <h3>{g.name}</h3>
               <div className="text-xs text-muted-foreground">{g.location}</div>
@@ -1107,7 +1107,7 @@ export function StockInView() {
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent aria-describedby={undefined}>
+        <DialogContent aria-describedby={undefined} className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
               {editing?.id
@@ -1144,7 +1144,7 @@ export function StockInView() {
               </div>
 
               {!fromSubTank && (
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <div className="grid gap-2">
                     <Label><span className="text-red-500">*</span> 缸组</Label>
                     <Select
@@ -1194,7 +1194,7 @@ export function StockInView() {
                   />
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <div className="grid gap-2">
                     <Label>入库日期</Label>
                     <Input

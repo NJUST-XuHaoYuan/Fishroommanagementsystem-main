@@ -210,8 +210,6 @@
   }
 
   body.fishroom-admin-shell {
-    position: fixed;
-    inset: 0;
     width: 100%;
   }
 
@@ -391,6 +389,7 @@
     border-bottom: 1px solid var(--border);
     background: oklch(0.992 0.001 260 / 0.98);
     box-shadow: 0 1px 0 oklch(1 0 0 / 0.72);
+    flex-shrink: 0;
   }
 
   .fishroom-content {
@@ -653,6 +652,23 @@
 
   .logo-loader__dot--delay-2 {
     animation-delay: 0.32s;
+  }
+}
+
+@media (max-width: 1023px) {
+  .fishroom-topbar {
+    min-height: calc(3.25rem + env(safe-area-inset-top));
+    padding-top: calc(0.5rem + env(safe-area-inset-top));
+  }
+
+  .fishroom-content {
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 420px) {
+  .fishroom-mobile-save-status {
+    display: none;
   }
 }
 

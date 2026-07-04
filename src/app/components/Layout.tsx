@@ -340,8 +340,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       </Sheet>
 
       <main className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <header className="fishroom-topbar sticky top-0 z-30 h-[3.25rem] px-3 flex items-center justify-between gap-3 text-sm lg:hidden">
-          <div className="flex min-w-0 items-center gap-2">
+        <header className="fishroom-topbar sticky top-0 z-30 flex min-h-[3.25rem] items-center justify-between gap-3 px-3 py-2 text-sm lg:hidden">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <Button
               variant="ghost"
               size="icon"
@@ -360,9 +360,11 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               <div className="truncate font-semibold text-foreground">{currentLabel}</div>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-w-0 shrink-0 items-center gap-2">
             <SiteSelector compact />
-            <SaveStatus saveStatus={saveStatus} />
+            <div className="fishroom-mobile-save-status">
+              <SaveStatus saveStatus={saveStatus} />
+            </div>
           </div>
         </header>
 

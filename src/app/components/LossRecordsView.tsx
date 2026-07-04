@@ -435,7 +435,7 @@ export function LossRecordsView() {
         <p className="text-sm text-muted-foreground">追溯每条损耗鱼的来源、缸位、原因和照片凭证</p>
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-lg border bg-card p-4">
           <div className="text-xs text-muted-foreground">累计损耗</div>
           <div className="mt-1 text-2xl font-semibold">{rows.length}</div>
@@ -455,7 +455,7 @@ export function LossRecordsView() {
       </div>
 
       <div className="rounded-lg border bg-card p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="font-medium">采购损耗筛选</div>
           {hasFilters && (
             <Button variant="ghost" size="sm" onClick={resetFilters}>
@@ -464,7 +464,7 @@ export function LossRecordsView() {
             </Button>
           )}
         </div>
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="grid gap-2">
             <Label>损耗开始日期</Label>
             <Input
@@ -623,13 +623,13 @@ export function LossRecordsView() {
       />
 
       <Dialog open={!!viewing} onOpenChange={(open) => !open && setViewing(null)}>
-        <DialogContent aria-describedby={undefined} className="max-w-3xl">
+        <DialogContent aria-describedby={undefined} className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>损耗详情</DialogTitle>
           </DialogHeader>
           {viewing && (
             <div className="grid gap-4 py-2">
-              <div className="grid grid-cols-2 gap-3 rounded-lg border p-4 text-sm">
+              <div className="grid gap-3 rounded-lg border p-4 text-sm sm:grid-cols-2">
                 <div>
                   <div className="text-xs text-muted-foreground">商品</div>
                   <div className="font-medium">{viewing.productName}</div>
@@ -688,7 +688,7 @@ export function LossRecordsView() {
                 {viewing.photos.length === 0 ? (
                   <div className="text-sm text-muted-foreground">暂无照片凭证</div>
                 ) : (
-                  <div className="grid grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     {viewing.photos.map((src, index) => (
                       <button
                         key={index}
