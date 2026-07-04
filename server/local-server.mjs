@@ -4365,6 +4365,93 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/return-item" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      requireOrderPermissionForAuth(req, "update");
+
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const orderId = String(body.orderId ?? "");
+      const stockItemId = String(body.stockItemId ?? "").trim();
+      if (!orderId || !stockItemId) throw new Error("缺少订单或商品信息");
+
+      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
+      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      if (currentOrder.status === "completed") throw new Error("已完成订单不能退商品");
+      if (currentOrder.status === "cancelled") throw new Error("已取消订单不能退商品");
+
+      const currentItems = Array.isArray(currentOrder.items) ? currentOrder.items : [];
+      const returningItem = currentItems.find((item) => String(item?.stockItemId ?? "") === stockItemId);
+      if (!returningItem) throw new Error("该商品已不在订单中，请刷新后重试");
+
+      const activeShipment = (Array.isArray(state.shipments) ? state.shipments : []).find((shipment) =>
+        String(shipment?.orderId ?? "") === orderId &&
+        shipmentBlocksOrderItemRemoval(shipment) &&
+        Array.isArray(shipment?.itemStockIds) &&
+        shipment.itemStockIds.some((id) => String(id ?? "") === stockItemId)
+      );
+      if (activeShipment) throw new Error("该商品已出库或已发货，不能按未发货商品退款");
+
+      let refundRecord = null;
+      if (body.refund && typeof body.refund === "object") {
+        refundRecord = normalizePaymentRecord(body.refund);
+        if (refundRecord.type !== "refund") throw new Error("退商品只能写入退款记录");
+        if (refundRecord.amount <= 0.005) refundRecord = null;
+      }
+      if (refundRecord) {
+        requireOrderPermissionForAuth(req, "create");
+        const maxRefund = Math.max(calcAmountPaidForOrder(currentOrder), 0);
+        if (refundRecord.amount > maxRefund + 0.005) {
+          throw new Error(`退款金额不能超过当前净已收款 ¥${maxRefund.toFixed(2)}`);
+        }
+        const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
+        if (currentPayments.some((payment) => String(payment?.id ?? "") === refundRecord.id)) {
+          throw new Error("退款记录已存在，请刷新后重试");
+        }
+      }
+
+      const nextOrder = {
+        ...currentOrder,
+        items: currentItems.filter((item) => String(item?.stockItemId ?? "") !== stockItemId),
+        payments: refundRecord
+          ? [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), refundRecord]
+          : (Array.isArray(currentOrder.payments) ? currentOrder.payments : []),
+      };
+      const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
+      const nextStock = setStockSoldForOrders(state, nextOrders);
+      const product = (Array.isArray(state.products) ? state.products : [])
+        .find((item) => String(item?.id ?? "") === String(returningItem?.productId ?? ""));
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: `订单「${currentOrder.orderNo}」退商品「${product?.name ?? returningItem.productId ?? stockItemId}」${refundRecord ? `，退款 ¥${refundRecord.amount.toFixed(2)}` : ""}`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        stock: nextStock,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, stock: nextStock, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "退商品失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/delete" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -4582,6 +4669,67 @@ async function handleApi(req, res, url) {
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "确认发货失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/shipments/cancel" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      requireOrderPermissionForAuth(req, "update");
+
+      const shipmentId = String(body.shipmentId ?? "").trim();
+      if (!shipmentId) throw new Error("缺少发货单信息");
+      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
+      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      if (shipment.status !== "outbound" && shipment.status !== "shipped") {
+        throw new Error("只有已出库或运输中的发货单可以取消");
+      }
+
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
+      if (!order) throw new Error("订单不存在，请刷新后重试");
+      if (order.status === "completed") throw new Error("已完成订单不能取消发货");
+
+      const nextShipments = shipments.filter((item) => String(item?.id ?? "") !== shipmentId);
+      const remainingActiveShipments = nextShipments.filter((item) =>
+        String(item?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(item)
+      );
+      const nextOrders = orders.map((item) => {
+        if (String(item?.id ?? "") !== String(order.id ?? "")) return item;
+        if (item.status === "completed" || item.status === "cancelled" || item.status === "damaged") return item;
+        return { ...item, status: remainingActiveShipments.length > 0 ? "shipped" : "pending" };
+      });
+      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders);
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: `订单「${order.orderNo}」取消出库/发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        shipments: nextShipments,
+        stock: nextStock,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, orders: nextOrders, shipments: nextShipments, stock: nextStock, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "取消出库失败" });
     } finally {
       client.release();
     }

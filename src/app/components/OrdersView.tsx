@@ -1849,6 +1849,7 @@ function ReturnItemDialog({
   product,
   stock,
   maxRefund,
+  saving = false,
   onConfirm,
 }: {
   open: boolean;
@@ -1858,6 +1859,7 @@ function ReturnItemDialog({
   product?: Product;
   stock?: StockItem;
   maxRefund: number;
+  saving?: boolean;
   onConfirm: (refund: PaymentRecord | null) => boolean | Promise<boolean>;
 }) {
   const [amount, setAmount] = useState(0);
@@ -1947,8 +1949,8 @@ function ReturnItemDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={submit}>确认退商品</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
+          <Button onClick={submit} disabled={saving}>{saving ? "保存中..." : "确认退商品"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -3821,6 +3823,7 @@ function OrderDetailDialog({
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
   const [damageShipment, setDamageShipment] = useState<Shipment | null>(null);
   const [returnItem, setReturnItem] = useState<OrderItem | null>(null);
+  const [returnSaving, setReturnSaving] = useState(false);
   const personnel = state.personnel ?? [];
   const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
@@ -3834,6 +3837,7 @@ function OrderDetailDialog({
       setShipmentConfirmSaving(false);
       setDamageShipment(null);
       setReturnItem(null);
+      setReturnSaving(false);
       setAddPayOpen(false);
       setEditingPayment(null);
       setDeletingPayment(null);
@@ -4086,30 +4090,28 @@ function OrderDetailDialog({
   const submitReturnItem = async (refund: PaymentRecord | null) => {
     if (!order || !returnItem) return false;
     if (!permission.requirePermission("update")) return false;
+    if (returnSaving) return false;
     if (order.status === "completed") { toast.error("已完成订单不能退商品"); return false; }
     if (order.status === "cancelled") { toast.error("已取消订单不能退商品"); return false; }
     if (shippedItemIds.has(returnItem.stockItemId)) { toast.error("该商品已出库或已发货，不能按未发货商品退款"); return false; }
     if (!confirmWrite("退款", refund ? `将退商品并记录退款 ¥${refund.amount.toFixed(2)}。` : "将退商品并调整应收金额。")) return false;
-    const returnStockItemId = returnItem.stockItemId;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      orders: latest.orders.map((o) =>
-        o.id === order.id
-          ? {
-              ...o,
-              items: o.items.filter((item) => item.stockItemId !== returnStockItemId),
-              payments: refund ? [...(o.payments ?? []), refund] : (o.payments ?? []),
-            }
-          : o
-      ),
-      stock: latest.stock.map((stock) =>
-        stock.id === returnStockItemId ? { ...stock, sold: false } : stock
-      ),
-    }));
-    if (!ok) { toast.error("保存失败，请重试"); return false; }
-    setReturnItem(null);
-    toast.success(refund ? `已退商品并记录退款 ¥${refund.amount.toFixed(2)}` : "已退商品，应收金额已更新");
-    return true;
+    setReturnSaving(true);
+    try {
+      const result = await postOrderApi("orders/return-item", {
+        orderId: order.id,
+        stockItemId: returnItem.stockItemId,
+        refund,
+      });
+      applyOrderApiResult(setState, result);
+      setReturnItem(null);
+      toast.success(refund ? `已退商品并记录退款 ¥${refund.amount.toFixed(2)}` : "已退商品，应收金额已更新");
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+      return false;
+    } finally {
+      setReturnSaving(false);
+    }
   };
 
   const completeOrder = async () => {
@@ -4185,25 +4187,21 @@ function OrderDetailDialog({
   const cancelShipment = async (shipment: Shipment) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
+    if (shipmentConfirmSaving) return;
     if (order.status === "completed") return toast.error("已完成订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
     if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。")) return;
-    const ok = await saveStateTransform((latest) => {
-      const shipments = latest.shipments.filter((sh) => sh.id !== shipment.id);
-      const remainingActiveShipments = shipments.filter((sh) => sh.orderId === order.id && countsAsActiveShipment(sh));
-      return {
-        ...latest,
-        shipments,
-        orders: latest.orders.map((o) => {
-          if (o.id !== order.id) return o;
-          if (o.status === "completed" || o.status === "cancelled" || o.status === "damaged") return o;
-          return { ...o, status: remainingActiveShipments.length > 0 ? "shipped" as const : "pending" as const };
-        }),
-      };
-    });
-    if (!ok) return toast.error("保存失败，请重试");
-    setShipmentAction(null);
-    toast.success("已取消出库/发货，商品已回到待发货状态");
+    setShipmentConfirmSaving(true);
+    try {
+      const result = await postOrderApi("shipments/cancel", { shipmentId: shipment.id });
+      applyOrderApiResult(setState, result);
+      setShipmentAction(null);
+      toast.success("已取消出库/发货，商品已回到待发货状态");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+    } finally {
+      setShipmentConfirmSaving(false);
+    }
   };
 
   const reportShipmentDamage = async (shipment: Shipment, result: DamageResult) => {
@@ -4820,6 +4818,7 @@ function OrderDetailDialog({
         product={returnProduct}
         stock={returnStock}
         maxRefund={maxReturnRefund}
+        saving={returnSaving}
         onConfirm={submitReturnItem}
       />
 
