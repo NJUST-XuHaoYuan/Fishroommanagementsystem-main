@@ -13,11 +13,13 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
+import { Checkbox } from "./ui/checkbox";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "./ui/select";
 import { toast } from "sonner";
 import { confirmWrite } from "../utils/writeConfirm";
+import { getSites, normalizeVisibleSiteIds } from "../utils/sites";
 
 const ACCESS_ROLE_LABEL: Record<Role, string> = {
   admin: "管理员",
@@ -32,6 +34,8 @@ export function PersonnelView() {
   const [deleting, setDeleting] = useState(false);
   const [resign, setResign] = useState<Personnel | null>(null);
   const [resigning, setResigning] = useState(false);
+  const sites = getSites(state);
+  const allSiteIds = sites.map((site) => site.id);
 
   if (state.user?.role !== "admin") {
     return (
@@ -47,6 +51,7 @@ export function PersonnelView() {
     username: "",
     password: "",
     accessRole: "staff",
+    visibleSiteIds: allSiteIds,
     permissions: emptyPermissions(),
     role: "",
     phone: "",
@@ -64,14 +69,48 @@ export function PersonnelView() {
       !isPersonnelResigned(person)
     ).length;
 
+  const selectedVisibleSiteIds = (person: Pick<Personnel, "accessRole" | "visibleSiteIds">) => {
+    if (person.accessRole === "admin") return allSiteIds;
+    const ids = normalizeVisibleSiteIds(person.visibleSiteIds, sites);
+    return ids.length > 0 ? ids : allSiteIds;
+  };
+
+  const visibleSiteNames = (person: Pick<Personnel, "accessRole" | "visibleSiteIds">) => {
+    if (person.accessRole === "admin") return "全部区域";
+    const ids = new Set(selectedVisibleSiteIds(person));
+    const names = sites.filter((site) => ids.has(site.id)).map((site) => site.name);
+    return names.length > 0 ? names.join("、") : "未设置";
+  };
+
+  const editPerson = (person: Personnel) => {
+    setEditing({ ...person, visibleSiteIds: selectedVisibleSiteIds(person) });
+    setOpen(true);
+  };
+
+  const toggleVisibleSite = (siteId: string, checked: boolean) => {
+    if (!editing || editing.accessRole === "admin") return;
+    const current = selectedVisibleSiteIds(editing);
+    const next = checked
+      ? [...current, siteId].filter((id, index, all) => all.indexOf(id) === index)
+      : current.filter((id) => id !== siteId);
+    setEditing({ ...editing, visibleSiteIds: next });
+  };
+
   const save = async () => {
     if (!editing) return;
+    const visibleSiteIds = editing.accessRole === "admin"
+      ? []
+      : normalizeVisibleSiteIds(editing.visibleSiteIds, sites);
+    if (editing.accessRole === "staff" && visibleSiteIds.length === 0) {
+      return toast.error("请至少选择一个可见区域");
+    }
     const next: Personnel = {
       ...editing,
       name: editing.name.trim(),
       username: editing.username.trim(),
       password: editing.password,
       accessRole: editing.accessRole,
+      visibleSiteIds,
       employmentStatus: isPersonnelResigned(editing) ? "resigned" : "active",
       resignedAt: editing.resignedAt,
       permissions: isPersonnelResigned(editing)
@@ -169,7 +208,7 @@ export function PersonnelView() {
 	              ? <Badge variant="outline" className="border-slate-300 text-xs text-slate-500">离职</Badge>
 	              : <Badge variant="secondary" className="text-xs">在职</Badge>,
 	          },
-	          {
+          {
 	            key: "accessRole",
             title: "系统权限",
             render: (row) => (
@@ -178,6 +217,7 @@ export function PersonnelView() {
               </Badge>
             ),
           },
+          { key: "visibleSiteIds", title: "可见区域", render: (row) => visibleSiteNames(row) },
           { key: "role", title: "岗位", render: (row) => row.role || "—" },
           { key: "phone", title: "电话", render: (row) => row.phone || "—" },
           { key: "orderCount", title: "关联订单", render: (row) => `${orderCount(row.name)} 单` },
@@ -185,7 +225,7 @@ export function PersonnelView() {
 	        ]}
 	        actions={(row) => (
 	          <div className="flex justify-end gap-2">
-	            <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row }); setOpen(true); }}>
+	            <Button size="sm" variant="outline" onClick={() => editPerson(row)}>
 	              编辑
 	            </Button>
 	            {!isPersonnelResigned(row) && (
@@ -241,7 +281,16 @@ export function PersonnelView() {
                   <Label>系统权限<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
                     value={editing.accessRole}
-                    onValueChange={(value) => setEditing({ ...editing, accessRole: value as Role })}
+                    onValueChange={(value) => {
+                      const accessRole = value as Role;
+                      setEditing({
+                        ...editing,
+                        accessRole,
+                        visibleSiteIds: accessRole === "admin"
+                          ? allSiteIds
+                          : selectedVisibleSiteIds(editing),
+                      });
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -252,6 +301,34 @@ export function PersonnelView() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+              <div className="grid gap-2">
+                <Label>可见区域<span className="text-red-500 ml-0.5">*</span></Label>
+                <div className="grid gap-2 rounded-md border bg-muted/20 p-3 sm:grid-cols-3">
+                  {sites.map((site) => {
+                    const checked = selectedVisibleSiteIds(editing).includes(site.id);
+                    const disabled = editing.accessRole === "admin";
+                    return (
+                      <label
+                        key={site.id}
+                        className={[
+                          "flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm",
+                          disabled ? "cursor-not-allowed opacity-70" : "cursor-pointer",
+                        ].join(" ")}
+                      >
+                        <Checkbox
+                          checked={checked}
+                          disabled={disabled}
+                          onCheckedChange={(value) => toggleVisibleSite(site.id, value === true)}
+                        />
+                        <span>{site.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  管理员默认全部区域可见；店员只显示已勾选区域的数据和菜单场地。
+                </p>
               </div>
               <div className="grid gap-2">
                 <Label>岗位</Label>

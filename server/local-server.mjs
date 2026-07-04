@@ -230,11 +230,40 @@ function matchesSite(item, siteId) {
   return normalizeSiteId(item?.siteId) === siteId;
 }
 
+function normalizeVisibleSiteIds(value, sites = []) {
+  if (!Array.isArray(value)) return [];
+  const allowedIds = new Set((Array.isArray(sites) ? sites : []).map((site) => normalizeSiteId(site?.id)));
+  const normalized = [];
+  value.forEach((item) => {
+    const rawId = String(item ?? "").trim();
+    const id = rawId ? normalizeSiteId(rawId) : "";
+    if (!id || (allowedIds.size > 0 && !allowedIds.has(id)) || normalized.includes(id)) return;
+    normalized.push(id);
+  });
+  return normalized;
+}
+
+function visibleSiteIdsForAccount(account = {}, state = {}) {
+  const sites = getSitesFromState(state);
+  const allSiteIds = sites.map((site) => site.id);
+  if (account?.accessRole === "admin") return allSiteIds;
+  const configuredIds = normalizeVisibleSiteIds(account?.visibleSiteIds, sites);
+  return configuredIds.length > 0 ? configuredIds : allSiteIds;
+}
+
+function matchesAnyVisibleSite(item, visibleSiteIds = []) {
+  return visibleSiteIds.some((siteId) => matchesSite(item, siteId));
+}
+
 function stockMatchesSite(state = {}, item = {}, siteId = ALL_SITE_ID) {
   if (siteId === ALL_SITE_ID) return true;
   const tankSiteId = findSubTank(state, item?.subTankId)?.group?.siteId;
   if (tankSiteId) return normalizeSiteId(tankSiteId) === siteId;
   return matchesSite(item, siteId);
+}
+
+function stockMatchesAnyVisibleSite(state = {}, item = {}, visibleSiteIds = []) {
+  return visibleSiteIds.some((siteId) => stockMatchesSite(state, item, siteId));
 }
 
 function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
@@ -268,6 +297,51 @@ function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
     orders,
     shipments: (Array.isArray(state.shipments) ? state.shipments : []).filter((item) =>
       matchesSite(item, scope) || orderIds.has(String(item?.orderId ?? ""))
+    ),
+  };
+}
+
+function siteVisibilityFilteredState(state = {}, account = {}) {
+  if (!account || account.accessRole === "admin") return state;
+  const sites = getSitesFromState(state);
+  const visibleSiteIds = visibleSiteIdsForAccount(account, state);
+  if (visibleSiteIds.length === 0 || visibleSiteIds.length >= sites.length) return state;
+  const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : []).filter((item) =>
+    matchesAnyVisibleSite(item, visibleSiteIds)
+  );
+  const subTankIds = new Set(tankGroups.flatMap((group) =>
+    (Array.isArray(group?.subTanks) ? group.subTanks : []).map((tank) => String(tank?.id ?? "")).filter(Boolean)
+  ));
+  const orders = (Array.isArray(state.orders) ? state.orders : []).filter((item) =>
+    matchesAnyVisibleSite(item, visibleSiteIds)
+  );
+  const orderIds = new Set(orders.map((order) => String(order?.id ?? "")).filter(Boolean));
+  const stock = (Array.isArray(state.stock) ? state.stock : []).filter((item) =>
+    stockMatchesAnyVisibleSite(state, item, visibleSiteIds)
+  );
+  const stockIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  return {
+    ...state,
+    tankGroups,
+    batches: (Array.isArray(state.batches) ? state.batches : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds)
+    ),
+    stock,
+    logs: (Array.isArray(state.logs) ? state.logs : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || subTankIds.has(String(item?.subTankId ?? ""))
+    ),
+    checks: (Array.isArray(state.checks) ? state.checks : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || subTankIds.has(String(item?.subTankId ?? ""))
+    ),
+    lossRecords: (Array.isArray(state.lossRecords) ? state.lossRecords : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || stockIds.has(String(item?.stockItemId ?? ""))
+    ),
+    bioRecords: (Array.isArray(state.bioRecords) ? state.bioRecords : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || stockIds.has(String(item?.stockItemId ?? ""))
+    ),
+    orders,
+    shipments: (Array.isArray(state.shipments) ? state.shipments : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || orderIds.has(String(item?.orderId ?? ""))
     ),
   };
 }
@@ -1197,11 +1271,15 @@ function isDefaultCredential(username, password) {
   return DEFAULT_CREDENTIAL_DIGESTS.has(credentialDigest(username, password));
 }
 
-function publicUserFromAccount(account = {}) {
+function publicUserFromAccount(account = {}, state = null) {
   if (isPersonnelResigned(account)) return null;
   const username = String(account.username ?? "").trim();
   const role = account.accessRole === "admin" ? "admin" : "staff";
-  return username ? { username, role } : null;
+  if (!username) return null;
+  if (role === "admin") return { username, role };
+  const sites = state && Array.isArray(state.sites) ? getSitesFromState(state) : [];
+  const visibleSiteIds = normalizeVisibleSiteIds(account.visibleSiteIds, sites);
+  return visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
 }
 
 function isPersonnelResigned(person = {}) {
@@ -1215,6 +1293,9 @@ function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
   const isCurrentUser = username && username === req?.auth?.user?.username;
   const { password, ...safePerson } = person;
   if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
+  safePerson.visibleSiteIds = safePerson.accessRole === "admin"
+    ? []
+    : normalizeVisibleSiteIds(safePerson.visibleSiteIds, []);
   safePerson.employmentStatus = isPersonnelResigned(safePerson) ? "resigned" : "active";
   if (isPersonnelResigned(safePerson)) {
     safePerson.permissions = emptyPermissionsValue();
@@ -1237,7 +1318,7 @@ function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
 
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
-  const next = { ...normalizePickupShipmentsForState(data) };
+  const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
   next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
@@ -1356,12 +1437,16 @@ function validateStatePatchAuthorization(req, patch = {}) {
   }
 }
 
-function normalizePersonnelInput(input = {}, existing = null) {
+function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   const source = input && typeof input === "object" ? input : {};
   const id = String(source.id || existing?.id || uid("person"));
   const name = String(source.name ?? existing?.name ?? "").trim();
   const username = String(source.username ?? existing?.username ?? "").trim();
   const accessRole = source.accessRole === "admin" ? "admin" : "staff";
+  const sites = getSitesFromState(state);
+  const visibleSiteIds = accessRole === "admin"
+    ? []
+    : normalizeVisibleSiteIds(source.visibleSiteIds ?? existing?.visibleSiteIds, sites);
   const role = String(source.role ?? existing?.role ?? "").trim();
   const phone = String(source.phone ?? existing?.phone ?? "").trim();
   const notes = String(source.notes ?? existing?.notes ?? "").trim();
@@ -1376,6 +1461,7 @@ function normalizePersonnelInput(input = {}, existing = null) {
     username,
     password: plainPassword ? hashPassword(plainPassword) : existing?.password,
     accessRole,
+    visibleSiteIds,
     employmentStatus: isPersonnelResigned(existing) ? "resigned" : "active",
     resignedAt: isPersonnelResigned(existing) ? existing?.resignedAt : undefined,
     permissions: isPersonnelResigned(existing)
@@ -3661,7 +3747,7 @@ async function handleApi(req, res, url) {
         ? personnel.find((person) => String(person?.id ?? "") === incomingId)
         : null;
       if (incomingId && !existing) throw new Error("人员不存在或已被删除");
-      const nextPerson = normalizePersonnelInput(incoming, existing);
+      const nextPerson = normalizePersonnelInput(incoming, existing, state);
       const duplicate = personnel.find((person) =>
         String(person?.id ?? "") !== nextPerson.id &&
         String(person?.username ?? "").trim() === nextPerson.username
@@ -4077,8 +4163,9 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/dashboard-summary" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+    const data = siteVisibilityFilteredState(rows[0]?.data ?? {}, req.auth?.account);
     sendJson(req, res, 200, {
-      summary: buildDashboardSummary(rows[0]?.data ?? {}, {
+      summary: buildDashboardSummary(data, {
         financeDays: url.searchParams.get("financeDays") ?? url.searchParams.get("days"),
         siteId: url.searchParams.get("siteId") ?? ALL_SITE_ID,
       }),

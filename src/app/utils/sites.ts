@@ -1,4 +1,4 @@
-import type { Store } from "../store";
+import type { Store, User } from "../store";
 
 export const DEFAULT_SITE_ID = "nanjing";
 export const ALL_SITE_ID = "all";
@@ -30,6 +30,33 @@ export function getSites(state?: Partial<Store>) {
     if (!merged.some((item) => item.id === id)) merged.push({ id, name });
   });
   return merged;
+}
+
+export function normalizeVisibleSiteIds(value: unknown, sites: readonly { id: string }[] = DEFAULT_SITES): string[] {
+  if (!Array.isArray(value)) return [];
+  const allowedIds = new Set(sites.map((site) => normalizeSiteId(site.id)));
+  const normalized: string[] = [];
+  value.forEach((item) => {
+    const rawId = String(item ?? "").trim();
+    const id = rawId ? normalizeSiteId(rawId) : "";
+    if (!id || (allowedIds.size > 0 && !allowedIds.has(id)) || normalized.includes(id)) return;
+    normalized.push(id);
+  });
+  return normalized;
+}
+
+export function visibleSitesForUser(user: User, state?: Partial<Store>) {
+  const sites = getSites(state);
+  if (!user || user.role === "admin") return sites;
+  const visibleSiteIds = normalizeVisibleSiteIds(user.visibleSiteIds, sites);
+  if (visibleSiteIds.length === 0) return sites;
+  const allowedIds = new Set(visibleSiteIds);
+  return sites.filter((site) => allowedIds.has(site.id));
+}
+
+export function canUserAccessSite(user: User, state: Partial<Store> | undefined, siteId: unknown): boolean {
+  const normalizedSiteId = normalizeSiteId(siteId);
+  return visibleSitesForUser(user, state).some((site) => site.id === normalizedSiteId);
 }
 
 export function siteName(state: Partial<Store> | undefined, siteId: unknown): string {

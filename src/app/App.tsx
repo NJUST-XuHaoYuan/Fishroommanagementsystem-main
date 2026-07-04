@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, isPersonnelResigned, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -22,7 +22,7 @@ import { PersonalCenterView } from "./components/PersonalCenterView";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
-import { DEFAULT_SITE_ID, DEFAULT_SITES, getSites, matchesSite, normalizeSiteId } from "./utils/sites";
+import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
 
 const API = "/api";
 const MAX_OPERATION_LOGS = 10000;
@@ -222,9 +222,25 @@ function mergeProductOrigins(origins: unknown, products: unknown): string[] {
   return merged;
 }
 
+function normalizeUserWithSiteScope(currentUser: User, personnel: Personnel[], sites: { id: string }[]): User {
+  if (!currentUser) return null;
+  const username = String(currentUser.username ?? "").trim();
+  if (!username) return null;
+  const matchedPerson = personnel.find((person) =>
+    person.username === username && !isPersonnelResigned(person)
+  );
+  const role = matchedPerson?.accessRole === "admin" || matchedPerson?.accessRole === "staff"
+    ? matchedPerson.accessRole
+    : currentUser.role;
+  if (role === "admin") return { username, role };
+  const visibleSiteIds = normalizeVisibleSiteIds(matchedPerson?.visibleSiteIds ?? currentUser.visibleSiteIds, sites);
+  return visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
+}
+
 function normalizePersistedState(data: any, currentUser: User): Store {
   if (!data) return { ...initialState, user: currentUser };
   const migratedData = backfillSiteScopedData(data);
+  const migratedSites = getSites(migratedData);
 
   // 迁移：旧格式 status === "sold" → sold: true, status: "healthy"
   const migratedStock = Array.isArray(migratedData.stock)
@@ -252,14 +268,18 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     ? migratedData.personnel.map((person: Record<string, unknown>, index: number) => {
         const name = String(person.name ?? person.username ?? "");
         const username = String(person.username ?? name);
+        const accessRole = person.accessRole === "admin" || person.accessRole === "staff"
+          ? person.accessRole
+          : username === "admin" ? "admin" : "staff";
         return {
           id: String(person.id ?? `person-${index + 1}`),
           name,
           username,
           password: typeof person.password === "string" ? person.password : "",
-          accessRole: person.accessRole === "admin" || person.accessRole === "staff"
-            ? person.accessRole
-            : username === "admin" ? "admin" : "staff",
+          accessRole,
+          visibleSiteIds: accessRole === "admin"
+            ? []
+            : normalizeVisibleSiteIds((person as any).visibleSiteIds, migratedSites),
           permissions: normalizePermissions((person as any).permissions),
           employmentStatus: person.employmentStatus === "resigned" || person.resignedAt ? "resigned" : "active",
           resignedAt: typeof person.resignedAt === "string" ? person.resignedAt : undefined,
@@ -285,7 +305,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     ...initialState,
     ...migratedData,
     systemSettings: migratedSystemSettings,
-    sites: getSites(migratedData),
+    sites: migratedSites,
     personnel: migratedPersonnel,
     operationLogs: Array.isArray(migratedData.operationLogs) ? migratedData.operationLogs : [],
     products: migratedProducts ?? migratedData.products,
@@ -293,14 +313,16 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     lossRecords: Array.isArray(migratedData.lossRecords) ? migratedData.lossRecords : [],
     stock: migratedStock ?? migratedData.stock,
     shipments: migratedShipments ?? migratedData.shipments,
-    user: currentUser,
+    user: normalizeUserWithSiteScope(currentUser, migratedPersonnel, migratedSites),
   };
 }
 
 function restoreUserFromSession(): User {
   const session = getValidAuthSession();
   if (!session) return null;
-  return { username: session.username, role: session.role };
+  return session.visibleSiteIds?.length
+    ? { username: session.username, role: session.role, visibleSiteIds: session.visibleSiteIds }
+    : { username: session.username, role: session.role };
 }
 
 function findChangedKeys(before: PersistedStore, after: PersistedStore): PersistedKey[] {
@@ -1117,12 +1139,16 @@ function AdminApp() {
         return result.user;
       })
       .then((userResult) => {
+        const visibleSiteIds = Array.isArray(userResult.visibleSiteIds)
+          ? userResult.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean)
+          : sessionUser.visibleSiteIds;
         const restoredUser: User = {
           username: String(userResult.username ?? sessionUser.username),
           role: userResult.role === "admin" ? "admin" : "staff",
+          ...(visibleSiteIds?.length ? { visibleSiteIds } : {}),
         };
         setStateBase((s) => {
-          return normalizePersistedState(EMPTY_PERSISTED_STATE, s.user ?? restoredUser);
+          return normalizePersistedState(EMPTY_PERSISTED_STATE, restoredUser ?? s.user);
         });
         setLoadedKeys(new Set<PersistedKey>());
       })
@@ -1213,9 +1239,24 @@ function AdminApp() {
     });
   };
 
+  const accessibleSiteIds = useMemo(
+    () => visibleSitesForUser(state.user, state).map((site) => site.id),
+    [state.user, state.sites]
+  );
+
+  useEffect(() => {
+    if (!state.user) return;
+    if (canUserAccessSite(state.user, state, activeSiteId)) return;
+    setActiveSiteId(accessibleSiteIds[0] ?? DEFAULT_SITE_ID);
+  }, [state.user, state.sites, activeSiteId, accessibleSiteIds, setActiveSiteId]);
+
+  const scopedSiteId = state.user && !canUserAccessSite(state.user, state, activeSiteId)
+    ? accessibleSiteIds[0] ?? DEFAULT_SITE_ID
+    : activeSiteId;
+
   const visibleState = useMemo(
-    () => state.user ? scopedStoreForSite(state, activeSiteId) : state,
-    [state, activeSiteId]
+    () => state.user ? scopedStoreForSite(state, scopedSiteId) : state,
+    [state, scopedSiteId]
   );
 
   const renderView = () => {

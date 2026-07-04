@@ -34,6 +34,9 @@ export function Login() {
       const user = {
         username: String(result.user.username ?? ""),
         role: result.user.role === "admin" ? "admin" as const : "staff" as const,
+        ...(Array.isArray(result.user.visibleSiteIds) && result.user.visibleSiteIds.length > 0
+          ? { visibleSiteIds: result.user.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean) }
+          : {}),
       };
       saveAuthSession(user, typeof result.token === "string" ? result.token : undefined, result.expiresAt);
       setState((s) => ({ ...s, user }));

@@ -2,7 +2,7 @@ import { createContext, useContext } from "react";
 
 export type Role = "admin" | "staff";
 
-export type User = { username: string; role: Role } | null;
+export type User = { username: string; role: Role; visibleSiteIds?: string[] } | null;
 
 export type PermissionAction = "create" | "update" | "delete";
 
@@ -269,6 +269,7 @@ export type Personnel = {
   username: string;
   password: string;
   accessRole: Role;
+  visibleSiteIds?: string[];
   permissions?: PermissionSet;
   employmentStatus?: "active" | "resigned";
   resignedAt?: string;

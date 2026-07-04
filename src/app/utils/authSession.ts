@@ -8,7 +8,16 @@ type AuthSession = {
   role: Role;
   expiresAt: number;
   token?: string;
+  visibleSiteIds?: string[];
 };
+
+function normalizeStoredVisibleSiteIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = value
+    .map((item) => String(item ?? "").trim())
+    .filter((item, index, all) => item && all.indexOf(item) === index);
+  return ids.length > 0 ? ids : undefined;
+}
 
 function readSession(): AuthSession | null {
   try {
@@ -23,7 +32,10 @@ function readSession(): AuthSession | null {
       clearAuthSession();
       return null;
     }
-    return session as AuthSession;
+    return {
+      ...(session as AuthSession),
+      visibleSiteIds: normalizeStoredVisibleSiteIds(session.visibleSiteIds),
+    };
   } catch {
     clearAuthSession();
     return null;
@@ -37,6 +49,8 @@ export function saveAuthSession(user: NonNullable<User>, token?: string, expires
     expiresAt: expiresAt ?? Date.now() + AUTH_SESSION_TTL_MS,
   };
   if (token) session.token = token;
+  const visibleSiteIds = normalizeStoredVisibleSiteIds(user.visibleSiteIds);
+  if (visibleSiteIds) session.visibleSiteIds = visibleSiteIds;
   window.localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
 }
 

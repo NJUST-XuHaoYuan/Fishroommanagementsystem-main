@@ -25,7 +25,7 @@ import {
   UserCircle,
   MapPin,
 } from "lucide-react";
-import { getSites, normalizeSiteId, siteName } from "../utils/sites";
+import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
 
 export type ViewKey =
@@ -133,8 +133,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   const { state, activeSiteId, setActiveSiteId, setState } = useStore();
   const user = state.user!;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const sites = getSites(state);
-  const activeSiteName = siteName(state, activeSiteId);
+  const sites = visibleSitesForUser(user, state);
+  const activeSiteName = sites.find((site) => site.id === normalizeSiteId(activeSiteId))?.name ?? siteName(state, activeSiteId);
 
   useEffect(() => {
     const scrollX = window.scrollX;
