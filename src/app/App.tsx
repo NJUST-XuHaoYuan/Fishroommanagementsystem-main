@@ -222,6 +222,12 @@ function mergeProductOrigins(origins: unknown, products: unknown): string[] {
   return merged;
 }
 
+function sameStringArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const leftItems = left ?? [];
+  const rightItems = right ?? [];
+  return leftItems.length === rightItems.length && leftItems.every((item, index) => item === rightItems[index]);
+}
+
 function normalizeUserWithSiteScope(currentUser: User, personnel: Personnel[], sites: { id: string }[]): User {
   if (!currentUser) return null;
   const username = String(currentUser.username ?? "").trim();
@@ -232,9 +238,18 @@ function normalizeUserWithSiteScope(currentUser: User, personnel: Personnel[], s
   const role = matchedPerson?.accessRole === "admin" || matchedPerson?.accessRole === "staff"
     ? matchedPerson.accessRole
     : currentUser.role;
-  if (role === "admin") return { username, role };
+  if (role === "admin") {
+    return currentUser.username === username && currentUser.role === role && !currentUser.visibleSiteIds?.length
+      ? currentUser
+      : { username, role };
+  }
   const visibleSiteIds = normalizeVisibleSiteIds(matchedPerson?.visibleSiteIds ?? currentUser.visibleSiteIds, sites);
-  return visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
+  const nextUser: NonNullable<User> = visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
+  return currentUser.username === nextUser.username &&
+    currentUser.role === nextUser.role &&
+    sameStringArray(currentUser.visibleSiteIds, nextUser.visibleSiteIds)
+    ? currentUser
+    : nextUser;
 }
 
 function normalizePersistedState(data: any, currentUser: User): Store {
@@ -325,6 +340,11 @@ function restoreUserFromSession(): User {
     : { username: session.username, role: session.role };
 }
 
+function userDependencyKey(user: User): string {
+  if (!user) return "";
+  return [user.username, user.role, ...(user.visibleSiteIds ?? [])].join("|");
+}
+
 function findChangedKeys(before: PersistedStore, after: PersistedStore): PersistedKey[] {
   return PERSISTED_KEYS.filter((key) =>
     JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)
@@ -402,6 +422,7 @@ function AdminApp() {
   const refreshInProgress = useRef(false);
   const loadedKeysRef = useRef<Set<PersistedKey>>(new Set());
   const viewRef = useRef(view);
+  const currentUserKey = userDependencyKey(state.user);
 
   const setActiveSiteId: Dispatch<SetStateAction<string>> = (value) => {
     setActiveSiteIdBase((current) => {
@@ -1168,7 +1189,7 @@ function AdminApp() {
     loadedKeysRef.current = new Set<PersistedKey>();
     setLoadedKeys(new Set<PersistedKey>());
     setStateLoaded(false);
-  }, [state.user]);
+  }, [currentUserKey]);
 
   useEffect(() => {
     if (!state.user) return;
@@ -1185,7 +1206,7 @@ function AdminApp() {
       setStateBase((s) => ({ ...s, user: null }));
     }, timeoutMs);
     return () => window.clearTimeout(timer);
-  }, [state.user]);
+  }, [currentUserKey]);
 
   // ── Load only the current page's business data after a successful login. ──
   useEffect(() => {
@@ -1202,13 +1223,13 @@ function AdminApp() {
         setStateLoaded(true);
       })
       .finally(() => setStateLoading(false));
-  }, [state.user, stateLoaded]);
+  }, [currentUserKey, stateLoaded]);
 
   useEffect(() => {
     if (!state.user || !stateLoaded) return;
     if (saveStatusRef.current === "saving") return;
     void loadViewState(view, { force: true, showLoading: true });
-  }, [view, state.user, stateLoaded]);
+  }, [view, currentUserKey, stateLoaded]);
 
   useEffect(() => {
     if (!state.user || !stateLoaded) return;
@@ -1230,7 +1251,7 @@ function AdminApp() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.clearInterval(interval);
     };
-  }, [state.user, stateLoaded]);
+  }, [currentUserKey, stateLoaded]);
 
   const setState: Dispatch<SetStateAction<Store>> = (value) => {
     setStateBase((prev) => {
@@ -1241,14 +1262,14 @@ function AdminApp() {
 
   const accessibleSiteIds = useMemo(
     () => visibleSitesForUser(state.user, state).map((site) => site.id),
-    [state.user, state.sites]
+    [currentUserKey, state.sites]
   );
 
   useEffect(() => {
     if (!state.user) return;
     if (canUserAccessSite(state.user, state, activeSiteId)) return;
     setActiveSiteId(accessibleSiteIds[0] ?? DEFAULT_SITE_ID);
-  }, [state.user, state.sites, activeSiteId, accessibleSiteIds, setActiveSiteId]);
+  }, [currentUserKey, state.sites, activeSiteId, accessibleSiteIds, setActiveSiteId]);
 
   const scopedSiteId = state.user && !canUserAccessSite(state.user, state, activeSiteId)
     ? accessibleSiteIds[0] ?? DEFAULT_SITE_ID
