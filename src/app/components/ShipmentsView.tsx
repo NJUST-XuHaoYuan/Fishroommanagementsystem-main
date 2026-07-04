@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useStore, Order, Shipment } from "../store";
+import { useStore, Order, Shipment, Store } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -19,6 +19,7 @@ import {
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import React from "react";
 import { confirmWrite } from "../utils/writeConfirm";
+import { authJsonHeaders } from "../utils/authSession";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +47,44 @@ function formatLocalDateTimeMinute(value?: string): string {
   if (Number.isNaN(parsed.getTime())) return raw.replace("T", " ").slice(0, 16);
   const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16).replace("T", " ");
+}
+
+async function postShipmentApi(path: string, body: Record<string, unknown>) {
+  const response = await fetch(`/api/${path}`, {
+    method: "POST",
+    headers: authJsonHeaders(),
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || `HTTP ${response.status}`);
+  }
+  return result;
+}
+
+function mergeOperationLog(current: Store, operationLog: Store["operationLogs"][number] | undefined) {
+  if (!operationLog) return current.operationLogs;
+  return [operationLog, ...(current.operationLogs ?? [])]
+    .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
+    .slice(0, 10000);
+}
+
+function applyShipmentApiResult(
+  setState: (value: Store | ((current: Store) => Store)) => void,
+  result: {
+    orders?: Store["orders"];
+    shipments?: Store["shipments"];
+    stock?: Store["stock"];
+    operationLog?: Store["operationLogs"][number];
+  }
+) {
+  setState((current) => ({
+    ...current,
+    orders: Array.isArray(result.orders) ? result.orders : current.orders,
+    shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
+    stock: Array.isArray(result.stock) ? result.stock : current.stock,
+    operationLogs: mergeOperationLog(current, result.operationLog),
+  }));
 }
 
 function countsAsActiveShipment(shipment: Shipment): boolean {
@@ -203,7 +242,7 @@ function EditShipmentDialog({
 // ─── Main View ────────────────────────────────────────────────────────────────
 
 export function ShipmentsView() {
-  const { state, saveStateTransform, saveShipmentOutbound } = useStore();
+  const { state, setState, saveStateTransform, saveShipmentOutbound } = useStore();
 
   const [shipOrder, setShipOrder] = useState<Order | null>(null);
   const [deliverShipment, setDeliverShipment] = useState<Shipment | null>(null);
@@ -309,21 +348,14 @@ export function ShipmentsView() {
 
   const doMarkDelivered = async (sh: Shipment) => {
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
-    const ok = await saveStateTransform((latest) => {
-      const shipments = latest.shipments.map((x) =>
-        x.id === sh.id ? { ...x, status: "delivered" as const } : x
-      );
-      return {
-        ...latest,
-        shipments,
-        orders: latest.orders.map((o) =>
-          o.id === sh.orderId ? { ...o, status: o.status === "damaged" ? "damaged" : "shipped" } : o
-        ),
-      };
-    });
-    if (!ok) return toast.error("保存失败，请重试");
-    setDeliverShipment(null);
-    toast.success("已确认签收");
+    try {
+      const result = await postShipmentApi("shipments/deliver", { shipmentId: sh.id });
+      applyShipmentApiResult(setState, result);
+      setDeliverShipment(null);
+      toast.success("已确认签收");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+    }
   };
 
   const doEditShipment = async (sh: Shipment, patch: Partial<Shipment>) => {

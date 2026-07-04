@@ -2948,7 +2948,7 @@ function validateShipmentPatchTransition(currentShipment = {}, nextShipment = {}
     if (shipMethod !== "pickup") throw new Error("快递发货必须先确认发货，不能直接签收");
     if (proof.length < 2) throw new Error("确认自取完成必须上传至少 2 张打包凭证");
   }
-  if (from !== "delivered" && to === "delivered" && proof.length < 2) {
+  if (from !== "delivered" && from !== "shipped" && to === "delivered" && proof.length < 2) {
     throw new Error("确认签收前必须已有至少 2 张打包凭证");
   }
   if (to === "shipped" && shipMethod !== "pickup") {
@@ -4539,6 +4539,55 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/complete" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      requireOrderPermissionForAuth(req, "update");
+
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const orderId = String(body.orderId ?? "").trim();
+      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
+      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      if (currentOrder.status === "completed") {
+        await client.query("ROLLBACK");
+        sendJson(req, res, 200, { ok: true, order: currentOrder, orders });
+        return;
+      }
+      if (currentOrder.status === "cancelled") throw new Error("已取消订单不能标记完成");
+      validateOrderCanComplete(currentOrder, state.shipments);
+
+      const nextOrder = { ...currentOrder, status: "completed" };
+      const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: `订单「${currentOrder.orderNo}」标记完成`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "完成订单失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/delete" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -4756,6 +4805,218 @@ async function handleApi(req, res, url) {
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "确认发货失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/shipments/deliver" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      requireOrderPermissionForAuth(req, "update");
+
+      const shipmentId = String(body.shipmentId ?? "").trim();
+      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
+      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
+      if (!order) throw new Error("订单不存在，请刷新后重试");
+      if (order.status === "completed") throw new Error("已完成订单不能再确认签收");
+      if (order.status === "cancelled") throw new Error("已取消订单不能再确认签收");
+      if (shipment.status === "delivered") {
+        await client.query("ROLLBACK");
+        sendJson(req, res, 200, { ok: true, shipment, orders, shipments });
+        return;
+      }
+      const nextShipment = {
+        ...shipment,
+        status: "delivered",
+        deliveredAt: shipment.deliveredAt || nowDatetimeInChina(),
+      };
+      validateShipmentPatchTransition(shipment, nextShipment);
+
+      const nextShipments = shipments.map((item) => String(item?.id ?? "") === shipmentId ? nextShipment : item);
+      const nextOrders = orders.map((item) =>
+        String(item?.id ?? "") === String(order.id ?? "")
+          ? { ...item, status: item.status === "damaged" ? "damaged" : "shipped" }
+          : item
+      );
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: `订单「${order.orderNo}」确认签收`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        shipments: nextShipments,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, shipment: nextShipment, orders: nextOrders, shipments: nextShipments, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "确认签收失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/shipments/damage" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const rawBody = JSON.parse(await readBody(req) || "{}");
+      const body = await externalizeDataUrls(rawBody);
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      requireOrderPermissionForAuth(req, "update");
+
+      const shipmentId = String(body.shipmentId ?? "").trim();
+      const resolution = String(body.resolution ?? "").trim();
+      if (!["refund", "reship"].includes(resolution)) throw new Error("发货报损必须选择退款或补发处理方式");
+      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
+      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      if (shipment.shipMethod === "pickup") throw new Error("上门自取订单不可报损");
+      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
+      if (!order) throw new Error("订单不存在，请刷新后重试");
+      if (order.status === "completed") throw new Error("已完成订单不能再报损");
+      if (order.status === "cancelled") throw new Error("已取消订单不能再报损");
+
+      const shippedItemIds = (Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds : [])
+        .map((id) => String(id ?? "").trim())
+        .filter(Boolean);
+      const shippedItemIdSet = new Set(shippedItemIds);
+      const orderItems = Array.isArray(order.items) ? order.items : [];
+      let nextShipment = {
+        ...shipment,
+        status: "damaged",
+        damageResolution: resolution,
+        notes: String(body.notes ?? shipment.notes ?? ""),
+      };
+      let nextOrder = order;
+      let nextStock = Array.isArray(state.stock) ? state.stock : [];
+
+      if (resolution === "refund") {
+        const damagedItemStockIds = Array.isArray(body.damagedItemStockIds)
+          ? body.damagedItemStockIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+          : [];
+        if (damagedItemStockIds.length === 0) throw new Error("请选择实际需要退款的商品");
+        if (new Set(damagedItemStockIds).size !== damagedItemStockIds.length) throw new Error("同一条商品不能重复报损");
+        if (damagedItemStockIds.some((id) => !shippedItemIdSet.has(id))) {
+          throw new Error("报损商品不属于当前发货单，请刷新后重试");
+        }
+        const refundAmount = normalizeMoney(body.refundAmount, "Damage refund amount");
+        if (refundAmount <= 0.005) throw new Error("请输入有效待退款金额");
+        const selectedSubtotal = orderItems
+          .filter((item) => damagedItemStockIds.includes(String(item?.stockItemId ?? "")))
+          .reduce((sum, item) => sum + Number(item?.price ?? 0), 0);
+        const maxRefund = Math.min(Math.max(calcAmountPaidForOrder(order), 0), selectedSubtotal);
+        if (refundAmount > maxRefund + 0.005) {
+          throw new Error(`退款金额不能超过已选商品可退金额 ¥${maxRefund.toFixed(2)}`);
+        }
+        nextShipment = {
+          ...nextShipment,
+          damageItemStockIds: damagedItemStockIds,
+          damageRefundAmount: refundAmount,
+          damageProof: Array.isArray(body.proof) ? body.proof.map((item) => String(item ?? "")).filter(Boolean) : [],
+        };
+        nextOrder = { ...order, status: "damaged" };
+      } else {
+        const replacements = Array.isArray(body.replacements) ? body.replacements : [];
+        if (replacements.length === 0) throw new Error("请选择补发库存鱼");
+        const replacementMap = new Map();
+        for (const item of replacements) {
+          const originalStockItemId = String(item?.originalStockItemId ?? "").trim();
+          const replacementStockItemId = String(item?.replacementStockItemId ?? "").trim();
+          if (!originalStockItemId || !replacementStockItemId) throw new Error("请选择补发库存鱼");
+          if (!shippedItemIdSet.has(originalStockItemId)) throw new Error("补发原商品不属于当前发货单，请刷新后重试");
+          replacementMap.set(originalStockItemId, replacementStockItemId);
+        }
+        if (replacementMap.size !== shippedItemIds.length) throw new Error("请为发货单内每条商品选择补发库存鱼");
+        const replacementIds = [...replacementMap.values()];
+        if (new Set(replacementIds).size !== replacementIds.length) throw new Error("同一条库存鱼不能重复补发");
+        const blockedShipmentIds = shipmentActiveStockIds(state, shipment.id);
+        const shippedIds = shippedOutStockIds(state);
+        for (const replacementStockItemId of replacementIds) {
+          const stockItem = nextStock.find((item) => String(item?.id ?? "") === replacementStockItemId);
+          if (!stockItem) throw new Error("补发库存不存在，请刷新后重试");
+          if (stockItem.sold) throw new Error("补发库存已被订单占用，请刷新后重试");
+          if (stockItem.lost) throw new Error("已损耗商品不能补发");
+          if (blockedShipmentIds.has(replacementStockItemId)) throw new Error("补发库存已经出库或发货，请刷新后重试");
+          if (!isPhysicallyInTank(stockItem, shippedIds)) throw new Error("补发库存已不在缸内，不能补发");
+          if (stockSiteId(state, stockItem) !== normalizeSiteId(order.siteId)) throw new Error("不能跨场地选择补发库存鱼");
+        }
+        nextStock = nextStock.map((stockItem) =>
+          replacementIds.includes(String(stockItem?.id ?? ""))
+            ? { ...stockItem, sold: true }
+            : stockItem
+        );
+        nextOrder = {
+          ...order,
+          status: "shipped",
+          items: orderItems.map((orderItem) => {
+            const replacementStockItemId = replacementMap.get(String(orderItem?.stockItemId ?? ""));
+            if (!replacementStockItemId) return orderItem;
+            const replacementStock = nextStock.find((stockItem) => String(stockItem?.id ?? "") === replacementStockItemId);
+            return {
+              ...orderItem,
+              stockItemId: replacementStockItemId,
+              productId: replacementStock?.productId ?? orderItem.productId,
+            };
+          }),
+        };
+      }
+
+      validateShipmentPatchTransition(shipment, nextShipment);
+      const nextShipments = shipments.map((item) => String(item?.id ?? "") === shipmentId ? nextShipment : item);
+      const nextOrders = orders.map((item) => String(item?.id ?? "") === String(order.id ?? "") ? nextOrder : item);
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "订单管理",
+        action: "修改记录",
+        detail: resolution === "refund"
+          ? `订单「${order.orderNo}」发货报损，计入待退款 ¥${Number(nextShipment.damageRefundAmount ?? 0).toFixed(2)}`
+          : `订单「${order.orderNo}」发货报损，已选择补发商品`,
+      };
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        shipments: nextShipments,
+        stock: nextStock,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        shipment: nextShipment,
+        order: nextOrder,
+        orders: nextOrders,
+        shipments: nextShipments,
+        stock: nextStock,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "发货报损失败" });
     } finally {
       client.release();
     }

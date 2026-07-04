@@ -3807,7 +3807,7 @@ type DamageResult =
 function OrderDetailDialog({
   order, open, onOpenChange,
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, setState, saveStateTransform, saveOrderPaymentChange } = useStore();
+  const { state, setState, saveOrderPaymentChange } = useStore();
   const permission = usePermission("orders");
   const isAdmin = state.user?.role === "admin";
   const today = todayDateString();
@@ -4126,38 +4126,27 @@ function OrderDetailDialog({
     if (!allShipmentsResolved)
       return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
     if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      orders: latest.orders.map((o) => o.id === order.id ? { ...o, status: "completed" } : o),
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
-    toast.success("订单已完成");
+    try {
+      const result = await postOrderApi("orders/complete", { orderId: order.id });
+      applyOrderApiResult(setState, result);
+      toast.success("订单已完成");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+    }
   };
 
   const markShipmentDelivered = async (shipment: Shipment) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
-    const ok = await saveStateTransform((latest) => {
-      const shipments = latest.shipments.map((sh) =>
-        sh.id === shipment.id ? { ...sh, status: "delivered" as const, deliveredAt: nowDatetimeLocal() } : sh
-      );
-      const relatedShipments = shipments.filter((sh) => sh.orderId === order.id && countsAsActiveShipment(sh));
-      const shippedIds = new Set(relatedShipments.flatMap((sh) => sh.itemStockIds ?? []));
-      const nextAllItemsShipped = order.items.length > 0 && order.items.every((i) => shippedIds.has(i.stockItemId));
-      return {
-        ...latest,
-        shipments,
-        orders: latest.orders.map((o) =>
-          o.id === order.id
-            ? { ...o, status: o.status === "damaged" ? "damaged" : nextAllItemsShipped ? "shipped" : o.status }
-            : o
-        ),
-      };
-    });
-    if (!ok) return toast.error("保存失败，请重试");
-    setShipmentAction(null);
-    toast.success("已确认收货");
+    try {
+      const result = await postOrderApi("shipments/deliver", { shipmentId: shipment.id });
+      applyOrderApiResult(setState, result);
+      setShipmentAction(null);
+      toast.success("已确认收货");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+    }
   };
 
   const confirmOutboundShipment = async (shipment: Shipment, packingProof: string[]) => {
@@ -4209,60 +4198,20 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return false;
     if (shipment.shipMethod === "pickup") { toast.error("上门自取订单不可报损"); return false; }
     if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并计入待退款金额，实际退款需手动录入资金往来。" : "将发货单报损并选择库存鱼补发。")) return false;
-    const ok = await saveStateTransform((latest) => {
-      const replacementMap = result.resolution === "reship"
-        ? new Map(result.replacements.map((item) => [item.originalStockItemId, item.replacementStockItemId]))
-        : new Map<string, string>();
-      const shipments = latest.shipments.map((sh) =>
-        sh.id === shipment.id
-          ? {
-              ...sh,
-              status: "damaged" as const,
-              damageResolution: result.resolution,
-              damageItemStockIds: result.resolution === "refund" ? result.damagedItemStockIds : sh.damageItemStockIds,
-              damageRefundAmount: result.resolution === "refund" ? result.refundAmount : sh.damageRefundAmount,
-              damageProof: result.resolution === "refund" ? result.proof : sh.damageProof,
-              notes: result.notes || sh.notes,
-            }
-          : sh
-      );
-      return {
-        ...latest,
-        shipments,
-        stock: result.resolution === "reship"
-          ? latest.stock.map((stock) =>
-              result.replacements.some((item) => item.replacementStockItemId === stock.id)
-                ? { ...stock, sold: true }
-                : stock
-            )
-          : latest.stock,
-        orders: latest.orders.map((o) =>
-          o.id === order.id
-            ? result.resolution === "refund"
-              ? { ...o, status: "damaged" as const }
-              : {
-                  ...o,
-                  status: "shipped" as const,
-                  items: o.items.map((item) => {
-                    const replacementStockItemId = replacementMap.get(item.stockItemId);
-                    if (!replacementStockItemId) return item;
-                    const replacementStock = latest.stock.find((stock) => stock.id === replacementStockItemId);
-                    return {
-                      ...item,
-                      stockItemId: replacementStockItemId,
-                      productId: replacementStock?.productId ?? item.productId,
-                    };
-                  }),
-                }
-            : o
-        ),
-      };
-    });
-    if (!ok) { toast.error("保存失败，请重试"); return false; }
-    setShipmentAction(null);
-    setDamageShipment(null);
-    toast.success(result.resolution === "refund" ? "已报损，待退款金额已计入订单" : "已报损，已选择库存鱼进入待发货");
-    return true;
+    try {
+      const response = await postOrderApi("shipments/damage", {
+        shipmentId: shipment.id,
+        ...result,
+      });
+      applyOrderApiResult(setState, response);
+      setShipmentAction(null);
+      setDamageShipment(null);
+      toast.success(result.resolution === "refund" ? "已报损，待退款金额已计入订单" : "已报损，已选择库存鱼进入待发货");
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+      return false;
+    }
   };
 
   const handleShipFromDetail = async (data: ShipFormData) => {
