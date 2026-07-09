@@ -64,7 +64,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
   batches: ["batches", "stock", "orders", "shipments"],
-  stockIn: ["species", "products", "tankGroups", "batches", "stock", "shipments"],
+  stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   daily: ["products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "bioRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],

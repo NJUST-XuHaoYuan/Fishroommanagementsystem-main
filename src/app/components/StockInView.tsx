@@ -17,7 +17,7 @@ import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, StatusLegend, statusRingClass, statusFrameClass } from "./StatusIcon";
 import { Search, ChevronDown, Trash2, Check, ArrowRightLeft, MapPin, List } from "lucide-react";
 import { toast } from "sonner";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { getInventoryHiddenStockIds, isVisibleInStockInventory } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 
@@ -278,7 +278,10 @@ export function StockInView() {
   const [viewMode, setViewMode] = useState<StockViewMode>("tank");
 
   const today = new Date().toISOString().slice(0, 10);
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const inventoryHiddenStockIds = useMemo(
+    () => getInventoryHiddenStockIds(state.shipments, state.orders),
+    [state.shipments, state.orders],
+  );
   const productById = useMemo(
     () => new Map(state.products.map((p) => [p.id, p])),
     [state.products],
@@ -302,8 +305,8 @@ export function StockInView() {
     return map;
   }, [state.tankGroups]);
   const activeStock = useMemo(
-    () => state.stock.filter((item) => isPhysicallyInTank(item, shippedOutStockIds)),
-    [state.stock, shippedOutStockIds],
+    () => state.stock.filter((item) => isVisibleInStockInventory(item, inventoryHiddenStockIds)),
+    [state.stock, inventoryHiddenStockIds],
   );
   const product = (id: string) => productById.get(id);
   const batch = (id: string) => state.batches.find((b) => b.id === id);
@@ -582,7 +585,7 @@ export function StockInView() {
     if (!permission.requirePermission("delete")) return;
     const ids = [...selectedIds].filter((id) => {
       const item = state.stock.find((stock) => stock.id === id);
-      return item && isPhysicallyInTank(item, shippedOutStockIds) && !stockCannotDelete(item);
+      return item && isVisibleInStockInventory(item, inventoryHiddenStockIds) && !stockCannotDelete(item);
     });
     if (ids.length === 0) return toast.error("请选择要删除的入库记录");
     setBulkDeleteIds(ids);
