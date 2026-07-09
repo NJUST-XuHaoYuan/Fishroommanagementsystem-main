@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, type ClipboardEvent } from "react";
 import { useStore, DailyLog, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -12,7 +12,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Upload, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -26,6 +26,9 @@ import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPri
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
+type RecordMediaTarget = "single" | "batch";
+
+const RECORD_MEDIA_ACCEPT = `image/*,${ORIGINAL_VIDEO_ACCEPT}`;
 
 function nowDatetimeLocal(): string {
   const now = new Date();
@@ -84,8 +87,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   });
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
-  const photoRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLInputElement>(null);
+  const recordMediaRef = useRef<HTMLInputElement>(null);
+  const [previewPhoto, setPreviewPhoto] = useState<{ src: string; filename: string } | null>(null);
 
   // Log dialog state
   const [logOpen, setLogOpen] = useState(false);
@@ -116,8 +119,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     videos: [],
   });
   const [batchRecordSaving, setBatchRecordSaving] = useState(false);
-  const batchPhotoRef = useRef<HTMLInputElement>(null);
-  const batchVideoRef = useRef<HTMLInputElement>(null);
+  const batchMediaRef = useRef<HTMLInputElement>(null);
 
   // Loss state
   const [lossOpen, setLossOpen] = useState(false);
@@ -503,34 +505,52 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     setBatchRecordOpen(true);
   };
 
-  const handleBatchPhotoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
+  const recordMediaKind = (file: File) => {
+    if (file.type.startsWith("image/")) return "image";
+    if (file.type.startsWith("video/")) return "video";
+    return null;
+  };
+
+  const appendRecordMediaUrl = (target: RecordMediaTarget, kind: "image" | "video", url: string) => {
+    const updater = (prev: RecordDraft): RecordDraft =>
+      kind === "image"
+        ? { ...prev, photos: [...prev.photos, url] }
+        : { ...prev, videos: [...prev.videos, url] };
+    if (target === "single") setNewRecord(updater);
+    else setBatchRecord(updater);
+  };
+
+  const uploadRecordMediaFiles = (files: FileList | File[] | null, target: RecordMediaTarget) => {
+    const list = Array.from(files ?? []);
+    if (list.length === 0) return;
+    let unsupportedCount = 0;
+    list.forEach(async (file) => {
+      const kind = recordMediaKind(file);
+      if (!kind) {
+        unsupportedCount += 1;
+        if (unsupportedCount === 1) toast.error("只能上传图片或视频文件");
+        return;
+      }
       try {
-        toast.info("照片原图上传中…");
+        toast.info(kind === "image" ? "图片原文件上传中…" : "视频原文件上传中…");
         const url = await uploadOriginalMedia(file);
-        setBatchRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-        toast.success("照片已上传");
+        appendRecordMediaUrl(target, kind, url);
+        toast.success(kind === "image" ? "图片已上传" : "视频已上传");
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
+        toast.error(error instanceof Error ? error.message : kind === "image" ? "图片上传失败，请重试" : "视频上传失败，请重试");
       }
     });
   };
 
-  const handleBatchVideoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
-      try {
-        toast.info("视频原文件上传中…");
-        const url = await uploadOriginalMedia(file);
-        setBatchRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
-      }
-    });
+  const handleRecordMediaPaste = (event: ClipboardEvent<HTMLElement>, target: RecordMediaTarget) => {
+    const itemFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const files = itemFiles.length > 0 ? itemFiles : Array.from(event.clipboardData.files);
+    if (files.length === 0) return;
+    event.preventDefault();
+    uploadRecordMediaFiles(files, target);
   };
 
   const submitBatchRecord = async () => {
@@ -906,38 +926,6 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     }));
     if (!ok) return toast.error("删除失败，请重试");
     toast.success("记录已删除");
-  };
-
-  // Handle photo upload for new record
-  const handlePhotoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
-      try {
-        toast.info("照片原图上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-        toast.success("照片已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
-      }
-    });
-  };
-
-  // Handle video upload for new record
-  const handleVideoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
-      try {
-        toast.info("视频原文件上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
-      }
-    });
   };
 
   // Log dialog
@@ -1805,24 +1793,15 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                           {ev.photos.length > 0 && (
                             <div className="flex flex-wrap gap-2 mt-2">
                               {ev.photos.map((src, pi) => (
-                                <div key={pi} className="group relative size-16 rounded border overflow-hidden cursor-pointer">
+                                <button
+                                  key={pi}
+                                  type="button"
+                                  className="relative size-16 overflow-hidden rounded border bg-muted transition-opacity hover:opacity-90"
+                                  onClick={() => setPreviewPhoto({ src, filename: `photo-${pi + 1}.jpg` })}
+                                  title="预览照片"
+                                >
                                   <ImageWithFallback src={src} alt={`照片${pi + 1}`} className="size-full object-cover" />
-                                  <button
-                                    type="button"
-                                    onClick={async (e) => {
-                                      e.stopPropagation();
-                                      try {
-                                        await downloadMedia(src, `photo-${pi + 1}.jpg`);
-                                      } catch {
-                                        toast.error("照片下载失败，请刷新后重试");
-                                      }
-                                    }}
-                                    className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                                    title="下载照片"
-                                  >
-                                    <Download className="size-4 text-white" />
-                                  </button>
-                                </div>
+                                </button>
                               ))}
                             </div>
                           )}
@@ -1864,7 +1843,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 
 	            {/* 添加记录 */}
 	            {permission.canCreate && (
-	            <div className="border rounded-lg p-4 flex flex-col gap-3 bg-muted/20">
+	            <div className="border rounded-lg p-4 flex flex-col gap-3 bg-muted/20" onPaste={(e) => handleRecordMediaPaste(e, "single")}>
               <div className="flex items-center gap-2">
                 <Plus className="size-4 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground">添加观察/治疗记录</span>
@@ -1881,57 +1860,43 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	                  />
                 </div>
                 <div className="grid gap-2">
-                  <Label className="text-xs">照片</Label>
+                  <Label className="text-xs">附件</Label>
                   <div className="flex items-center gap-2">
                     <input
-                      ref={photoRef}
+                      ref={recordMediaRef}
                       type="file"
-                      accept="image/*"
+                      accept={RECORD_MEDIA_ACCEPT}
                       multiple
                       className="hidden"
-                      onChange={(e) => { handlePhotoUpload(e.target.files); e.target.value = ""; }}
+                      onChange={(e) => { uploadRecordMediaFiles(e.target.files, "single"); e.target.value = ""; }}
                     />
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="flex-1"
-                      onClick={() => photoRef.current?.click()}
+                      onClick={() => recordMediaRef.current?.click()}
                     >
-                      <Camera className="size-4" /> 上传照片
+                      <Upload className="size-4" /> 上传图片/视频
                     </Button>
                   </div>
                 </div>
-	                <div className="grid gap-2">
-	                  <Label className="text-xs">视频</Label>
-	                  <div className="flex items-center gap-2">
-	                    <input
-	                      ref={videoRef}
-	                      type="file"
-	                      accept={ORIGINAL_VIDEO_ACCEPT}
-	                      multiple
-	                      className="hidden"
-	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
-	                    />
-	                    <Button
-	                      type="button"
-	                      variant="outline"
-	                      size="sm"
-	                      className="flex-1"
-	                      onClick={() => videoRef.current?.click()}
-	                    >
-	                      <Video className="size-4" /> 上传视频
-	                    </Button>
-	                  </div>
-	                </div>
               </div>
               {newRecord.photos.length > 0 && (
                 <div className="flex flex-wrap gap-2">
                   {newRecord.photos.map((src, i) => (
-                    <div key={i} className="relative size-14 rounded border overflow-hidden">
+                    <div
+                      key={i}
+                      className="relative size-14 cursor-pointer overflow-hidden rounded border"
+                      onClick={() => setPreviewPhoto({ src, filename: `record-photo-${i + 1}.jpg` })}
+                    >
                       <ImageWithFallback src={src} alt="" className="size-full object-cover" />
                       <button
-                        onClick={() => setNewRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setNewRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }));
+                        }}
                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
                       >×</button>
                     </div>
@@ -1944,6 +1909,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                     <div key={i} className="relative size-14 rounded border overflow-hidden">
                       <video src={src} alt="" className="size-full object-cover" controls />
                       <button
+                        type="button"
                         onClick={() => setNewRecord((p) => ({ ...p, videos: p.videos.filter((_, idx) => idx !== i) }))}
                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
                       >×</button>
@@ -1998,7 +1964,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	          <DialogHeader>
 	            <DialogTitle>批量维护</DialogTitle>
 	          </DialogHeader>
-	          <div className="grid gap-4 py-2 overflow-y-auto pr-1">
+	          <div className="grid gap-4 py-2 overflow-y-auto pr-1" onPaste={(e) => handleRecordMediaPaste(e, "batch")}>
 	            <div className="rounded-lg border bg-muted/30 p-3 text-sm">
 	              <div className="font-medium mb-2">本次添加观察/治疗记录 {batchRecordItems.length} 条</div>
 	              <div className="flex flex-col gap-1 text-xs text-muted-foreground max-h-32 overflow-y-auto">
@@ -2028,40 +1994,36 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	              </div>
 	              <div className="grid gap-2">
 	                <Label>附件</Label>
-	                <div className="grid gap-2 sm:grid-cols-2">
+	                <div className="grid gap-2">
 	                  <input
-	                    ref={batchPhotoRef}
+	                    ref={batchMediaRef}
 	                    type="file"
-	                    accept="image/*"
+	                    accept={RECORD_MEDIA_ACCEPT}
 	                    multiple
 	                    className="hidden"
-	                    onChange={(e) => { handleBatchPhotoUpload(e.target.files); e.target.value = ""; }}
+	                    onChange={(e) => { uploadRecordMediaFiles(e.target.files, "batch"); e.target.value = ""; }}
 	                  />
-	                  <Button type="button" variant="outline" size="sm" onClick={() => batchPhotoRef.current?.click()}>
-	                    <Camera className="size-4" /> 上传照片
+	                  <Button type="button" variant="outline" size="sm" onClick={() => batchMediaRef.current?.click()}>
+	                    <Upload className="size-4" /> 上传图片/视频
 	                  </Button>
-		                  <input
-		                    ref={batchVideoRef}
-		                    type="file"
-		                    accept={ORIGINAL_VIDEO_ACCEPT}
-		                    multiple
-		                    className="hidden"
-		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
-		                  />
-		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoRef.current?.click()}>
-		                    <Video className="size-4" /> 上传视频
-		                  </Button>
 		                </div>
 		              </div>
 	            </div>
 	            {batchRecord.photos.length > 0 && (
 	              <div className="flex flex-wrap gap-2">
 	                {batchRecord.photos.map((src, i) => (
-	                  <div key={i} className="relative size-14 rounded border overflow-hidden">
+	                  <div
+	                    key={i}
+	                    className="relative size-14 cursor-pointer overflow-hidden rounded border"
+	                    onClick={() => setPreviewPhoto({ src, filename: `batch-photo-${i + 1}.jpg` })}
+	                  >
 	                    <ImageWithFallback src={src} alt="" className="size-full object-cover" />
 	                    <button
 	                      type="button"
-	                      onClick={() => setBatchRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
+	                      onClick={(e) => {
+	                        e.stopPropagation();
+	                        setBatchRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }));
+	                      }}
 	                      className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
 	                    >×</button>
 	                  </div>
@@ -2356,6 +2318,37 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setViewLogGroupId(null)}>关闭</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!previewPhoto} onOpenChange={(open) => !open && setPreviewPhoto(null)}>
+        <DialogContent aria-describedby={undefined} className="max-w-5xl gap-3 p-3 sm:p-4">
+          <DialogHeader className="pr-24">
+            <DialogTitle>照片预览</DialogTitle>
+          </DialogHeader>
+          {previewPhoto && (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="absolute right-12 top-3 h-8 px-2.5 sm:top-4"
+                onClick={async () => {
+                  try {
+                    await downloadMedia(previewPhoto.src, previewPhoto.filename);
+                  } catch {
+                    toast.error("照片下载失败，请刷新后重试");
+                  }
+                }}
+              >
+                <Download className="size-4" />
+                下载
+              </Button>
+              <div className="flex max-h-[72dvh] items-center justify-center overflow-hidden rounded-lg bg-black">
+                <ImageWithFallback src={previewPhoto.src} alt="照片预览" className="max-h-[72dvh] w-auto max-w-full object-contain" />
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
