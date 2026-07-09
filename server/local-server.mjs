@@ -1,12 +1,17 @@
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { extname, join, normalize, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
+
+const execFileAsync = promisify(execFile);
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const dataDir = join(root, ".data");
@@ -22,6 +27,9 @@ const MIN_FINANCE_DAYS = 7;
 const MAX_FINANCE_DAYS = 730;
 const MAX_IMAGE_UPLOAD_BYTES = numberFromEnv(process.env.MAX_IMAGE_UPLOAD_BYTES, 50 * 1024 * 1024);
 const MAX_VIDEO_UPLOAD_BYTES = numberFromEnv(process.env.MAX_VIDEO_UPLOAD_BYTES, 300 * 1024 * 1024);
+const VIDEO_TRANSCODE_TIMEOUT_MS = numberFromEnv(process.env.VIDEO_TRANSCODE_TIMEOUT_MS, 5 * 60 * 1000);
+const TRANSCODE_VIDEO_UPLOADS = process.env.TRANSCODE_VIDEO_UPLOADS !== "false";
+const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -3152,7 +3160,7 @@ function cosKeyFromUrl(value) {
   }
 }
 
-function sendCosObject(req, res, key, cacheControl = "private, max-age=3600") {
+function sendCosObject(req, res, key, cacheControl = "private, max-age=3600", options = {}) {
   const client = getCosClient();
   if (!client) {
     sendJson(req, res, 503, { error: "COS is not configured" });
@@ -3169,8 +3177,25 @@ function sendCosObject(req, res, key, cacheControl = "private, max-age=3600") {
       return;
     }
     const body = data.Body ?? Buffer.alloc(0);
+    const contentType = data.ContentType || mimeForExtension(extname(key));
+    if (options.wechatVideo && String(contentType).startsWith("video/")) {
+      transcodeVideoToWechatMp4(body, contentType)
+        .then((mp4Buffer) => {
+          res.writeHead(200, {
+            "Content-Type": "video/mp4",
+            "Content-Disposition": "inline; filename=\"wechat-video.mp4\"",
+            "Cache-Control": cacheControl,
+          });
+          res.end(mp4Buffer);
+        })
+        .catch((transcodeError) => {
+          console.warn(`Failed to transcode COS video ${key}: ${transcodeError.message}`);
+          sendJson(req, res, 502, { error: "视频转码失败，请稍后重试" });
+        });
+      return;
+    }
     res.writeHead(200, {
-      "Content-Type": data.ContentType || mimeForExtension(extname(key)),
+      "Content-Type": contentType,
       "Cache-Control": cacheControl,
     });
     res.end(body);
@@ -3244,6 +3269,52 @@ function mimeForExtension(ext) {
   if (normalized === ".3gp") return "video/3gpp";
   if (normalized === ".3g2") return "video/3gpp2";
   return "application/octet-stream";
+}
+
+async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4") {
+  const tempDir = await mkdtemp(join(tmpdir(), "fishroom-video-"));
+  const inputPath = join(tempDir, `input${extensionForMime(sourceMime)}`);
+  const outputPath = join(tempDir, "wechat.mp4");
+  try {
+    await writeFile(inputPath, buffer);
+    await execFileAsync(FFMPEG_PATH, [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      inputPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-profile:v",
+      "main",
+      "-level",
+      "4.0",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ], {
+      timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+    return await readFile(outputPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function uploadBufferToCos(buffer, mime, key) {
@@ -3331,14 +3402,20 @@ function normalizeUploadMime(value, filename = "") {
 }
 
 async function uploadOriginalMedia(buffer, mime) {
-  const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 24);
-  const ext = extensionForMime(mime);
-  const typeFolder = mime.startsWith("video/") ? "videos" : "images";
+  let mediaBuffer = buffer;
+  let mediaMime = mime;
+  if (TRANSCODE_VIDEO_UPLOADS && String(mime).startsWith("video/")) {
+    mediaBuffer = await transcodeVideoToWechatMp4(buffer, mime);
+    mediaMime = "video/mp4";
+  }
+  const hash = createHash("sha256").update(mediaBuffer).digest("hex").slice(0, 24);
+  const ext = extensionForMime(mediaMime);
+  const typeFolder = mediaMime.startsWith("video/") ? "videos" : "images";
   const fileName = `${hash}${ext}`;
   if (cosReady()) {
     const cosUrl = await uploadBufferToCos(
-      buffer,
-      mime,
+      mediaBuffer,
+      mediaMime,
       prefixedCosKey("original", typeFolder, fileName)
     );
     if (cosUrl) return cosUrl;
@@ -3348,7 +3425,7 @@ async function uploadOriginalMedia(buffer, mime) {
   const filePath = join(folder, fileName);
   await mkdir(folder, { recursive: true });
   if (!existsSync(filePath)) {
-    await writeFile(filePath, buffer);
+    await writeFile(filePath, mediaBuffer);
   }
   return `/uploads/original/${typeFolder}/${fileName}`;
 }
@@ -4128,10 +4205,11 @@ async function handleApi(req, res, url) {
         return;
       }
       const mediaUrl = await uploadOriginalMedia(buffer, mime);
+      const storedMime = isVideo && TRANSCODE_VIDEO_UPLOADS ? "video/mp4" : mime;
       sendJson(req, res, 200, {
         ok: true,
         url: mediaUrl,
-        mime,
+        mime: storedMime,
         size: buffer.length,
         storage: cosReady() ? "cos" : "local",
       });
@@ -4153,7 +4231,9 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 400, { error: "Invalid COS media URL" });
       return;
     }
-    sendCosObject(req, res, key);
+    sendCosObject(req, res, key, "private, max-age=3600", {
+      wechatVideo: url.searchParams.get("wechatVideo") === "1",
+    });
     return;
   }
 
@@ -5858,8 +5938,24 @@ async function serveUpload(req, res, url) {
   try {
     const fileStat = await stat(finalPath);
     if (!fileStat.isFile()) throw new Error("Not a file");
+    const contentType = mimeTypes[extname(finalPath)] || mimeForExtension(extname(finalPath));
+    if (url.searchParams.get("wechatVideo") === "1" && contentType.startsWith("video/")) {
+      try {
+        const mp4Buffer = await transcodeVideoToWechatMp4(await readFile(finalPath), contentType);
+        res.writeHead(200, {
+          "Content-Type": "video/mp4",
+          "Content-Disposition": "inline; filename=\"wechat-video.mp4\"",
+          "Cache-Control": "public, max-age=3600",
+        });
+        res.end(mp4Buffer);
+      } catch (error) {
+        console.warn(`Failed to transcode local video ${finalPath}: ${error.message}`);
+        sendJson(req, res, 502, { error: "视频转码失败，请稍后重试" });
+      }
+      return;
+    }
     res.writeHead(200, {
-      "Content-Type": mimeTypes[extname(finalPath)] || "application/octet-stream",
+      "Content-Type": contentType,
       "Cache-Control": "public, max-age=31536000, immutable",
     });
     createReadStream(finalPath).pipe(res);

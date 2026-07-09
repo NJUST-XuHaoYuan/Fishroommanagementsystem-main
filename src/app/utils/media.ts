@@ -159,16 +159,29 @@ function triggerDownload(url: string, filename: string) {
   document.body.removeChild(link);
 }
 
-export async function downloadMedia(src: string | undefined, filename: string) {
+type DownloadMediaOptions = {
+  mediaType?: "image" | "video";
+};
+
+export async function downloadMedia(src: string | undefined, filename: string, options: DownloadMediaOptions = {}) {
   if (!src) throw new Error("Missing media URL");
   if (src.startsWith("data:")) {
     triggerDownload(src, filename);
     return;
   }
 
-  const targetUrl = isCosMediaUrl(src)
-    ? `/api/media/cos?url=${encodeURIComponent(src)}`
-    : src;
+  const targetUrl = (() => {
+    if (!isCosMediaUrl(src)) {
+      if (options.mediaType === "video" && src.startsWith("/uploads/")) {
+        const query = new URLSearchParams({ wechatVideo: "1" });
+        return `${src}?${query.toString()}`;
+      }
+      return src;
+    }
+    const query = new URLSearchParams({ url: src });
+    if (options.mediaType === "video") query.set("wechatVideo", "1");
+    return `/api/media/cos?${query.toString()}`;
+  })();
   const response = await fetch(targetUrl, {
     headers: isCosMediaUrl(src) || targetUrl.startsWith("/api/") ? authHeaders() : undefined,
   });

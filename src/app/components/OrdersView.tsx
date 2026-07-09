@@ -3390,7 +3390,7 @@ function StockPickerBioDialog({
                                     onClick={async (e) => {
                                       e.stopPropagation();
                                       try {
-                                        await downloadMedia(src, `video-${videoIndex + 1}.mp4`);
+                                        await downloadMedia(src, `video-${videoIndex + 1}.mp4`, { mediaType: "video" });
                                       } catch {
                                         toast.error("视频下载失败，请刷新后重试");
                                       }
