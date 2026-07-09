@@ -6,7 +6,8 @@ ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8787
 
-RUN apk add --no-cache ffmpeg
+RUN sed -i 's#https://dl-cdn.alpinelinux.org/alpine#https://mirrors.cloud.tencent.com/alpine#g' /etc/apk/repositories \
+  && apk add --no-cache ffmpeg
 
 COPY package.json ./
 RUN npm config set registry https://registry.npmmirror.com \
