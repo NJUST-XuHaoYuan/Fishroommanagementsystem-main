@@ -2560,12 +2560,54 @@ function requireOrderPermissionForAuth(req, action = "update") {
   }
 }
 
+function normalizeStockLookupCode(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[－–—]/g, "-")
+    .replace(/\s+/g, "")
+    .replace(/[-_]/g, "");
+}
+
+function stockMatchesLookupCode(stockItem = {}, lookupCode = "") {
+  const code = normalizeStockLookupCode(lookupCode);
+  if (!code) return false;
+  return [stockItem?.code, stockItem?.id]
+    .map(normalizeStockLookupCode)
+    .filter(Boolean)
+    .some((token) => token === code);
+}
+
+function findOrderStockItemByInput(state = {}, input = {}, expectedSiteId = DEFAULT_SITE_ID) {
+  const rawStockId = String(input.stockItemId ?? "").trim();
+  const rawLookupCode = String(input.fishCode ?? input.code ?? rawStockId).trim();
+  if (!rawStockId && !rawLookupCode) throw new Error("Order item stockItemId is required");
+
+  const stock = Array.isArray(state.stock) ? state.stock : [];
+  const byId = rawStockId
+    ? stock.find((item) => String(item?.id ?? "") === rawStockId)
+    : undefined;
+  if (byId) return byId;
+
+  const codeMatches = rawLookupCode
+    ? stock.filter((item) => stockMatchesLookupCode(item, rawLookupCode))
+    : [];
+  if (codeMatches.length === 0) {
+    throw new Error(`库存鱼不存在或已被删除：${rawLookupCode || rawStockId}`);
+  }
+
+  const siteMatches = codeMatches.filter((item) => stockSiteId(state, item) === expectedSiteId);
+  if (siteMatches.length === 1) return siteMatches[0];
+  if (siteMatches.length > 1) {
+    throw new Error(`鱼编号「${rawLookupCode}」对应 ${siteMatches.length} 条库存鱼，请从搜索结果中点选具体鱼`);
+  }
+  throw new Error("不能跨场地选择库存鱼");
+}
+
 function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
-  const stockId = String(input.stockItemId ?? "").trim();
-  if (!stockId) throw new Error("Order item stockItemId is required");
-  const stockItem = (Array.isArray(state.stock) ? state.stock : []).find((item) => String(item?.id ?? "") === stockId);
-  if (!stockItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
   const expectedSiteId = normalizeSiteId(options.siteId);
+  const stockItem = findOrderStockItemByInput(state, input, expectedSiteId);
+  const stockId = String(stockItem?.id ?? "").trim();
   if (stockSiteId(state, stockItem) !== expectedSiteId) {
     throw new Error("不能跨场地选择库存鱼");
   }
@@ -2638,6 +2680,10 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
       commissionRate: 0,
     };
   });
+  const normalizedItemIds = items.map((item) => String(item?.stockItemId ?? "")).filter(Boolean);
+  if (new Set(normalizedItemIds).size !== normalizedItemIds.length) {
+    throw new Error("订单内不能重复选择同一条鱼");
+  }
   const shippingFee = normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
   const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
   const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
@@ -4418,6 +4464,7 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, { ok: true, order, orders: nextOrders, stock: nextStock, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
+      console.warn(`[orders/create] ${error.message}`);
       sendJson(req, res, 400, { ok: false, error: error.message });
     } finally {
       client.release();
@@ -4474,6 +4521,7 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, stock: nextStock, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
+      console.warn(`[orders/update] ${error.message}`);
       sendJson(req, res, 400, { ok: false, error: error.message });
     } finally {
       client.release();

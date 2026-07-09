@@ -85,8 +85,16 @@ type OrderPickerItem = {
   commissionRate?: number;
 };
 
+function normalizeSearchText(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[－–—]/g, "-")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
 function normalizeFishCode(value: unknown): string {
-  return String(value ?? "").trim().toLowerCase();
+  return normalizeSearchText(value).replace(/[-_]/g, "");
 }
 
 function splitFishCodeInput(value: string): string[] {
@@ -4884,6 +4892,7 @@ function StockPickerDialog({
   const [groupId, setGroupId] = useState("");
   const [subTankId, setSubTankId] = useState("");
   const [fishCodeInput, setFishCodeInput] = useState("");
+  const [searchInput, setSearchInput] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [detailStockId, setDetailStockId] = useState<string | null>(null);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -4893,6 +4902,7 @@ function StockPickerDialog({
       setGroupId("");
       setSubTankId("");
       setFishCodeInput("");
+      setSearchInput("");
       setPicked(new Set());
       setDetailStockId(null);
       if (clickTimer.current) {
@@ -4903,6 +4913,19 @@ function StockPickerDialog({
   }, [open]);
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
+
+  const tankContextBySubId = (subTankId: string) => {
+    for (const group of state.tankGroups) {
+      const tank = group.subTanks.find((entry) => entry.id === subTankId);
+      if (tank) return { group, tank };
+    }
+    return null;
+  };
+
+  const tankLabel = (subTankId: string) => {
+    const ctx = tankContextBySubId(subTankId);
+    return ctx ? `${ctx.group.name} / ${ctx.tank.name}` : "未知缸位";
+  };
 
   const getItemIcon = (itemId: string, productId: string) => {
     const recs = state.bioRecords
@@ -4928,6 +4951,12 @@ function StockPickerDialog({
   const shippedOutStockIds = getShippedOutStockIds(state.shipments);
   const isAvail = (s: StockItem) =>
     !s.sold && !excludeIds.has(s.id) && isPhysicallyInTank(s, shippedOutStockIds);
+  const unavailableReason = (s: StockItem) => {
+    if (excludeIds.has(s.id)) return "已在当前订单或已选列表中";
+    if (s.sold) return "已被订单占用";
+    if (!isPhysicallyInTank(s, shippedOutStockIds)) return "已不在缸内或已出库";
+    return "不可添加";
+  };
 
   const availableGroups = state.tankGroups.filter((g) =>
     g.subTanks.some((t) => state.stock.some((s) => s.subTankId === t.id && isAvail(s)))
@@ -4943,6 +4972,34 @@ function StockPickerDialog({
     : [];
 
   const grouped = groupByProduct(availableItems);
+  const availableAllItems = state.stock
+    .filter(isAvail)
+    .slice()
+    .sort((a, b) =>
+      tankLabel(a.subTankId).localeCompare(tankLabel(b.subTankId), "zh-Hans-CN") ||
+      (getProduct(a.productId)?.name ?? "").localeCompare(getProduct(b.productId)?.name ?? "", "zh-Hans-CN") ||
+      String(a.code ?? "").localeCompare(String(b.code ?? ""), "zh-Hans-CN")
+    );
+  const searchTerm = normalizeSearchText(searchInput);
+  const itemMatchesSearch = (s: StockItem) => {
+    if (!searchTerm) return false;
+    const p = getProduct(s.productId);
+    const ctx = tankContextBySubId(s.subTankId);
+    return [
+      s.code,
+      s.id,
+      s.notes,
+      p?.name,
+      p?.size,
+      p?.origin,
+      ctx?.group.name,
+      ctx?.tank.name,
+      ctx ? `${ctx.group.name}/${ctx.tank.name}` : "",
+      ctx ? `${ctx.group.name}${ctx.tank.name}` : "",
+    ].some((value) => normalizeSearchText(value).includes(searchTerm));
+  };
+  const searchItems = searchTerm ? availableAllItems.filter(itemMatchesSearch) : [];
+  const groupedSearchItems = groupByProduct(searchItems);
 
   const toggleFish = (id: string) =>
     setPicked((prev) => {
@@ -4967,10 +5024,19 @@ function StockPickerDialog({
     }, 220);
   };
 
+  const matchesFishCode = (stock: StockItem, code: string, partial = false) => {
+    const normalizedCode = normalizeFishCode(code);
+    if (!normalizedCode) return false;
+    const tokens = [stock.code, stock.id].map(normalizeFishCode).filter(Boolean);
+    return partial
+      ? tokens.some((token) => token.includes(normalizedCode))
+      : tokens.some((token) => token === normalizedCode);
+  };
+
   const pickByFishCode = () => {
-    const codes = splitFishCodeInput(fishCodeInput);
+    const codes = splitFishCodeInput(fishCodeInput || searchInput);
     if (codes.length === 0) {
-      toast.error("请输入选鱼码");
+      toast.error("请输入编号");
       return;
     }
 
@@ -4981,8 +5047,10 @@ function StockPickerDialog({
     let firstAdded: StockItem | null = null;
 
     for (const code of codes) {
-      const normalizedCode = normalizeFishCode(code);
-      const codeMatches = state.stock.filter((stock) => normalizeFishCode(stock.code) === normalizedCode);
+      const exactMatches = state.stock.filter((stock) => matchesFishCode(stock, code));
+      const codeMatches = exactMatches.length > 0
+        ? exactMatches
+        : state.stock.filter((stock) => matchesFishCode(stock, code, true));
       const availableMatches = codeMatches.filter(isAvail);
 
       if (availableMatches.length === 1) {
@@ -4998,19 +5066,19 @@ function StockPickerDialog({
       }
 
       if (availableMatches.length > 1) {
-        errors.push(`选鱼码「${code}」对应 ${availableMatches.length} 条可售鱼，请从缸位列表选择`);
+        errors.push(`编号「${code}」对应 ${availableMatches.length} 条可售鱼，请从搜索结果或缸位列表点选`);
         continue;
       }
 
       if (codeMatches.some((stock) => excludeIds.has(stock.id))) {
-        skipped.push(code);
+        errors.push(`编号「${code}」${unavailableReason(codeMatches.find((stock) => excludeIds.has(stock.id))!)}`);
         continue;
       }
 
       if (codeMatches.length > 0) {
-        errors.push(`选鱼码「${code}」对应的鱼不可添加`);
+        errors.push(`编号「${code}」对应的鱼${unavailableReason(codeMatches[0])}`);
       } else {
-        errors.push(`未找到选鱼码「${code}」`);
+        errors.push(`未找到编号「${code}」`);
       }
     }
 
@@ -5024,11 +5092,11 @@ function StockPickerDialog({
         setSubTankId(firstAdded.subTankId);
       }
       setFishCodeInput("");
-      toast.success(`已按选鱼码选择 ${added.length} 条鱼`);
+      toast.success(`已按编号选择 ${added.length} 条鱼`);
     }
 
     if (skipped.length > 0 && added.length === 0 && errors.length === 0) {
-      toast.info(`选鱼码「${skipped.join("、")}」已在当前订单或已选列表中`);
+      toast.info(`编号「${skipped.join("、")}」已在当前订单或已选列表中`);
     }
 
     if (errors.length > 0) {
@@ -5038,9 +5106,16 @@ function StockPickerDialog({
   };
 
   const selectAll = () => setPicked(new Set(availableItems.map((s) => s.id)));
+  const selectAllSearchResults = () =>
+    setPicked((current) => new Set([...current, ...searchItems.map((s) => s.id)]));
   const clearAll = () => setPicked(new Set());
 
   const confirm = () => {
+    const missingIds = Array.from(picked).filter((stockItemId) => !state.stock.some((x) => x.id === stockItemId));
+    if (missingIds.length > 0) {
+      toast.error("已选商品数据已变化，请重新选择商品");
+      return;
+    }
     const items = Array.from(picked).map((stockItemId) => {
       const s = state.stock.find((x) => x.id === stockItemId)!;
       return {
@@ -5061,7 +5136,7 @@ function StockPickerDialog({
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-w-lg max-h-[80vh] flex flex-col">
+      <DialogContent aria-describedby={undefined} className="max-w-2xl max-h-[86vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>选择商品</DialogTitle>
         </DialogHeader>
@@ -5070,33 +5145,144 @@ function StockPickerDialog({
 
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <Label className="text-xs font-medium text-muted-foreground">按选鱼码直接选鱼</Label>
+              <Label className="text-xs font-medium text-muted-foreground">搜索商品或按编号选鱼</Label>
               {picked.size > 0 && (
                 <span className="text-xs font-medium text-emerald-600">已选 {picked.size} 条</span>
               )}
             </div>
-            <div className="flex gap-2">
-              <Input
-                value={fishCodeInput}
-                onChange={(event) => setFishCodeInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    pickByFishCode();
-                  }
-                }}
-                placeholder="输入选鱼码，多个用空格或逗号分隔"
-                className="h-9"
-              />
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="relative min-w-0">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchInput}
+                  onChange={(event) => {
+                    setSearchInput(event.target.value);
+                    setFishCodeInput(event.target.value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      pickByFishCode();
+                    }
+                  }}
+                  placeholder="搜索缸位 / 商品名 / 编号 / 备注，多个编号用空格"
+                  className="h-9 pl-9"
+                />
+              </div>
               <Button type="button" variant="outline" size="sm" onClick={pickByFishCode}>
                 <Check className="size-4" />
-                选鱼
+                编号选中
               </Button>
             </div>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              只会添加当前可售且未加入订单的鱼；回车即可确认。
+              输入会即时模糊筛选；回车或点击“编号选中”会按明确编号加入。
             </p>
           </div>
+
+          {searchTerm && (
+            <div className="flex flex-col gap-2 rounded-lg border bg-white">
+              <div className="flex items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+                <div className="min-w-0 text-xs font-medium text-muted-foreground">
+                  搜索结果 <span className="text-foreground">{searchItems.length}</span> 条
+                </div>
+                <div className="flex items-center gap-3">
+                  {searchItems.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={selectAllSearchResults}
+                      className="text-xs font-medium text-sky-600 hover:underline"
+                    >
+                      全选结果
+                    </button>
+                  )}
+                  {picked.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearAll}
+                      className="text-xs text-muted-foreground hover:underline"
+                    >
+                      清除已选
+                    </button>
+                  )}
+                </div>
+              </div>
+              {searchItems.length === 0 ? (
+                <div className="px-3 py-5 text-center text-sm text-muted-foreground">
+                  没有匹配的可售鱼
+                </div>
+              ) : (
+                <div className="max-h-64 overflow-y-auto divide-y">
+                  {groupedSearchItems.map(([productId, stockItems]) => {
+                    const p = getProduct(productId);
+                    const selectedCount = stockItems.filter((s) => picked.has(s.id)).length;
+                    return (
+                      <div key={productId} className="p-3">
+                        <div className="mb-2 flex items-center gap-2">
+                          <div className="size-7 shrink-0 overflow-hidden rounded border bg-muted">
+                            {p?.imageUrl
+                              ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
+                              : <div className="flex size-full items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="text-sm font-medium">{p?.name ?? productId}</span>
+                            {(p?.size || p?.origin) && (
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {[p?.size, p?.origin].filter(Boolean).join(" · ")}
+                              </span>
+                            )}
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">×{stockItems.length}</span>
+                          {selectedCount > 0 && (
+                            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">+{selectedCount}</span>
+                          )}
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {stockItems.map((s) => {
+                            const iconUrl = getItemIcon(s.id, s.productId);
+                            const isSel = picked.has(s.id);
+                            return (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onClick={(event) => handleFishClick(s.id, event.detail)}
+                                className={`grid grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-2 rounded-md border p-2 text-left transition hover:bg-muted/40 ${
+                                  isSel ? "border-emerald-500 bg-emerald-50" : "border-border"
+                                }`}
+                                title="单击选择，双击查看/修改"
+                              >
+                                <span className={`relative size-10 overflow-hidden rounded bg-muted ${isSel ? "ring-2 ring-emerald-500 ring-offset-1" : statusRingClass(s.status)}`}>
+                                  {iconUrl
+                                    ? <ImageWithFallback src={iconUrl} alt="" className="size-full object-cover" />
+                                    : <span className="flex size-full items-center justify-center"><Fish className="size-3 text-muted-foreground" /></span>}
+                                  {isSel && (
+                                    <span className="absolute inset-0 flex items-center justify-center bg-emerald-500/40">
+                                      <Check className="size-4 text-white drop-shadow" />
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="min-w-0">
+                                  <span className="flex min-w-0 items-center gap-1.5">
+                                    {s.code && (
+                                      <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs font-semibold text-slate-700">
+                                        {s.code}
+                                      </span>
+                                    )}
+                                    <span className="truncate text-xs text-muted-foreground">{statusLabel(s.status)}</span>
+                                  </span>
+                                  <span className="mt-1 block truncate text-xs text-muted-foreground">{tankLabel(s.subTankId)}</span>
+                                  {s.notes && <span className="mt-0.5 block truncate text-xs text-muted-foreground">{s.notes}</span>}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Step 1: 缸组 */}
           <div className="flex flex-col gap-2">
@@ -5437,6 +5623,12 @@ function NewOrderDialog({
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (belowMinimumReturn) return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
+    const missingStockIds = Array.from(selectedItems.keys()).filter((stockItemId) =>
+      !state.stock.some((item) => item.id === stockItemId)
+    );
+    if (missingStockIds.length > 0) {
+      return toast.error("已选商品数据已变化，请移除后重新添加");
+    }
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
       const s = state.stock.find((x) => x.id === stockItemId)!;
       return {
