@@ -81,7 +81,8 @@ type OrderPickerItem = {
   stockItemId: string;
   productId: string;
   price: number;
-  commissionRate: number;
+  minReturnPrice: number;
+  commissionRate?: number;
 };
 
 function normalizeFishCode(value: unknown): string {
@@ -447,18 +448,48 @@ function money(value: number | undefined): string {
   return `¥${Number(value ?? 0).toFixed(2)}`;
 }
 
-function normalizeCommissionRate(value: unknown): number {
-  const rate = Number(value ?? 0);
-  if (Number.isNaN(rate) || rate < 0) return 0;
-  return Number(rate.toFixed(4));
+function normalizeMoneyAmount(value: unknown): number {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount) || amount < 0) return 0;
+  return Number(amount.toFixed(2));
 }
 
-function itemCommissionAmount(item: Pick<OrderItem, "price" | "commissionRate">): number {
-  return Number(item.price ?? 0) * normalizeCommissionRate(item.commissionRate) / 100;
+function normalizeMinReturnPrice(value: unknown): number {
+  return normalizeMoneyAmount(value);
 }
 
-function orderCommissionTotal(order: Pick<Order, "items">): number {
-  return (order.items ?? []).reduce((sum, item) => sum + itemCommissionAmount(item), 0);
+function itemCommissionAmount(item: { price?: number; minReturnPrice?: number }): number {
+  return Math.max(0, normalizeMoneyAmount(item.price) - normalizeMinReturnPrice(item.minReturnPrice));
+}
+
+function orderCommissionTotalWithProducts(
+  order: Pick<Order, "items">,
+  getProduct: (productId: string) => Pick<Product, "minReturnPrice"> | undefined
+): number {
+  return (order.items ?? []).reduce((sum, item) => {
+    const minReturnPrice = orderItemMinReturnPrice(item, getProduct(item.productId));
+    return sum + itemCommissionAmount({ ...item, minReturnPrice });
+  }, 0);
+}
+
+function orderMinimumReturnTotal(items: { minReturnPrice?: number }[]): number {
+  return items.reduce((sum, item) => sum + normalizeMinReturnPrice(item.minReturnPrice), 0);
+}
+
+function orderGoodsNetTotal(itemsTotal: number, discount: number): number {
+  return Number((itemsTotal - normalizeMoneyAmount(discount)).toFixed(2));
+}
+
+function productMinReturnPrice(product?: Pick<Product, "minReturnPrice"> | null): number {
+  return normalizeMinReturnPrice(product?.minReturnPrice);
+}
+
+function orderItemMinReturnPrice(
+  item: { minReturnPrice?: number; productId?: string },
+  product?: Pick<Product, "minReturnPrice"> | null
+): number {
+  if (item.minReturnPrice != null) return normalizeMinReturnPrice(item.minReturnPrice);
+  return productMinReturnPrice(product);
 }
 
 function safeExcelFilename(value: string): string {
@@ -3647,6 +3678,8 @@ function ItemsWithShipments({
     const isLost = !!s?.lost;
     const isUnshipped = !shippedItemIds.has(item.stockItemId);
     const damageRefunded = !!options?.damageRefunded;
+    const minReturnPrice = orderItemMinReturnPrice(item, p);
+    const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
     return (
       <tr key={item.stockItemId ?? idx} className={`border-t hover:bg-muted/20 transition-colors cursor-pointer group ${isLost ? "bg-red-50/40" : ""}`}
         onClick={() => setDetailId(item.stockItemId)}>
@@ -3670,8 +3703,8 @@ function ItemsWithShipments({
         </td>
         <td className="px-4 py-2.5 text-sm text-muted-foreground">{s ? subTankName(s.subTankId) : "—"}</td>
         <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
-        <td className="px-4 py-2.5 text-sm text-right">{normalizeCommissionRate(item.commissionRate).toFixed(2)}%</td>
-        <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{itemCommissionAmount(item).toFixed(2)}</td>
+        <td className="px-4 py-2.5 text-sm text-right">¥{minReturnPrice.toFixed(2)}</td>
+        <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{commissionAmount.toFixed(2)}</td>
         <td className="px-3 py-2.5 text-right">
           {isUnshipped && canReturnItem ? (
             <Button
@@ -3702,8 +3735,8 @@ function ItemsWithShipments({
         <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
         <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">缸位</th>
         <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">售价</th>
-        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成比例</th>
-        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">提成</th>
+        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">最低回厂价</th>
+        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">可提成</th>
         <th className="w-12 px-3 py-2" />
       </tr>
     </thead>
@@ -3809,7 +3842,6 @@ function OrderDetailDialog({
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
   const { state, setState, saveOrderPaymentChange } = useStore();
   const permission = usePermission("orders");
-  const isAdmin = state.user?.role === "admin";
   const today = todayDateString();
   const [addPayOpen, setAddPayOpen] = useState(false);
   const [editingPayment, setEditingPayment] = useState<PaymentRecord | null>(null);
@@ -3857,7 +3889,11 @@ function OrderDetailDialog({
         stockItemId: i.stockItemId,
         productId: i.productId,
         price: i.price,
-        commissionRate: normalizeCommissionRate(i.commissionRate),
+        minReturnPrice: orderItemMinReturnPrice(
+          i,
+          state.products.find((product) => product.id === i.productId)
+        ),
+        commissionRate: 0,
       })),
     });
     setEditMode(true);
@@ -3873,8 +3909,8 @@ function OrderDetailDialog({
     if (!editForm.source.trim()) return toast.error("请选择订单来源");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
     if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
-    if (editForm.items.some((item) => normalizeCommissionRate(item.commissionRate) < 0))
-      return toast.error("提成比例不能小于 0");
+    if (displayGoodsNetTotal <= displayMinimumReturnTotal)
+      return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
     if (!editForm.plannedShipDate) return toast.error("请选择预计发货日期");
     if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
@@ -3892,7 +3928,11 @@ function OrderDetailDialog({
         shippingFee: editForm.shippingFee,
         packagingFee: editForm.packagingFee,
         discount: editForm.discount,
-        items: editForm.items.map((item) => ({ ...item, commissionRate: normalizeCommissionRate(item.commissionRate) })),
+        items: editForm.items.map((item) => ({
+          ...item,
+          minReturnPrice: normalizeMinReturnPrice(item.minReturnPrice),
+          commissionRate: 0,
+        })),
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -3952,8 +3992,6 @@ function OrderDetailDialog({
   };
   const setEditItemPrice = (id: string, price: number) =>
     setEditForm((f) => f ? { ...f, items: f.items.map((i) => i.stockItemId === id ? { ...i, price } : i) } : f);
-  const setEditItemCommissionRate = (id: string, commissionRate: number) =>
-    setEditForm((f) => f ? { ...f, items: f.items.map((i) => i.stockItemId === id ? { ...i, commissionRate: normalizeCommissionRate(commissionRate) } : i) } : f);
 
   const excludePickerIds = useMemo(() => new Set((editForm?.items ?? []).map((i) => i.stockItemId)), [editForm]);
 
@@ -3974,11 +4012,18 @@ function OrderDetailDialog({
   const editDefaultAddress = String(customer?.address ?? "").trim();
 
   const displayItems = editMode && editForm ? editForm.items : (order?.items ?? []);
-  const displayItemsTotal = displayItems.reduce((s, i) => s + i.price, 0);
-  const displayCommissionTotal = displayItems.reduce((s, i) => s + itemCommissionAmount(i), 0);
+  const displayItemsWithMinimumReturn = displayItems.map((item) => ({
+    ...item,
+    minReturnPrice: orderItemMinReturnPrice(item, getProduct(item.productId)),
+  }));
+  const displayItemsTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + i.price, 0);
   const displayShipping  = (editMode && editForm ? editForm.shippingFee  : order?.shippingFee)  ?? 0;
   const displayPackaging = (editMode && editForm ? editForm.packagingFee : order?.packagingFee) ?? 0;
   const displayDiscount  = (editMode && editForm ? editForm.discount     : order?.discount)     ?? 0;
+  const displayGoodsNetTotal = orderGoodsNetTotal(displayItemsTotal, displayDiscount);
+  const displayMinimumReturnTotal = orderMinimumReturnTotal(displayItemsWithMinimumReturn);
+  const displayCommissionTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + itemCommissionAmount(i), 0);
+  const displayBelowMinimumReturn = displayItemsWithMinimumReturn.length > 0 && displayGoodsNetTotal <= displayMinimumReturnTotal;
   const draftAmountDue = displayItemsTotal + displayShipping + displayPackaging - displayDiscount;
 
   const orderShipments = state.shipments.filter((s) => s.orderId === order?.id);
@@ -4408,7 +4453,8 @@ function OrderDetailDialog({
                 {editMode && editForm && (
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
-                    <span className="text-emerald-700">提成 ¥{displayCommissionTotal.toFixed(2)}</span>
+                    <span className="text-slate-600">最低回厂价 ¥{displayMinimumReturnTotal.toFixed(2)}</span>
+                    <span className="text-emerald-700">可提成 ¥{displayCommissionTotal.toFixed(2)}</span>
                   </div>
                 )}
               </div>
@@ -4423,8 +4469,8 @@ function OrderDetailDialog({
                           <th className="text-left px-4 py-2 text-xs text-muted-foreground">商品</th>
                           <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
                           <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
-                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成比例</th>
-                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">提成</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">最低回厂价</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">可提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
@@ -4434,7 +4480,8 @@ function OrderDetailDialog({
                           const s = state.stock.find((x) => x.id === item.stockItemId);
                           const isShipped = shippedItemIds.has(item.stockItemId);
                           const isLost = !!s?.lost;
-                          const commissionRate = normalizeCommissionRate(item.commissionRate);
+                          const minReturnPrice = orderItemMinReturnPrice(item, p);
+                          const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
                           return (
                             <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
                               <td className="px-4 py-2">
@@ -4465,18 +4512,10 @@ function OrderDetailDialog({
                                   className="h-7 w-24 text-sm text-right ml-auto" />
                               </td>
                               <td className="px-4 py-2 text-sm text-right">
-                                <Input
-                                  type="number"
-                                  min={0}
-                                  step={0.01}
-                                  value={commissionRate}
-                                  onChange={(e) => setEditItemCommissionRate(item.stockItemId, Number(e.target.value))}
-                                  disabled={isLost || !isAdmin}
-                                  className="h-7 w-24 text-sm text-right ml-auto"
-                                />
+                                ¥{minReturnPrice.toFixed(2)}
                               </td>
                               <td className="px-4 py-2 text-sm text-right text-emerald-700">
-                                ¥{itemCommissionAmount(item).toFixed(2)}
+                                ¥{commissionAmount.toFixed(2)}
                               </td>
 	                              <td className="px-2 py-2">
 	                                {!isShipped && (
@@ -4538,7 +4577,7 @@ function OrderDetailDialog({
                       onChange={(e) => setEditForm((f) => f ? { ...f, packagingFee: Number(e.target.value) } : f)} />
                   </div>
                   <div className="grid gap-1.5">
-                    <Label className="text-xs">折扣/优��（¥）</Label>
+                    <Label className="text-xs">折扣/优惠（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={editForm.discount || ""} placeholder="0"
                       className={`h-8 text-sm${displayAmountDue < 0 ? " border-red-500 focus-visible:ring-red-500" : ""}`}
                       onChange={(e) => setEditForm((f) => f ? { ...f, discount: Number(e.target.value) } : f)} />
@@ -4547,10 +4586,17 @@ function OrderDetailDialog({
                 </div>
                 <div className="border-t pt-3 flex flex-col gap-1.5 text-sm">
                   <div className="flex justify-between"><span className="text-muted-foreground">商品小计</span><span>¥{displayItemsTotal.toFixed(2)}</span></div>
-                  <div className="flex justify-between text-emerald-700"><span>销售提成</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
+                  {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 折扣</span><span>¥{displayDiscount.toFixed(2)}</span></div>}
+                  <div className="flex justify-between"><span className="text-muted-foreground">商品折后金额</span><span>¥{displayGoodsNetTotal.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
+                  <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
+                  {displayBelowMinimumReturn && (
+                    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      商品折后金额必须高于最低回厂价合计。
+                    </div>
+                  )}
                   {displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
                   {displayPackaging > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>}
-                  {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 折扣</span><span>¥{displayDiscount.toFixed(2)}</span></div>}
                   <div className="flex justify-between font-semibold text-base border-t pt-2 mt-1">
                     <span>应付总额</span>
                     <span className={displayAmountDue < 0 ? "text-red-600" : "text-sky-700"}>¥{displayAmountDue.toFixed(2)}</span>
@@ -4561,7 +4607,10 @@ function OrderDetailDialog({
               <div className="rounded-lg border p-4 flex flex-col gap-2 text-sm">
                 <div className="text-xs font-medium text-muted-foreground mb-1">费用明细</div>
                 <div className="flex justify-between"><span className="text-muted-foreground">商品小计</span><span>¥{displayItemsTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-emerald-700"><span>销售提成</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
+                {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>折扣 / 优惠</span><span>− ¥{displayDiscount.toFixed(2)}</span></div>}
+                <div className="flex justify-between"><span className="text-muted-foreground">商品折后金额</span><span>¥{displayGoodsNetTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
                 {hasActualShipping && (
                   <div className="flex justify-between">
@@ -4576,7 +4625,6 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div className="flex justify-between"><span className="text-muted-foreground">包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>
-                {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>折扣 / 优惠</span><span>− ¥{displayDiscount.toFixed(2)}</span></div>}
                 {damageRefundOrder && damageRefundAdjustment > 0.005 && (
                   <div className="flex justify-between text-red-600">
                     <span>报损退款调整</span>
@@ -4855,13 +4903,6 @@ function StockPickerDialog({
   }, [open]);
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
-  const getBatch = (id: string) => state.batches.find((b) => b.id === id);
-  const getDefaultCommissionRate = (stock: StockItem) => {
-    if (stock.commissionRate != null) return normalizeCommissionRate(stock.commissionRate);
-    const productRate = normalizeCommissionRate(getProduct(stock.productId)?.commissionRate);
-    const multiplier = normalizeCommissionRate(getBatch(stock.batchId)?.commissionMultiplier ?? 100);
-    return normalizeCommissionRate(productRate * multiplier / 100);
-  };
 
   const getItemIcon = (itemId: string, productId: string) => {
     const recs = state.bioRecords
@@ -5006,7 +5047,8 @@ function StockPickerDialog({
         stockItemId,
         productId: s.productId,
         price: s.basePrice ?? getProduct(s.productId)?.defaultPrice ?? 0,
-        commissionRate: getDefaultCommissionRate(s),
+        minReturnPrice: productMinReturnPrice(getProduct(s.productId)),
+        commissionRate: 0,
       };
     });
     onAdd(items);
@@ -5221,7 +5263,7 @@ function StockPickerDialog({
   );
 }
 
-// ─── NewOrderDialog ────────────────────��──────────────────────────────────────
+// ─── NewOrderDialog ───────────────────────────────────────────────────────────
 
 function NewOrderDialog({
   open, onOpenChange,
@@ -5229,7 +5271,6 @@ function NewOrderDialog({
   const { state, activeSiteId, setState } = useStore();
   const permission = usePermission("orders");
   const customerPermission = usePermission("customers");
-  const isAdmin = state.user?.role === "admin";
   const today = todayDateString();
   const currentUsername = state.user?.username ?? "";
   const personnel = state.personnel ?? [];
@@ -5242,7 +5283,7 @@ function NewOrderDialog({
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
   const [notes, setNotes] = useState("");
-  const [selectedItems, setSelectedItems] = useState<Map<string, { price: number; commissionRate: number }>>(new Map());
+  const [selectedItems, setSelectedItems] = useState<Map<string, { price: number; minReturnPrice: number }>>(new Map());
   const [shippingFee, setShippingFee] = useState(0);
   const [packagingFee, setPackagingFee] = useState(0);
   const [discount, setDiscount] = useState(0);
@@ -5285,8 +5326,13 @@ function NewOrderDialog({
   const addFromPicker = (items: OrderPickerItem[]) => {
     setSelectedItems((prev) => {
       const next = new Map(prev);
-      for (const { stockItemId, price, commissionRate } of items) {
-        if (!next.has(stockItemId)) next.set(stockItemId, { price, commissionRate: normalizeCommissionRate(commissionRate) });
+      for (const { stockItemId, price, minReturnPrice } of items) {
+        if (!next.has(stockItemId)) {
+          next.set(stockItemId, {
+            price: normalizeMoneyAmount(price),
+            minReturnPrice: normalizeMinReturnPrice(minReturnPrice),
+          });
+        }
       }
       return next;
     });
@@ -5294,21 +5340,18 @@ function NewOrderDialog({
 
   const setItemPrice = (stockItemId: string, price: number) =>
     setSelectedItems((prev) => {
-      const current = prev.get(stockItemId) ?? { price: 0, commissionRate: 0 };
+      const current = prev.get(stockItemId) ?? { price: 0, minReturnPrice: 0 };
       return new Map(prev).set(stockItemId, { ...current, price });
-    });
-
-  const setItemCommissionRate = (stockItemId: string, commissionRate: number) =>
-    setSelectedItems((prev) => {
-      const current = prev.get(stockItemId) ?? { price: 0, commissionRate: 0 };
-      return new Map(prev).set(stockItemId, { ...current, commissionRate: normalizeCommissionRate(commissionRate) });
     });
 
   const removeItem = (stockItemId: string) =>
     setSelectedItems((prev) => { const n = new Map(prev); n.delete(stockItemId); return n; });
 
   const itemsTotal = Array.from(selectedItems.values()).reduce((s, item) => s + item.price, 0);
-  const commissionTotal = Array.from(selectedItems.values()).reduce((s, item) => s + item.price * normalizeCommissionRate(item.commissionRate) / 100, 0);
+  const minimumReturnTotal = orderMinimumReturnTotal(Array.from(selectedItems.values()));
+  const goodsNetTotal = orderGoodsNetTotal(itemsTotal, discount);
+  const belowMinimumReturn = selectedItems.size > 0 && goodsNetTotal <= minimumReturnTotal;
+  const commissionTotal = Array.from(selectedItems.values()).reduce((s, item) => s + itemCommissionAmount(item), 0);
   const amountDue = itemsTotal + shippingFee + packagingFee - discount;
   const contactOptions = getContactPersonOptions(personnel, contactPerson);
 
@@ -5393,13 +5436,15 @@ function NewOrderDialog({
     if (!plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
+    if (belowMinimumReturn) return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
       const s = state.stock.find((x) => x.id === stockItemId)!;
       return {
         stockItemId,
         productId: s.productId,
-        price: draft.price,
-        commissionRate: normalizeCommissionRate(draft.commissionRate),
+        price: normalizeMoneyAmount(draft.price),
+        minReturnPrice: normalizeMinReturnPrice(draft.minReturnPrice),
+        commissionRate: 0,
       };
     });
     const paymentText = draftPayments.length > 0 ? `，并保存 ${draftPayments.length} 条资金往来记录` : "";
@@ -5438,8 +5483,9 @@ function NewOrderDialog({
       const stockItem = state.stock.find((item) => item.id === stockItemId);
       if (!stockItem) return [];
       const product = state.products.find((item) => item.id === stockItem.productId);
-      const commissionRate = normalizeCommissionRate(draftItem.commissionRate);
-      return [{ stockItemId, stockItem, product, draftItem, commissionRate }];
+      const minReturnPrice = normalizeMinReturnPrice(draftItem.minReturnPrice);
+      const commissionAmount = itemCommissionAmount({ ...draftItem, minReturnPrice });
+      return [{ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }];
     })
   ), [selectedItems, state.stock, state.products]);
 
@@ -5561,7 +5607,7 @@ function NewOrderDialog({
                 </span>
                 {selectedItems.size > 0 && (
                   <span className="text-sm text-muted-foreground">
-                    小计 ¥{itemsTotal.toFixed(2)} · 预计提成 ¥{commissionTotal.toFixed(2)}
+                    小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)} · 预计可提成 ¥{commissionTotal.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -5575,7 +5621,7 @@ function NewOrderDialog({
                 ) : (
                   <>
                     <div className="flex flex-col divide-y md:hidden">
-                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, commissionRate }) => (
+                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }) => (
                         <div key={stockItemId} className="p-3">
                           <div className="flex items-start gap-2">
                             <div className="size-10 shrink-0 overflow-hidden rounded border bg-muted">
@@ -5615,20 +5661,14 @@ function NewOrderDialog({
                               />
                             </div>
                             <div className="grid gap-1">
-                              <Label className="text-xs">提成比例</Label>
-                              <Input
-                                type="number"
-                                min={0}
-                                step={0.01}
-                                value={commissionRate}
-                                onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
-                                disabled={!isAdmin}
-                                className="h-9 text-sm"
-                              />
+                              <Label className="text-xs">最低回厂价（¥）</Label>
+                              <div className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm">
+                                ¥{minReturnPrice.toFixed(2)}
+                              </div>
                             </div>
                           </div>
                           <div className="mt-2 text-right text-sm text-emerald-700">
-                            提成 ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
+                            可提成 ¥{commissionAmount.toFixed(2)}
                           </div>
                         </div>
                       ))}
@@ -5639,13 +5679,13 @@ function NewOrderDialog({
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">商品</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">缸位</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">售价（¥）</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">提成比例</th>
-                          <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">提成</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">最低回厂价</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">可提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
                       <tbody>
-                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, commissionRate }) => (
+                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }) => (
                           <tr key={stockItemId} className="border-t">
                             <td className="px-4 py-2.5">
                               <div className="flex items-center gap-2">
@@ -5674,18 +5714,10 @@ function NewOrderDialog({
                               />
                             </td>
                             <td className="px-4 py-2.5">
-                              <Input
-                                type="number"
-                                min={0}
-                                step={0.01}
-                                value={commissionRate}
-                                onChange={(e) => setItemCommissionRate(stockItemId, Number(e.target.value))}
-                                disabled={!isAdmin}
-                                className="h-7 w-24 text-sm"
-                              />
+                              <span className="text-sm">¥{minReturnPrice.toFixed(2)}</span>
                             </td>
                             <td className="px-4 py-2.5 text-right text-sm text-emerald-700">
-                              ¥{(draftItem.price * commissionRate / 100).toFixed(2)}
+                              ¥{commissionAmount.toFixed(2)}
                             </td>
                             <td className="px-2 py-2.5">
                               <button
@@ -5715,7 +5747,7 @@ function NewOrderDialog({
                 </button>
                 {selectedItems.size > 0 && (
                   <span className="text-xs text-muted-foreground">
-                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 预计提成 ¥{commissionTotal.toFixed(2)}
+                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)} · 预计可提成 ¥{commissionTotal.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -5737,21 +5769,29 @@ function NewOrderDialog({
                   <div className="grid gap-1.5">
                     <Label className="text-xs">折扣/优惠（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={discount || ""} onChange={(e) => setDiscount(Number(e.target.value))} placeholder="0"
-                      className={`h-8 text-sm${amountDue < 0 ? " border-red-500 focus-visible:ring-red-500" : ""}`} />
+                      className={`h-8 text-sm${amountDue < 0 || belowMinimumReturn ? " border-red-500 focus-visible:ring-red-500" : ""}`} />
                     {amountDue < 0 && <p className="text-xs text-red-500">折扣超出应付金额 ¥{Math.abs(amountDue).toFixed(2)}</p>}
+                    {belowMinimumReturn && <p className="text-xs text-red-500">商品折后金额必须高于最低回厂价合计</p>}
                   </div>
                 </div>
               </div>
               <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
                 <div className="text-xs font-medium text-muted-foreground mb-1">结算预览</div>
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-sm text-emerald-700"><span>预计提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
+                {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
+                <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品折后金额</span><span>¥{goodsNetTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between text-sm"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{minimumReturnTotal.toFixed(2)}</span></div>
+                <div className="flex justify-between text-sm text-emerald-700"><span>预计可提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
+                {belowMinimumReturn && (
+                  <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    商品折后金额必须高于最低回厂价合计。
+                  </div>
+                )}
                 {shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
                 {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
-                {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-semibold text-base border-t pt-2">
                   <span>应付总额</span>
-                  <span className={amountDue < 0 ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
+                  <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
                 </div>
               </div>
             </div>
@@ -5912,7 +5952,8 @@ export function OrdersView() {
           item.stockItemId,
           item.plannedShipDate,
           item.price,
-          item.commissionRate,
+          orderItemMinReturnPrice(item, product),
+          itemCommissionAmount({ ...item, minReturnPrice: orderItemMinReturnPrice(item, product) }),
           product?.name,
           product?.size,
           product?.origin,
@@ -5956,7 +5997,7 @@ export function OrdersView() {
         ]),
         calcAmountDue(order, state.shipments).toFixed(2),
         calcAmountPaid(order).toFixed(2),
-        orderCommissionTotal(order).toFixed(2),
+        orderCommissionTotalWithProducts(order, (productId) => productMap.get(productId)).toFixed(2),
         ...itemSearchText,
       ].filter(Boolean).join(" ");
       return { ...order, searchText };
@@ -6724,9 +6765,11 @@ export function OrdersView() {
           },
           {
             key: "commission",
-            title: "提成",
+            title: "可提成",
             render: (r) => (
-              <span className="font-medium text-emerald-700">¥{orderCommissionTotal(r).toFixed(2)}</span>
+              <span className="font-medium text-emerald-700">
+                ¥{orderCommissionTotalWithProducts(r, (productId) => state.products.find((product) => product.id === productId)).toFixed(2)}
+              </span>
             ),
           },
           {

@@ -40,9 +40,11 @@ export type Product = {
   origin: string;
   imageUrl: string;
   defaultPrice: number;
+  /** 商品最低回厂价，订单商品折后金额必须高于该价格合计。 */
+  minReturnPrice?: number;
   /** 是否展示在对外网站。未设置时按展示处理，兼容旧数据。 */
   publicVisible?: boolean;
-  /** 销售提成比例，单位为百分比，例如 5 表示 5%。 */
+  /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   notes: string;
 };
@@ -75,7 +77,7 @@ export type PurchaseBatch = {
   stockedCount: number;
   lossCount: number;
   lossProof: string[];
-  /** 批次提成系数，单位为百分比。100 表示按商品默认提成，0 表示本批次无提成，200 表示翻倍。 */
+  /** 旧字段兼容：历史版本曾用批次系数计算销售提成。 */
   commissionMultiplier?: number;
   /** 旧字段兼容：上一版曾用它表示批次默认提成比例，现不再作为最终提成比例使用。 */
   defaultCommissionRate?: number;
@@ -103,7 +105,7 @@ export type StockItem = {
   basePrice: number;
   /** 是否在日常管理中手工改过单条售价。 */
   priceOverridden?: boolean;
-  /** 这条鱼下单时默认带出的提成比例，单位为百分比。 */
+  /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   /** 店内给单条鱼手工标记的展示编号。 */
   code?: string;
@@ -181,7 +183,9 @@ export type OrderItem = {
   stockItemId: string;
   productId: string;
   price: number;
-  /** 下单时固化的提成比例，单位为百分比。 */
+  /** 下单时固化的商品最低回厂价。 */
+  minReturnPrice?: number;
+  /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   plannedShipDate?: string;
 };
@@ -445,9 +449,9 @@ export const initialState: Store = {
     { id: "s3", name: "黄金吊", scientificName: "Zebrasoma flavescens", category: "刺尾鱼科", commonNames: ["黄三角吊"], description: "鲜艳的黄色", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200" },
   ],
   products: [
-    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, publicVisible: true, commissionRate: 0, notes: "" },
-    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, publicVisible: true, commissionRate: 0, notes: "" },
-    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
   ],
   tankGroups: [
     {
@@ -513,7 +517,7 @@ export const initialState: Store = {
       source: "线下",
       plannedShipDate: "2026-04-25",
       contactPerson: "admin",
-      items: [{ stockItemId: "i5", productId: "p3", price: 350, commissionRate: 0 }],
+      items: [{ stockItemId: "i5", productId: "p3", price: 350, minReturnPrice: 0, commissionRate: 0 }],
       shippingFee: 25,
       packagingFee: 15,
       discount: 0,

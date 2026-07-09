@@ -63,7 +63,6 @@ export function BatchesView() {
   const [detail, setDetail] = useState<PurchaseBatch | null>(null);
   const [proofPreview, setProofPreview] = useState<{ url: string; title: string } | null>(null);
   const permission = usePermission("batches");
-  const isAdmin = state.user?.role === "admin";
 
   const today = new Date().toISOString().slice(0, 10);
 
@@ -188,9 +187,7 @@ export function BatchesView() {
     if (!editing.arrivalDate) return toast.error("请选择到货日期");
     if (editing.arrivalDate > today) return toast.error("到货日期不能晚于今天");
     if (maxArrivalDate && editing.arrivalDate > maxArrivalDate) return toast.error("到货日期不能晚于该批次最早入库日期");
-    const commissionMultiplier = Number(editing.commissionMultiplier ?? 100);
-    if (Number.isNaN(commissionMultiplier) || commissionMultiplier < 0) return toast.error("提成系数不能小于 0");
-    const finalEditing = { ...editing, commissionMultiplier: Number(commissionMultiplier.toFixed(4)) };
+    const finalEditing = { ...editing, commissionMultiplier: 100 };
     if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存采购批次的修改。" : "将新增一个采购批次。")) return;
     const ok = await saveStateTransform((latest) => {
       const exists = latest.batches.find((b) => b.id === finalEditing.id);
@@ -222,7 +219,6 @@ export function BatchesView() {
           { key: "shippingFee", title: "运输费用(¥)", render: (r) => r.shippingFee.toFixed(2) },
           { key: "totalCost", title: "合计(¥)", render: (r) => (r.bioFee + r.shippingFee).toFixed(2) },
           { key: "received", title: "实收金额(¥)", render: (r) => salesStats(r.id).received.toFixed(2) },
-          { key: "commissionMultiplier", title: "提成系数", render: (r) => `${Number(r.commissionMultiplier ?? 100).toFixed(2)}%` },
           { key: "stockedCount", title: "入库数量", render: (r) => `${r.stockedCount} 条` },
           { key: "lossCount", title: "报损数量", render: (r) => `${r.lossCount} 条` },
           { key: "notes", title: "备注" },
@@ -284,10 +280,6 @@ export function BatchesView() {
                   <Label className="text-xs text-muted-foreground">合计费用</Label>
                   <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">¥{totalCost(detail)}</div>
                 </div>
-              </div>
-              <div className="grid gap-1">
-                <Label className="text-xs text-muted-foreground">本批次提成系数</Label>
-                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{Number(detail.commissionMultiplier ?? 100).toFixed(2)}%</div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-1">
@@ -382,20 +374,6 @@ export function BatchesView() {
               </div>
               <div className="grid gap-2">
                 <Label>合计费用: ¥{(editing.bioFee + editing.shippingFee).toFixed(2)}</Label>
-              </div>
-              <div className="grid gap-2">
-                <Label>本批次提成系数(%)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={editing.commissionMultiplier ?? 100}
-                  onChange={(e) => setEditing({ ...editing, commissionMultiplier: e.target.value === "" ? 100 : Number(e.target.value) })}
-                  disabled={!isAdmin}
-                />
-                <span className="text-xs text-muted-foreground">
-                  {isAdmin ? "100%=按商品默认提成，0%=无提成，200%=商品默认提成翻倍。" : "仅管理员可修改提成系数"}
-                </span>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-2">

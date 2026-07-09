@@ -260,7 +260,6 @@ function BatchCombobox({
 export function StockInView() {
   const { state, saveStockChange } = useStore();
   const permission = usePermission("stockIn");
-  const isAdmin = state.user?.role === "admin";
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StockItem | null>(null);
@@ -321,12 +320,6 @@ export function StockInView() {
     return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
-  const batchCommissionMultiplier = (batchId: string) => Number(batch(batchId)?.commissionMultiplier ?? 100);
-  const defaultCommissionRate = (productId: string, batchId: string) => {
-    const productRate = Number(product(productId)?.commissionRate ?? 0);
-    const multiplier = batchCommissionMultiplier(batchId);
-    return Number((productRate * multiplier / 100).toFixed(4));
-  };
   const stockLockedByOrder = (id: string) =>
     state.orders.some((order) =>
       order.status !== "cancelled" && order.items.some((item) => item.stockItemId === id)
@@ -351,7 +344,7 @@ export function StockInView() {
       status: "healthy",
       inDate: today,
       basePrice: defaultProduct?.defaultPrice ?? 0,
-      commissionRate: defaultCommissionRate(defaultProduct?.id ?? "", latestBatchId()),
+      commissionRate: 0,
       code: "",
       notes: "",
     };
@@ -361,30 +354,24 @@ export function StockInView() {
     if (!editing) return;
     const currentDefault = product(editing.productId)?.defaultPrice ?? 0;
     const nextDefault = product(productId)?.defaultPrice ?? 0;
-    const currentCommissionDefault = defaultCommissionRate(editing.productId, editing.batchId);
-    const nextCommissionDefault = defaultCommissionRate(productId, editing.batchId);
     const shouldUseProductDefault = !editing.basePrice || editing.basePrice === currentDefault;
-    const shouldUseCommissionDefault = editing.commissionRate == null || Number(editing.commissionRate) === currentCommissionDefault;
     setEditing({
       ...editing,
       productId,
       basePrice: shouldUseProductDefault ? nextDefault : editing.basePrice,
-      commissionRate: shouldUseCommissionDefault ? nextCommissionDefault : editing.commissionRate,
+      commissionRate: 0,
     });
   };
   const changeBatch = (batchId: string) => {
     if (!editing) return;
     const nextBatch = batch(batchId);
-    const currentCommissionDefault = defaultCommissionRate(editing.productId, editing.batchId);
-    const nextCommissionDefault = defaultCommissionRate(editing.productId, batchId);
-    const shouldUseCommissionDefault = editing.commissionRate == null || Number(editing.commissionRate) === currentCommissionDefault;
     setEditing({
       ...editing,
       batchId,
       inDate: nextBatch && editing.inDate && editing.inDate < nextBatch.arrivalDate
         ? nextBatch.arrivalDate
         : editing.inDate,
-      commissionRate: shouldUseCommissionDefault ? nextCommissionDefault : editing.commissionRate,
+      commissionRate: 0,
     });
   };
   const changeInDate = (inDate: string) => {
@@ -409,7 +396,7 @@ export function StockInView() {
     }
     setEditing({
       ...item,
-      commissionRate: item.commissionRate ?? defaultCommissionRate(item.productId, item.batchId),
+      commissionRate: 0,
     });
     setFromSubTank(subTankMode);
     setQuantity("1");
@@ -472,8 +459,6 @@ export function StockInView() {
     if (currentBatch && editing.inDate < currentBatch.arrivalDate) return toast.error("入库日期不能早于采购批次到货日期");
     const basePrice = Number(editing.basePrice || product(editing.productId)?.defaultPrice || 0);
     if (!basePrice || basePrice <= 0) return toast.error("请填写单条售价");
-    const commissionRate = Number(editing.commissionRate ?? 0);
-    if (Number.isNaN(commissionRate) || commissionRate < 0) return toast.error("提成比例不能小于 0");
     if (!fromSubTank && !selectedGroupId) return toast.error("请选择缸组");
     if (!editing.subTankId) return toast.error("请选择子缸");
     const parsedQty = Number(quantity);
@@ -481,7 +466,7 @@ export function StockInView() {
       return toast.error("请填写大于 0 的入库数量");
     }
     const qty = fromSubTank && !editing.id ? parsedQty : 1;
-    const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: Number(commissionRate.toFixed(4)) }, qty);
+    const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: 0 }, qty);
     setSaveConfirm({ stockItems, qty, isEdit: Boolean(editing.id) });
   };
 
@@ -1223,22 +1208,6 @@ export function StockInView() {
                   </div>
                 </div>
               )}
-
-              <div className="grid gap-2">
-                <Label>销售提成比例(%)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  value={editing.commissionRate ?? 0}
-                  onChange={(e) => setEditing({ ...editing, commissionRate: e.target.value === "" ? 0 : Number(e.target.value) })}
-                  disabled={!isAdmin}
-                  placeholder="0"
-                />
-                <span className="text-xs text-muted-foreground">
-                  {isAdmin ? "默认按商品提成 × 批次系数计算；也可以单独覆盖这条鱼的最终提成比例。" : "仅管理员可修改提成比例"}
-                </span>
-              </div>
 
               {fromSubTank && !editing.id && (
                 <div className="grid gap-2">

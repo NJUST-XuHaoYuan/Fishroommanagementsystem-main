@@ -511,7 +511,7 @@ export function ProductsView() {
   const [speciesCard, setSpeciesCard] = useState<Species | null>(null);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
   const [priceStr, setPriceStr] = useState<string>("");
-  const [commissionStr, setCommissionStr] = useState<string>("");
+  const [minReturnPriceStr, setMinReturnPriceStr] = useState<string>("");
   const [savingProduct, setSavingProduct] = useState(false);
   const permission = usePermission("products");
   const isAdmin = state.user?.role === "admin";
@@ -543,7 +543,7 @@ export function ProductsView() {
   );
 
   const empty = (): Product => ({
-    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, publicVisible: true, commissionRate: 0, notes: "",
+    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "",
   });
 
   const onSpeciesChange = (sid: string) => {
@@ -567,15 +567,16 @@ export function ProductsView() {
     if (!editing.origin.trim()) return toast.error("产地为必填项，请选择或新增产地");
     const price = parseFloat(priceStr);
     if (isNaN(price) || price <= 0) return toast.error("请填写销售默认价");
-    const commissionRate = commissionStr.trim() === "" ? 0 : Number(commissionStr);
-    if (Number.isNaN(commissionRate) || commissionRate < 0) return toast.error("提成比例不能小于 0");
+    const minReturnPrice = minReturnPriceStr.trim() === "" ? 0 : Number(minReturnPriceStr);
+    if (Number.isNaN(minReturnPrice) || minReturnPrice < 0) return toast.error("最低回厂价格不能小于 0");
     const finalEditing = {
       ...editing,
       id: editing.id || uid(),
       notes: editing.notes?.trim() ?? "",
       defaultPrice: isNaN(price) ? 0 : price,
+      minReturnPrice: Number(minReturnPrice.toFixed(2)),
       publicVisible: editing.publicVisible !== false,
-      commissionRate: isAdmin ? Number(commissionRate.toFixed(4)) : Number(editing.commissionRate ?? 0),
+      commissionRate: 0,
     };
     if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存商品信息的修改。" : "将新增一个商品。")) return;
     setSavingProduct(true);
@@ -622,7 +623,7 @@ export function ProductsView() {
         data={productRows}
         searchKeys={["name", "size", "origin", "notes", "speciesSearch"]}
         searchPlaceholder="搜索商品名称、所属物种、规格、产地、备注..."
-        onAdd={permission.canCreate ? () => { setEditing(empty()); setPriceStr(""); setCommissionStr(""); setOpen(true); } : undefined}
+        onAdd={permission.canCreate ? () => { setEditing(empty()); setPriceStr(""); setMinReturnPriceStr(""); setOpen(true); } : undefined}
         addLabel="新增商品"
         columns={[
           {
@@ -663,6 +664,7 @@ export function ProductsView() {
           { key: "size", title: "规格" },
           { key: "origin", title: "产地" },
           { key: "defaultPrice", title: "销售默认价(¥)", render: (r) => Number(r.defaultPrice || 0).toFixed(2) },
+          { key: "minReturnPrice", title: "最低回厂价(¥)", render: (r) => Number(r.minReturnPrice ?? 0).toFixed(2) },
           {
             key: "publicVisible",
             title: "对外网站",
@@ -676,7 +678,6 @@ export function ProductsView() {
               </span>
             ),
           },
-          { key: "commissionRate", title: "提成比例", render: (r) => `${Number(r.commissionRate ?? 0).toFixed(2)}%` },
           {
             key: "notes",
             title: "备注",
@@ -691,9 +692,9 @@ export function ProductsView() {
           <div className="flex justify-end gap-2">
             {permission.canUpdate && <Button size="sm" variant="outline" onClick={() => {
               const { speciesSearch, ...product } = row;
-              setEditing({ ...product, publicVisible: product.publicVisible !== false, commissionRate: Number(product.commissionRate ?? 0), notes: product.notes ?? "" });
+              setEditing({ ...product, minReturnPrice: Number(product.minReturnPrice ?? 0), publicVisible: product.publicVisible !== false, commissionRate: 0, notes: product.notes ?? "" });
               setPriceStr(String(row.defaultPrice));
-              setCommissionStr(String(row.commissionRate ?? 0));
+              setMinReturnPriceStr(String(row.minReturnPrice ?? 0));
               setOpen(true);
             }}>编辑</Button>}
             {permission.canDelete && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDeleting(row)}>删除</Button>}
@@ -745,6 +746,21 @@ export function ProductsView() {
                   placeholder="0.00"
                 />
               </div>
+              <div className="grid gap-2">
+                <Label>最低回厂价格(¥)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={minReturnPriceStr}
+                  onChange={(e) => setMinReturnPriceStr(e.target.value)}
+                  placeholder="0.00"
+                  disabled={!isAdmin}
+                />
+                <span className="text-xs text-muted-foreground">
+                  {isAdmin ? "订单商品折后金额必须高于所选商品的最低回厂价合计；超出部分作为销售提成。" : "仅管理员可修改最低回厂价格"}
+                </span>
+              </div>
               <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/20 px-3 py-3">
                 <div className="space-y-1">
                   <Label htmlFor="product-public-visible">对外网站展示</Label>
@@ -755,19 +771,6 @@ export function ProductsView() {
                   checked={editing.publicVisible !== false}
                   onCheckedChange={(checked) => setEditing({ ...editing, publicVisible: checked })}
                 />
-              </div>
-              <div className="grid gap-2">
-                <Label>销售提成比例(%)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  value={commissionStr}
-                  onChange={(e) => setCommissionStr(e.target.value)}
-                  placeholder="0"
-                  disabled={!isAdmin}
-                />
-                {!isAdmin && <span className="text-xs text-muted-foreground">仅管理员可修改提成比例</span>}
               </div>
               <div className="grid gap-2">
                 <Label>备注</Label>

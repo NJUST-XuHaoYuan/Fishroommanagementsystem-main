@@ -2267,7 +2267,7 @@ function normalizeStockItem(item) {
     status: ["healthy", "feeding", "sick"].includes(item.status) ? item.status : "healthy",
     inDate: String(item.inDate ?? "").trim(),
     basePrice: Number(item.basePrice ?? 0),
-    commissionRate: Math.max(0, Number(item.commissionRate ?? 0)),
+    commissionRate: 0,
     code: String(item.code ?? "").trim(),
     notes: String(item.notes ?? ""),
     lossProof: Array.isArray(item.lossProof) ? item.lossProof : [],
@@ -2434,10 +2434,14 @@ function normalizeMoney(value, label) {
   return Number(amount.toFixed(2));
 }
 
-function normalizeCommissionRate(value) {
-  const rate = Number(value ?? 0);
-  if (!Number.isFinite(rate) || rate < 0) return 0;
-  return Number(rate.toFixed(4));
+function normalizeMinReturnPrice(value) {
+  return normalizeMoney(value, "Minimum return price");
+}
+
+function findProductById(state = {}, productId = "") {
+  const id = String(productId ?? "").trim();
+  return (Array.isArray(state.products) ? state.products : [])
+    .find((product) => String(product?.id ?? "") === id);
 }
 
 function normalizePaymentRecord(record = {}) {
@@ -2563,12 +2567,15 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
   if (stockInShipments.has(stockId)) throw new Error("所选鱼已出库或发货，不能再次加入订单");
   if (!isPhysicallyInTank(stockItem, shippedOutStockIds(state))) throw new Error("所选鱼已不在缸内，不能加入订单");
 
+  const productId = String(stockItem.productId ?? input.productId ?? "").trim();
+  const product = findProductById(state, productId);
   const price = normalizeMoney(input.price ?? stockItem.basePrice, "Order item price");
   return {
     stockItemId: stockId,
-    productId: String(stockItem.productId ?? input.productId ?? "").trim(),
+    productId,
     price,
-    commissionRate: normalizeCommissionRate(input.commissionRate ?? stockItem.commissionRate),
+    minReturnPrice: normalizeMinReturnPrice(input.minReturnPrice ?? product?.minReturnPrice ?? 0),
+    commissionRate: 0,
   };
 }
 
@@ -2613,18 +2620,27 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
       .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockId);
     if (!stockItem && !existingItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
+    const productId = String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim();
+    const product = findProductById(state, productId);
     return {
       stockItemId: stockId,
-      productId: String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim(),
+      productId,
       price: normalizeMoney(item.price ?? existingItem?.price, "Order item price"),
-      commissionRate: normalizeCommissionRate(item.commissionRate ?? existingItem?.commissionRate),
+      minReturnPrice: normalizeMinReturnPrice(item.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
+      commissionRate: 0,
     };
   });
   const shippingFee = normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
   const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
   const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
-  if (items.reduce((sum, item) => sum + item.price, 0) + shippingFee + packagingFee - discount < -0.005) {
+  const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
+  const minimumReturnTotal = items.reduce((sum, item) => sum + normalizeMinReturnPrice(item.minReturnPrice), 0);
+  const goodsNetTotal = Number((itemsTotal - discount).toFixed(2));
+  if (itemsTotal + shippingFee + packagingFee - discount < -0.005) {
     throw new Error("折扣过大，应付金额不能为负数");
+  }
+  if (goodsNetTotal <= minimumReturnTotal + 0.005) {
+    throw new Error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
   }
   return {
     siteId,
@@ -2826,7 +2842,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "notes",
 ]);
 
-function orderMutableFieldsComparable(order = {}) {
+function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = null) {
   return {
     siteId: normalizeSiteId(order.siteId),
     customerId: String(order.customerId ?? "").trim(),
@@ -2835,12 +2851,20 @@ function orderMutableFieldsComparable(order = {}) {
     shippingAddress: String(order.shippingAddress ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
-    items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
-      stockItemId: String(item?.stockItemId ?? "").trim(),
-      productId: String(item?.productId ?? "").trim(),
-      price: normalizeMoney(item?.price, "Order item price"),
-      commissionRate: normalizeCommissionRate(item?.commissionRate),
-    })),
+    items: (Array.isArray(order.items) ? order.items : []).map((item) => {
+      const stockItemId = String(item?.stockItemId ?? "").trim();
+      const productId = String(item?.productId ?? "").trim();
+      const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
+        .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockItemId);
+      const product = findProductById(state, productId || existingItem?.productId);
+      return {
+        stockItemId,
+        productId,
+        price: normalizeMoney(item?.price, "Order item price"),
+        minReturnPrice: normalizeMinReturnPrice(item?.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
+        commissionRate: 0,
+      };
+    }),
     shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
     packagingFee: normalizeMoney(order.packagingFee, "Packaging fee"),
     discount: normalizeMoney(order.discount, "Discount"),
@@ -2862,7 +2886,7 @@ function shipmentBlocksOrderItemRemoval(shipment = {}) {
 
 function validateOrderBusinessFieldsForPatch(currentOrder = {}, nextOrder = {}, nextState = {}) {
   const normalized = normalizeOrderMutationInput(nextState, nextOrder, currentOrder);
-  if (stableJson(normalized) !== stableJson(orderMutableFieldsComparable(nextOrder))) {
+  if (stableJson(normalized) !== stableJson(orderMutableFieldsComparable(nextOrder, nextState, currentOrder))) {
     throw new Error("订单字段必须符合订单专用接口的服务端校验结果");
   }
   if (stableJson(orderProtectedFieldsComparable(currentOrder)) !== stableJson(orderProtectedFieldsComparable(nextOrder))) {
@@ -5723,6 +5747,11 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { error: "Product defaultPrice must be greater than 0" });
         return;
       }
+      const minReturnPriceInput = Number(product.minReturnPrice ?? 0);
+      if (!Number.isFinite(minReturnPriceInput) || minReturnPriceInput < 0) {
+        sendJson(req, res, 400, { error: "Product minReturnPrice must be a non-negative number" });
+        return;
+      }
 
       const client = await pool.connect();
       try {
@@ -5743,8 +5772,9 @@ async function handleApi(req, res, url) {
           imageUrl: String(product.imageUrl ?? ""),
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
+          minReturnPrice: normalizeMinReturnPrice(minReturnPriceInput),
           publicVisible: product.publicVisible !== false,
-          commissionRate: Math.max(0, Number(product.commissionRate ?? 0)),
+          commissionRate: 0,
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);
         const nextProducts = exists
