@@ -749,54 +749,166 @@ function canvasToJpegBytes(canvas: HTMLCanvasElement): Uint8Array {
   return bytes;
 }
 
-function asciiBytes(value: string): Uint8Array {
+function utf8Bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
-function buildPdfFromJpegs(images: Array<{ bytes: Uint8Array; width: number; height: number }>): Blob {
-  const chunks: Uint8Array[] = [];
-  const offsets: number[] = [0];
-  let byteLength = 0;
-  const push = (chunk: string | Uint8Array) => {
-    const bytes = typeof chunk === "string" ? asciiBytes(chunk) : chunk;
-    chunks.push(bytes);
-    byteLength += bytes.length;
-  };
-  const beginObject = (id: number) => {
-    offsets[id] = byteLength;
-    push(`${id} 0 obj\n`);
-  };
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
 
-  push("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
-  const pageObjectIds = images.map((_, index) => 3 + index * 3);
-  beginObject(1);
-  push("<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-  beginObject(2);
-  push(`<< /Type /Pages /Count ${images.length} /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] >>\nendobj\n`);
-
-  images.forEach((image, index) => {
-    const pageId = 3 + index * 3;
-    const contentId = pageId + 1;
-    const imageId = pageId + 2;
-    const name = `Im${index + 1}`;
-    const content = `q\n${FISH_LIST_PDF_WIDTH} 0 0 ${FISH_LIST_PDF_HEIGHT} 0 0 cm\n/${name} Do\nQ\n`;
-    beginObject(pageId);
-    push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${FISH_LIST_PDF_WIDTH} ${FISH_LIST_PDF_HEIGHT}] /Resources << /XObject << /${name} ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>\nendobj\n`);
-    beginObject(contentId);
-    push(`<< /Length ${asciiBytes(content).length} >>\nstream\n${content}endstream\nendobj\n`);
-    beginObject(imageId);
-    push(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.bytes.length} >>\nstream\n`);
-    push(image.bytes);
-    push("\nendstream\nendobj\n");
-  });
-
-  const xrefOffset = byteLength;
-  push(`xref\n0 ${offsets.length}\n0000000000 65535 f \n`);
-  for (let i = 1; i < offsets.length; i += 1) {
-    push(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let value = i;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[i] = value >>> 0;
   }
-  push(`trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
-  return new Blob(chunks, { type: "application/pdf" });
+  return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function writeUint16(view: DataView, offset: number, value: number) {
+  view.setUint16(offset, value, true);
+}
+
+function writeUint32(view: DataView, offset: number, value: number) {
+  view.setUint32(offset, value >>> 0, true);
+}
+
+function dosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+function buildZip(files: Array<{ path: string; data: Uint8Array }>): Uint8Array {
+  const localChunks: Uint8Array[] = [];
+  const centralChunks: Uint8Array[] = [];
+  const { time, date } = dosDateTime();
+  let offset = 0;
+
+  for (const file of files) {
+    const pathBytes = utf8Bytes(file.path);
+    const checksum = crc32(file.data);
+
+    const localHeader = new Uint8Array(30 + pathBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    writeUint32(localView, 0, 0x04034b50);
+    writeUint16(localView, 4, 20);
+    writeUint16(localView, 6, 0);
+    writeUint16(localView, 8, 0);
+    writeUint16(localView, 10, time);
+    writeUint16(localView, 12, date);
+    writeUint32(localView, 14, checksum);
+    writeUint32(localView, 18, file.data.length);
+    writeUint32(localView, 22, file.data.length);
+    writeUint16(localView, 26, pathBytes.length);
+    writeUint16(localView, 28, 0);
+    localHeader.set(pathBytes, 30);
+    localChunks.push(localHeader, file.data);
+
+    const centralHeader = new Uint8Array(46 + pathBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    writeUint32(centralView, 0, 0x02014b50);
+    writeUint16(centralView, 4, 20);
+    writeUint16(centralView, 6, 20);
+    writeUint16(centralView, 8, 0);
+    writeUint16(centralView, 10, 0);
+    writeUint16(centralView, 12, time);
+    writeUint16(centralView, 14, date);
+    writeUint32(centralView, 16, checksum);
+    writeUint32(centralView, 20, file.data.length);
+    writeUint32(centralView, 24, file.data.length);
+    writeUint16(centralView, 28, pathBytes.length);
+    writeUint16(centralView, 30, 0);
+    writeUint16(centralView, 32, 0);
+    writeUint16(centralView, 34, 0);
+    writeUint16(centralView, 36, 0);
+    writeUint32(centralView, 38, 0);
+    writeUint32(centralView, 42, offset);
+    centralHeader.set(pathBytes, 46);
+    centralChunks.push(centralHeader);
+
+    offset += localHeader.length + file.data.length;
+  }
+
+  const centralDirectory = concatBytes(centralChunks);
+  const endRecord = new Uint8Array(22);
+  const endView = new DataView(endRecord.buffer);
+  writeUint32(endView, 0, 0x06054b50);
+  writeUint16(endView, 4, 0);
+  writeUint16(endView, 6, 0);
+  writeUint16(endView, 8, files.length);
+  writeUint16(endView, 10, files.length);
+  writeUint32(endView, 12, centralDirectory.length);
+  writeUint32(endView, 16, offset);
+  writeUint16(endView, 20, 0);
+
+  return concatBytes([...localChunks, centralDirectory, endRecord]);
+}
+
+function fishListDocxImageXml(index: number, title: string): string {
+  const relId = `rIdImage${index + 1}`;
+  const docPrId = index + 1;
+  const name = xmlEscape(`${title} 第${index + 1}页`);
+  const cx = Math.round(FISH_LIST_PDF_WIDTH * 12700);
+  const cy = Math.round(FISH_LIST_PDF_HEIGHT * 12700);
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${docPrId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${docPrId}" name="${name}.jpg"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+}
+
+function buildDocxFromJpegs(images: Array<{ bytes: Uint8Array; width: number; height: number }>, title: string): Blob {
+  const pageWidthTwips = Math.round(FISH_LIST_PDF_WIDTH * 20);
+  const pageHeightTwips = Math.round(FISH_LIST_PDF_HEIGHT * 20);
+  const bodyXml = images.map((_, index) => {
+    const page = fishListDocxImageXml(index, title);
+    return index === images.length - 1 ? page : `${page}<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+  }).join("");
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${bodyXml}<w:sectPr><w:pgSz w:w="${pageWidthTwips}" w:h="${pageHeightTwips}"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${images.map((_, index) => `<Relationship Id="rIdImage${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/fish-list-page-${index + 1}.jpg"/>`).join("")}</Relationships>`;
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDocument" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rIdCore" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rIdApp" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
+  const now = new Date().toISOString();
+  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>fishroom-management</dc:creator><cp:lastModifiedBy>fishroom-management</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>fishroom-management</Application><Pages>${images.length}</Pages></Properties>`;
+
+  const zip = buildZip([
+    { path: "[Content_Types].xml", data: utf8Bytes(contentTypesXml) },
+    { path: "_rels/.rels", data: utf8Bytes(rootRelsXml) },
+    { path: "docProps/core.xml", data: utf8Bytes(coreXml) },
+    { path: "docProps/app.xml", data: utf8Bytes(appXml) },
+    { path: "word/document.xml", data: utf8Bytes(documentXml) },
+    { path: "word/_rels/document.xml.rels", data: utf8Bytes(relsXml) },
+    ...images.map((image, index) => ({ path: `word/media/fish-list-page-${index + 1}.jpg`, data: image.bytes })),
+  ]);
+  return new Blob([zip], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
 
 export function Dashboard() {
@@ -1686,7 +1798,7 @@ export function Dashboard() {
     const fishListDateLabel = formatFishListDate(today);
     try {
       const template = await loadFishListImage(FISH_LIST_TEMPLATE_URL);
-      const pdfImages = pageRows.map((rows, index) => {
+      const wordImages = pageRows.map((rows, index) => {
         const ctx = createFishListPageCanvas(template, fishListDateLabel, index + 1);
         drawFishListTable(ctx, rows);
         const canvas = ctx.canvas;
@@ -1694,18 +1806,19 @@ export function Dashboard() {
       });
       const rulesCtx = createFishListPageCanvas(template, fishListDateLabel, pageRows.length + 1);
       drawFishListRules(rulesCtx, fishListFooterText);
-      pdfImages.push({
+      wordImages.push({
         bytes: canvasToJpegBytes(rulesCtx.canvas),
         width: rulesCtx.canvas.width,
         height: rulesCtx.canvas.height,
       });
-      const blob = buildPdfFromJpegs(pdfImages);
+      const exportNamePrefix = dashboardSiteId === ALL_SITE_ID ? "海洋森林" : `${siteName(state, dashboardSiteId)}海洋森林`;
+      const exportDateName = `${Number(today.slice(5, 7))}月${Number(today.slice(8, 10))}日`;
+      const exportTitle = `${exportNamePrefix}鱼单${exportDateName}`;
+      const blob = buildDocxFromJpegs(wordImages, exportTitle);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      const exportNamePrefix = dashboardSiteId === ALL_SITE_ID ? "海洋森林" : `${siteName(state, dashboardSiteId)}海洋森林`;
-      const exportDateName = `${Number(today.slice(5, 7))}月${Number(today.slice(8, 10))}日`;
-      link.download = `${safeFilename(`${exportNamePrefix}鱼单${exportDateName}`)}.pdf`;
+      link.download = `${safeFilename(exportTitle)}.docx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
