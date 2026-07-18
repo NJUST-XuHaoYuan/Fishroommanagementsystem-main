@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, Store, TankGroup, SubTank, User, isPersonnelResigned, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -785,6 +785,7 @@ function AdminApp() {
 	  const saveMaintenanceAction = async (change:
 	    | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
 	    | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }
+	    | { mode: "status"; itemIds: string[]; targetStatus: StockStatus }
 	    | { mode: "loss"; stockItemId?: string; itemIds?: string[]; lossDate: string; lossReason?: string; lossProof: string[] }
 	  ): Promise<boolean> => {
 	    clearTimeout(saveTimer.current);

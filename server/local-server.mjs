@@ -5359,12 +5359,14 @@ async function handleApi(req, res, url) {
 		      const rawMode = String(rawChange?.mode ?? "");
 		      if (rawMode === "record") requireModulePermissionForAuth(req, "daily", "create");
 		      else if (rawMode === "move") requireModulePermissionForAuth(req, "daily", "update");
+		      else if (rawMode === "status") requireModulePermissionForAuth(req, "daily", "update");
 		      else if (rawMode === "loss") requireModulePermissionForAuth(req, "lossRecords", "create");
 		      const {
 		        mode,
 	        itemIds = [],
 	        stockItemId,
 	        targetSubTankId,
+	        targetStatus,
 	        moveDate,
 	        moveNotes = "",
 	        recordDate,
@@ -5473,6 +5475,44 @@ async function handleApi(req, res, url) {
 	            module: "日常管理",
 	            action: "修改记录",
 	            detail: `移缸 ${movingItems.length} 条至「${targetName}」`,
+	          };
+	        } else if (mode === "status") {
+	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
+	          const idSet = new Set(requestedIds);
+	          if (idSet.size === 0) throw new Error("请选择要设置状态的鱼");
+	          const targetItems = stock.filter((item) => idSet.has(String(item.id)));
+	          if (targetItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+	          const shippedIds = shippedOutStockIds(state);
+	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
+	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能设置状态");
+	          const nextStatus = String(targetStatus ?? "").trim();
+	          const statusLabels = { healthy: "正常", feeding: "开口", sick: "疾病" };
+	          if (!Object.prototype.hasOwnProperty.call(statusLabels, nextStatus)) throw new Error("请选择目标状态");
+	          const changedItems = targetItems.filter((item) => item.status !== nextStatus);
+	          if (changedItems.length === 0) throw new Error(`所选鱼已经全部是${statusLabels[nextStatus]}状态`);
+	          const date = todayInChina();
+	          const statusRecords = changedItems.map((item) => ({
+	            id: uid("bio"),
+	            siteId: normalizeSiteId(item.siteId),
+	            stockItemId: item.id,
+	            date,
+	            text: `状态调整：${statusLabels[item.status] ?? item.status ?? "未知"} → ${statusLabels[nextStatus]}`,
+	            photos: [],
+	            videos: [],
+	            sourceType: "manual",
+	            operator,
+	          }));
+	          nextStock = stock.map((item) =>
+	            idSet.has(String(item.id)) ? { ...item, status: nextStatus } : item
+	          );
+	          nextBioRecords = [...bioRecords, ...statusRecords];
+	          operationLog = {
+	            id: uid("log"),
+	            time: new Date().toISOString(),
+	            operator,
+	            module: "日常管理",
+	            action: "修改记录",
+	            detail: `批量设置状态 ${targetItems.length} 条为「${statusLabels[nextStatus]}」`,
 	          };
 	        } else if (mode === "loss") {
 	          const requestedLossIds = Array.isArray(itemIds) && itemIds.length > 0

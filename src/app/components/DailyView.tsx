@@ -119,6 +119,12 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
   const batchPhotoRef = useRef<HTMLInputElement>(null);
   const batchVideoRef = useRef<HTMLInputElement>(null);
 
+  // Batch status state
+  const [batchStatusOpen, setBatchStatusOpen] = useState(false);
+  const [batchStatusItemIds, setBatchStatusItemIds] = useState<string[]>([]);
+  const [batchTargetStatus, setBatchTargetStatus] = useState<StockStatus>("healthy");
+  const [batchStatusSaving, setBatchStatusSaving] = useState(false);
+
   // Loss state
   const [lossOpen, setLossOpen] = useState(false);
   const [lossItemIds, setLossItemIds] = useState<string[]>([]);
@@ -398,6 +404,9 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     (latest, item) => (item.inDate && item.inDate > latest ? item.inDate : latest),
     ""
   );
+  const batchStatusItems = batchStatusItemIds
+    .map((id) => stockItem(id))
+    .filter(Boolean) as StockItem[];
   const lossItems = lossItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
@@ -488,6 +497,41 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
     setSelectedIds(new Set());
     setSelectMode(false);
     toast.success(`已移缸 ${moveItemIds.length} 条`);
+  };
+
+  const openBatchStatusDialog = (ids: string[]) => {
+    if (!permission.requirePermission("update")) return;
+    const validIds = Array.from(new Set(ids)).filter((id) => {
+      const item = stockItem(id);
+      return item && isPhysicallyInTank(item, shippedOutStockIds);
+    });
+    if (validIds.length === 0) return toast.error("请选择要设置状态的鱼");
+    setBatchStatusItemIds(validIds);
+    setBatchTargetStatus("healthy");
+    setBioOpen(false);
+    setBatchStatusOpen(true);
+  };
+
+  const submitBatchStatus = async () => {
+    if (!permission.requirePermission("update")) return;
+    if (batchStatusItems.length === 0) return toast.error("请选择要设置状态的鱼");
+    const statusLabel = statusMeta[batchTargetStatus].label;
+    const changedCount = batchStatusItems.filter((item) => item.status !== batchTargetStatus).length;
+    if (changedCount === 0) return toast.error(`所选鱼已经全部是${statusLabel}状态`);
+    if (!confirmWrite("批量状态", `将 ${batchStatusItems.length} 条鱼设置为「${statusLabel}」状态。`)) return;
+    setBatchStatusSaving(true);
+    const ok = await saveMaintenanceAction({
+      mode: "status",
+      itemIds: batchStatusItems.map((item) => item.id),
+      targetStatus: batchTargetStatus,
+    });
+    setBatchStatusSaving(false);
+    if (!ok) return toast.error("状态保存失败，请刷新后重试");
+    setBatchStatusOpen(false);
+    setBatchStatusItemIds([]);
+    setSelectedIds(new Set());
+    setSelectMode(false);
+    toast.success(`已更新状态 ${changedCount} 条`);
   };
 
   const openBatchRecordDialog = (ids: string[]) => {
@@ -1112,6 +1156,18 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                       onClick={() => openBatchRecordDialog(Array.from(selectedIds))}
                     >
                       批量维护
+                    </Button>
+                  )}
+                  {permission.canUpdate && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={selectedItems.length === 0}
+                      onClick={() => openBatchStatusDialog(Array.from(selectedIds))}
+                    >
+                      <Check className="size-3.5 mr-1" />
+                      批量状态
                     </Button>
                   )}
                   {permission.canUpdate && (
@@ -2096,6 +2152,56 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
 	            <Button variant="outline" onClick={() => setBatchRecordOpen(false)} disabled={batchRecordSaving}>取消</Button>
 	            <Button onClick={submitBatchRecord} disabled={batchRecordSaving}>
 	              {batchRecordSaving ? "保存中…" : "确认添加"}
+	            </Button>
+	          </DialogFooter>
+	        </DialogContent>
+	      </Dialog>
+
+	      {/* ── 批量状态 Dialog ── */}
+	      <Dialog open={batchStatusOpen} onOpenChange={setBatchStatusOpen}>
+	        <DialogContent aria-describedby={undefined} className="max-w-lg max-h-[86vh] flex flex-col overflow-hidden">
+	          <DialogHeader>
+	            <DialogTitle>批量设置状态</DialogTitle>
+	          </DialogHeader>
+	          <div className="grid gap-4 py-2 overflow-y-auto pr-1">
+	            <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+	              <div className="font-medium mb-2">本次设置状态 {batchStatusItems.length} 条</div>
+	              <div className="flex flex-col gap-1 text-xs text-muted-foreground max-h-36 overflow-y-auto">
+	                {batchStatusItems.map((item) => {
+	                  const p = product(item.productId);
+	                  return (
+	                    <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+	                      <span className="truncate">
+	                        {p?.name ?? item.productId}{item.code ? ` · ${item.code}` : ""}
+	                      </span>
+	                      <Badge variant="outline" className="justify-self-end">{statusMeta[item.status].label}</Badge>
+	                      <span className="text-right">{subTankName(item.subTankId)}</span>
+	                    </div>
+	                  );
+	                })}
+	              </div>
+	            </div>
+	            <div className="grid gap-2">
+	              <Label>目标状态<span className="text-red-500 ml-0.5">*</span></Label>
+	              <Select
+	                value={batchTargetStatus}
+	                onValueChange={(value: StockStatus) => setBatchTargetStatus(value)}
+	              >
+	                <SelectTrigger>
+	                  <SelectValue placeholder="选择目标状态" />
+	                </SelectTrigger>
+	                <SelectContent>
+	                  <SelectItem value="healthy">正常</SelectItem>
+	                  <SelectItem value="feeding">开口</SelectItem>
+	                  <SelectItem value="sick">疾病</SelectItem>
+	                </SelectContent>
+	              </Select>
+	            </div>
+	          </div>
+	          <DialogFooter className="pt-2 border-t shrink-0">
+	            <Button variant="outline" onClick={() => setBatchStatusOpen(false)} disabled={batchStatusSaving}>取消</Button>
+	            <Button onClick={submitBatchStatus} disabled={batchStatusSaving}>
+	              {batchStatusSaving ? "保存中…" : "确认设置"}
 	            </Button>
 	          </DialogFooter>
 	        </DialogContent>
