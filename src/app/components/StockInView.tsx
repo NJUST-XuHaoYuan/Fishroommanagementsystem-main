@@ -61,14 +61,14 @@ function ProductCombobox({
   );
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
+    const handler = (e: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
         setQ("");
       }
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
   }, []);
 
   const pick = (id: string) => {
@@ -81,10 +81,12 @@ function ProductCombobox({
     <div ref={containerRef} className="relative">
       <button
         type="button"
-        className="w-full flex items-center justify-between h-9 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs hover:bg-accent hover:text-accent-foreground"
+        className="flex h-11 w-full touch-manipulation items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs hover:bg-accent hover:text-accent-foreground sm:h-9"
         onClick={() => {
           setOpen((v) => !v);
-          setTimeout(() => inputRef.current?.focus(), 50);
+          if (window.matchMedia("(pointer: fine)").matches) {
+            setTimeout(() => inputRef.current?.focus(), 50);
+          }
         }}
       >
         <span className={selected ? "text-foreground" : "text-muted-foreground"}>
@@ -94,7 +96,7 @@ function ProductCombobox({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 rounded-md border bg-popover shadow-md flex flex-col">
+        <div className="absolute left-0 right-0 top-full z-[70] mt-1 flex max-h-[min(18rem,42dvh)] flex-col rounded-md border bg-popover shadow-md">
           <div className="p-2 border-b">
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
@@ -115,7 +117,7 @@ function ProductCombobox({
                 <button
                   key={p.id}
                   type="button"
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left ${
+                  className={`flex min-h-11 w-full touch-manipulation items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent ${
                     p.id === value ? "bg-accent/60" : ""
                   }`}
                   onClick={() => pick(p.id)}
@@ -183,14 +185,14 @@ function BatchCombobox({
   }, [compactQuery, normalizedQuery, sorted]);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
+    const handler = (e: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
         setQ("");
       }
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
   }, []);
 
   const pick = (id: string) => {
@@ -203,10 +205,12 @@ function BatchCombobox({
     <div ref={containerRef} className="relative">
       <button
         type="button"
-        className="w-full flex items-center justify-between h-9 rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs hover:bg-accent hover:text-accent-foreground"
+        className="flex h-11 w-full touch-manipulation items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs hover:bg-accent hover:text-accent-foreground sm:h-9"
         onClick={() => {
           setOpen((v) => !v);
-          setTimeout(() => inputRef.current?.focus(), 50);
+          if (window.matchMedia("(pointer: fine)").matches) {
+            setTimeout(() => inputRef.current?.focus(), 50);
+          }
         }}
       >
         <span className={selected ? "text-foreground truncate" : "text-muted-foreground"}>
@@ -218,7 +222,7 @@ function BatchCombobox({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 rounded-md border bg-popover shadow-md flex flex-col">
+        <div className="absolute left-0 right-0 top-full z-[70] mt-1 flex max-h-[min(20rem,46dvh)] flex-col rounded-md border bg-popover shadow-md">
           <div className="p-2 border-b">
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
@@ -239,7 +243,7 @@ function BatchCombobox({
                 <button
                   key={b.id}
                   type="button"
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 text-sm hover:bg-accent text-left ${
+                  className={`flex min-h-11 w-full touch-manipulation items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-accent ${
                     b.id === value ? "bg-accent/60" : ""
                   }`}
                   onClick={() => pick(b.id)}
@@ -320,11 +324,33 @@ export function StockInView() {
     return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
-  const stockLockedByOrder = (id: string) =>
-    state.orders.some((order) =>
-      order.status !== "cancelled" && order.items.some((item) => item.stockItemId === id)
+  const orderItemKeepsInventory = (item: { inventoryRemovedAt?: string }) => !item.inventoryRemovedAt;
+  const pendingOrdersForStockIds = (ids: Iterable<string>) => {
+    const idSet = new Set(ids);
+    return state.orders.filter((order) =>
+      (order.status === "pending" || order.status === "confirmed") &&
+      order.items.some((item) =>
+        idSet.has(item.stockItemId) && orderItemKeepsInventory(item)
+      )
     );
-  const stockCannotDelete = (item: StockItem) => Boolean(item.sold) || stockLockedByOrder(item.id);
+  };
+  const stockLockedByProtectedOrder = (id: string) =>
+    state.orders.some((order) =>
+      order.status !== "cancelled" &&
+      order.status !== "pending" &&
+      order.status !== "confirmed" &&
+      order.items.some((item) => item.stockItemId === id && orderItemKeepsInventory(item))
+    );
+  const stockLockedByShipment = (id: string) =>
+    state.shipments.some((shipment) =>
+      shipment.status !== "preparing" && (shipment.itemStockIds ?? []).includes(id)
+    );
+  const stockCannotDelete = (item: StockItem) =>
+    stockLockedByProtectedOrder(item.id) || stockLockedByShipment(item.id);
+  const stockDeleteLockReason = (item: StockItem) =>
+    stockLockedByShipment(item.id)
+      ? "已出库或已发货，不能删除"
+      : "已进入完成或异常订单，不能删除";
   const latestBatchId = () =>
     [...state.batches].sort((a, b) => {
       const byDate = b.arrivalDate.localeCompare(a.arrivalDate);
@@ -389,9 +415,18 @@ export function StockInView() {
   };
 
   const openDialog = (item: StockItem, subTankMode = false) => {
-    if (!permission.requirePermission(item.id ? "update" : "create")) return;
+    if (!item.id && !permission.requirePermission("create")) return;
+    if (item.id && !permission.canUpdate) {
+      if (!permission.requirePermission("delete")) return;
+      if (stockCannotDelete(item)) {
+        toast.error(stockDeleteLockReason(item));
+        return;
+      }
+      setDel(item);
+      return;
+    }
     if (item.id && stockCannotDelete(item)) {
-      toast.error("已售或已关联订单的商品不能在入库模块编辑或删除");
+      toast.error(stockDeleteLockReason(item));
       return;
     }
     setEditing({
@@ -446,7 +481,7 @@ export function StockInView() {
       }));
       return next.size === prev.size ? prev : next;
     });
-  }, [state.stock, state.orders]);
+  }, [state.stock, state.orders, state.shipments]);
 
   const save = async () => {
     if (!editing) return;
@@ -471,12 +506,12 @@ export function StockInView() {
   };
 
   const confirmSave = async () => {
-    if (!saveConfirm) return;
+    if (!saveConfirm || saving) return;
     setSaving(true);
-    const ok = await saveStockChange({ upsert: saveConfirm.stockItems });
+    const result = await saveStockChange({ upsert: saveConfirm.stockItems });
     setSaving(false);
-    if (!ok) {
-      toast.error("保存失败，请重试");
+    if (!result.ok) {
+      toast.error(result.error || "保存失败，请重试");
       return;
     }
     const qty = saveConfirm.qty;
@@ -486,25 +521,26 @@ export function StockInView() {
   };
 
   const confirmDelete = async () => {
-    if (!del) return;
+    if (!del || saving) return;
     if (!permission.requirePermission("delete")) return;
-    if (stockCannotDelete(del)) return toast.error("该鱼已售或已关联订单，不能删除入库记录");
+    if (stockCannotDelete(del)) return toast.error(stockDeleteLockReason(del));
+    const linkedOrderCount = pendingOrdersForStockIds([del.id]).length;
     setSaving(true);
-    const ok = await saveStockChange({ deleteIds: [del.id] });
+    const result = await saveStockChange({ deleteIds: [del.id] });
     setSaving(false);
-    if (!ok) {
-      toast.error("删除失败，请重试");
+    if (!result.ok) {
+      toast.error(result.error || "删除失败，请重试");
       return;
     }
     setDel(null);
-    toast.success("已删除");
+    toast.success(linkedOrderCount > 0 ? "已删除库存，订单历史已保留" : "已删除");
   };
 
   const toggleSelected = (id: string) => {
     if (!selectMode) return;
     const item = state.stock.find((stock) => stock.id === id);
     if (!item || stockCannotDelete(item)) {
-      toast.error("已售或已关联订单的商品不能批量删除");
+      toast.error(item ? stockDeleteLockReason(item) : "库存记录不存在");
       return;
     }
     setSelectedIds((prev) => {
@@ -578,12 +614,13 @@ export function StockInView() {
 
   const confirmBulkDelete = async () => {
     if (!permission.requirePermission("delete")) return;
-    if (bulkDeleteIds.length === 0) return;
+    if (bulkDeleteIds.length === 0 || saving) return;
+    const linkedOrderCount = pendingOrdersForStockIds(bulkDeleteIds).length;
     setSaving(true);
-    const ok = await saveStockChange({ deleteIds: bulkDeleteIds });
+    const result = await saveStockChange({ deleteIds: bulkDeleteIds });
     setSaving(false);
-    if (!ok) {
-      toast.error("批量删除失败，请重试");
+    if (!result.ok) {
+      toast.error(result.error || "批量删除失败，请重试");
       return;
     }
     setSelectedIds((prev) => {
@@ -594,7 +631,11 @@ export function StockInView() {
     const count = bulkDeleteIds.length;
     setBulkDeleteIds([]);
     setSelectMode(false);
-    toast.success(`已删除 ${count} 条入库记录`);
+    toast.success(
+      linkedOrderCount > 0
+        ? `已删除 ${count} 条库存，${linkedOrderCount} 个订单历史已保留`
+        : `已删除 ${count} 条入库记录`
+    );
   };
 
   const groupByProduct = (items: ReturnType<typeof stockBySub>) => {
@@ -925,7 +966,7 @@ export function StockInView() {
                                 {stockItems.map((s) => {
                                   const selected = selectedIds.has(s.id);
                                   const locked = stockCannotDelete(s);
-                                  const lockReason = s.sold ? "已售商品，不能删除" : "已关联订单，不能删除";
+                                  const lockReason = stockDeleteLockReason(s);
                                   return (
                                     <div
                                       key={s.id}
@@ -1111,6 +1152,11 @@ export function StockInView() {
                   : "新增入库"}
             </DialogTitle>
           </DialogHeader>
+          {editing?.id && pendingOrdersForStockIds([editing.id]).length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-5 text-amber-900">
+              该鱼关联 {pendingOrdersForStockIds([editing.id]).length} 个未出库订单。删除库存后，订单商品和收款历史会保留，并标记为“库存记录已删除”。
+            </div>
+          )}
           {editing && (
             <div className="grid gap-4 py-2">
               <div className="grid gap-2">
@@ -1252,9 +1298,9 @@ export function StockInView() {
               )}
             </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>取消</Button>
-            <Button onClick={save} disabled={saving}>{saving ? "保存中..." : "保存"}</Button>
+          <DialogFooter className="sticky bottom-[-1rem] z-10 -mx-4 -mb-4 border-t bg-background px-4 py-3 sm:static sm:m-0 sm:border-0 sm:bg-transparent sm:p-0">
+            <Button className="min-h-11 sm:min-h-9" variant="outline" onClick={() => setOpen(false)} disabled={saving}>取消</Button>
+            <Button className="min-h-11 sm:min-h-9" onClick={save} disabled={saving}>{saving ? "保存中..." : "保存"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1270,8 +1316,9 @@ export function StockInView() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={saving}>取消</AlertDialogCancel>
+            <AlertDialogCancel className="min-h-11 sm:min-h-9" disabled={saving}>取消</AlertDialogCancel>
             <AlertDialogAction
+              className="min-h-11 sm:min-h-9"
               disabled={saving}
               onClick={(event) => {
                 event.preventDefault();
@@ -1288,11 +1335,16 @@ export function StockInView() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>删除入库记录</AlertDialogTitle>
-            <AlertDialogDescription>确认删除该条入库记录？</AlertDialogDescription>
+            <AlertDialogDescription>
+              {del && pendingOrdersForStockIds([del.id]).length > 0
+                ? `确认删除该条库存记录？关联的 ${pendingOrdersForStockIds([del.id]).length} 个未出库订单会保留商品和收款历史，并标记为“库存记录已删除”。`
+                : "确认删除该条入库记录？"}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={saving}>取消</AlertDialogCancel>
+            <AlertDialogCancel className="min-h-11 sm:min-h-9" disabled={saving}>取消</AlertDialogCancel>
 	            <AlertDialogAction
+	              className="min-h-11 sm:min-h-9"
 	              disabled={saving}
 	              onClick={(event) => {
 	                event.preventDefault();
@@ -1310,12 +1362,17 @@ export function StockInView() {
           <AlertDialogHeader>
             <AlertDialogTitle>批量删除入库记录</AlertDialogTitle>
             <AlertDialogDescription>
-              确认删除已选的 {bulkDeleteIds.length} 条入库记录？已售或已关联订单的鱼不会进入可删除选择。
+              确认删除已选的 {bulkDeleteIds.length} 条入库记录？
+              {pendingOrdersForStockIds(bulkDeleteIds).length > 0
+                ? ` 其中关联 ${pendingOrdersForStockIds(bulkDeleteIds).length} 个未出库订单，订单商品和收款历史会保留并标记。`
+                : ""}
+              已实际出库或进入完成、异常订单的鱼不会进入可删除选择。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={saving}>取消</AlertDialogCancel>
+            <AlertDialogCancel className="min-h-11 sm:min-h-9" disabled={saving}>取消</AlertDialogCancel>
             <AlertDialogAction
+              className="min-h-11 sm:min-h-9"
               disabled={saving}
               onClick={(event) => {
                 event.preventDefault();

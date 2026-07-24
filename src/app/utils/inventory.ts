@@ -28,7 +28,7 @@ export function getInventoryHiddenStockIds(
     if (order.status === "cancelled" || order.status === "pending" || order.status === "confirmed") return;
     if (order.status === "shipped" && ordersWithShipmentDetail.has(order.id)) return;
     order.items.forEach((item) => {
-      if (item.stockItemId) hiddenIds.add(item.stockItemId);
+      if (item.stockItemId && !item.inventoryRemovedAt) hiddenIds.add(item.stockItemId);
     });
   });
 

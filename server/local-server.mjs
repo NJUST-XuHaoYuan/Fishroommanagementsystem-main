@@ -2392,11 +2392,15 @@ function syncDailyLogToBioRecords(state = {}, bioRecords = [], normalizedLog = {
   };
 }
 
+function orderItemKeepsInventory(item = {}) {
+  return !String(item?.inventoryRemovedAt ?? "").trim();
+}
+
 function findActiveOrderForStock(state = {}, stockItemId) {
   return (Array.isArray(state.orders) ? state.orders : []).find((order) =>
     order?.status !== "cancelled" &&
     Array.isArray(order.items) &&
-    order.items.some((item) => item?.stockItemId === stockItemId)
+    order.items.some((item) => item?.stockItemId === stockItemId && orderItemKeepsInventory(item))
   );
 }
 
@@ -2413,6 +2417,7 @@ function orderActiveStockIds(state = {}, excludeOrderId = "") {
   for (const order of Array.isArray(state.orders) ? state.orders : []) {
     if (!order || order.status === "cancelled" || String(order.id ?? "") === String(excludeOrderId ?? "")) continue;
     for (const item of Array.isArray(order.items) ? order.items : []) {
+      if (!orderItemKeepsInventory(item)) continue;
       const id = String(item?.stockItemId ?? "");
       if (id) ids.add(id);
     }
@@ -2672,12 +2677,16 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     if (!stockItem && !existingItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
     const productId = String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim();
     const product = findProductById(state, productId);
+    const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? "").trim();
+    const inventoryRemovedBy = String(existingItem?.inventoryRemovedBy ?? "").trim();
     return {
       stockItemId: stockId,
       productId,
       price: normalizeMoney(item.price ?? existingItem?.price, "Order item price"),
       minReturnPrice: normalizeMinReturnPrice(item.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
       commissionRate: 0,
+      ...(inventoryRemovedAt ? { inventoryRemovedAt } : {}),
+      ...(inventoryRemovedBy ? { inventoryRemovedBy } : {}),
     };
   });
   const normalizedItemIds = items.map((item) => String(item?.stockItemId ?? "")).filter(Boolean);
@@ -2717,6 +2726,7 @@ function setStockSoldForOrders(state = {}, orders = []) {
   for (const order of orders) {
     if (!order || order.status === "cancelled") continue;
     for (const item of Array.isArray(order.items) ? order.items : []) {
+      if (!orderItemKeepsInventory(item)) continue;
       const stockId = String(item?.stockItemId ?? "");
       if (stockId) activeOrderIds.add(stockId);
     }
@@ -2765,7 +2775,7 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   const shippedIds = new Set(activeShipments.flatMap((shipment) =>
     Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.map((id) => String(id)) : []
   ));
-  const orderItems = Array.isArray(order.items) ? order.items : [];
+  const orderItems = (Array.isArray(order.items) ? order.items : []).filter(orderItemKeepsInventory);
   if (orderItems.length === 0 || !orderItems.every((item) => shippedIds.has(String(item?.stockItemId ?? "")))) {
     throw new Error("订单尚有商品未发货，不能标记完成");
   }
@@ -2911,12 +2921,16 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
       const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
         .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockItemId);
       const product = findProductById(state, productId || existingItem?.productId);
+      const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? item?.inventoryRemovedAt ?? "").trim();
+      const inventoryRemovedBy = String(existingItem?.inventoryRemovedBy ?? item?.inventoryRemovedBy ?? "").trim();
       return {
         stockItemId,
         productId,
         price: normalizeMoney(item?.price, "Order item price"),
         minReturnPrice: normalizeMinReturnPrice(item?.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
         commissionRate: 0,
+        ...(inventoryRemovedAt ? { inventoryRemovedAt } : {}),
+        ...(inventoryRemovedBy ? { inventoryRemovedBy } : {}),
       };
     }),
     shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
@@ -3110,6 +3124,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     for (const order of nextOrders) {
       if (!order || order.status === "cancelled") continue;
       for (const item of Array.isArray(order.items) ? order.items : []) {
+        if (!orderItemKeepsInventory(item)) continue;
         const stockId = String(item?.stockItemId ?? "");
         if (stockId) activeOrderStockIds.add(stockId);
       }
@@ -4809,6 +4824,7 @@ async function handleApi(req, res, url) {
       if (selectedItemIds.length === 0) throw new Error("请选择要出库的商品");
       if (new Set(selectedItemIds).size !== selectedItemIds.length) throw new Error("同一条鱼不能重复出库");
       const orderItemIds = new Set((Array.isArray(order.items) ? order.items : [])
+        .filter(orderItemKeepsInventory)
         .map((item) => String(item?.stockItemId ?? ""))
         .filter(Boolean));
       const notInOrderIds = selectedItemIds.filter((id) => !orderItemIds.has(id));
@@ -5305,13 +5321,84 @@ async function handleApi(req, res, url) {
 	        } = await externalizeDataUrls(rawChange);
 	        const upsertItems = Array.isArray(upsert) ? upsert.map(normalizeStockItem) : [];
 	        const deleteIdSet = new Set(Array.isArray(deleteIds) ? deleteIds.map((id) => String(id)) : []);
+	        const existingDeleteIds = new Set(
+	          stock
+	            .map((item) => String(item?.id ?? ""))
+	            .filter((id) => id && deleteIdSet.has(id))
+	        );
+	        if (deleteIdSet.size > 0 && existingDeleteIds.size !== deleteIdSet.size) {
+	          throw new Error("部分库存记录已不存在，请刷新后重试");
+	        }
+
+	        const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+	        const blockingShipment = shipments.find((shipment) =>
+	          shipmentBlocksInventory(shipment) &&
+	          (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [])
+	            .some((id) => existingDeleteIds.has(String(id ?? "")))
+	        );
+	        if (blockingShipment) {
+	          throw new Error("所选库存已出库或发货，不能删除");
+	        }
+
+	        const orders = Array.isArray(state.orders) ? state.orders : [];
+	        const protectedOrder = orders.find((order) =>
+	          !["cancelled", "pending", "confirmed"].includes(String(order?.status ?? "")) &&
+	          (Array.isArray(order?.items) ? order.items : []).some((item) =>
+	            orderItemKeepsInventory(item) && existingDeleteIds.has(String(item?.stockItemId ?? ""))
+	          )
+	        );
+	        if (protectedOrder) {
+	          throw new Error(`库存已进入订单「${protectedOrder.orderNo || protectedOrder.id}」的完成或异常流程，不能删除`);
+	        }
+
+	        const removedAt = new Date().toISOString();
+	        const affectedOrderIds = new Set();
+	        const nextOrders = orders.map((order) => {
+	          if (!["pending", "confirmed"].includes(String(order?.status ?? ""))) return order;
+	          let changed = false;
+	          const items = (Array.isArray(order.items) ? order.items : []).map((item) => {
+	            if (
+	              !orderItemKeepsInventory(item) ||
+	              !existingDeleteIds.has(String(item?.stockItemId ?? ""))
+	            ) {
+	              return item;
+	            }
+	            changed = true;
+	            return {
+	              ...item,
+	              inventoryRemovedAt: removedAt,
+	              inventoryRemovedBy: operator,
+	            };
+	          });
+	          if (!changed) return order;
+	          affectedOrderIds.add(String(order.id ?? ""));
+	          return { ...order, items };
+	        });
+	        const nextShipments = shipments.map((shipment) => {
+	          if (shipment?.status !== "preparing") return shipment;
+	          const currentItemIds = Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [];
+	          const itemStockIds = currentItemIds.filter((id) => !existingDeleteIds.has(String(id ?? "")));
+	          if (itemStockIds.length === currentItemIds.length) return shipment;
+	          return {
+	            ...shipment,
+	            itemStockIds,
+	            damageItemStockIds: Array.isArray(shipment?.damageItemStockIds)
+	              ? shipment.damageItemStockIds.filter((id) => !existingDeleteIds.has(String(id ?? "")))
+	              : shipment.damageItemStockIds,
+	          };
+	        });
+	        const orderUpdates = nextOrders.filter((order) => affectedOrderIds.has(String(order?.id ?? "")));
+	        const shipmentUpdates = nextShipments.filter((shipment, index) =>
+	          stableJson(shipment) !== stableJson(shipments[index])
+	        );
 	        const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
-	        const nextStock = stock
+	        const changedStock = stock
 	          .filter((item) => !deleteIdSet.has(item?.id))
 	          .map((item) => upsertById.get(item.id) ?? item);
         for (const item of upsertItems) {
-          if (!existingIds.has(item.id)) nextStock.push(item);
+          if (!existingIds.has(item.id)) changedStock.push(item);
         }
+        const nextStock = setStockSoldForOrders({ ...state, stock: changedStock }, nextOrders);
         const nextBatches = refreshBatchStockCounts(state.batches, nextStock);
         const operationLog = {
           id: uid("log"),
@@ -5320,13 +5407,15 @@ async function handleApi(req, res, url) {
           module: "库存明细",
           action: deleteIdSet.size > 0 ? "删除记录" : upsertItems.some((item) => existingIds.has(item.id)) ? "修改记录" : "添加记录",
           detail: deleteIdSet.size > 0
-            ? `删除入库记录 ${deleteIdSet.size} 条`
+            ? `删除入库记录 ${deleteIdSet.size} 条${affectedOrderIds.size > 0 ? `，保留并标记未出库订单 ${affectedOrderIds.size} 个` : ""}`
             : `保存入库记录 ${upsertItems.length} 条`,
         };
 	        const nextState = {
 	          ...state,
 	          stock: nextStock,
 	          batches: nextBatches,
+	          orders: nextOrders,
+	          shipments: nextShipments,
 	          operationLogs: pushOperationLog(operationLogs, operationLog),
 	        };
         await client.query(
@@ -5338,6 +5427,9 @@ async function handleApi(req, res, url) {
           ok: true,
           stock: nextStock,
           batches: nextBatches,
+          orderUpdates,
+          shipmentUpdates,
+          affectedOrderCount: affectedOrderIds.size,
           operationLog,
         });
       } catch (error) {
@@ -5347,7 +5439,7 @@ async function handleApi(req, res, url) {
         client.release();
       }
     } catch (error) {
-      sendJson(req, res, 400, { error: `Failed to save stock: ${error.message}` });
+      sendJson(req, res, 400, { error: error.message });
 	    }
 	    return;
 	  }

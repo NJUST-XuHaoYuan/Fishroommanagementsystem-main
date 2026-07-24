@@ -392,6 +392,20 @@
     flex-shrink: 0;
   }
 
+  .fishroom-mobile-menu-trigger {
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 1px solid oklch(0.79 0.006 260);
+    background: oklch(1 0 0);
+    color: oklch(0.26 0.035 185);
+    box-shadow: 0 1px 2px oklch(0.2 0.01 260 / 0.08);
+  }
+
+  .fishroom-mobile-menu-trigger:hover {
+    border-color: oklch(0.62 0.04 185);
+    background: var(--fishroom-reef-soft);
+  }
+
   .fishroom-content {
     background: var(--background);
     min-height: 0;

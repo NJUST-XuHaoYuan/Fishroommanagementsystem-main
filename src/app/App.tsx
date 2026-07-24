@@ -732,7 +732,9 @@ function AdminApp() {
     }
   };
 
-	  const saveStockChange = async (change: { upsert?: StockItem[]; deleteIds?: string[] }): Promise<boolean> => {
+	  const saveStockChange = async (
+	    change: { upsert?: StockItem[]; deleteIds?: string[] }
+	  ): Promise<{ ok: boolean; error?: string }> => {
 	    clearTimeout(saveTimer.current);
 	    if (saveAbort.current) {
 	      saveAbort.current.abort();
@@ -758,10 +760,28 @@ function AdminApp() {
       }
 
       setStateBase((current) => {
+        const orderUpdates = new Map<string, Store["orders"][number]>(
+          (Array.isArray(result.orderUpdates) ? result.orderUpdates : [])
+            .map((order: Store["orders"][number]) => [order.id, order] as const)
+        );
+        const shipmentUpdates = new Map<string, Store["shipments"][number]>(
+          (Array.isArray(result.shipmentUpdates) ? result.shipmentUpdates : [])
+            .map((shipment: Store["shipments"][number]) => [shipment.id, shipment] as const)
+        );
         const next = {
           ...current,
           stock: Array.isArray(result.stock) ? result.stock : current.stock,
           batches: Array.isArray(result.batches) ? result.batches : current.batches,
+          orders: Array.isArray(result.orders)
+            ? result.orders
+            : orderUpdates.size > 0
+              ? current.orders.map((order) => orderUpdates.get(order.id) ?? order)
+              : current.orders,
+          shipments: Array.isArray(result.shipments)
+            ? result.shipments
+            : shipmentUpdates.size > 0
+              ? current.shipments.map((shipment) => shipmentUpdates.get(shipment.id) ?? shipment)
+              : current.shipments,
 	          operationLogs: result.operationLog
 	            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
 	                arr.findIndex((item) => item.id === log.id) === idx
@@ -773,12 +793,16 @@ function AdminApp() {
       });
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
-      return true;
+      return { ok: true };
     } catch (error) {
       console.error("Failed to save stock:", error);
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
-	      return false;
+	      const message = error instanceof Error ? error.message : "保存失败，请重试";
+	      return {
+	        ok: false,
+	        error: message.replace(/^Failed to save stock:\s*/i, "") || "保存失败，请重试",
+	      };
 	    }
 	  };
 
@@ -1309,17 +1333,17 @@ function AdminApp() {
     setView(nextView);
   };
 
-  const loadingView = viewLoading;
+  const loadingView = viewLoading || Boolean(state.user && (stateLoading || !stateLoaded));
   const viewContent = loadingView ? (
     <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">
       正在加载当前页面数据…
     </div>
   ) : renderView();
 
-  if (loading || (!isPublicSite && state.user && (stateLoading || !stateLoaded))) {
+  if (loading) {
     return (
       <div className="size-full min-h-screen flex items-center justify-center bg-slate-50">
-        <LogoLoader label={loading ? "正在加载登录信息…" : "正在加载业务数据…"} />
+        <LogoLoader label="正在加载登录信息…" />
       </div>
     );
   }

@@ -277,7 +277,9 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
 
   const activeShipments = orderShipments.filter(countsAsActiveShipment);
   const activeShippedItemIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
-  const hasUnshippedItems = order.items.some((item) => !activeShippedItemIds.has(item.stockItemId));
+  const inventoryActiveItems = order.items.filter((item) => !item.inventoryRemovedAt);
+  const removedInventoryCount = order.items.length - inventoryActiveItems.length;
+  const hasUnshippedItems = inventoryActiveItems.some((item) => !activeShippedItemIds.has(item.stockItemId));
   const outboundShipments = activeShipments.filter((shipment) => shipment.status === "outbound");
   const shippedInProgress = activeShipments.filter((shipment) => shipment.status === "shipped");
   const needsTracking = shippedInProgress.some((shipment) =>
@@ -287,7 +289,14 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
     (shipment.shipMethod ?? "express") !== "pickup" && !!String(shipment.trackingNo ?? "").trim()
   );
 
-  if (activeShipments.length === 0 && order.items.length > 0) {
+  if (removedInventoryCount > 0) {
+    tags.push({
+      label: `库存已移除 ${removedInventoryCount} 件`,
+      className: ORDER_STATUS_TAG_STYLE.cancelled,
+    });
+  }
+
+  if (activeShipments.length === 0 && inventoryActiveItems.length > 0) {
     tags.push({ label: "待发货", className: ORDER_STATUS_TAG_STYLE.pendingShip });
     return tags;
   }
@@ -2943,7 +2952,10 @@ function StockPickerBioDialog({
   const batch = item ? state.batches.find((entry) => entry.id === item.batchId) : undefined;
   const order = item
     ? state.orders.find((entry) =>
-        entry.status !== "cancelled" && entry.items.some((orderItem) => orderItem.stockItemId === item.id)
+        entry.status !== "cancelled" &&
+        entry.items.some((orderItem) =>
+          orderItem.stockItemId === item.id && !orderItem.inventoryRemovedAt
+        )
       )
     : undefined;
 
@@ -3684,13 +3696,19 @@ function ItemsWithShipments({
     const p = getProduct(item.productId);
     const s = getStockItem(item.stockItemId);
     const isLost = !!s?.lost;
-    const isUnshipped = !shippedItemIds.has(item.stockItemId);
+    const inventoryRemoved = Boolean(item.inventoryRemovedAt);
+    const isUnshipped = !inventoryRemoved && !shippedItemIds.has(item.stockItemId);
     const damageRefunded = !!options?.damageRefunded;
     const minReturnPrice = orderItemMinReturnPrice(item, p);
     const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
     return (
-      <tr key={item.stockItemId ?? idx} className={`border-t hover:bg-muted/20 transition-colors cursor-pointer group ${isLost ? "bg-red-50/40" : ""}`}
-        onClick={() => setDetailId(item.stockItemId)}>
+      <tr
+        key={item.stockItemId ?? idx}
+        className={`group border-t transition-colors ${inventoryRemoved ? "bg-slate-50/70" : "cursor-pointer hover:bg-muted/20"} ${isLost ? "bg-red-50/40" : ""}`}
+        onClick={() => {
+          if (!inventoryRemoved) setDetailId(item.stockItemId);
+        }}
+      >
         <td className="px-4 py-2.5">
           <div className="flex items-center gap-2">
             <div className="relative size-8 rounded overflow-hidden border bg-muted shrink-0">
@@ -3704,12 +3722,15 @@ function ItemsWithShipments({
                 {p?.name ?? "—"}
                 {isLost && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">已损耗，需退商品</span>}
                 {damageRefunded && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">报损退款</span>}
+                {inventoryRemoved && <span className="ml-2 rounded bg-slate-200 px-1 py-0.5 text-xs text-slate-700">库存记录已删除</span>}
               </div>
               {p?.size && <div className="text-xs text-muted-foreground">{p.size}{p.origin ? ` · ${p.origin}` : ""}</div>}
             </div>
           </div>
         </td>
-        <td className="px-4 py-2.5 text-sm text-muted-foreground">{s ? subTankName(s.subTankId) : "—"}</td>
+        <td className="px-4 py-2.5 text-sm text-muted-foreground">
+          {inventoryRemoved ? "已从库存移除" : s ? subTankName(s.subTankId) : "—"}
+        </td>
         <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
         <td className="px-4 py-2.5 text-sm text-right">¥{minReturnPrice.toFixed(2)}</td>
         <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{commissionAmount.toFixed(2)}</td>
@@ -3727,15 +3748,20 @@ function ItemsWithShipments({
             >
               退
             </Button>
-          ) : (
+          ) : !inventoryRemoved ? (
             <span className="text-xs text-sky-600 opacity-0 group-hover:opacity-100 transition-opacity">详情 ›</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">历史保留</span>
           )}
         </td>
       </tr>
     );
   };
 
-  const unshippedOrderItems = order.items.filter((i) => !shippedItemIds.has(i.stockItemId));
+  const unshippedOrderItems = order.items.filter((i) =>
+    !i.inventoryRemovedAt && !shippedItemIds.has(i.stockItemId)
+  );
+  const inventoryRemovedItems = order.items.filter((i) => Boolean(i.inventoryRemovedAt));
 
   const colHeader = (
     <thead>
@@ -3810,6 +3836,20 @@ function ItemsWithShipments({
             {colHeader}
             <tbody>
               {unshippedOrderItems.map((item, idx) => renderItemRow(item, idx))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {inventoryRemovedItems.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 border-t bg-slate-100/70 px-4 py-2 text-xs font-medium text-slate-700">
+            库存记录已删除（{inventoryRemovedItems.length} 件，订单及收款历史保留）
+          </div>
+          <table className="w-full">
+            {colHeader}
+            <tbody>
+              {inventoryRemovedItems.map((item, idx) => renderItemRow(item, idx))}
             </tbody>
           </table>
         </div>
@@ -4052,10 +4092,14 @@ function OrderDetailDialog({
 
   const activeOrderShipments = orderShipments.filter(countsAsActiveShipment);
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
-  const unshippedItems = (order?.items ?? []).filter((i) => !shippedItemIds.has(i.stockItemId));
+  const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
+  const unshippedItems = inventoryActiveItems.filter((i) => !shippedItemIds.has(i.stockItemId));
   const lostUnshippedItems = unshippedItems.filter((i) => state.stock.find((s) => s.id === i.stockItemId)?.lost);
-  const shippableUnshippedItems = unshippedItems.filter((i) => !state.stock.find((s) => s.id === i.stockItemId)?.lost);
-  const allItemsShipped = (order?.items ?? []).length > 0 && unshippedItems.length === 0;
+  const shippableUnshippedItems = unshippedItems.filter((i) => {
+    const stockItem = state.stock.find((s) => s.id === i.stockItemId);
+    return Boolean(stockItem) && !stockItem?.lost;
+  });
+  const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || (s.status === "damaged" && s.damageResolution === "refund")
   );
@@ -4075,6 +4119,7 @@ function OrderDetailDialog({
   const openReturnItem = (item: OrderItem) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
+    if (item.inventoryRemovedAt) return toast.error("该商品的库存记录已删除，订单历史仅供查看");
     if (order.status === "completed") return toast.error("已完成订单不能退商品");
     if (order.status === "cancelled") return toast.error("已取消订单不能退商品");
     if (shippedItemIds.has(item.stockItemId)) return toast.error("该商品已出库或已发货，不能按未发货商品退款");
@@ -6329,14 +6374,15 @@ export function OrdersView() {
     const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
     const activeShipments = orderShipments.filter(countsAsActiveShipment);
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
-    const unshippedCount = order.items.filter((item) => !shippedIds.has(item.stockItemId)).length;
+    const inventoryActiveItems = order.items.filter((item) => !item.inventoryRemovedAt);
+    const unshippedCount = inventoryActiveItems.filter((item) => !shippedIds.has(item.stockItemId)).length;
     const nextShipDate = order.status === "completed"
       ? ""
-      : order.items
+      : inventoryActiveItems
           .map((item) => effectiveItemPlannedShipDate(order, item) || item.plannedShipDate)
           .filter(Boolean)
           .sort()[0] || order.plannedShipDate || "";
-    const plannedTodayCount = order.items.filter((item) =>
+    const plannedTodayCount = inventoryActiveItems.filter((item) =>
       effectiveItemPlannedShipDate(order, item) === today || item.plannedShipDate === today
     ).length;
     const itemNames = order.items

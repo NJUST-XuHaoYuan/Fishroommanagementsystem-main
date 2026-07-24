@@ -346,8 +346,9 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               variant="ghost"
               size="icon"
               onClick={() => setMobileNavOpen(true)}
-              className="shrink-0"
+              className="fishroom-mobile-menu-trigger shrink-0"
               title="打开菜单"
+              aria-label="打开菜单"
             >
               <Menu className="size-5" />
             </Button>

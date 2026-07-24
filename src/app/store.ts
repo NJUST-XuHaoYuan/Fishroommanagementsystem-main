@@ -188,6 +188,9 @@ export type OrderItem = {
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   plannedShipDate?: string;
+  /** 库存记录删除后保留订单商品快照，避免丢失订单和收款历史。 */
+  inventoryRemovedAt?: string;
+  inventoryRemovedBy?: string;
 };
 
 export type PaymentType = "deposit" | "balance" | "shipping_fee" | "refund" | "other";
@@ -349,7 +352,7 @@ export type StoreContextType = {
   setState: React.Dispatch<React.SetStateAction<Store>>;
   savePatch: (patch: Partial<Omit<Store, "user">>) => Promise<boolean>;
   saveProduct: (product: Product) => Promise<boolean>;
-  saveStockChange: (change: { upsert?: StockItem[]; deleteIds?: string[] }) => Promise<boolean>;
+  saveStockChange: (change: { upsert?: StockItem[]; deleteIds?: string[] }) => Promise<{ ok: boolean; error?: string }>;
   saveMaintenanceAction: (change:
     | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
     | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }
@@ -568,7 +571,7 @@ export const StoreContext = createContext<StoreContextType>({
   setState: () => {},
   savePatch: async () => false,
   saveProduct: async () => false,
-  saveStockChange: async () => false,
+  saveStockChange: async () => ({ ok: false }),
   saveMaintenanceAction: async () => false,
   saveTankGroupChange: async () => false,
   saveDailyLog: async () => false,
