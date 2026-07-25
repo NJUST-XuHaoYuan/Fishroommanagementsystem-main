@@ -2639,10 +2639,6 @@ const ORDER_SOURCE_VALUES = new Set(["线下", "平台下单", "私域线上"]);
 function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
   const incomingSiteId = body.siteId === ALL_SITE_ID ? DEFAULT_SITE_ID : body.siteId;
   const siteId = normalizeSiteId(incomingSiteId ?? currentOrder?.siteId);
-  const customerId = String(body.customerId ?? currentOrder?.customerId ?? "").trim();
-  const customerExists = (Array.isArray(state.customers) ? state.customers : [])
-    .some((customer) => String(customer?.id ?? "") === customerId);
-  if (!customerId || !customerExists) throw new Error("请选择有效客户");
   const date = String(body.date ?? currentOrder?.date ?? "").trim();
   if (!date) throw new Error("下单日期不能为空");
   if (date > todayInChina()) throw new Error("下单日期不能晚于今天");
@@ -2650,9 +2646,31 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const source = String(body.source ?? currentOrder?.source ?? "").trim();
   if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
-  const shippingAddress = String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim();
-  const plannedShipDate = String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
-  if (!plannedShipDate) throw new Error("请选择预计发货日期");
+  const isDouyinOrder = source === "平台下单";
+  const isPickupOrder = source === "线下";
+  const requestedCustomerId = String(body.customerId ?? currentOrder?.customerId ?? "").trim();
+  const customerExists = (Array.isArray(state.customers) ? state.customers : [])
+    .some((customer) => String(customer?.id ?? "") === requestedCustomerId);
+  if (!isDouyinOrder && (!requestedCustomerId || !customerExists)) throw new Error("请选择有效客户");
+  const customerId = isDouyinOrder ? "" : requestedCustomerId;
+  const douyinOrderNo = isDouyinOrder
+    ? String(body.douyinOrderNo ?? currentOrder?.douyinOrderNo ?? "").trim()
+    : "";
+  if (isDouyinOrder && !douyinOrderNo) throw new Error("请填写抖音订单编号");
+  if (isDouyinOrder) {
+    const duplicateOrder = (Array.isArray(state.orders) ? state.orders : []).find((order) =>
+      String(order?.id ?? "") !== String(currentOrder?.id ?? "") &&
+      String(order?.douyinOrderNo ?? "").trim().toLowerCase() === douyinOrderNo.toLowerCase()
+    );
+    if (duplicateOrder) throw new Error(`抖音订单编号已存在：${douyinOrderNo}`);
+  }
+  const shippingAddress = source === "私域线上"
+    ? String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim()
+    : "";
+  const plannedShipDate = isPickupOrder
+    ? ""
+    : String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
+  if (!isPickupOrder && !plannedShipDate) throw new Error("请选择预计发货日期");
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
   assertActivePersonnelName(state, contactPerson, "对接人", currentOrder?.contactPerson);
@@ -2693,7 +2711,9 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   if (new Set(normalizedItemIds).size !== normalizedItemIds.length) {
     throw new Error("订单内不能重复选择同一条鱼");
   }
-  const shippingFee = normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
+  const shippingFee = isPickupOrder
+    ? 0
+    : normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
   const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
   const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
   const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
@@ -2710,8 +2730,9 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     customerId,
     date,
     source,
+    douyinOrderNo,
     shippingAddress,
-    plannedShipDate,
+    plannedShipDate: plannedShipDate || undefined,
     contactPerson,
     items,
     shippingFee,
@@ -2896,6 +2917,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "customerId",
   "date",
   "source",
+  "douyinOrderNo",
   "shippingAddress",
   "plannedShipDate",
   "contactPerson",
@@ -2912,6 +2934,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
     customerId: String(order.customerId ?? "").trim(),
     date: String(order.date ?? "").trim(),
     source: String(order.source ?? "").trim(),
+    douyinOrderNo: String(order.douyinOrderNo ?? "").trim(),
     shippingAddress: String(order.shippingAddress ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
@@ -4466,7 +4489,7 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "添加记录",
-        detail: `创建订单「${order.orderNo}」，商品 ${order.items.length} 条`,
+        detail: `创建订单「${order.orderNo}」${order.douyinOrderNo ? `，抖音订单编号 ${order.douyinOrderNo}` : ""}，商品 ${order.items.length} 条`,
       };
       const nextState = {
         ...state,
@@ -4841,6 +4864,9 @@ async function handleApi(req, res, url) {
       }
 
       const shipMethod = body.shipMethod === "pickup" ? "pickup" : "express";
+      if (String(order.source ?? "") === "线下" && shipMethod !== "pickup") {
+        throw new Error("线下自提订单不需要快递发货，请使用上门自取");
+      }
       const carrier = String(body.carrier ?? "").trim();
       if (shipMethod === "express" && !carrier) throw new Error("请选择快递公司");
       const shipDate = String(body.shipDate ?? "").trim();

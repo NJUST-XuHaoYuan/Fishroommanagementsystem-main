@@ -66,6 +66,50 @@ const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }
   { value: "B", label: "B端（批发）" },
   { value: "C", label: "C端（零售）" },
 ];
+const ORDER_SOURCE_LABELS: Record<string, string> = {
+  "平台下单": "抖音",
+  "私域线上": "线上私域",
+  "线下": "线下自提",
+};
+const NEW_ORDER_SOURCE_CHOICES = [
+  {
+    value: "平台下单",
+    label: "抖音",
+    description: "填写抖音订单编号，无需客户和地址",
+    icon: Video,
+    activeClass: "border-rose-400 bg-rose-50 text-rose-800",
+    iconClass: "bg-rose-100 text-rose-700",
+  },
+  {
+    value: "私域线上",
+    label: "线上私域",
+    description: "选择客户、收货地址并按现有流程发货",
+    icon: MessageCircle,
+    activeClass: "border-sky-400 bg-sky-50 text-sky-800",
+    iconClass: "bg-sky-100 text-sky-700",
+  },
+  {
+    value: "线下",
+    label: "线下自提",
+    description: "选择客户并确认自提，无需填写发货信息",
+    icon: MapPin,
+    activeClass: "border-emerald-400 bg-emerald-50 text-emerald-800",
+    iconClass: "bg-emerald-100 text-emerald-700",
+  },
+] as const;
+
+function orderSourceLabel(source?: string): string {
+  const normalized = String(source ?? "").trim();
+  return ORDER_SOURCE_LABELS[normalized] ?? normalized;
+}
+
+function isDouyinOrderSource(source?: string): boolean {
+  return String(source ?? "").trim() === "平台下单";
+}
+
+function isPickupOrderSource(source?: string): boolean {
+  return String(source ?? "").trim() === "线下";
+}
 
 function customerTypeLabel(type?: CustomerType) {
   if (type === "B") return "B端（批发）";
@@ -297,12 +341,18 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
   }
 
   if (activeShipments.length === 0 && inventoryActiveItems.length > 0) {
-    tags.push({ label: "待发货", className: ORDER_STATUS_TAG_STYLE.pendingShip });
+    tags.push({
+      label: isPickupOrderSource(order.source) ? "待自提" : "待发货",
+      className: ORDER_STATUS_TAG_STYLE.pendingShip,
+    });
     return tags;
   }
 
   if (hasUnshippedItems) {
-    tags.push({ label: "部分未发货", className: ORDER_STATUS_TAG_STYLE.pendingShip });
+    tags.push({
+      label: isPickupOrderSource(order.source) ? "部分未自提" : "部分未发货",
+      className: ORDER_STATUS_TAG_STYLE.pendingShip,
+    });
   }
   if (outboundShipments.length > 0) {
     tags.push({
@@ -987,12 +1037,15 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       index + 1,
       order.orderNo,
       getOrderStatusText(order, state.shipments),
-      order.source || "",
-      orderCustomer?.name ?? "—",
+      orderSourceLabel(order.source),
+      order.douyinOrderNo || "",
+      orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
       orderCustomer?.phone || "",
-      effectiveOrderAddress(order, orderCustomer) || "",
+      order.source === "私域线上" ? effectiveOrderAddress(order, orderCustomer) || "" : "",
       order.date,
-      order.status === "completed" ? "—" : order.plannedShipDate || "—",
+      isPickupOrderSource(order.source)
+        ? "无需发货"
+        : order.status === "completed" ? "—" : order.plannedShipDate || "—",
       order.contactPerson || "",
       order.items.length,
       orderShipments.length,
@@ -1023,7 +1076,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       const itemShipment = shipmentForItem(orderShipments, orderItem.stockItemId);
       return [
         order.orderNo,
-        orderCustomer?.name ?? "—",
+        orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
         index + 1,
         stock?.code ?? "",
         orderItem.stockItemId,
@@ -1034,13 +1087,15 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         itemBatch?.batchNo ?? "",
         itemBatch?.supplier ?? "",
         stock?.inDate ?? "",
-        effectiveItemPlannedShipDate(order, orderItem) || "",
+        isPickupOrderSource(order.source) ? "无需发货" : effectiveItemPlannedShipDate(order, orderItem) || "",
         stock?.status === "sick" ? "疾病" : stock?.status === "feeding" ? "开口" : "正常",
         stock?.lost
           ? "已损耗"
           : itemShipment?.status === "outbound"
             ? "已出库待发货"
-            : shippedItemIds.has(orderItem.stockItemId) ? "已发货" : "待发货",
+            : shippedItemIds.has(orderItem.stockItemId)
+              ? isPickupOrderSource(order.source) ? "已自提" : "已发货"
+              : isPickupOrderSource(order.source) ? "待自提" : "待发货",
         itemShipment ? `发货单${orderShipments.findIndex((shipment) => shipment.id === itemShipment.id) + 1}` : "",
         money(orderItem.price),
         stock?.notes ?? "",
@@ -1052,7 +1107,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
     const orderCustomer = customer(order.customerId);
     return shipmentsForOrder(order.id).map((shipment, index) => [
       order.orderNo,
-      orderCustomer?.name ?? "—",
+      orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
       index + 1,
       SHIP_METHOD_LABEL[shipment.shipMethod ?? "express"],
       shipment.shipDate,
@@ -1073,7 +1128,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       .sort((a, b) => a.time.localeCompare(b.time))
       .map((payment, index) => [
         order.orderNo,
-        orderCustomer?.name ?? "—",
+        orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
         index + 1,
         fmtDatetime(payment.time),
         PAYMENT_TYPE_LABEL[payment.type],
@@ -1096,7 +1151,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
         ${table("资金往来", ["订单号", "客户", "序号", "时间", "类型", "金额", "备注"], paymentRows)}
@@ -3829,8 +3884,10 @@ function ItemsWithShipments({
       {unshippedOrderItems.length > 0 && (
         <div>
           <div className="px-4 py-2 flex items-center gap-2 text-xs font-medium border-t bg-amber-50/50 text-amber-800">
-            <Plus className="size-3.5 shrink-0 opacity-60" />
-            待发货（{unshippedOrderItems.length} 件）
+            {isPickupOrderSource(order.source)
+              ? <MapPin className="size-3.5 shrink-0 opacity-60" />
+              : <Plus className="size-3.5 shrink-0 opacity-60" />}
+            {isPickupOrderSource(order.source) ? "待自提" : "待发货"}（{unshippedOrderItems.length} 件）
           </div>
           <table className="w-full">
             {colHeader}
@@ -3871,7 +3928,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; douyinOrderNo: string; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3930,6 +3987,7 @@ function OrderDetailDialog({
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
+      douyinOrderNo: order.douyinOrderNo ?? "",
       shippingAddress: order.shippingAddress ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
       shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
@@ -3955,25 +4013,28 @@ function OrderDetailDialog({
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
     if (!editForm.source.trim()) return toast.error("请选择订单来源");
+    if (!isDouyinOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
+    if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
     if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
-    if (!editForm.plannedShipDate) return toast.error("请选择预计发货日期");
+    if (!isPickupOrderSource(editForm.source) && !editForm.plannedShipDate) return toast.error("请选择预计发货日期");
     if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
     if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
     try {
       const result = await postOrderApi("orders/update", {
         orderId: order.id,
-        customerId: editForm.customerId,
+        customerId: isDouyinOrderSource(editForm.source) ? "" : editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
-        shippingAddress: editForm.shippingAddress.trim(),
-        plannedShipDate: editForm.plannedShipDate,
+        douyinOrderNo: isDouyinOrderSource(editForm.source) ? editForm.douyinOrderNo.trim() : "",
+        shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
+        plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
-        shippingFee: editForm.shippingFee,
+        shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
         packagingFee: editForm.packagingFee,
         discount: editForm.discount,
         items: editForm.items.map((item) => ({
@@ -4026,6 +4087,20 @@ function OrderDetailDialog({
       return;
     }
     setEditForm((f) => f ? { ...f, plannedShipDate: newDate } : f);
+  };
+  const changeEditSource = (nextSource: string) => {
+    setEditForm((form) => {
+      if (!form) return form;
+      return {
+        ...form,
+        source: nextSource,
+        customerId: isDouyinOrderSource(nextSource) ? "" : form.customerId,
+        douyinOrderNo: isDouyinOrderSource(nextSource) ? form.douyinOrderNo : "",
+        shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
+        plannedShipDate: isPickupOrderSource(nextSource) ? "" : form.plannedShipDate,
+        shippingFee: isPickupOrderSource(nextSource) ? 0 : form.shippingFee,
+      };
+    });
   };
   const removeEditItem = (id: string) => {
     if (shippedItemIds.has(id)) return toast.error("该商品已在出库/发货单中，无法从订单移除");
@@ -4220,7 +4295,9 @@ function OrderDetailDialog({
       return toast.error(`${action}未结清（差额 ¥${financialState.amount.toFixed(2)}），请先完成${action}`);
     }
     if (!allItemsShipped)
-      return toast.error("尚有商品未发货，请先完成所有发货再确认完成");
+      return toast.error(isPickupOrderSource(order.source)
+        ? "尚有商品未自提，请先完成所有自提再确认完成"
+        : "尚有商品未发货，请先完成所有发货再确认完成");
     if (!allShipmentsResolved)
       return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
     if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
@@ -4320,7 +4397,7 @@ function OrderDetailDialog({
     const confirmDetail = data.shipMethod === "pickup"
       ? `将确认 ${data.selectedItemIds.length} 条商品上门自取并直接签收。`
       : `将出库 ${data.selectedItemIds.length} 条商品，后续需上传打包凭证再确认发货。`;
-    if (!confirmWrite("出库", confirmDetail)) return false;
+    if (!confirmWrite(data.shipMethod === "pickup" ? "确认自提" : "出库", confirmDetail)) return false;
     try {
       const result = await postOrderApi("shipments/outbound", {
         orderId: order.id,
@@ -4378,24 +4455,37 @@ function OrderDetailDialog({
             {/* ── 基本信息 ── */}
             {editMode && editForm ? (
               <div className="rounded-lg border p-4 grid grid-cols-5 gap-3 bg-amber-50/50">
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">客户</Label>
-                  <CustomerCombobox value={editForm.customerId}
-                    onChange={(id) => setEditForm((f) => f ? { ...f, customerId: id } : f)}
-                    customers={state.customers ?? []} />
-                </div>
+                {!isDouyinOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">客户<span className="ml-0.5 text-red-500">*</span></Label>
+                    <CustomerCombobox value={editForm.customerId}
+                      onChange={(id) => setEditForm((f) => f ? { ...f, customerId: id } : f)}
+                      customers={state.customers ?? []} />
+                  </div>
+                )}
+                {isDouyinOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">抖音订单编号<span className="ml-0.5 text-red-500">*</span></Label>
+                    <Input
+                      value={editForm.douyinOrderNo}
+                      placeholder="请输入抖音订单编号"
+                      onChange={(event) => setEditForm((form) => form ? { ...form, douyinOrderNo: event.target.value } : form)}
+                      className={!editForm.douyinOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    />
+                  </div>
+                )}
                 <div className="grid gap-1.5">
                   <Label className="text-xs">订单来源<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
                     value={editForm.source}
-                    onValueChange={(value) => setEditForm((f) => f ? { ...f, source: value } : f)}
+                    onValueChange={changeEditSource}
                   >
                     <SelectTrigger className={!editForm.source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
                       <SelectValue placeholder="请选择来源" />
                     </SelectTrigger>
                     <SelectContent>
                       {ORDER_SOURCE_OPTIONS.map((source) => (
-                        <SelectItem key={source} value={source}>{source}</SelectItem>
+                        <SelectItem key={source} value={source}>{orderSourceLabel(source)}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -4410,23 +4500,25 @@ function OrderDetailDialog({
                     <p className="text-xs text-red-500">下单日期不能晚于今天</p>
                   )}
                 </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    type="date"
-                    value={editForm.plannedShipDate}
-                    min={editForm.date}
-                    required
-                    onChange={(e) => changeEditPlannedShipDate(e.target.value)}
-                    className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
-                  />
-                  {!editForm.plannedShipDate && (
-                    <p className="text-xs text-red-500">请选择预计发货日期</p>
-                  )}
-                  {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
-                    <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
-                  )}
-                </div>
+                {!isPickupOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                    <Input
+                      type="date"
+                      value={editForm.plannedShipDate}
+                      min={editForm.date}
+                      required
+                      onChange={(e) => changeEditPlannedShipDate(e.target.value)}
+                      className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    />
+                    {!editForm.plannedShipDate && (
+                      <p className="text-xs text-red-500">请选择预计发货日期</p>
+                    )}
+                    {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
+                      <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
+                    )}
+                  </div>
+                )}
                 <div className="grid gap-1.5">
                   <Label className="text-xs">对接人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
@@ -4451,17 +4543,19 @@ function OrderDetailDialog({
                     {formatOrderCreatedAt(order.createdAt)}
                   </div>
                 </div>
-                <div className="grid gap-1.5 col-span-4">
-                  <Label className="text-xs">本单收货地址</Label>
-                  <Input
-                    value={editForm.shippingAddress}
-                    placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
-                    onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
-                  </p>
-                </div>
+                {editForm.source === "私域线上" && (
+                  <div className="grid gap-1.5 col-span-4">
+                    <Label className="text-xs">本单收货地址</Label>
+                    <Input
+                      value={editForm.shippingAddress}
+                      placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
+                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
+                    </p>
+                  </div>
+                )}
                 <div className="grid gap-1.5 col-span-5">
                   <Label className="text-xs">备注</Label>
                   <Input value={editForm.notes} placeholder="选填"
@@ -4470,14 +4564,23 @@ function OrderDetailDialog({
               </div>
             ) : (
               <div className="rounded-lg border p-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm bg-muted/30">
-                <div><span className="text-muted-foreground">客户：</span><span className="font-medium">{customer?.name ?? "—"}</span></div>
-                <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
-                <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
-                <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
-                <div><span className="text-muted-foreground">订单来源：</span>{order.source || "—"}</div>
+                {isDouyinOrderSource(order.source) ? (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">抖音订单编号：</span>
+                    <span className="font-medium">{order.douyinOrderNo || "—"}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div><span className="text-muted-foreground">客户：</span><span className="font-medium">{customer?.name ?? "—"}</span></div>
+                    <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
+                    <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
+                    <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
+                  </>
+                )}
+                <div><span className="text-muted-foreground">订单来源：</span>{orderSourceLabel(order.source) || "—"}</div>
                 <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
                 <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
-                {order.status !== "completed" && (
+                {order.status !== "completed" && !isPickupOrderSource(order.source) && (
                   <div>
                     <span className="text-muted-foreground">预计发货：</span>
                     {order.plannedShipDate
@@ -4486,7 +4589,7 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div><span className="text-muted-foreground">对接人：</span>{order.contactPerson || "—"}</div>
-                {displayAddress && (
+                {order.source === "私域线上" && displayAddress && (
                   <div className="col-span-2">
                     <span className="text-muted-foreground">收货地址：</span>
                     {displayAddress}
@@ -4618,12 +4721,14 @@ function OrderDetailDialog({
             {editMode && editForm ? (
               <div className="rounded-lg border p-4 bg-amber-50/50">
                 <div className="text-xs font-medium text-muted-foreground mb-3">费用设置</div>
-                <div className="grid grid-cols-3 gap-3 mb-4">
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">预收运费（¥）</Label>
-                    <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
-                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
-                  </div>
+                <div className={`grid gap-3 mb-4 ${isPickupOrderSource(editForm.source) ? "grid-cols-2" : "grid-cols-3"}`}>
+                  {!isPickupOrderSource(editForm.source) && (
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs">预收运费（¥）</Label>
+                      <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
+                        onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
+                    </div>
+                  )}
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={editForm.packagingFee || ""} placeholder="0" className="h-8 text-sm"
@@ -4664,7 +4769,9 @@ function OrderDetailDialog({
                 <div className="flex justify-between"><span className="text-muted-foreground">商品折后金额</span><span>¥{displayGoodsNetTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                {!isPickupOrderSource(order.source) && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                )}
                 {hasActualShipping && (
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">实际运费</span>
@@ -4790,15 +4897,21 @@ function OrderDetailDialog({
                       onClick={() => setShipDialogOpen(true)}
                       disabled={!canShip}
                     >
-                      <Truck className="size-3.5 mr-1" />
-                      {shippableUnshippedItems.length < (order?.items.length ?? 0) ? "继续出库" : "出库"}
+                      {isPickupOrderSource(order.source)
+                        ? <MapPin className="size-3.5 mr-1" />
+                        : <Truck className="size-3.5 mr-1" />}
+                      {isPickupOrderSource(order.source)
+                        ? shippableUnshippedItems.length < (order?.items.length ?? 0) ? "继续自提" : "确认自提"
+                        : shippableUnshippedItems.length < (order?.items.length ?? 0) ? "继续出库" : "出库"}
                     </Button>
                   </div>
                 )}
 	                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && activeOrderShipments.length > 0 && (
                   <div className="flex flex-col items-end gap-1">
                     {!allItemsShipped && (
-                      <p className="text-xs text-purple-500">尚有 {unshippedItems.length} 件未发货</p>
+                      <p className="text-xs text-purple-500">
+                        尚有 {unshippedItems.length} 件{isPickupOrderSource(order.source) ? "未自提" : "未发货"}
+                      </p>
                     )}
                     {allItemsShipped && !isFinancialSettled && (
                       <p className={financialState.kind === "refundable" ? "text-xs text-red-500" : "text-xs text-orange-500"}>
@@ -4907,6 +5020,7 @@ function OrderDetailDialog({
           return s ? subTankName(s.subTankId) : "—";
         }}
         balance={balance}
+        pickupOnly={isPickupOrderSource(order.source)}
       />
 
       {editMode && (
@@ -5510,6 +5624,7 @@ function NewOrderDialog({
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
+  const [douyinOrderNo, setDouyinOrderNo] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
@@ -5527,7 +5642,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5545,6 +5660,18 @@ function NewOrderDialog({
     [state.customers, customerId]
   );
   const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
+  const douyinOrder = isDouyinOrderSource(source);
+  const pickupOrder = isPickupOrderSource(source);
+
+  const chooseSource = (nextSource: string) => {
+    setSource(nextSource);
+    setSubmitAttempted(false);
+    setCustomerId("");
+    setDouyinOrderNo("");
+    setShippingAddress("");
+    setPlannedShipDate("");
+    setShippingFee(0);
+  };
 
   const subTankName = (id: string) => {
     for (const g of state.tankGroups) {
@@ -5659,12 +5786,13 @@ function NewOrderDialog({
   const save = async () => {
     if (!permission.requirePermission("create")) return;
     setSubmitAttempted(true);
-    if (!customerId) return toast.error("请选择客户");
-    if (date > today) return toast.error("下单日期不能晚于今天");
     if (!source.trim()) return toast.error("请选择订单来源");
+    if (!douyinOrder && !customerId) return toast.error("请选择客户");
+    if (douyinOrder && !douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
+    if (date > today) return toast.error("下单日期不能晚于今天");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
-    if (!plannedShipDate) return toast.error("请选择预计发货日期");
+    if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
     if (belowMinimumReturn) return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
@@ -5693,11 +5821,12 @@ function NewOrderDialog({
         customerId,
         date,
         source: source.trim(),
-        shippingAddress: shippingAddress.trim(),
-        plannedShipDate,
+        douyinOrderNo: douyinOrder ? douyinOrderNo.trim() : "",
+        shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
+        plannedShipDate: pickupOrder ? "" : plannedShipDate,
         contactPerson: contactPerson.trim(),
         items,
-        shippingFee,
+        shippingFee: pickupOrder ? 0 : shippingFee,
         packagingFee,
         discount,
         notes,
@@ -5737,40 +5866,85 @@ function NewOrderDialog({
             <DialogTitle className="text-base sm:text-lg">新建销售订单</DialogTitle>
           </DialogHeader>
 
+          {!source ? (
+            <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto p-4 sm:p-8">
+              <div className="w-full max-w-3xl">
+                <div className="mb-5 text-center">
+                  <div className="text-base font-semibold text-foreground">选择订单来源</div>
+                  <div className="mt-1 text-sm text-muted-foreground">不同来源会自动显示对应的必填信息和履约方式</div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
+                    const SourceIcon = choice.icon;
+                    return (
+                      <button
+                        key={choice.value}
+                        type="button"
+                        className={`flex min-h-36 touch-manipulation flex-col items-start justify-between rounded-lg border bg-background p-4 text-left shadow-sm transition-colors hover:border-slate-400 hover:bg-muted/30 ${choice.activeClass}`}
+                        onClick={() => chooseSource(choice.value)}
+                      >
+                        <span className={`flex size-11 items-center justify-center rounded-lg ${choice.iconClass}`}>
+                          <SourceIcon className="size-5" />
+                        </span>
+                        <span className="mt-5">
+                          <span className="block text-lg font-semibold">{choice.label}</span>
+                          <span className="mt-1 block text-sm leading-5 text-muted-foreground">{choice.description}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="flex-1 overflow-y-auto p-3 sm:p-6">
             <div className="flex flex-col gap-4 sm:gap-5">
 
+            <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5 sm:px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-xs text-muted-foreground">订单来源</span>
+                <span className="truncate text-sm font-semibold text-foreground">{orderSourceLabel(source)}</span>
+              </div>
+              <Button type="button" variant="ghost" size="sm" onClick={() => chooseSource("")}>
+                重新选择
+              </Button>
+            </div>
+
             {/* ── 1. Customer + date + notes ── */}
             <div className="grid grid-cols-1 items-end gap-3 rounded-lg border bg-card p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-4">
-              <div className="grid gap-2">
-                <div className="flex items-center justify-between gap-2">
-                  <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
-                  {customerPermission.canCreate && (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-700 hover:underline"
-                      onClick={() => setCustomerDialogOpen(true)}
-                    >
-                      <Plus className="size-3" />
-                      新建客户
-                    </button>
+              {!douyinOrder && (
+                <div className="grid gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
+                    {customerPermission.canCreate && (
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-700 hover:underline"
+                        onClick={() => setCustomerDialogOpen(true)}
+                      >
+                        <Plus className="size-3" />
+                        新建客户
+                      </button>
+                    )}
+                  </div>
+                  <CustomerCombobox value={customerId} onChange={setCustomerId} customers={state.customers ?? []} />
+                </div>
+              )}
+              {douyinOrder && (
+                <div className="grid gap-2">
+                  <Label>抖音订单编号<span className="ml-0.5 text-red-500">*</span></Label>
+                  <Input
+                    value={douyinOrderNo}
+                    onChange={(event) => setDouyinOrderNo(event.target.value)}
+                    placeholder="请输入抖音订单编号"
+                    autoComplete="off"
+                    className={submitAttempted && !douyinOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  />
+                  {submitAttempted && !douyinOrderNo.trim() && (
+                    <p className="-mt-1 text-xs text-red-500">请填写抖音订单编号</p>
                   )}
                 </div>
-                <CustomerCombobox value={customerId} onChange={setCustomerId} customers={state.customers ?? []} />
-              </div>
-              <div className="grid gap-2">
-                <Label>来源<span className="text-red-500 ml-0.5">*</span></Label>
-                <Select value={source} onValueChange={setSource}>
-                  <SelectTrigger className={submitAttempted && !source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                    <SelectValue placeholder="请选择来源" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ORDER_SOURCE_OPTIONS.map((option) => (
-                      <SelectItem key={option} value={option}>{option}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              )}
               <div className="grid gap-2">
                 <Label>下单日期</Label>
                 <Input
@@ -5784,23 +5958,25 @@ function NewOrderDialog({
                   <p className="text-xs text-red-500 -mt-1">下单日期不能晚于今天</p>
                 )}
               </div>
-              <div className="grid gap-2">
-                <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                <Input
-                  type="date"
-                  value={plannedShipDate}
-                  min={date}
-                  required
-                  onChange={(e) => changePlannedShipDate(e.target.value)}
-                  className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
-                />
-                {submitAttempted && !plannedShipDate && (
-                  <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
-                )}
-                {plannedShipDate && plannedShipDate < date && (
-                  <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
-                )}
-              </div>
+              {!pickupOrder && (
+                <div className="grid gap-2">
+                  <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Input
+                    type="date"
+                    value={plannedShipDate}
+                    min={date}
+                    required
+                    onChange={(e) => changePlannedShipDate(e.target.value)}
+                    className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  />
+                  {submitAttempted && !plannedShipDate && (
+                    <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
+                  )}
+                  {plannedShipDate && plannedShipDate < date && (
+                    <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
+                  )}
+                </div>
+              )}
               <div className="grid gap-2">
                 <Label>对接人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
@@ -5819,17 +5995,19 @@ function NewOrderDialog({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid gap-2 md:col-span-2 xl:col-span-3">
-                <Label>本单收货地址</Label>
-                <Input
-                  value={shippingAddress}
-                  onChange={(e) => setShippingAddress(e.target.value)}
-                  placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
-                />
-                <p className="text-xs text-muted-foreground -mt-1">
-                  {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
-                </p>
-              </div>
+              {source === "私域线上" && (
+                <div className="grid gap-2 md:col-span-2 xl:col-span-3">
+                  <Label>本单收货地址</Label>
+                  <Input
+                    value={shippingAddress}
+                    onChange={(e) => setShippingAddress(e.target.value)}
+                    placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
+                  />
+                  <p className="text-xs text-muted-foreground -mt-1">
+                    {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
+                  </p>
+                </div>
+              )}
               <div className="grid gap-2 md:col-span-2 xl:col-span-4">
                 <Label>备注</Label>
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
@@ -5994,11 +6172,13 @@ function NewOrderDialog({
             <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
               <div className="flex flex-col gap-3">
                 <div className="text-xs font-medium text-muted-foreground">费用设置</div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">预收运费（¥）</Label>
-                    <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
-                  </div>
+                <div className={`grid grid-cols-1 gap-3 ${pickupOrder ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
+                  {!pickupOrder && (
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs">预收运费（¥）</Label>
+                      <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                    </div>
+                  )}
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={packagingFee || ""} onChange={(e) => setPackagingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
@@ -6064,10 +6244,13 @@ function NewOrderDialog({
             </div>
             </div>
           </div>
+          )}
 
           <DialogFooter className="flex-col border-t bg-background px-4 py-3 sm:flex-row sm:px-6">
             <Button variant="outline" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button className="w-full sm:w-auto" onClick={save}><ShoppingCart className="size-4 mr-1" />创建订单</Button>
+            {source && (
+              <Button className="w-full sm:w-auto" onClick={save}><ShoppingCart className="size-4 mr-1" />创建订单</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -6208,6 +6391,8 @@ export function OrdersView() {
         order.orderNo,
         order.date,
         order.source,
+        orderSourceLabel(order.source),
+        order.douyinOrderNo,
         order.plannedShipDate,
         getOrderStatusText(order, state.shipments),
         customer?.name,
@@ -6412,9 +6597,13 @@ export function OrdersView() {
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="truncate text-xs font-medium text-muted-foreground">{order.orderNo}</div>
+                <div className="truncate text-xs font-medium text-muted-foreground">
+                  {order.orderNo} · {orderSourceLabel(order.source) || "未设置来源"}
+                </div>
                 <div className="mt-0.5 truncate text-base font-semibold text-foreground">
-                  {customer?.name ?? "未找到客户"}
+                  {customer?.name ?? (isDouyinOrderSource(order.source)
+                    ? `抖音订单 ${order.douyinOrderNo || ""}`.trim()
+                    : "未找到客户")}
                 </div>
               </div>
               <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
@@ -6428,9 +6617,11 @@ export function OrdersView() {
 
             <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div className="rounded-md bg-muted/35 px-2.5 py-2">
-                <div className="text-xs text-muted-foreground">预计发货</div>
+                <div className="text-xs text-muted-foreground">{isPickupOrderSource(order.source) ? "履约方式" : "预计发货"}</div>
                 <div className={nextShipDate === today ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
-                  {order.status === "completed"
+                  {isPickupOrderSource(order.source)
+                    ? "线下自提"
+                    : order.status === "completed"
                     ? "已完成"
                     : nextShipDate
                       ? `${nextShipDate}${plannedTodayCount > 0 ? ` · ${plannedTodayCount}件` : ""}`
@@ -6438,7 +6629,7 @@ export function OrdersView() {
                 </div>
               </div>
               <div className="rounded-md bg-muted/35 px-2.5 py-2">
-                <div className="text-xs text-muted-foreground">未发货</div>
+                <div className="text-xs text-muted-foreground">{isPickupOrderSource(order.source) ? "待自提" : "未发货"}</div>
                 <div className={unshippedCount > 0 ? "mt-0.5 font-semibold text-amber-700" : "mt-0.5 font-semibold text-emerald-700"}>
                   {unshippedCount > 0 ? `${unshippedCount} 条` : "已处理"}
                 </div>
@@ -6926,10 +7117,17 @@ export function OrdersView() {
 	          },
 	          {
 	            key: "customerId",
-	            title: "客户",
+            title: "客户",
             render: (r) => {
               const customer = getCustomer(r.customerId);
-              if (!customer) return <span className="text-muted-foreground">—</span>;
+              if (!customer) {
+                return isDouyinOrderSource(r.source) ? (
+                  <div>
+                    <div className="text-sm font-medium text-foreground">抖音订单</div>
+                    <div className="text-xs text-muted-foreground">{r.douyinOrderNo || "未填写编号"}</div>
+                  </div>
+                ) : <span className="text-muted-foreground">—</span>;
+              }
               return (
                 <Button
                   type="button"
@@ -6950,7 +7148,7 @@ export function OrdersView() {
             title: "来源",
             render: (r) => r.source ? (
               <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
-                {r.source}
+                {orderSourceLabel(r.source)}
               </span>
             ) : (
               <span className="text-muted-foreground">—</span>

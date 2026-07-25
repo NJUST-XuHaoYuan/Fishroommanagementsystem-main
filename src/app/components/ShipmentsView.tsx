@@ -317,7 +317,10 @@ export function ShipmentsView() {
   );
 
   const doShip = async (order: Order, data: ShipFormData) => {
-    if (!confirmWrite("出库", `将记录订单 ${order.orderNo} 出库，后续需在订单详情上传打包凭证后确认发货。`)) return false;
+    const confirmation = data.shipMethod === "pickup"
+      ? `将确认订单 ${order.orderNo} 的所选商品已由客户自提。`
+      : `将记录订单 ${order.orderNo} 出库，后续需在订单详情上传打包凭证后确认发货。`;
+    if (!confirmWrite(data.shipMethod === "pickup" ? "确认自提" : "出库", confirmation)) return false;
     const ok = await saveShipmentOutbound({
       orderId: order.id,
       selectedItemIds: data.selectedItemIds,
@@ -332,7 +335,7 @@ export function ShipmentsView() {
     const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
     const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
     if (data.shipMethod === "pickup") {
-      toast.success(`订单 ${order.orderNo} 已出库，请上传打包凭证后确认自取完成`);
+      toast.success(`订单 ${order.orderNo} 已确认上门自取签收`);
     } else if (Math.abs(feeDiff) > 0.005) {
       if (feeDiff > 0)
         toast.success(`订单 ${order.orderNo} 已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
@@ -421,7 +424,9 @@ export function ShipmentsView() {
                       return (
                         <tr key={o.id} className="border-t hover:bg-orange-50/30 transition-colors">
                           <td className="px-4 py-3 text-sm font-mono text-sky-700">{o.orderNo}</td>
-                          <td className="px-4 py-3 text-sm font-medium">{customer?.name ?? "—"}</td>
+                          <td className="px-4 py-3 text-sm font-medium">
+                            {customer?.name ?? (o.source === "平台下单" ? `抖音订单 ${o.douyinOrderNo || ""}`.trim() : "—")}
+                          </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">{o.items.length} 条</td>
                           <td className="px-4 py-3 text-sm text-right">¥{(o.shippingFee ?? 0).toFixed(2)}</td>
                           <td className="px-4 py-3 text-right">
@@ -431,7 +436,10 @@ export function ShipmentsView() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <Button size="sm" onClick={() => setShipOrder(o)}>
-                              <Truck className="size-3.5 mr-1" /> 发货
+                              {o.source === "线下"
+                                ? <MapPin className="size-3.5 mr-1" />
+                                : <Truck className="size-3.5 mr-1" />}
+                              {o.source === "线下" ? "自提" : "发货"}
                             </Button>
                           </td>
                         </tr>
@@ -468,9 +476,13 @@ export function ShipmentsView() {
                       return (
                         <tr key={o.id} className="border-t hover:bg-muted/20 transition-colors">
                           <td className="px-4 py-3 text-sm font-mono text-sky-700">{o.orderNo}</td>
-                          <td className="px-4 py-3 text-sm font-medium">{customer?.name ?? "—"}</td>
+                          <td className="px-4 py-3 text-sm font-medium">
+                            {customer?.name ?? (o.source === "平台下单" ? `抖音订单 ${o.douyinOrderNo || ""}`.trim() : "—")}
+                          </td>
                           <td className="px-4 py-3 text-sm">
-                            <PlannedShipBadge date={o.plannedShipDate} />
+                            {o.source === "线下"
+                              ? <span className="text-emerald-700">无需发货</span>
+                              : <PlannedShipBadge date={o.plannedShipDate} />}
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">{o.items.length} 条</td>
                           <td className="px-4 py-3 text-sm text-right">¥{(o.shippingFee ?? 0).toFixed(2)}</td>
@@ -481,7 +493,10 @@ export function ShipmentsView() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <Button size="sm" variant="outline" onClick={() => setShipOrder(o)}>
-                              <Truck className="size-3.5 mr-1" /> 发货
+                              {o.source === "线下"
+                                ? <MapPin className="size-3.5 mr-1" />
+                                : <Truck className="size-3.5 mr-1" />}
+                              {o.source === "线下" ? "自提" : "发货"}
                             </Button>
                           </td>
                         </tr>
@@ -556,7 +571,9 @@ export function ShipmentsView() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-sm font-mono text-sky-700">{order?.orderNo ?? "—"}</td>
-                        <td className="px-4 py-3 text-sm font-medium">{customer?.name ?? "—"}</td>
+                        <td className="px-4 py-3 text-sm font-medium">
+                          {customer?.name ?? (order?.source === "平台下单" ? `抖音订单 ${order.douyinOrderNo || ""}`.trim() : "—")}
+                        </td>
                         <td className="px-4 py-3 text-sm">{sh.shipDate}</td>
                         <td className="px-4 py-3 text-sm">
                           {sh.shipMethod === "pickup" ? (
@@ -682,6 +699,7 @@ export function ShipmentsView() {
         getProductName={getProductName}
         getTankName={getTankName}
         balance={shipOrder ? calcBalance(shipOrder) : 0}
+        pickupOnly={shipOrder?.source === "线下"}
       />
 
       {/* ── Edit Shipment Dialog ── */}

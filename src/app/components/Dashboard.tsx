@@ -1296,7 +1296,11 @@ export function Dashboard() {
       const detail: DailySalespersonOrderDetail = {
         orderId: order.id,
         orderNo: order.orderNo,
-        customerName: customer?.name ?? order.customerId,
+        customerName: customer?.name ?? (
+          String(order.source ?? "").trim() === "平台下单"
+            ? `抖音订单 ${String(order.douyinOrderNo ?? "").trim()}`.trim()
+            : order.customerId || "未关联客户"
+        ),
         contactPerson: salesperson,
         amount,
         itemCount: order.items?.length ?? 0,

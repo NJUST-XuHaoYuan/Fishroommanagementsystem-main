@@ -212,6 +212,7 @@ export type Order = {
   customerId: string;
   date: string;
   source?: OrderSource | string;
+  douyinOrderNo?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
   contactPerson?: string;

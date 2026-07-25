@@ -85,7 +85,9 @@ export function PersonalCenterView() {
     return (state.orders ?? [])
       .filter((order) => order.status === "completed" && order.contactPerson === currentContactName)
       .map((order) => {
-        const customer = customerName(order.customerId);
+        const customer = order.source === "平台下单"
+          ? `抖音订单 ${order.douyinOrderNo || ""}`.trim()
+          : customerName(order.customerId);
         const products = order.items.map((item) => productName(item.productId)).join(" ");
         return {
           ...order,
@@ -287,7 +289,12 @@ export function PersonalCenterView() {
             <div className="grid gap-4">
               <div className="grid gap-2 rounded-lg border bg-slate-50 p-4 text-sm md:grid-cols-3">
                 <div><span className="text-muted-foreground">订单号：</span>{viewOrder.orderNo}</div>
-                <div><span className="text-muted-foreground">客户：</span>{customerName(viewOrder.customerId)}</div>
+                <div>
+                  <span className="text-muted-foreground">{viewOrder.source === "平台下单" ? "抖音订单：" : "客户："}</span>
+                  {viewOrder.source === "平台下单"
+                    ? viewOrder.douyinOrderNo || "—"
+                    : customerName(viewOrder.customerId)}
+                </div>
                 <div><span className="text-muted-foreground">下单日期：</span>{viewOrder.date}</div>
                 <div><span className="text-muted-foreground">对接人：</span>{viewOrder.contactPerson || "—"}</div>
                 <div><span className="text-muted-foreground">应收：</span>¥{calcAmountDue(viewOrder, state.shipments).toFixed(2)}</div>

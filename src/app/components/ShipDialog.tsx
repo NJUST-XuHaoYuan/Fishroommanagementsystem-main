@@ -43,6 +43,7 @@ export function ShipDialog({
   getProductName,
   getTankName,
   balance,             // amountDue - amountPaid (must be ~0 to allow shipping)
+  pickupOnly = false,
 }: {
   order: Order | null;
   open: boolean;
@@ -52,6 +53,7 @@ export function ShipDialog({
   getProductName: (productId: string) => string;
   getTankName: (stockItemId: string) => string;
   balance: number;     // positive = unpaid, negative = overpaid
+  pickupOnly?: boolean;
 }) {
   const todayStr = todayDateString();
 
@@ -75,14 +77,14 @@ export function ShipDialog({
   useEffect(() => {
     if (open && order) {
       setShipDate(todayStr);
-      setShipMethod("express");
+      setShipMethod(pickupOnly ? "pickup" : "express");
       setCarrier("");
       setTrackingNo("");
-      setActualShippingFee(order.shippingFee ?? 0);
+      setActualShippingFee(pickupOnly ? 0 : order.shippingFee ?? 0);
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
     }
-  }, [open, order?.id]); // eslint-disable-line
+  }, [open, order?.id, pickupOnly]); // eslint-disable-line
 
   if (!order) return null;
 
@@ -103,6 +105,7 @@ export function ShipDialog({
   };
 
   const changeShipMethod = (method: "express" | "pickup") => {
+    if (pickupOnly && method !== "pickup") return;
     setShipMethod(method);
     if (method === "pickup") {
       setActualShippingFee(0);
@@ -113,6 +116,7 @@ export function ShipDialog({
 
   const confirm = async () => {
     if (paymentBlocked) return toast.error("应付与已付金额不相等，请先完成付款再出库");
+    if (pickupOnly && shipMethod !== "pickup") return toast.error("线下自提订单只能使用上门自取");
     if (!shipDate) return toast.error("请填写出库日期");
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
@@ -133,7 +137,7 @@ export function ShipDialog({
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <PackageCheck className="size-4 text-sky-600" />
-            出库 — {order.orderNo}
+            {pickupOnly ? "确认自提" : "出库"} — {order.orderNo}
           </DialogTitle>
         </DialogHeader>
 
@@ -200,31 +204,38 @@ export function ShipDialog({
 
           {/* Shipping method */}
           <div className="grid gap-2">
-            <Label>物流方式<span className="text-red-500 ml-0.5">*</span></Label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => changeShipMethod("express")}
-                className={`flex-1 flex items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-medium transition-colors ${
-                  shipMethod === "express"
-                    ? "border-sky-500 bg-sky-50 text-sky-700"
-                    : "hover:bg-muted/60 text-muted-foreground"
-                }`}
-              >
-                <Truck className="size-4" /> 快递寄送
-              </button>
-              <button
-                type="button"
-                onClick={() => changeShipMethod("pickup")}
-                className={`flex-1 flex items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-medium transition-colors ${
-                  shipMethod === "pickup"
-                    ? "border-emerald-500 bg-emerald-50 text-emerald-700"
-                    : "hover:bg-muted/60 text-muted-foreground"
-                }`}
-              >
-                <MapPin className="size-4" /> 上门自取
-              </button>
-            </div>
+            <Label>履约方式</Label>
+            {pickupOnly ? (
+              <div className="flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-sm font-medium text-emerald-800">
+                <MapPin className="size-4" />
+                上门自取，不创建快递发货记录
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => changeShipMethod("express")}
+                  className={`flex-1 flex items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-medium transition-colors ${
+                    shipMethod === "express"
+                      ? "border-sky-500 bg-sky-50 text-sky-700"
+                      : "hover:bg-muted/60 text-muted-foreground"
+                  }`}
+                >
+                  <Truck className="size-4" /> 快递寄送
+                </button>
+                <button
+                  type="button"
+                  onClick={() => changeShipMethod("pickup")}
+                  className={`flex-1 flex items-center justify-center gap-2 rounded-lg border py-2.5 text-sm font-medium transition-colors ${
+                    shipMethod === "pickup"
+                      ? "border-emerald-500 bg-emerald-50 text-emerald-700"
+                      : "hover:bg-muted/60 text-muted-foreground"
+                  }`}
+                >
+                  <MapPin className="size-4" /> 上门自取
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Express fields */}
@@ -240,7 +251,7 @@ export function ShipDialog({
           {/* Date + actual fee */}
           <div className={shipMethod === "express" ? "grid grid-cols-2 gap-3" : "grid gap-3"}>
             <div className="grid gap-1.5">
-              <Label className="text-sm">出库日期<span className="text-red-500 ml-0.5">*</span></Label>
+              <Label className="text-sm">{pickupOnly ? "自提日期" : "出库日期"}<span className="text-red-500 ml-0.5">*</span></Label>
               <Input
                 type="date"
                 value={shipDate}
@@ -300,7 +311,7 @@ export function ShipDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={confirm} disabled={paymentBlocked || saving}>
             <PackageCheck className="size-4 mr-1" />
-            {saving ? "保存中..." : "确认出库"}
+            {saving ? "保存中..." : pickupOnly ? "确认自提" : "确认出库"}
           </Button>
         </DialogFooter>
       </DialogContent>
