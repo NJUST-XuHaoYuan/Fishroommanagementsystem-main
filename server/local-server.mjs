@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
+import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -4465,7 +4466,9 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/orders/create" && req.method === "POST") {
     const client = await pool.connect();
     try {
-      const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
+      const body = normalizeLegacyDouyinOrderRequest(
+        await externalizeDataUrls(JSON.parse(await readBody(req)))
+      );
       const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
@@ -4513,7 +4516,9 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/orders/update" && req.method === "POST") {
     const client = await pool.connect();
     try {
-      const body = await externalizeDataUrls(JSON.parse(await readBody(req)));
+      const body = normalizeLegacyDouyinOrderRequest(
+        await externalizeDataUrls(JSON.parse(await readBody(req)))
+      );
       const operator = authenticatedOperator(req);
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);

@@ -71,6 +71,7 @@ const ORDER_SOURCE_LABELS: Record<string, string> = {
   "私域线上": "线上私域",
   "线下": "线下自提",
 };
+const ORDER_FORM_SCHEMA_VERSION = 2;
 const NEW_ORDER_SOURCE_CHOICES = [
   {
     value: "平台下单",
@@ -4025,6 +4026,7 @@ function OrderDetailDialog({
     if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
     try {
       const result = await postOrderApi("orders/update", {
+        orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
         orderId: order.id,
         customerId: isDouyinOrderSource(editForm.source) ? "" : editForm.customerId,
         date: editForm.date,
@@ -5817,6 +5819,7 @@ function NewOrderDialog({
     let createdOrderNo = "";
     try {
       const result = await postOrderApi("orders/create", {
+        orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
         siteId: activeSiteId,
         customerId,
         date,
