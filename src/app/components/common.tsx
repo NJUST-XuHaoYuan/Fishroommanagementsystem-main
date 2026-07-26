@@ -28,6 +28,7 @@ type Props<T> = {
   addLabel?: string;
   actions?: (row: T) => ReactNode;
   searchPlaceholder?: string;
+  searchRank?: (row: T, query: string) => number;
   onRowDoubleClick?: (row: T) => void;
 };
 
@@ -40,6 +41,7 @@ export function DataTable<T extends { id: string }>({
   addLabel = "新增",
   actions,
   searchPlaceholder = "搜索...",
+  searchRank,
   onRowDoubleClick,
 }: Props<T>) {
   const [q, setQ] = useState("");
@@ -48,11 +50,18 @@ export function DataTable<T extends { id: string }>({
 
   const filtered = useMemo(() => {
     if (!q.trim()) return data;
+    if (searchRank) {
+      return data
+        .map((row, index) => ({ row, index, rank: searchRank(row, q) }))
+        .filter(({ rank }) => Number.isFinite(rank))
+        .sort((left, right) => left.rank - right.rank || left.index - right.index)
+        .map(({ row }) => row);
+    }
     const term = q.toLowerCase();
     return data.filter((row) =>
       searchKeys.some((k) => String(row[k] ?? "").toLowerCase().includes(term))
     );
-  }, [data, q, searchKeys]);
+  }, [data, q, searchKeys, searchRank]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const current = Math.min(page, totalPages);
@@ -147,7 +156,7 @@ export function DataTable<T extends { id: string }>({
                   colSpan={columns.length + (actions ? 1 : 0)}
                   className="px-4 py-14 text-center text-sm text-muted-foreground"
                 >
-                  暂无数据，使用上方操作新增记录。
+                  {q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。"}
                 </td>
               </tr>
             ) : (
@@ -173,7 +182,7 @@ export function DataTable<T extends { id: string }>({
       <div className="flex flex-col gap-3 md:hidden">
         {slice.length === 0 ? (
           <div className="fishroom-card rounded-xl px-4 py-10 text-center text-sm text-muted-foreground">
-            暂无数据，使用上方操作新增记录。
+            {q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。"}
           </div>
         ) : (
           slice.map((row) => (

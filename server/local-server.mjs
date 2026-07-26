@@ -2628,6 +2628,7 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
   const price = normalizeMoney(input.price ?? stockItem.basePrice, "Order item price");
   return {
     stockItemId: stockId,
+    fishCode: String(stockItem?.code ?? "").trim(),
     productId,
     price,
     minReturnPrice: normalizeMinReturnPrice(input.minReturnPrice ?? product?.minReturnPrice ?? 0),
@@ -2698,8 +2699,10 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     const product = findProductById(state, productId);
     const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? "").trim();
     const inventoryRemovedBy = String(existingItem?.inventoryRemovedBy ?? "").trim();
+    const fishCode = String(stockItem?.code ?? existingItem?.fishCode ?? item?.fishCode ?? "").trim();
     return {
       stockItemId: stockId,
+      ...(fishCode ? { fishCode } : {}),
       productId,
       price: normalizeMoney(item.price ?? existingItem?.price, "Order item price"),
       minReturnPrice: normalizeMinReturnPrice(item.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
@@ -2947,8 +2950,12 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
       const product = findProductById(state, productId || existingItem?.productId);
       const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? item?.inventoryRemovedAt ?? "").trim();
       const inventoryRemovedBy = String(existingItem?.inventoryRemovedBy ?? item?.inventoryRemovedBy ?? "").trim();
+      const stockItem = (Array.isArray(state.stock) ? state.stock : [])
+        .find((stock) => String(stock?.id ?? "") === stockItemId);
+      const fishCode = String(stockItem?.code ?? existingItem?.fishCode ?? item?.fishCode ?? "").trim();
       return {
         stockItemId,
+        ...(fishCode ? { fishCode } : {}),
         productId,
         price: normalizeMoney(item?.price, "Order item price"),
         minReturnPrice: normalizeMinReturnPrice(item?.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
@@ -5383,6 +5390,7 @@ async function handleApi(req, res, url) {
 	        }
 
 	        const removedAt = new Date().toISOString();
+	        const stockById = new Map(stock.map((item) => [String(item?.id ?? ""), item]));
 	        const affectedOrderIds = new Set();
 	        const nextOrders = orders.map((order) => {
 	          if (!["pending", "confirmed"].includes(String(order?.status ?? ""))) return order;
@@ -5395,8 +5403,10 @@ async function handleApi(req, res, url) {
 	              return item;
 	            }
 	            changed = true;
+	            const fishCode = String(item?.fishCode ?? stockById.get(String(item?.stockItemId ?? ""))?.code ?? "").trim();
 	            return {
 	              ...item,
+	              ...(fishCode ? { fishCode } : {}),
 	              inventoryRemovedAt: removedAt,
 	              inventoryRemovedBy: operator,
 	            };

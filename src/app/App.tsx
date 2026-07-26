@@ -404,6 +404,7 @@ function AdminApp() {
   const [stateLoading, setStateLoading] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [loadedKeys, setLoadedKeys] = useState<Set<PersistedKey>>(() => new Set());
+  const [openOrderRequest, setOpenOrderRequest] = useState<{ orderId: string; requestId: number } | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [activeSiteId, setActiveSiteIdBase] = useState(() => {
     try {
@@ -420,6 +421,7 @@ function AdminApp() {
   const stateRef = useRef(state);
   const saveStatusRef = useRef(saveStatus);
   const refreshInProgress = useRef(false);
+  const orderRequestSequence = useRef(0);
   const loadedKeysRef = useRef<Set<PersistedKey>>(new Set());
   const viewRef = useRef(view);
   const currentUserKey = userDependencyKey(state.user);
@@ -1313,10 +1315,15 @@ function AdminApp() {
       case "tankGroups": return <TankGroupsView />;
       case "batches":    return <BatchesView />;
       case "stockIn":    return <StockInView />;
-      case "daily":      return <DailyView allTankGroups={state.tankGroups} />;
+      case "daily":      return <DailyView allTankGroups={state.tankGroups} onOpenOrder={requestOpenOrder} />;
       case "lossRecords": return <LossRecordsView />;
       case "customers":  return <CustomersView />;
-      case "orders":     return <OrdersView />;
+      case "orders":     return (
+        <OrdersView
+          openOrderRequest={openOrderRequest}
+          onOpenOrderRequestHandled={() => setOpenOrderRequest(null)}
+        />
+      );
       case "profile":    return <PersonalCenterView />;
       case "accounts":   return <PersonnelView />;
       case "permissions": return <PermissionsView />;
@@ -1325,7 +1332,14 @@ function AdminApp() {
     }
   };
 
+  function requestOpenOrder(orderId: string) {
+    orderRequestSequence.current += 1;
+    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current });
+    setView("orders");
+  }
+
   const handleSetView = (nextView: ViewKey) => {
+    if (nextView !== "orders") setOpenOrderRequest(null);
     if (nextView === viewRef.current) {
       void loadViewState(nextView, { force: true, showLoading: true });
       return;

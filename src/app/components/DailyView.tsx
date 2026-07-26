@@ -12,7 +12,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -56,9 +56,10 @@ function formatBioRecordTime(value: string): string {
 
 type DailyViewProps = {
   allTankGroups?: TankGroup[];
+  onOpenOrder?: (orderId: string) => void;
 };
 
-export function DailyView({ allTankGroups }: DailyViewProps = {}) {
+export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
   const { state, setState, saveStateTransform, saveDailyLog, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
   const [q, setQ] = useState("");
@@ -781,8 +782,8 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
           subTankName?: string;
           operator?: string;
         }
-      | { type: "sold"; date: string; orderNo: string }
-      | { type: "shipment"; date: string; orderNo: string; carrier: string; trackingNo: string; status: string; shipMethod?: string }
+      | { type: "sold"; date: string; orderId: string; orderNo: string }
+      | { type: "shipment"; date: string; orderId: string; orderNo: string; carrier: string; trackingNo: string; status: string; shipMethod?: string }
     > = [];
 
     const b = batch(item.batchId);
@@ -811,7 +812,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
       o.items.some((i) => i.stockItemId === item.id) && o.status !== "cancelled"
     );
     if (order) {
-      events.push({ type: "sold", date: order.date, orderNo: order.orderNo });
+      events.push({ type: "sold", date: order.date, orderId: order.id, orderNo: order.orderNo });
     }
     for (const shipment of state.shipments.filter((shipment) =>
       Array.isArray(shipment.itemStockIds) && shipment.itemStockIds.includes(item.id)
@@ -820,6 +821,7 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
       events.push({
         type: "shipment",
         date: shipment.shipDate,
+        orderId: shipment.orderId,
         orderNo: shipmentOrder?.orderNo ?? "—",
         carrier: shipment.carrier,
         trackingNo: shipment.trackingNo,
@@ -1836,16 +1838,42 @@ export function DailyView({ allTankGroups }: DailyViewProps = {}) {
                         <p className="text-muted-foreground text-xs">批次：{ev.batchNo}</p>
                       )}
                       {ev.type === "sold" && (
-                        <p className="text-yellow-700 text-xs">订单：{ev.orderNo}</p>
+                        onOpenOrder ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenOrder(ev.orderId)}
+                            className="-mx-2 inline-flex min-h-10 items-center gap-1.5 rounded-md px-2 text-left text-xs font-medium text-yellow-800 transition-colors hover:bg-yellow-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500 focus-visible:ring-offset-2"
+                            aria-label={`打开订单 ${ev.orderNo}`}
+                          >
+                            <span>订单：{ev.orderNo}</span>
+                            <ExternalLink className="size-3.5 shrink-0" />
+                          </button>
+                        ) : (
+                          <p className="text-xs text-yellow-700">订单：{ev.orderNo}</p>
+                        )
                       )}
                       {ev.type === "shipment" && (
-                        <p className="text-violet-700 text-xs">
-                          订单：{ev.orderNo}
-                          {ev.shipMethod === "pickup" ? "；上门自取" : ""}
-                          {ev.carrier ? `；${ev.carrier}` : ""}
-                          {ev.trackingNo ? `；单号：${ev.trackingNo}` : ""}
-                          {`；状态：${ev.status === "delivered" ? "已签收" : ev.status === "outbound" ? "已出库待发货" : ev.status === "shipped" ? "运输中" : ev.status === "damaged" ? "报损" : "待发货"}`}
-                        </p>
+                        <div className="flex flex-col items-start gap-0.5 text-xs text-violet-700 sm:flex-row sm:items-center sm:gap-1">
+                          {onOpenOrder ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenOrder(ev.orderId)}
+                              className="-mx-2 inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-md px-2 text-left font-medium text-violet-800 transition-colors hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
+                              aria-label={`打开订单 ${ev.orderNo}`}
+                            >
+                              <span>订单：{ev.orderNo}</span>
+                              <ExternalLink className="size-3.5 shrink-0" />
+                            </button>
+                          ) : (
+                            <span>订单：{ev.orderNo}</span>
+                          )}
+                          <span>
+                            {ev.shipMethod === "pickup" ? "上门自取；" : ""}
+                            {ev.carrier ? `${ev.carrier}；` : ""}
+                            {ev.trackingNo ? `单号：${ev.trackingNo}；` : ""}
+                            {`状态：${ev.status === "delivered" ? "已签收" : ev.status === "outbound" ? "已出库待发货" : ev.status === "shipped" ? "运输中" : ev.status === "damaged" ? "报损" : "待发货"}`}
+                          </span>
+                        </div>
                       )}
                       {ev.type === "record" && (
                         <>

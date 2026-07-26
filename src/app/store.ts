@@ -181,6 +181,8 @@ export type OrderSource = typeof ORDER_SOURCE_OPTIONS[number];
 
 export type OrderItem = {
   stockItemId: string;
+  /** 下单时固化的鱼只编码，库存记录删除后仍用于订单检索。 */
+  fishCode?: string;
   productId: string;
   price: number;
   /** 下单时固化的商品最低回厂价。 */

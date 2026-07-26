@@ -36,6 +36,8 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
+import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
+import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -6288,7 +6290,15 @@ function NewOrderDialog({
 
 // ─── Main View ────────────────────────────────────────────────────────────────
 
-export function OrdersView() {
+type OrdersViewProps = {
+  openOrderRequest?: { orderId: string; requestId: number } | null;
+  onOpenOrderRequestHandled?: () => void;
+};
+
+export function OrdersView({
+  openOrderRequest,
+  onOpenOrderRequestHandled,
+}: OrdersViewProps = {}) {
   const { state, setState, saveStateTransform } = useStore();
   const permission = usePermission("orders");
 
@@ -6337,6 +6347,17 @@ export function OrdersView() {
     [viewOrder, state.orders]
   );
 
+  useEffect(() => {
+    if (!openOrderRequest) return;
+    const targetOrder = state.orders.find((order) => order.id === openOrderRequest.orderId);
+    if (targetOrder) {
+      setViewOrder(targetOrder);
+    } else {
+      toast.error("没有找到对应订单，可能已被删除或不属于当前场地");
+      onOpenOrderRequestHandled?.();
+    }
+  }, [openOrderRequest?.requestId]);
+
   const orderList = useMemo(
     () => [...state.orders].sort(compareOrdersByCreatedDesc),
     [state.orders]
@@ -6348,7 +6369,11 @@ export function OrdersView() {
   const isCurrentUserContactOrder = (order: Order) =>
     currentContactAliases.has(normalizeContactPersonName(order.contactPerson));
 
-  type OrderListRow = Order & { searchText: string };
+  type OrderListRow = Order & {
+    searchText: string;
+    fishSearchCodes: string[];
+    fishDisplayCodes: string[];
+  };
   const orderRows = useMemo<OrderListRow[]>(() => {
     const customerMap = new Map(customers.map((customer) => [customer.id, customer]));
     const productMap = new Map(state.products.map((product) => [product.id, product]));
@@ -6367,12 +6392,29 @@ export function OrdersView() {
     return orderList.map((order) => {
       const customer = customerMap.get(order.customerId);
       const orderShipments = shipmentsByOrder.get(order.id) ?? [];
-      const itemSearchText = order.items.flatMap((item) => {
+      const orderStocks = order.items.map((item) => stockMap.get(item.stockItemId));
+      const fishDisplayCodes = Array.from(new Set(
+        order.items
+          .map((item, index) => String(orderStocks[index]?.code ?? item.fishCode ?? "").trim())
+          .filter(Boolean)
+      ));
+      const fishSearchCodes = Array.from(new Set(
+        order.items.flatMap((item, index) => [
+          item.stockItemId,
+          orderStocks[index]?.code ?? item.fishCode,
+          buildPublicSelectionCode(item.stockItemId),
+        ])
+          .map((code) => String(code ?? "").trim())
+          .filter(Boolean)
+      ));
+      const itemSearchText = order.items.flatMap((item, index) => {
         const product = productMap.get(item.productId);
-        const stock = stockMap.get(item.stockItemId);
+        const stock = orderStocks[index];
         const batch = stock ? batchMap.get(stock.batchId) : undefined;
         return [
           item.stockItemId,
+          stock?.code ?? item.fishCode,
+          buildPublicSelectionCode(item.stockItemId),
           item.plannedShipDate,
           item.price,
           orderItemMinReturnPrice(item, product),
@@ -6425,7 +6467,7 @@ export function OrdersView() {
         orderCommissionTotalWithProducts(order, (productId) => productMap.get(productId)).toFixed(2),
         ...itemSearchText,
       ].filter(Boolean).join(" ");
-      return { ...order, searchText };
+      return { ...order, searchText, fishSearchCodes, fishDisplayCodes };
     });
   }, [customers, orderList, state.batches, state.products, state.shipments, state.stock, state.tankGroups]);
 
@@ -6443,9 +6485,7 @@ export function OrdersView() {
 	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
 
   const mobileFilteredOrders = useMemo(() => {
-    const term = mobileSearch.trim().toLowerCase();
-    if (!term) return filteredOrders;
-    return filteredOrders.filter((order) => order.searchText.toLowerCase().includes(term));
+    return rankOrderSearchRows(filteredOrders, mobileSearch);
   }, [filteredOrders, mobileSearch]);
 
   useEffect(() => {
@@ -6657,6 +6697,15 @@ export function OrdersView() {
             <div className="mt-3 rounded-md bg-background px-2.5 py-2 text-xs text-muted-foreground">
               <span className="text-foreground">{shownItems || "无商品"}</span>
               {extraItemCount > 0 && <span> 等 {itemNames.length} 条</span>}
+              {order.fishDisplayCodes.length > 0 && (
+                <div className="mt-1.5 flex items-center gap-1 text-sky-700">
+                  <Fish className="size-3.5 shrink-0" />
+                  <span className="truncate">
+                    鱼码 {order.fishDisplayCodes.slice(0, 4).join("、")}
+                    {order.fishDisplayCodes.length > 4 ? ` 等 ${order.fishDisplayCodes.length} 个` : ""}
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="mt-3 flex flex-col items-start gap-2">
@@ -6750,7 +6799,7 @@ export function OrdersView() {
               <Input
                 value={mobileSearch}
                 onChange={(event) => setMobileSearch(event.target.value)}
-                placeholder="搜索订单、客户、商品..."
+                placeholder="搜索鱼码、订单、客户、商品..."
                 className="h-10 pl-9"
               />
             </div>
@@ -7089,7 +7138,8 @@ export function OrdersView() {
 	      <DataTable
 	        data={filteredOrders}
         searchKeys={["searchText"] as (keyof OrderListRow)[]}
-        searchPlaceholder="搜索订单号、客户、商品、来源、对接人..."
+        searchPlaceholder="搜索鱼码、订单号、客户、商品、来源..."
+        searchRank={orderSearchRank}
         onAdd={permission.canCreate ? () => setNewOpen(true) : undefined}
 	        addLabel="新建订单"
 	        columns={[
@@ -7180,7 +7230,17 @@ export function OrdersView() {
           {
             key: "items",
             title: "商品数",
-            render: (r) => `${r.items.length} 条`,
+            render: (r) => (
+              <div title={r.fishDisplayCodes.length > 0 ? `鱼码：${r.fishDisplayCodes.join("、")}` : undefined}>
+                <div>{r.items.length} 条</div>
+                {r.fishDisplayCodes.length > 0 && (
+                  <div className="mt-0.5 max-w-36 truncate text-xs text-sky-700">
+                    鱼码 {r.fishDisplayCodes.slice(0, 3).join("、")}
+                    {r.fishDisplayCodes.length > 3 ? "…" : ""}
+                  </div>
+                )}
+              </div>
+            ),
           },
           {
             key: "shippingFee",
@@ -7317,7 +7377,11 @@ export function OrdersView() {
       <OrderDetailDialog
         order={syncedViewOrder}
         open={!!viewOrder}
-        onOpenChange={(o) => { if (!o) setViewOrder(null); }}
+        onOpenChange={(o) => {
+          if (o) return;
+          setViewOrder(null);
+          onOpenOrderRequestHandled?.();
+        }}
       />
 
       <CustomerDetailDialog
