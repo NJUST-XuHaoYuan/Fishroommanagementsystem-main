@@ -1314,7 +1314,7 @@ function AdminApp() {
       case "products":   return <ProductsView />;
       case "tankGroups": return <TankGroupsView />;
       case "batches":    return <BatchesView />;
-      case "stockIn":    return <StockInView />;
+      case "stockIn":    return <StockInView onOpenOrder={requestOpenOrder} />;
       case "daily":      return <DailyView allTankGroups={state.tankGroups} onOpenOrder={requestOpenOrder} />;
       case "lossRecords": return <LossRecordsView />;
       case "customers":  return <CustomersView />;

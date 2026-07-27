@@ -5,7 +5,7 @@ import { Card } from "./ui/card";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -15,13 +15,39 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, StatusLegend, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, ChevronDown, Trash2, Check, ArrowRightLeft, MapPin, List } from "lucide-react";
+import {
+  Search, ChevronDown, Trash2, Check, ArrowRightLeft, MapPin, List,
+  ExternalLink, Pencil, ReceiptText,
+} from "lucide-react";
 import { toast } from "sonner";
 import { getInventoryHiddenStockIds, isVisibleInStockInventory } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
 
 type StockViewMode = "tank" | "species";
+type StockInViewProps = {
+  onOpenOrder?: (orderId: string) => void;
+};
+
+const ORDER_STATUS_META: Record<string, { label: string; className: string }> = {
+  pending: { label: "待处理", className: "bg-amber-100 text-amber-800" },
+  confirmed: { label: "已确认", className: "bg-sky-100 text-sky-800" },
+  shipped: { label: "发货中", className: "bg-violet-100 text-violet-800" },
+  completed: { label: "已完成", className: "bg-emerald-100 text-emerald-800" },
+  damaged: { label: "已报损", className: "bg-rose-100 text-rose-800" },
+  cancelled: { label: "已取消", className: "bg-slate-100 text-slate-700" },
+};
+
+function orderSourceLabel(source?: string): string {
+  const labels: Record<string, string> = {
+    "平台下单": "抖音",
+    "私域线上": "线上私域",
+    "线下": "线下自提",
+  };
+  const normalized = String(source ?? "").trim();
+  return labels[normalized] ?? (normalized || "未填写来源");
+}
 
 function buildStockItems(item: StockItem, quantity: number): StockItem[] {
   return item.id
@@ -261,7 +287,7 @@ function BatchCombobox({
   );
 }
 
-export function StockInView() {
+export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
   const { state, saveStockChange } = useStore();
   const permission = usePermission("stockIn");
   const [q, setQ] = useState("");
@@ -271,6 +297,7 @@ export function StockInView() {
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[]>([]);
   const [saveConfirm, setSaveConfirm] = useState<{ stockItems: StockItem[]; qty: number; isEdit: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [linkedStockItem, setLinkedStockItem] = useState<StockItem | null>(null);
 
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [fromSubTank, setFromSubTank] = useState(false);
@@ -292,6 +319,10 @@ export function StockInView() {
   const speciesById = useMemo(
     () => new Map(state.species.map((s) => [s.id, s])),
     [state.species],
+  );
+  const customerById = useMemo(
+    () => new Map(state.customers.map((customer) => [customer.id, customer])),
+    [state.customers],
   );
   const tankMetaById = useMemo(() => {
     const map = new Map<string, { groupName: string; subTankName: string; location: string; label: string }>();
@@ -324,7 +355,6 @@ export function StockInView() {
     return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
-  const orderItemKeepsInventory = (item: { inventoryRemovedAt?: string }) => !item.inventoryRemovedAt;
   const pendingOrdersForStockIds = (ids: Iterable<string>) => {
     const idSet = new Set(ids);
     return state.orders.filter((order) =>
@@ -334,6 +364,10 @@ export function StockInView() {
       )
     );
   };
+  const linkedOrders = useMemo(
+    () => linkedStockItem ? linkedOrdersForStock(state.orders, linkedStockItem.id) : [],
+    [linkedStockItem, state.orders],
+  );
   const stockLockedByProtectedOrder = (id: string) =>
     state.orders.some((order) =>
       order.status !== "cancelled" &&
@@ -440,6 +474,19 @@ export function StockInView() {
       : state.tankGroups[0]?.id ?? "";
     setSelectedGroupId(gid);
     setOpen(true);
+  };
+
+  const openLinkedInventoryActions = () => {
+    if (!linkedStockItem) return;
+    const item = linkedStockItem;
+    setLinkedStockItem(null);
+    openDialog({ ...item }, false);
+  };
+
+  const openLinkedOrder = (orderId: string) => {
+    if (!onOpenOrder) return;
+    setLinkedStockItem(null);
+    onOpenOrder(orderId);
   };
 
   const subTanksOfGroup = useMemo(
@@ -960,40 +1007,38 @@ export function StockInView() {
 
                             {isExpanded && (
                               <div
-                                className="grid gap-1.5 px-3 pb-2 pt-1 bg-slate-50 border-t"
-                                style={{ gridTemplateColumns: "repeat(auto-fill, 2.25rem)", maxWidth: "27.375rem" }}
+                                className="grid grid-cols-[repeat(auto-fill,2.5rem)] gap-1.5 border-t bg-slate-50 px-3 pb-2 pt-1 sm:grid-cols-[repeat(auto-fill,2.25rem)]"
+                                style={{ maxWidth: "27.375rem" }}
                               >
                                 {stockItems.map((s) => {
                                   const selected = selectedIds.has(s.id);
                                   const locked = stockCannotDelete(s);
                                   const lockReason = stockDeleteLockReason(s);
                                   return (
-                                    <div
+                                    <button
                                       key={s.id}
-                                      role="button"
-                                      tabIndex={0}
+                                      type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         if (selectMode) {
                                           if (!locked) toggleSelected(s.id);
                                           return;
                                         }
-                                        openDialog({ ...s }, false);
-                                      }}
-                                      onKeyDown={(e) => {
-                                        if (e.key !== "Enter" && e.key !== " ") return;
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        if (selectMode) {
-                                          if (!locked) toggleSelected(s.id);
+                                        if (s.sold) {
+                                          setLinkedStockItem({ ...s });
                                           return;
                                         }
                                         openDialog({ ...s }, false);
                                       }}
-                                      className={`relative size-9 rounded overflow-hidden bg-muted hover:opacity-80 transition-opacity cursor-pointer ${
+                                      className={`relative size-10 touch-manipulation overflow-hidden rounded bg-muted text-left transition-opacity hover:opacity-80 sm:size-9 ${
                                         selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
                                       } ${selectMode && locked ? "cursor-not-allowed opacity-50 hover:opacity-50" : ""}`}
-                                      title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${selectMode && locked ? ` · ${lockReason}` : ""}`}
+                                      title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.sold && !selectMode ? " · 点击查看关联订单" : ""}${selectMode && locked ? ` · ${lockReason}` : ""}`}
+                                      aria-label={
+                                        s.sold && !selectMode
+                                          ? `查看${p?.name ?? "该鱼"}的关联订单`
+                                          : `${selectMode ? "选择" : "编辑"}${p?.name ?? "库存记录"}`
+                                      }
                                     >
                                     {p?.imageUrl ? (
                                       <ImageWithFallback src={p.imageUrl} alt={p?.name ?? ""} className="size-full object-cover" />
@@ -1016,7 +1061,7 @@ export function StockInView() {
                                         <Check className="size-4 text-white drop-shadow" />
                                       </div>
                                     )}
-                                  </div>
+                                  </button>
                                   );
                                 })}
                               </div>
@@ -1134,6 +1179,114 @@ export function StockInView() {
           )}
         </>
       )}
+
+      <Dialog open={!!linkedStockItem} onOpenChange={(nextOpen) => !nextOpen && setLinkedStockItem(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ReceiptText className="size-5 text-amber-600" />
+              关联订单
+            </DialogTitle>
+            <DialogDescription>
+              黄色外框表示该库存已被订单占用，可在这里核对并打开对应订单。
+            </DialogDescription>
+          </DialogHeader>
+
+          {linkedStockItem && (
+            <div className="flex items-center gap-3 rounded-md bg-slate-50 px-3 py-2.5">
+              <div className="size-11 shrink-0 overflow-hidden rounded-md bg-muted ring-2 ring-yellow-400 ring-offset-2">
+                {product(linkedStockItem.productId)?.imageUrl ? (
+                  <ImageWithFallback
+                    src={product(linkedStockItem.productId)?.imageUrl ?? ""}
+                    alt={product(linkedStockItem.productId)?.name ?? "库存鱼"}
+                    className="size-full object-cover"
+                  />
+                ) : (
+                  <div className="flex size-full items-center justify-center px-1 text-center text-[9px] text-muted-foreground">
+                    {product(linkedStockItem.productId)?.name ?? "库存鱼"}
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="truncate font-semibold">
+                  {product(linkedStockItem.productId)?.name ?? linkedStockItem.productId}
+                </div>
+                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                  {[
+                    linkedStockItem.code ? `鱼码 ${linkedStockItem.code}` : "",
+                    tankMetaById.get(linkedStockItem.subTankId)?.label ?? "",
+                  ].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {linkedOrders.length > 0 ? (
+            <div className="divide-y overflow-hidden rounded-md border">
+              {linkedOrders.map((order) => {
+                const statusMeta = ORDER_STATUS_META[order.status] ?? {
+                  label: order.status || "未知状态",
+                  className: "bg-slate-100 text-slate-700",
+                };
+                const customerName = customerById.get(order.customerId)?.name;
+                return (
+                  <div
+                    key={order.id}
+                    className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-slate-900">{order.orderNo}</span>
+                        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusMeta.className}`}>
+                          {statusMeta.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {[order.date, orderSourceLabel(order.source), customerName].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                    {onOpenOrder && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="min-h-10 w-full shrink-0 gap-1.5 sm:w-auto"
+                        onClick={() => openLinkedOrder(order.id)}
+                      >
+                        查看订单
+                        <ExternalLink className="size-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+              未找到有效关联订单，可能是历史状态残留。
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11 gap-1.5 sm:mr-auto sm:min-h-9"
+              onClick={openLinkedInventoryActions}
+            >
+              <Pencil className="size-3.5" />
+              库存操作
+            </Button>
+            <Button
+              type="button"
+              className="min-h-11 sm:min-h-9"
+              onClick={() => setLinkedStockItem(null)}
+            >
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent aria-describedby={undefined} className="sm:max-w-lg">
