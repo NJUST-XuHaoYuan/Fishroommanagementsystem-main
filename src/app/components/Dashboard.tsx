@@ -79,12 +79,12 @@ type DailyFinancePoint = {
   privateDomainAmount: number;
 };
 
-type DailyFinanceMetricKey = "platformAmount" | "offlinePickupAmount" | "privateDomainAmount";
+type DailyFinanceMetricKey = "received" | "refunded" | "orderAmount";
 
 const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
-  { key: "platformAmount", label: "平台成交", color: "#8b5cf6" },
-  { key: "offlinePickupAmount", label: "线下自提", color: "#f59e0b" },
-  { key: "privateDomainAmount", label: "线上私域", color: "#14b8a6" },
+  { key: "received", label: "实际收款", color: "#10b981" },
+  { key: "refunded", label: "退款", color: "#f43f5e" },
+  { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
 ];
 
 type DailyLossDetail = {
@@ -2148,7 +2148,7 @@ export function Dashboard() {
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">销售情况</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天按订单来源统计渠道成交金额</p>
+              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退款与订单金额</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5 text-muted-foreground">
@@ -2219,10 +2219,10 @@ export function Dashboard() {
                   points={linePoints(dailyFinanceData, series.key, maxFinanceValue)}
                   fill="none"
                   stroke={series.color}
-                  strokeWidth="2.8"
+                  strokeWidth={series.key === "orderAmount" ? "3.5" : "2.5"}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity="0.9"
+                  opacity={series.key === "orderAmount" ? "1" : "0.86"}
                 />
               ))}
               {hoveredFinancePoint && (
