@@ -79,12 +79,9 @@ type DailyFinancePoint = {
   privateDomainAmount: number;
 };
 
-type DailyFinanceMetricKey = "received" | "refunded" | "orderAmount" | "platformAmount" | "offlinePickupAmount" | "privateDomainAmount";
+type DailyFinanceMetricKey = "platformAmount" | "offlinePickupAmount" | "privateDomainAmount";
 
 const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
-  { key: "received", label: "实际收款", color: "#10b981" },
-  { key: "refunded", label: "退款", color: "#f43f5e" },
-  { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
   { key: "platformAmount", label: "平台成交", color: "#8b5cf6" },
   { key: "offlinePickupAmount", label: "线下自提", color: "#f59e0b" },
   { key: "privateDomainAmount", label: "线上私域", color: "#14b8a6" },
@@ -2151,7 +2148,7 @@ export function Dashboard() {
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">销售情况</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退款、订单金额与渠道成交金额</p>
+              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天按订单来源统计渠道成交金额</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5 text-muted-foreground">
@@ -2174,7 +2171,7 @@ export function Dashboard() {
               ))}
             </div>
           </div>
-          <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+          <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
             {financeRangeTotals.map((item) => (
               <div key={item.key} className="rounded-lg border bg-slate-50/60 px-3 py-2">
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -2222,10 +2219,10 @@ export function Dashboard() {
                   points={linePoints(dailyFinanceData, series.key, maxFinanceValue)}
                   fill="none"
                   stroke={series.color}
-                  strokeWidth={series.key === "orderAmount" ? "3.5" : "2.5"}
+                  strokeWidth="2.8"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity={series.key === "orderAmount" ? "1" : "0.86"}
+                  opacity="0.9"
                 />
               ))}
               {hoveredFinancePoint && (
