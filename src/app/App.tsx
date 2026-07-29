@@ -51,6 +51,12 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
 type PersistedStore = Omit<Store, "user">;
 type PersistedKey = keyof PersistedStore;
 type StateLoadOptions = { force?: boolean; showLoading?: boolean; liteSpecies?: boolean };
+type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily">;
+type OpenOrderRequest = {
+  orderId: string;
+  requestId: number;
+  returnView?: LinkedOrderSourceView;
+};
 
 const PERSISTED_KEYS = AUDIT_COLLECTIONS
   .map(({ key }) => key)
@@ -404,7 +410,7 @@ function AdminApp() {
   const [stateLoading, setStateLoading] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [loadedKeys, setLoadedKeys] = useState<Set<PersistedKey>>(() => new Set());
-  const [openOrderRequest, setOpenOrderRequest] = useState<{ orderId: string; requestId: number } | null>(null);
+  const [openOrderRequest, setOpenOrderRequest] = useState<OpenOrderRequest | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [activeSiteId, setActiveSiteIdBase] = useState(() => {
     try {
@@ -1321,7 +1327,7 @@ function AdminApp() {
       case "orders":     return (
         <OrdersView
           openOrderRequest={openOrderRequest}
-          onOpenOrderRequestHandled={() => setOpenOrderRequest(null)}
+          onOpenOrderRequestHandled={finishOpenOrderRequest}
         />
       );
       case "profile":    return <PersonalCenterView />;
@@ -1333,9 +1339,19 @@ function AdminApp() {
   };
 
   function requestOpenOrder(orderId: string) {
+    const sourceView = viewRef.current;
+    const returnView = sourceView === "stockIn" || sourceView === "daily"
+      ? sourceView
+      : undefined;
     orderRequestSequence.current += 1;
-    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current });
+    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current, returnView });
     setView("orders");
+  }
+
+  function finishOpenOrderRequest() {
+    const returnView = openOrderRequest?.returnView;
+    setOpenOrderRequest(null);
+    if (returnView) setView(returnView);
   }
 
   const handleSetView = (nextView: ViewKey) => {
