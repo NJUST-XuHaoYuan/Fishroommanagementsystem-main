@@ -88,7 +88,7 @@ const NAV: NavSection[] = [
     title: "财务管理",
     icon: CircleDollarSign,
     items: [
-      { key: "finance", label: "财务工作台" },
+      { key: "finance", label: "财务台账" },
     ],
   },
 ];

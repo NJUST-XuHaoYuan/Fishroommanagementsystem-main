@@ -23,15 +23,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Textarea } from "./ui/textarea";
 import {
-  AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
-  Banknote,
-  CheckCircle2,
-  CircleDollarSign,
   FileCheck2,
   FileSpreadsheet,
   History,
@@ -44,7 +39,6 @@ import {
   Settings2,
   Trash2,
   Upload,
-  WalletCards,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -705,43 +699,6 @@ function OrderFinanceDialog({
   );
 }
 
-function MetricStrip({ data }: { data: FinanceOverview["summary"] }) {
-  const metrics = [
-    { label: "订单应收", value: money(data.receivable), icon: ReceiptText },
-    { label: "实际入账", value: money(data.actualInflow), icon: Banknote },
-    { label: "退款", value: money(data.refunded), icon: ArrowUpRight },
-    { label: "平台费用", value: money(data.platformFees), icon: FileCheck2 },
-    { label: "净结算", value: money(data.netSettlement), icon: WalletCards },
-    { label: "未核销订单", value: `${data.unreconciledOrders} 单`, icon: AlertTriangle },
-    { label: "负责人提成", value: money(data.commissionTotal), icon: CircleDollarSign },
-  ];
-  return (
-    <div className="finance-mobile-two-columns grid grid-cols-2 overflow-hidden rounded-lg border bg-card md:grid-cols-4 xl:grid-cols-7">
-      {metrics.map((metric, index) => {
-        const Icon = metric.icon;
-        return (
-          <div
-            key={metric.label}
-            className={[
-              "min-w-0 border-b p-3",
-              index % 2 === 1 ? "border-l" : "",
-              index === metrics.length - 1 ? "col-span-2 md:col-span-1" : "",
-              "md:border-l md:first:border-l-0",
-              "xl:border-b-0",
-            ].join(" ")}
-          >
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Icon className="size-3.5" />
-              <span>{metric.label}</span>
-            </div>
-            <div className="mt-1 truncate text-base font-semibold tabular-nums">{metric.value}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function EmptyState({ children }: { children: string }) {
   return (
     <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed px-4 text-center text-sm text-muted-foreground">
@@ -765,6 +722,7 @@ export function FinanceView() {
   const [ledgerMode, setLedgerMode] = useState<"orders" | "transactions">("orders");
   const [selectedOrderId, setSelectedOrderId] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [csvPanelOpen, setCsvPanelOpen] = useState(false);
   const [defaultCommissionRate, setDefaultCommissionRate] = useState(1);
   const [savingSettings, setSavingSettings] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -772,8 +730,6 @@ export function FinanceView() {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [reconciliationSearch, setReconciliationSearch] = useState("");
-  const [reconciliationFilter, setReconciliationFilter] = useState("all");
 
   const loadOverview = useCallback(async (quiet = false) => {
     if (!canAccess) {
@@ -802,6 +758,13 @@ export function FinanceView() {
     void loadOverview();
   }, [loadOverview]);
 
+  useEffect(() => {
+    setCsvFile(null);
+    setCsvText("");
+    setPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [activeSiteId]);
+
   const selectedOrder = data?.orders.find((order) => order.id === selectedOrderId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
   const filteredOrders = useMemo(() => (data?.orders ?? []).filter((order) => {
@@ -825,19 +788,10 @@ export function FinanceView() {
       transaction.notes,
     ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch));
   }), [data?.transactions, normalizedSearch]);
-  const filteredReconciliations = useMemo(() => {
-    const term = reconciliationSearch.trim().toLowerCase();
-    return (data?.reconciliations ?? []).filter((row) => {
-      if (reconciliationFilter !== "all" && row.status !== reconciliationFilter) return false;
-      if (!term) return true;
-      return [
-        row.externalOrderNo,
-        row.internalOrderNo,
-        row.productName,
-        row.contactPerson,
-      ].some((value) => String(value ?? "").toLowerCase().includes(term));
-    });
-  }, [data?.reconciliations, reconciliationFilter, reconciliationSearch]);
+  const unresolvedReconciliations = useMemo(
+    () => (data?.reconciliations ?? []).filter((row) => row.status !== "已匹配"),
+    [data?.reconciliations],
+  );
 
   const saveDefaultCommissionRate = async () => {
     if (!permission.requirePermission("update") || savingSettings) return;
@@ -941,12 +895,21 @@ export function FinanceView() {
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2>财务管理</h2>
+          <h2>财务台账</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            集中处理订单应收、资金流水、负责人提成和抖店结算对账
+            逐单核对应收、收款、退款、平台扣费和负责人提成
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {permission.canCreate && (
+            <Button
+              variant={csvPanelOpen ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => setCsvPanelOpen((open) => !open)}
+            >
+              <Upload className="size-4" /> 导入抖店结算
+            </Button>
+          )}
           {permission.canUpdate && (
             <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
               <Settings2 className="size-4" /> 提成设置
@@ -965,15 +928,7 @@ export function FinanceView() {
         </div>
       )}
 
-      {data && <MetricStrip data={data.summary} />}
-
-      <Tabs defaultValue="ledger" className="flex flex-col gap-4">
-        <TabsList className="finance-mobile-two-columns grid w-full grid-cols-2 sm:w-[340px]">
-          <TabsTrigger value="ledger">财务台账</TabsTrigger>
-          <TabsTrigger value="douyin">抖店对账</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="ledger" className="mt-0 flex flex-col gap-3">
+      <section className="order-2 flex flex-col gap-3">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-1 rounded-md border bg-muted/20 p-1">
               <Button
@@ -1181,15 +1136,16 @@ export function FinanceView() {
               </div>
             </>
           )}
-        </TabsContent>
+      </section>
 
-        <TabsContent value="douyin" className="mt-0 flex flex-col gap-4">
+      {csvPanelOpen && (
+        <div className="order-1 flex flex-col gap-4">
           <section className="rounded-lg border bg-card">
             <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold">导入抖店结算 CSV</h3>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  导入前先预览匹配结果；同一文件和重复结算行不会重复写入。
+                  预览确认后自动写回对应订单；同一文件和重复结算行不会重复写入。
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1206,6 +1162,14 @@ export function FinanceView() {
                 <Button size="sm" onClick={previewCsv} disabled={!csvFile || previewing}>
                   {previewing ? <Loader2 className="size-4 animate-spin" /> : <FileSpreadsheet className="size-4" />}
                   解析预览
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setCsvPanelOpen(false)}
+                  title="收起导入"
+                >
+                  <X className="size-4" />
                 </Button>
               </div>
             </div>
@@ -1298,39 +1262,17 @@ export function FinanceView() {
             </section>
           )}
 
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h3 className="text-sm font-semibold">结算对账结果</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                系统应收与抖店收入不一致时标记为有差异，未找到抖音订单号时标记为未匹配。
-              </p>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <label className="relative sm:w-72">
-                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={reconciliationSearch}
-                  onChange={(event) => setReconciliationSearch(event.target.value)}
-                  placeholder="抖音订单号或系统订单号"
-                  className="pl-9"
-                />
-              </label>
-              <Select value={reconciliationFilter} onValueChange={setReconciliationFilter}>
-                <SelectTrigger className="w-full sm:w-32"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">全部状态</SelectItem>
-                  <SelectItem value="已匹配">已匹配</SelectItem>
-                  <SelectItem value="有差异">有差异</SelectItem>
-                  <SelectItem value="未匹配">未匹配</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+          <div>
+            <h3 className="text-sm font-semibold">需要人工核对</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              这里只保留金额有差异或未找到系统订单的记录；正常匹配结果已自动写入订单台账。
+            </p>
           </div>
 
           {loading ? (
             <LoadingRows />
-          ) : filteredReconciliations.length === 0 ? (
-            <EmptyState>尚无抖店结算记录，选择 CSV 后可先预览再导入</EmptyState>
+          ) : unresolvedReconciliations.length === 0 ? (
+            <EmptyState>当前没有需要人工核对的抖店结算记录</EmptyState>
           ) : (
             <>
               <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
@@ -1350,7 +1292,7 @@ export function FinanceView() {
                     </tr>
                   </thead>
                   <tbody className="divide-y">
-                    {filteredReconciliations.map((row) => (
+                    {unresolvedReconciliations.map((row) => (
                       <tr key={row.externalOrderNo}>
                         <td className="px-3 py-2.5 font-mono text-xs">{row.externalOrderNo}</td>
                         <td className="px-3 py-2.5">{row.internalOrderNo || "—"}</td>
@@ -1374,7 +1316,7 @@ export function FinanceView() {
                 </table>
               </div>
               <div className="divide-y rounded-lg border bg-card md:hidden">
-                {filteredReconciliations.map((row) => (
+                {unresolvedReconciliations.map((row) => (
                   <div key={row.externalOrderNo} className="px-3 py-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -1423,8 +1365,8 @@ export function FinanceView() {
               </div>
             </section>
           )}
-        </TabsContent>
-      </Tabs>
+        </div>
+      )}
 
       <OrderFinanceDialog
         order={selectedOrder}
