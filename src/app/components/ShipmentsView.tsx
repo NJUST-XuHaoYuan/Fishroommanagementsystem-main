@@ -91,14 +91,6 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
 }
 
-function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
-  const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipment(shipment)
-  );
-  if (activeShipments.length === 0) return order.shippingFee ?? 0;
-  return activeShipments.reduce((sum, shipment) => sum + (shipment.actualShippingFee ?? 0), 0);
-}
-
 function PlannedShipBadge({ date }: { date?: string }) {
   if (!date) return <span className="text-muted-foreground text-xs">未设置</span>;
   if (date === today)
@@ -259,13 +251,6 @@ export function ShipmentsView() {
   const getCustomer = (id: string) => (state.customers ?? []).find((c) => c.id === id);
   const getOrder = (id: string) => state.orders.find((o) => o.id === id);
 
-  const calcBalance = (order: Order) => {
-    const itemsTotal = order.items.reduce((s, i) => s + i.price, 0);
-    const amountDue = itemsTotal + getBillableShippingFee(order, state.shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0);
-    const amountPaid = (order.payments ?? []).reduce((s, p) => (p.type === "refund" ? s - p.amount : s + p.amount), 0);
-    return amountDue - amountPaid;
-  };
-
   const getUnshippedItems = (order: Order) => {
     const shippedIds = new Set(state.shipments.filter(s => s.orderId === order.id && countsAsActiveShipment(s)).flatMap(s => s.itemStockIds ?? []));
     return order.items.filter(i => !shippedIds.has(i.stockItemId));
@@ -413,7 +398,7 @@ export function ShipmentsView() {
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">订单号</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">客户</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
-                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">预收运费</th>
+                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">订单运费</th>
                       <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">状态</th>
                       <th className="w-24 px-4 py-2" />
                     </tr>
@@ -465,7 +450,7 @@ export function ShipmentsView() {
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">客户</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">预计发货</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
-                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">预收运费</th>
+                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">订单运费</th>
                       <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">状态</th>
                       <th className="w-24 px-4 py-2" />
                     </tr>
@@ -698,7 +683,6 @@ export function ShipmentsView() {
         unshippedItems={shipOrder ? getUnshippedItems(shipOrder) : []}
         getProductName={getProductName}
         getTankName={getTankName}
-        balance={shipOrder ? calcBalance(shipOrder) : 0}
         pickupOnly={shipOrder?.source === "线下"}
       />
 

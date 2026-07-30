@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
-  PaymentRecord, PaymentType, Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
+  Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
   ORDER_SOURCE_OPTIONS, isPersonnelResigned,
 } from "../store";
 import { DataTable } from "./common";
@@ -25,7 +25,7 @@ import { statusRingClass } from "./StatusIcon";
 import { toast } from "sonner";
 import {
   Fish, CheckCircle, XCircle, Eye, ShoppingCart, Plus, Trash2,
-  ChevronDown, Check, Truck, X, MapPin, Pencil, AlertTriangle,
+  ChevronDown, Check, Truck, X, MapPin, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
 } from "lucide-react";
@@ -41,18 +41,6 @@ import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const PAYMENT_TYPES: PaymentType[] = ["deposit", "balance", "shipping_fee", "refund", "other"];
-const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = {
-  deposit: "定金", balance: "尾款", shipping_fee: "运费补款",
-  refund: "退款", other: "其他",
-};
-const PAYMENT_TYPE_COLOR: Record<PaymentType, string> = {
-  deposit: "bg-sky-100 text-sky-700",
-  balance: "bg-blue-100 text-blue-700",
-  shipping_fee: "bg-violet-100 text-violet-700",
-  refund: "bg-red-100 text-red-700",
-  other: "bg-gray-100 text-gray-600",
-};
 const SHIPMENT_STATUS_LABEL: Record<ShipmentStatus, string> = {
   preparing: "待发货",
   outbound: "已出库/待发货",
@@ -241,18 +229,6 @@ function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
   return items + getBillableShippingFee(order, shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0) - calcDamageRefundAdjustment(order, shipments);
 }
 
-function calcAmountPaid(order: Order): number {
-  return (order.payments ?? []).reduce(
-    (s, p) => (p.type === "refund" ? s - p.amount : s + p.amount), 0
-  );
-}
-
-function calcAmountReceived(order: Order): number {
-  return (order.payments ?? [])
-    .filter((payment) => payment.type !== "refund")
-    .reduce((sum, payment) => sum + payment.amount, 0);
-}
-
 function calcAmountRefunded(order: Order): number {
   return (order.payments ?? [])
     .filter((payment) => payment.type === "refund")
@@ -265,27 +241,12 @@ function isDamageRefundOrder(order: Order, shipments: Shipment[] = []): boolean 
     orderShipments.some((shipment) => shipment.status === "damaged" && shipment.damageResolution === "refund");
 }
 
-type OrderFinancialState = {
-  kind: "paid" | "payable" | "refundable";
-  amount: number;
-};
-
-function getOrderFinancialState(order: Order, shipments: Shipment[] = []): OrderFinancialState {
-  const balance = calcAmountDue(order, shipments) - calcAmountPaid(order);
-  if (balance > 0.005) return { kind: "payable", amount: balance };
-  if (balance < -0.005) return { kind: "refundable", amount: Math.abs(balance) };
-  return { kind: "paid", amount: 0 };
-}
-
 type OrderStatusTag = {
   label: string;
   className: string;
 };
 
 const ORDER_STATUS_TAG_STYLE = {
-  paid: "bg-emerald-100 text-emerald-700",
-  payable: "bg-orange-100 text-orange-700",
-  refundable: "bg-red-100 text-red-700",
   pendingShip: "bg-amber-100 text-amber-700",
   outNoTracking: "bg-blue-100 text-blue-700",
   receiving: "bg-purple-100 text-purple-700",
@@ -293,20 +254,13 @@ const ORDER_STATUS_TAG_STYLE = {
   cancelled: "bg-gray-100 text-gray-500",
   damaged: "bg-red-100 text-red-700",
   outbound: "bg-sky-100 text-sky-700",
+  delivered: "bg-emerald-100 text-emerald-700",
 };
 
 function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   const hasDamagedShipment = orderShipments.some((shipment) => shipment.status === "damaged");
-  const financialState = getOrderFinancialState(order, shipments);
-  const tags: OrderStatusTag[] = [{
-    label: financialState.kind === "paid" ? "已结清" : financialState.kind === "payable" ? "待付款" : "待退款",
-    className: financialState.kind === "paid"
-      ? ORDER_STATUS_TAG_STYLE.paid
-      : financialState.kind === "payable"
-        ? ORDER_STATUS_TAG_STYLE.payable
-        : ORDER_STATUS_TAG_STYLE.refundable,
-  }];
+  const tags: OrderStatusTag[] = [];
 
   if (order.status === "cancelled") {
     tags.push({ label: "已取消", className: ORDER_STATUS_TAG_STYLE.cancelled });
@@ -334,6 +288,10 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
   );
   const waitingReceive = shippedInProgress.some((shipment) =>
     (shipment.shipMethod ?? "express") !== "pickup" && !!String(shipment.trackingNo ?? "").trim()
+  );
+  const allResolved = activeShipments.length > 0 && activeShipments.every((shipment) =>
+    shipment.status === "delivered" ||
+    (shipment.status === "damaged" && shipment.damageResolution === "refund")
   );
 
   if (removedInventoryCount > 0) {
@@ -373,6 +331,12 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
     tags.push({
       label: hasUnshippedItems ? "部分待收货" : "待收货",
       className: ORDER_STATUS_TAG_STYLE.receiving,
+    });
+  }
+  if (allResolved && !hasUnshippedItems) {
+    tags.push({
+      label: isPickupOrderSource(order.source) ? "已自提" : "已签收",
+      className: ORDER_STATUS_TAG_STYLE.delivered,
     });
   }
 
@@ -625,7 +589,6 @@ type PendingTrackingShipmentRow = {
   tankName: string;
   stockStatus: string;
   price: number;
-  balance: number;
   orderNotes: string;
   shipmentNotes: string;
   stockNotes: string;
@@ -669,7 +632,6 @@ function collectPendingTrackingShipmentRows(orders: Order[], state: Store): Pend
     const order = orders.find((entry) => entry.id === shipment.orderId);
     if (!order) return [];
     const orderCustomer = customer(order.customerId);
-    const balance = calcAmountDue(order, state.shipments) - calcAmountPaid(order);
     return (shipment.itemStockIds ?? []).flatMap((stockItemId, index) => {
       const orderItem = order.items.find((item) => item.stockItemId === stockItemId);
       if (!orderItem) return [];
@@ -695,7 +657,6 @@ function collectPendingTrackingShipmentRows(orders: Order[], state: Store): Pend
         tankName: subTankNameFromState(state, stock?.subTankId),
         stockStatus: stock?.status === "sick" ? "疾病" : stock?.status === "feeding" ? "开口" : "正常",
         price: orderItem.price,
-        balance,
         orderNotes: order.notes || "",
         shipmentNotes: shipment.notes || "",
         stockNotes: stock?.notes || "",
@@ -1034,8 +995,6 @@ function exportOrdersExcel(orders: Order[], state: Store) {
     const orderShipments = shipmentsForOrder(order.id);
     const itemSubtotal = order.items.reduce((sum, item) => sum + item.price, 0);
     const amountDue = calcAmountDue(order, state.shipments);
-    const amountPaid = calcAmountPaid(order);
-    const financialState = getOrderFinancialState(order, state.shipments);
     return [
       index + 1,
       order.orderNo,
@@ -1057,12 +1016,6 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       money(order.packagingFee),
       money(order.discount),
       money(amountDue),
-      money(amountPaid),
-      financialState.kind === "paid"
-        ? "已结清"
-        : financialState.kind === "payable"
-          ? `待付款 ${money(financialState.amount)}`
-          : `待退款 ${money(financialState.amount)}`,
       order.notes || "",
     ];
   });
@@ -1125,21 +1078,6 @@ function exportOrdersExcel(orders: Order[], state: Store) {
     ]);
   });
 
-  const paymentRows = orders.flatMap((order) => {
-    const orderCustomer = customer(order.customerId);
-    return [...(order.payments ?? [])]
-      .sort((a, b) => a.time.localeCompare(b.time))
-      .map((payment, index) => [
-        order.orderNo,
-        orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
-        index + 1,
-        fmtDatetime(payment.time),
-        PAYMENT_TYPE_LABEL[payment.type],
-        payment.type === "refund" ? `-${money(payment.amount)}` : money(payment.amount),
-        payment.notes || "",
-      ]);
-  });
-
   const html = `<!doctype html>
     <html>
       <head>
@@ -1154,10 +1092,9 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "应付总额", "实付净额", "结算状态", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
-        ${table("资金往来", ["订单号", "客户", "序号", "时间", "类型", "金额", "备注"], paymentRows)}
       </body>
     </html>`;
   const blob = new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8" });
@@ -1190,14 +1127,6 @@ function OrderStatusTags({
           {tag.label}
         </span>
       ))}
-    </span>
-  );
-}
-
-function PaymentBadge({ type }: { type: PaymentType }) {
-  return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${PAYMENT_TYPE_COLOR[type]}`}>
-      {PAYMENT_TYPE_LABEL[type]}
     </span>
   );
 }
@@ -1647,8 +1576,6 @@ function CustomerDetailDialog({
   }, [customer, orders]);
 
   const totalDue = customerOrders.reduce((sum, order) => sum + calcAmountDue(order, shipments), 0);
-  const totalPaid = customerOrders.reduce((sum, order) => sum + calcAmountPaid(order), 0);
-  const balance = totalDue - totalPaid;
   const activeCount = customerOrders.filter((order) => order.status !== "completed" && order.status !== "cancelled").length;
   const completedCount = customerOrders.filter((order) => order.status === "completed").length;
   const recentOrders = customerOrders.slice(0, 5);
@@ -1674,7 +1601,7 @@ function CustomerDetailDialog({
 
         {customer && (
           <div className="grid gap-4">
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-2">
               <div className="rounded-lg border bg-card p-3">
                 <div className="text-xs text-muted-foreground">订单总数</div>
                 <div className="mt-1 text-2xl font-semibold">{customerOrders.length}</div>
@@ -1683,16 +1610,9 @@ function CustomerDetailDialog({
                 </div>
               </div>
               <div className="rounded-lg border bg-card p-3">
-                <div className="text-xs text-muted-foreground">累计应收</div>
+                <div className="text-xs text-muted-foreground">累计订单应收</div>
                 <div className="mt-1 text-2xl font-semibold text-sky-700">{money(totalDue)}</div>
                 <div className="mt-1 text-xs text-muted-foreground">按当前订单金额计算</div>
-              </div>
-              <div className="rounded-lg border bg-card p-3">
-                <div className="text-xs text-muted-foreground">累计实收</div>
-                <div className="mt-1 text-2xl font-semibold text-emerald-600">{money(totalPaid)}</div>
-                <div className={`mt-1 text-xs ${balance > 0.005 ? "text-orange-600" : balance < -0.005 ? "text-red-600" : "text-muted-foreground"}`}>
-                  {Math.abs(balance) <= 0.005 ? "账款已平" : balance > 0 ? `待收 ${money(balance)}` : `多收 ${money(Math.abs(balance))}`}
-                </div>
               </div>
             </div>
 
@@ -1837,123 +1757,6 @@ function ProofUploader({
   );
 }
 
-// ─── AddPaymentDialog ─────────────────────────────────────────────────────────
-
-function AddPaymentDialog({
-  open, onOpenChange, onAdd, editingRecord, onUpdate,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  onAdd: (r: PaymentRecord) => boolean | Promise<boolean>;
-  editingRecord?: PaymentRecord | null;
-  onUpdate?: (r: PaymentRecord) => boolean | Promise<boolean>;
-}) {
-  const emptyForm = () => ({
-    time: nowDatetimeLocal(), type: "balance" as PaymentType,
-    amount: 0, account: "", proof: [] as string[], notes: "",
-  });
-  const [form, setForm] = useState(emptyForm);
-  const isEditing = !!editingRecord;
-
-  useEffect(() => {
-    if (!open) return;
-    setForm(editingRecord
-      ? {
-          time: editingRecord.time,
-          type: editingRecord.type,
-          amount: editingRecord.amount,
-          account: editingRecord.account ?? "",
-          proof: [...(editingRecord.proof ?? [])],
-          notes: editingRecord.notes ?? "",
-        }
-      : emptyForm()
-    );
-  }, [open, editingRecord]);
-
-  const submit = async () => {
-    if (!form.amount || form.amount <= 0) return toast.error("请输入有效金额");
-    const ok = editingRecord
-      ? await onUpdate?.({ ...editingRecord, ...form, amount: Number(form.amount) })
-      : await onAdd({ ...form, id: uid(), amount: Number(form.amount) });
-    if (ok !== false) onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{isEditing ? "修改资金往来记录" : "添加收款 / 退款记录"}</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col gap-4 py-1">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-2">
-              <Label>类型</Label>
-              <Select
-                value={form.type}
-                onValueChange={(v) => setForm((f) => ({ ...f, type: v as PaymentType }))}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {PAYMENT_TYPES.map((t) => (
-                    <SelectItem key={t} value={t}>{PAYMENT_TYPE_LABEL[t]}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label>金额（元）<span className="text-red-500">*</span></Label>
-              <Input
-                type="number" min={0} step={0.01}
-                value={form.amount || ""}
-                onChange={(e) => setForm((f) => ({ ...f, amount: Number(e.target.value) }))}
-                placeholder="0.00"
-              />
-            </div>
-          </div>
-          <div className="grid gap-2">
-            <Label>资金账户</Label>
-            <Input
-              value={form.account}
-              onChange={(e) => setForm((f) => ({ ...f, account: e.target.value }))}
-              placeholder="例如：微信、支付宝、银行账户"
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label>时间</Label>
-            <Input
-              type="datetime-local"
-              value={form.time}
-              onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))}
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label>备注</Label>
-            <textarea
-              value={form.notes}
-              onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-              placeholder="描述该笔收款/退款情况…"
-              rows={2}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label>凭证图片</Label>
-            <ProofUploader
-              images={form.proof}
-              onChange={(imgs) => setForm((f) => ({ ...f, proof: imgs }))}
-            />
-            <p className="text-xs text-muted-foreground">支持多张凭证，点击图片查看大图</p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={submit}>{isEditing ? "保存修改" : "添加记录"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 // ─── Return Unshipped Item ────────────────────────────────────────────────────
 
 function ReturnItemDialog({
@@ -1963,7 +1766,6 @@ function ReturnItemDialog({
   item,
   product,
   stock,
-  maxRefund,
   saving = false,
   onConfirm,
 }: {
@@ -1973,39 +1775,13 @@ function ReturnItemDialog({
   item: OrderItem | null;
   product?: Product;
   stock?: StockItem;
-  maxRefund: number;
   saving?: boolean;
-  onConfirm: (refund: PaymentRecord | null) => boolean | Promise<boolean>;
+  onConfirm: () => boolean | Promise<boolean>;
 }) {
-  const [amount, setAmount] = useState(0);
-  const [time, setTime] = useState(nowDatetimeLocal());
-  const [notes, setNotes] = useState("");
-  const [proof, setProof] = useState<string[]>([]);
-
-  useEffect(() => {
-    if (!open || !item) return;
-    setAmount(Number(Math.min(item.price, maxRefund).toFixed(2)));
-    setTime(nowDatetimeLocal());
-    setNotes(stock?.lost ? "未发货商品损耗退款" : "未发货商品退款");
-    setProof([]);
-  }, [open, item?.stockItemId, maxRefund, stock?.lost]);
-
   if (!order || !item) return null;
 
   const submit = async () => {
-    if (amount < 0) return toast.error("退款金额不能为负数");
-    if (amount > maxRefund + 0.005) return toast.error(`退款金额不能超过当前净已收款 ¥${maxRefund.toFixed(2)}`);
-    const refund = amount > 0.005
-      ? {
-          id: uid(),
-          time,
-          type: "refund" as const,
-          amount: Number(amount.toFixed(2)),
-          proof,
-          notes: notes.trim() || (stock?.lost ? "未发货商品损耗退款" : "未发货商品退款"),
-        }
-      : null;
-    const ok = await onConfirm(refund);
+    const ok = await onConfirm();
     if (ok !== false) onOpenChange(false);
   };
 
@@ -2013,13 +1789,14 @@ function ReturnItemDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent aria-describedby={undefined} className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{stock?.lost ? "退损耗商品" : "退未发货商品"}</DialogTitle>
+          <DialogTitle>{stock?.lost ? "移除损耗商品" : "移除未发货商品"}</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4 py-1">
           <div className="rounded-lg border bg-muted/30 p-3 text-sm">
             <div className="font-medium">{product?.name ?? item.productId}</div>
             <div className="text-xs text-muted-foreground mt-1">
-              订单售价 ¥{item.price.toFixed(2)}，当前净已收款 ¥{maxRefund.toFixed(2)}
+              订单售价 ¥{item.price.toFixed(2)}
+              {stock?.code ? ` · 鱼码 ${stock.code}` : ""}
             </div>
             {stock?.lost && (
               <div className="mt-2 rounded border border-red-100 bg-red-50 px-2 py-1.5 text-xs text-red-700">
@@ -2027,45 +1804,13 @@ function ReturnItemDialog({
               </div>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-2">
-              <Label>退款金额（元）</Label>
-              <Input
-                type="number"
-                min={0}
-                max={maxRefund}
-                step={0.01}
-                value={amount === 0 ? "" : amount}
-                onChange={(event) => setAmount(event.target.value === "" ? 0 : Number(event.target.value))}
-                placeholder="0.00"
-              />
-              <p className="text-xs text-muted-foreground">不需要实际退款可填 0。</p>
-            </div>
-            <div className="grid gap-2">
-              <Label>退款时间</Label>
-              <Input type="datetime-local" value={time} onChange={(event) => setTime(event.target.value)} />
-            </div>
-          </div>
-          <div className="grid gap-2">
-            <Label>退款 / 退货备注</Label>
-            <Textarea
-              rows={3}
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              placeholder="填写原因、协商结果或退款方式..."
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label>退款凭证</Label>
-            <ProofUploader images={proof} onChange={setProof} />
-          </div>
           <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
-            确认后会先从订单中移除此商品，订单应收金额随之减少；退款金额大于 0 时，会同步写入资金往来记录。
+            确认后会从订单中移除此商品，订单应收自动减少 ¥{item.price.toFixed(2)}。实际收款或退款统一在财务管理中登记。
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
-          <Button onClick={submit} disabled={saving}>{saving ? "保存中..." : "确认退商品"}</Button>
+          <Button onClick={submit} disabled={saving}>{saving ? "保存中..." : "确认移除"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -2213,7 +1958,6 @@ function ReportDamageDialog({
   onSubmit: (shipment: Shipment, result: DamageResult) => boolean | Promise<boolean>;
 }) {
   const { state } = useStore();
-  const refundable = order ? Math.max(calcAmountPaid(order), 0) : 0;
   const [resolution, setResolution] = useState<"refund" | "reship">("refund");
   const [refundItemIds, setRefundItemIds] = useState<string[]>([]);
   const [refundAmountByStockId, setRefundAmountByStockId] = useState<Record<string, number>>({});
@@ -2239,7 +1983,7 @@ function ReportDamageDialog({
       setReplacementGroupByOriginal({});
       setReplacementSubTankByOriginal({});
     }
-  }, [open, shipment?.id, order?.id, refundable]);
+  }, [open, shipment?.id, order?.id]);
 
   if (!shipment || !order) return null;
 
@@ -2251,7 +1995,7 @@ function ReportDamageDialog({
     (sum, item) => sum + (refundAmountByStockId[item.stockItemId] ?? 0),
     0
   );
-  const maxRefundForSelection = Math.min(refundable, selectedRefundSubtotal);
+  const maxRefundForSelection = selectedRefundSubtotal;
   const selectedReplacementIds = new Set(Object.values(replacementByOriginal).filter(Boolean));
 
   const getProduct = (id: string) => state.products.find((product) => product.id === id);
@@ -2494,7 +2238,7 @@ function ReportDamageDialog({
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  只勾选实际要退款的鱼；每条鱼的待退款金额可手动改，但不能超过该鱼售价、已选商品总售价和当前净已收款。
+                  只勾选实际要退款的鱼；每条鱼的应收调减金额可手动修改，但不能超过该鱼售价和已选商品总售价。
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -2504,11 +2248,11 @@ function ReportDamageDialog({
                     ¥{selectedRefundAmount.toFixed(2)}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    当前最多可退 ¥{maxRefundForSelection.toFixed(2)}，订单净已收 ¥{refundable.toFixed(2)}
+                    当前最多可调减订单应收 ¥{maxRefundForSelection.toFixed(2)}
                   </p>
                 </div>
                 <div className="rounded-lg border border-orange-100 bg-orange-50 px-3 py-2 text-xs text-orange-800">
-                  确认后只会把这笔金额计入订单「待退款」。实际退款完成后，请在资金往来里手动新增退款记录。
+                  确认后只会调整订单应收。实际退款完成后，请在财务管理中登记退款流水。
                 </div>
               </div>
             </div>
@@ -2707,7 +2451,7 @@ function ReportDamageDialog({
             <div className="grid gap-2">
               <Label>报损凭证</Label>
               <ProofUploader images={proof} onChange={setProof} />
-              <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录等凭证；实际退款凭证请在资金往来里上传。</p>
+              <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录等凭证；实际退款凭证请在财务管理中上传。</p>
             </div>
           )}
         </div>
@@ -2720,117 +2464,6 @@ function ReportDamageDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ─── PaymentTimeline ──────────────────────────────────────────────────────────
-
-function PaymentTimeline({
-  payments, onAdd, onEdit, onDelete, canAdd, canEdit, canDelete,
-}: {
-  payments: PaymentRecord[];
-  onAdd: () => void;
-  onEdit: (record: PaymentRecord) => void;
-  onDelete: (record: PaymentRecord) => void;
-  canAdd: boolean;
-  canEdit: boolean;
-  canDelete: boolean;
-}) {
-  const sorted = [...payments].sort((a, b) => a.time.localeCompare(b.time));
-
-  const openImg = (src: string) => {
-    const w = window.open();
-    w?.document.write(`<img src="${src}" style="max-width:100%;max-height:100vh;display:block;margin:auto;" />`);
-  };
-
-  return (
-    <div className="flex flex-col">
-      {sorted.length === 0 && (
-        <p className="text-sm text-muted-foreground text-center py-3">暂无收款记录</p>
-      )}
-      {sorted.map((p, idx) => {
-        const isRefund = p.type === "refund";
-        const isLast = idx === sorted.length - 1;
-        return (
-          <div key={p.id} className="flex gap-3">
-            <div className="flex flex-col items-center w-4 shrink-0">
-              <div
-                className={`size-3 rounded-full mt-0.5 ring-2 ring-offset-1 shrink-0 ${
-                  isRefund ? "bg-red-400 ring-red-200" : "bg-emerald-400 ring-emerald-200"
-                }`}
-              />
-              {!isLast && <div className="w-px flex-1 bg-border min-h-4 my-1" />}
-            </div>
-            <div className={`flex-1 ${isLast ? "pb-1" : "pb-4"}`}>
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-muted-foreground">{fmtDatetime(p.time)}</span>
-                  <PaymentBadge type={p.type} />
-                  <span className={`text-sm font-semibold ${isRefund ? "text-red-600" : "text-emerald-600"}`}>
-                    {isRefund ? "−" : "+"}¥{p.amount.toFixed(2)}
-                  </span>
-                </div>
-                {(canEdit || canDelete) && (
-                  <div className="flex shrink-0 items-center gap-1">
-                    {canEdit && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => onEdit(p)}
-                      >
-                        <Pencil className="size-3 mr-1" />
-                        编辑
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 px-2 text-xs text-red-600 hover:bg-red-50 hover:text-red-700"
-                        onClick={() => onDelete(p)}
-                      >
-                        <Trash2 className="size-3 mr-1" />
-                        删除
-                      </Button>
-                    )}
-                  </div>
-                )}
-              </div>
-              {(p.account || p.notes) && (
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {[p.account ? `账户：${p.account}` : "", p.notes].filter(Boolean).join(" · ")}
-                </p>
-              )}
-              {p.proof?.length > 0 && (
-                <div className="flex gap-2 mt-2 flex-wrap">
-                  {p.proof.map((img, i) => (
-                    <img
-                      key={i}
-                      src={img}
-                      className="size-14 object-cover rounded border cursor-pointer hover:opacity-80"
-                      onClick={() => openImg(img)}
-                      title="点击查看大图"
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-      {canAdd && (
-        <button
-          type="button"
-          className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium mt-2 hover:underline w-fit"
-          onClick={onAdd}
-        >
-          <Plus className="size-4" /> 添加收款 / 退款记录
-        </button>
-      )}
-    </div>
   );
 }
 
@@ -3319,7 +2952,7 @@ function StockPickerBioDialog({
     setLossSaving(false);
     if (!ok) return toast.error("损耗保存失败，请刷新后重试");
     if (order) {
-      toast.success(`已登记损耗；请到订单 ${order.orderNo} 里点击退商品并填写退款金额`);
+      toast.success(`已登记损耗；请到订单 ${order.orderNo} 中移除该商品，实际退款在财务管理中处理`);
     } else {
       toast.success("已登记损耗");
     }
@@ -3671,7 +3304,7 @@ function StockPickerBioDialog({
             </div>
             {order && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                这条鱼已关联销售订单「{order.orderNo}」。确认损耗后会在订单商品上标记「损耗」，该商品不可发货；需要到订单详情里点击退商品，手动填写退款金额后再完成退款记录。
+                这条鱼已关联销售订单「{order.orderNo}」。确认损耗后会在订单商品上标记「损耗」，该商品不可发货；请到订单详情中移除该商品，实际退款在财务管理中处理。
               </div>
             )}
             <div className="rounded-lg border p-3 text-sm">
@@ -3917,7 +3550,7 @@ function ItemsWithShipments({
       {inventoryRemovedItems.length > 0 && (
         <div>
           <div className="flex items-center gap-2 border-t bg-slate-100/70 px-4 py-2 text-xs font-medium text-slate-700">
-            库存记录已删除（{inventoryRemovedItems.length} 件，订单及收款历史保留）
+            库存记录已删除（{inventoryRemovedItems.length} 件，订单历史保留）
           </div>
           <table className="w-full">
             {colHeader}
@@ -3961,13 +3594,9 @@ type DamageResult =
 function OrderDetailDialog({
   order, open, onOpenChange,
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, setState, saveOrderPaymentChange } = useStore();
+  const { state, setState } = useStore();
   const permission = usePermission("orders");
-  const financePermission = usePermission("finance");
   const today = todayDateString();
-  const [addPayOpen, setAddPayOpen] = useState(false);
-  const [editingPayment, setEditingPayment] = useState<PaymentRecord | null>(null);
-  const [deletingPayment, setDeletingPayment] = useState<PaymentRecord | null>(null);
 
   const [editMode, setEditMode] = useState(false);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
@@ -3992,9 +3621,6 @@ function OrderDetailDialog({
       setDamageShipment(null);
       setReturnItem(null);
       setReturnSaving(false);
-      setAddPayOpen(false);
-      setEditingPayment(null);
-      setDeletingPayment(null);
     }
   }, [open]);
 
@@ -4033,7 +3659,7 @@ function OrderDetailDialog({
     if (!isDouyinOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
     if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
-    if (displayAmountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
+    if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
     if (!isPickupOrderSource(editForm.source) && !editForm.plannedShipDate) return toast.error("请选择预计发货日期");
@@ -4170,18 +3796,11 @@ function OrderDetailDialog({
   const orderShipments = state.shipments.filter((s) => s.orderId === order?.id);
   const damageRefundOrder = !!order && isDamageRefundOrder(order, state.shipments);
   const amountDue = order ? calcAmountDue(order, state.shipments) : 0;
-  const amountPaid = order ? calcAmountPaid(order) : 0;
-  const amountReceived = order ? calcAmountReceived(order) : 0;
-  const amountRefunded = order ? calcAmountRefunded(order) : 0;
   const damageRefundAdjustment = order ? calcDamageRefundAdjustment(order, state.shipments) : 0;
-  const financialState = order ? getOrderFinancialState(order, state.shipments) : { kind: "paid" as const, amount: 0 };
-  const isFinancialSettled = financialState.kind === "paid";
-  const balance = amountDue - amountPaid;
   const billableShipping = order ? getBillableShippingFee(order, state.shipments) : displayShipping;
   const hasActualShipping = order ? hasActualShippingFee(order, state.shipments) : false;
   const shippingAdjustment = order ? calcShippingAdjustment(order, state.shipments) : 0;
   const displayAmountDue = editMode && editForm ? draftAmountDue : amountDue;
-  const displayOriginalAmountDue = damageRefundOrder ? displayAmountDue + damageRefundAdjustment : displayAmountDue;
 
   const activeOrderShipments = orderShipments.filter(countsAsActiveShipment);
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
@@ -4206,7 +3825,6 @@ function OrderDetailDialog({
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
   const returnStock = returnItem ? state.stock.find((stock) => stock.id === returnItem.stockItemId) : undefined;
   const returnProduct = returnItem ? getProduct(returnItem.productId) : undefined;
-  const maxReturnRefund = order ? Math.max(calcAmountPaid(order), 0) : 0;
 
   const openReturnItem = (item: OrderItem) => {
     if (!order) return;
@@ -4214,76 +3832,27 @@ function OrderDetailDialog({
     if (item.inventoryRemovedAt) return toast.error("该商品的库存记录已删除，订单历史仅供查看");
     if (order.status === "completed") return toast.error("已完成订单不能退商品");
     if (order.status === "cancelled") return toast.error("已取消订单不能退商品");
-    if (shippedItemIds.has(item.stockItemId)) return toast.error("该商品已出库或已发货，不能按未发货商品退款");
+    if (shippedItemIds.has(item.stockItemId)) return toast.error("该商品已出库或已发货，不能从订单中移除");
     setReturnItem(item);
   };
 
-  const addPayment = async (record: PaymentRecord) => {
-    if (!order) return false;
-    if (!financePermission.requirePermission("create")) return false;
-    if (!confirmWrite("新增", "将新增一条资金往来记录。")) return false;
-    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "add", payment: record });
-    if (!ok) { toast.error("保存失败，请重试"); return false; }
-    toast.success("记录已添加");
-    return true;
-  };
-
-  const openAddPayment = () => {
-    if (!financePermission.requirePermission("create")) return;
-    setEditingPayment(null);
-    setAddPayOpen(true);
-  };
-
-  const openEditPayment = (record: PaymentRecord) => {
-    if (!financePermission.requirePermission("update")) return;
-    setEditingPayment(record);
-    setAddPayOpen(true);
-  };
-
-  const updatePayment = async (record: PaymentRecord) => {
-    if (!order) return false;
-    if (!financePermission.requirePermission("update")) return false;
-    if (!confirmWrite("修改", "将保存资金往来记录的修改。")) return false;
-    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "update", payment: record });
-    if (!ok) { toast.error("保存失败，请重试"); return false; }
-    toast.success("资金记录已更新");
-    return true;
-  };
-
-  const openDeletePayment = (record: PaymentRecord) => {
-    if (!financePermission.requirePermission("delete")) return;
-    setDeletingPayment(record);
-  };
-
-  const deletePayment = async () => {
-    if (!order || !deletingPayment) return;
-    if (!financePermission.requirePermission("delete")) return;
-    if (!confirmWrite("删除", "将删除这条资金往来记录。")) return;
-    const deletePaymentId = deletingPayment.id;
-    const ok = await saveOrderPaymentChange({ orderId: order.id, action: "delete", paymentId: deletePaymentId });
-    if (!ok) return toast.error("删除失败，请重试");
-    setDeletingPayment(null);
-    toast.success("资金记录已删除");
-  };
-
-  const submitReturnItem = async (refund: PaymentRecord | null) => {
+  const submitReturnItem = async () => {
     if (!order || !returnItem) return false;
     if (!permission.requirePermission("update")) return false;
     if (returnSaving) return false;
     if (order.status === "completed") { toast.error("已完成订单不能退商品"); return false; }
     if (order.status === "cancelled") { toast.error("已取消订单不能退商品"); return false; }
-    if (shippedItemIds.has(returnItem.stockItemId)) { toast.error("该商品已出库或已发货，不能按未发货商品退款"); return false; }
-    if (!confirmWrite("退款", refund ? `将退商品并记录退款 ¥${refund.amount.toFixed(2)}。` : "将退商品并调整应收金额。")) return false;
+    if (shippedItemIds.has(returnItem.stockItemId)) { toast.error("该商品已出库或已发货，不能从订单中移除"); return false; }
+    if (!confirmWrite("修改", "将从订单中移除该商品，并同步调整订单应收。")) return false;
     setReturnSaving(true);
     try {
       const result = await postOrderApi("orders/return-item", {
         orderId: order.id,
         stockItemId: returnItem.stockItemId,
-        refund,
       });
       applyOrderApiResult(setState, result);
       setReturnItem(null);
-      toast.success(refund ? `已退商品并记录退款 ¥${refund.amount.toFixed(2)}` : "已退商品，应收金额已更新");
+      toast.success("商品已移除，订单应收已更新");
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
@@ -4374,7 +3943,7 @@ function OrderDetailDialog({
     if (!order) return false;
     if (!permission.requirePermission("update")) return false;
     if (shipment.shipMethod === "pickup") { toast.error("上门自取订单不可报损"); return false; }
-    if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并计入待退款金额，实际退款需手动录入资金往来。" : "将发货单报损并选择库存鱼补发。")) return false;
+    if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并调整订单应收，实际退款由财务管理处理。" : "将发货单报损并选择库存鱼补发。")) return false;
     try {
       const response = await postOrderApi("shipments/damage", {
         shipmentId: shipment.id,
@@ -4726,7 +4295,7 @@ function OrderDetailDialog({
                 <div className={`grid gap-3 mb-4 ${isPickupOrderSource(editForm.source) ? "grid-cols-2" : "grid-cols-3"}`}>
                   {!isPickupOrderSource(editForm.source) && (
                     <div className="grid gap-1.5">
-                      <Label className="text-xs">预收运费（¥）</Label>
+                      <Label className="text-xs">订单运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
                         onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
                     </div>
@@ -4741,7 +4310,7 @@ function OrderDetailDialog({
                     <Input type="number" min={0} step={0.01} value={editForm.discount || ""} placeholder="0"
                       className={`h-8 text-sm${displayAmountDue < 0 ? " border-red-500 focus-visible:ring-red-500" : ""}`}
                       onChange={(e) => setEditForm((f) => f ? { ...f, discount: Number(e.target.value) } : f)} />
-                    {displayAmountDue < 0 && <p className="text-xs text-red-500">折扣超出应付金额 ¥{Math.abs(displayAmountDue).toFixed(2)}</p>}
+                    {displayAmountDue < 0 && <p className="text-xs text-red-500">折扣导致订单应收为负 ¥{Math.abs(displayAmountDue).toFixed(2)}</p>}
                   </div>
                 </div>
                 <div className="border-t pt-3 flex flex-col gap-1.5 text-sm">
@@ -4758,7 +4327,7 @@ function OrderDetailDialog({
                   {displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
                   {displayPackaging > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>}
                   <div className="flex justify-between font-semibold text-base border-t pt-2 mt-1">
-                    <span>应付总额</span>
+                    <span>订单应收</span>
                     <span className={displayAmountDue < 0 ? "text-red-600" : "text-sky-700"}>¥{displayAmountDue.toFixed(2)}</span>
                   </div>
                 </div>
@@ -4772,7 +4341,7 @@ function OrderDetailDialog({
                 <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
                 {!isPickupOrderSource(order.source) && (
-                  <div className="flex justify-between"><span className="text-muted-foreground">预收运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">订单运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
                 )}
                 {hasActualShipping && (
                   <div className="flex justify-between">
@@ -4794,72 +4363,9 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div className="flex justify-between border-t pt-2 font-semibold text-base">
-                  <span>{damageRefundOrder ? "调整后应付" : "应付总额"}</span><span className="text-sky-700">¥{displayAmountDue.toFixed(2)}</span>
+                  <span>{damageRefundOrder ? "调整后订单应收" : "订单应收"}</span><span className="text-sky-700">¥{displayAmountDue.toFixed(2)}</span>
                 </div>
               </div>
-            )}
-
-            {/* ── 收付款（只读模式显示）── */}
-            {!editMode && (
-              <>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="rounded-lg border p-3 text-center">
-                    <div className="text-xs text-muted-foreground mb-1">{damageRefundOrder ? "原应付" : "应付"}</div>
-                    <div className="text-lg font-semibold">¥{displayOriginalAmountDue.toFixed(2)}</div>
-                  </div>
-                  <div className="rounded-lg border p-3 text-center">
-                    <div className="text-xs text-muted-foreground mb-1">{damageRefundOrder ? "已收" : "已付"}</div>
-                    <div className="text-lg font-semibold text-emerald-600">¥{(damageRefundOrder ? amountReceived : amountPaid).toFixed(2)}</div>
-                  </div>
-                  {damageRefundOrder ? (
-                    <div className={`rounded-lg border p-3 text-center ${
-                      financialState.kind === "refundable"
-                        ? "border-red-200 bg-red-50"
-                        : financialState.kind === "payable"
-                          ? "border-orange-200 bg-orange-50"
-                          : "border-emerald-200 bg-emerald-50"
-                    }`}>
-                      <div className="text-xs text-muted-foreground mb-1">
-                        {financialState.kind === "refundable" ? "待退款" : financialState.kind === "payable" ? "待付款" : "已结清"}
-                      </div>
-                      <div className={`text-lg font-semibold ${
-                        financialState.kind === "refundable"
-                          ? "text-red-600"
-                          : financialState.kind === "payable"
-                            ? "text-orange-600"
-                            : "text-emerald-600"
-                      }`}>
-                        {financialState.kind === "paid" ? "✓" : `¥${financialState.amount.toFixed(2)}`}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className={`rounded-lg border p-3 text-center ${
-                      balance > 0.005 ? "border-orange-200 bg-orange-50" : balance < -0.005 ? "border-emerald-200 bg-emerald-50" : ""
-                    }`}>
-                      <div className="text-xs text-muted-foreground mb-1">
-                        {balance > 0.005 ? "待付" : balance < -0.005 ? "多付" : "已结清"}
-                      </div>
-                      <div className={`text-lg font-semibold ${
-                        balance > 0.005 ? "text-orange-600" : balance < -0.005 ? "text-emerald-600" : "text-muted-foreground"
-                      }`}>
-                        {Math.abs(balance) < 0.005 ? "✓" : `${balance < 0 ? "−" : ""}¥${Math.abs(balance).toFixed(2)}`}
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="text-xs font-medium text-muted-foreground mb-4">资金往来记录</div>
-		                  <PaymentTimeline
-		                    payments={order.payments ?? []}
-		                    onAdd={openAddPayment}
-		                    onEdit={openEditPayment}
-		                    onDelete={openDeletePayment}
-		                    canAdd={financePermission.canCreate}
-		                    canEdit={financePermission.canUpdate}
-		                    canDelete={financePermission.canDelete}
-		                  />
-                </div>
-              </>
             )}
           </div>
 
@@ -4933,36 +4439,6 @@ function OrderDetailDialog({
         </DialogContent>
       </Dialog>
 
-      <AddPaymentDialog
-        open={addPayOpen}
-        onOpenChange={(o) => {
-          setAddPayOpen(o);
-          if (!o) setEditingPayment(null);
-        }}
-        onAdd={addPayment}
-        editingRecord={editingPayment}
-        onUpdate={updatePayment}
-      />
-
-      <AlertDialog open={!!deletingPayment} onOpenChange={(nextOpen) => !nextOpen && setDeletingPayment(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除资金往来记录</AlertDialogTitle>
-            <AlertDialogDescription>
-              确认删除这笔「{deletingPayment ? PAYMENT_TYPE_LABEL[deletingPayment.type] : ""}」记录？
-              {deletingPayment ? ` 金额 ¥${deletingPayment.amount.toFixed(2)}。` : ""}
-              删除后订单的实付金额会重新计算。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={deletePayment} className="bg-red-600 hover:bg-red-700">
-              确认删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
       <ReturnItemDialog
         open={!!returnItem}
         onOpenChange={(nextOpen) => { if (!nextOpen) setReturnItem(null); }}
@@ -4970,7 +4446,6 @@ function OrderDetailDialog({
         item={returnItem}
         product={returnProduct}
         stock={returnStock}
-        maxRefund={maxReturnRefund}
         saving={returnSaving}
         onConfirm={submitReturnItem}
       />
@@ -5009,7 +4484,6 @@ function OrderDetailDialog({
           const s = state.stock.find((x) => x.id === sid);
           return s ? subTankName(s.subTankId) : "—";
         }}
-        balance={balance}
         pickupOnly={isPickupOrderSource(order.source)}
       />
 
@@ -5760,7 +5234,7 @@ function NewOrderDialog({
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
     if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
-    if (amountDue < 0) return toast.error("折扣过大，应付金额不能为负数");
+    if (amountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (belowMinimumReturn) return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
     const missingStockIds = Array.from(selectedItems.keys()).filter((stockItemId) =>
       !state.stock.some((item) => item.id === stockItemId)
@@ -6140,7 +5614,7 @@ function NewOrderDialog({
                 <div className={`grid grid-cols-1 gap-3 ${pickupOrder ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
                   {!pickupOrder && (
                     <div className="grid gap-1.5">
-                      <Label className="text-xs">预收运费（¥）</Label>
+                      <Label className="text-xs">订单运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
                     </div>
                   )}
@@ -6152,7 +5626,7 @@ function NewOrderDialog({
                     <Label className="text-xs">折扣/优惠（¥）</Label>
                     <Input type="number" min={0} step={0.01} value={discount || ""} onChange={(e) => setDiscount(Number(e.target.value))} placeholder="0"
                       className={`h-8 text-sm${amountDue < 0 || belowMinimumReturn ? " border-red-500 focus-visible:ring-red-500" : ""}`} />
-                    {amountDue < 0 && <p className="text-xs text-red-500">折扣超出应付金额 ¥{Math.abs(amountDue).toFixed(2)}</p>}
+                    {amountDue < 0 && <p className="text-xs text-red-500">折扣导致订单应收为负 ¥{Math.abs(amountDue).toFixed(2)}</p>}
                     {belowMinimumReturn && <p className="text-xs text-red-500">商品折后金额必须高于最低回厂价合计</p>}
                   </div>
                 </div>
@@ -6371,12 +5845,6 @@ export function OrdersView({
         customer?.notes,
         order.contactPerson,
         order.notes,
-        ...order.payments.flatMap((payment) => [
-          PAYMENT_TYPE_LABEL[payment.type],
-          payment.amount,
-          payment.time,
-          payment.notes,
-        ]),
         ...orderShipments.flatMap((shipment) => [
           shipment.shipDate,
           shipment.carrier,
@@ -6384,7 +5852,6 @@ export function OrdersView({
           shipment.notes,
         ]),
         calcAmountDue(order, state.shipments).toFixed(2),
-        calcAmountPaid(order).toFixed(2),
         orderCommissionTotalWithProducts(order, (productId) => productMap.get(productId)).toFixed(2),
         ...itemSearchText,
       ].filter(Boolean).join(" ");
@@ -6468,7 +5935,7 @@ export function OrdersView({
     if (!deleteOrder) return;
     if (!permission.requirePermission("delete")) return;
     if (hasPaymentRecords(deleteOrder)) {
-      toast.error("该订单已有收款记录，不能删除");
+      toast.error("该订单已有财务流水，不能删除，请先在财务管理中处理");
       setDeleteOrder(null);
       return;
     }
@@ -6518,8 +5985,7 @@ export function OrdersView({
   const renderMobileOrderCard = (order: OrderListRow) => {
     const customer = getCustomer(order.customerId);
     const due = calcAmountDue(order, state.shipments);
-    const paid = calcAmountPaid(order);
-    const balance = due - paid;
+    const commission = orderCommissionTotalWithProducts(order, (productId) => mobileProductById.get(productId));
     const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
     const activeShipments = orderShipments.filter(countsAsActiveShipment);
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
@@ -6539,11 +6005,6 @@ export function OrdersView({
       .filter(Boolean);
     const shownItems = itemNames.slice(0, 2).join("、");
     const extraItemCount = Math.max(0, itemNames.length - 2);
-    const financialClass = balance > 0.005
-      ? "text-orange-600"
-      : balance < -0.005
-        ? "text-red-600"
-        : "text-emerald-700";
 
     return (
       <article
@@ -6600,18 +6061,14 @@ export function OrdersView({
               </div>
             </div>
 
-            <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div>
-                <div className="text-xs text-muted-foreground">应付</div>
+                <div className="text-xs text-muted-foreground">订单应收</div>
                 <div className="mt-0.5 font-semibold text-sky-700">¥{due.toFixed(2)}</div>
               </div>
               <div>
-                <div className="text-xs text-muted-foreground">实付</div>
-                <div className="mt-0.5 font-semibold text-foreground">¥{paid.toFixed(2)}</div>
-              </div>
-              <div>
-                <div className="text-xs text-muted-foreground">{balance < -0.005 ? "应退" : "待收"}</div>
-                <div className={`mt-0.5 font-semibold ${financialClass}`}>¥{Math.abs(balance).toFixed(2)}</div>
+                <div className="text-xs text-muted-foreground">可提成</div>
+                <div className="mt-0.5 font-semibold text-emerald-700">¥{commission.toFixed(2)}</div>
               </div>
             </div>
 
@@ -6655,7 +6112,7 @@ export function OrdersView({
                     onClick={(event) => {
                       event.stopPropagation();
                       if (hasPaymentRecords(order)) {
-                        toast.error("该订单已有收款记录，不能删除");
+                        toast.error("该订单已有财务流水，不能删除，请先在财务管理中处理");
                         return;
                       }
                       setDeleteOrder(order);
@@ -7165,23 +6622,10 @@ export function OrdersView({
           },
           {
             key: "shippingFee",
-            title: "应付",
+            title: "订单应收",
             render: (r) => (
               <span className="text-sky-700 font-medium">¥{calcAmountDue(r, state.shipments).toFixed(2)}</span>
             ),
-          },
-          {
-            key: "payments",
-            title: "实付",
-            render: (r) => {
-              const paid = calcAmountPaid(r);
-              const due = calcAmountDue(r, state.shipments);
-              return (
-                <span className={paid + 0.005 >= due ? "text-emerald-600" : "text-orange-500"}>
-                  ¥{paid.toFixed(2)}
-                </span>
-              );
-            },
           },
           {
             key: "commission",
@@ -7205,14 +6649,14 @@ export function OrdersView({
             </Button>
 	            {permission.canDelete && (
 	              <Button
-	                size="sm"
-	                variant="ghost"
-	                className={hasPaymentRecords(row) ? "text-muted-foreground" : "text-red-500 hover:text-red-700 hover:bg-red-50"}
-	                title={hasPaymentRecords(row) ? "已有收款记录，不能删除" : "删除订单"}
-	                onClick={() => {
-	                  if (hasPaymentRecords(row)) {
-	                    toast.error("该订单已有收款记录，不能删除");
-	                    return;
+		                size="sm"
+		                variant="ghost"
+		                className={hasPaymentRecords(row) ? "text-muted-foreground" : "text-red-500 hover:text-red-700 hover:bg-red-50"}
+		                title={hasPaymentRecords(row) ? "已有财务流水，不能删除" : "删除订单"}
+		                onClick={() => {
+		                  if (hasPaymentRecords(row)) {
+		                    toast.error("该订单已有财务流水，不能删除，请先在财务管理中处理");
+		                    return;
 	                  }
 	                  setDeleteOrder(row);
 	                }}
@@ -7235,7 +6679,7 @@ export function OrdersView({
               当前已选 {selectedOrders.length} 个订单。
               {pendingTrackingOnly
                 ? "只会导出这些订单里「已出库/待发货」的商品，不包含订单里未出库或已发货的商品。"
-                : "将导出选中订单的完整订单、商品、发货和资金信息。"}
+                : "将导出选中订单的订单、商品和发货信息，不包含财务流水。"}
             </p>
             <div className="grid grid-cols-2 gap-3">
               <Button
@@ -7320,7 +6764,7 @@ export function OrdersView({
             <AlertDialogDescription>
               确认彻底删除「{getCustomer(deleteOrder?.customerId ?? "")?.name ?? ""}」的订单（{deleteOrder?.date}）？
               {" 关联商品将恢复为在库状态，相关发货记录会一并删除。"}
-              {deleteOrder && hasPaymentRecords(deleteOrder) && " 该订单已有收款记录，不能删除。"}
+              {deleteOrder && hasPaymentRecords(deleteOrder) && " 该订单已有财务流水，不能删除，请先在财务管理中处理。"}
               此操作无法撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>

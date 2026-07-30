@@ -8,7 +8,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
 import { toast } from "sonner";
-import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square, AlertCircle } from "lucide-react";
+import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
 
 function todayDateString(): string {
   const now = new Date();
@@ -42,7 +42,6 @@ export function ShipDialog({
   unshippedItems,      // items not yet in any shipment
   getProductName,
   getTankName,
-  balance,             // amountDue - amountPaid (must be ~0 to allow shipping)
   pickupOnly = false,
 }: {
   order: Order | null;
@@ -52,7 +51,6 @@ export function ShipDialog({
   unshippedItems: OrderItem[];
   getProductName: (productId: string) => string;
   getTankName: (stockItemId: string) => string;
-  balance: number;     // positive = unpaid, negative = overpaid
   pickupOnly?: boolean;
 }) {
   const todayStr = todayDateString();
@@ -88,9 +86,8 @@ export function ShipDialog({
 
   if (!order) return null;
 
-  const paymentBlocked = Math.abs(balance) > 0.005;
-  const preCollected = order.shippingFee ?? 0;
-  const feeDiff = actualShippingFee - preCollected;
+  const orderShippingFee = order.shippingFee ?? 0;
+  const feeDiff = actualShippingFee - orderShippingFee;
 
   const toggleItem = (id: string) => {
     setSelectedIds((prev) => {
@@ -115,7 +112,6 @@ export function ShipDialog({
   };
 
   const confirm = async () => {
-    if (paymentBlocked) return toast.error("应付与已付金额不相等，请先完成付款再出库");
     if (pickupOnly && shipMethod !== "pickup") return toast.error("线下自提订单只能使用上门自取");
     if (!shipDate) return toast.error("请填写出库日期");
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
@@ -142,19 +138,6 @@ export function ShipDialog({
         </DialogHeader>
 
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 py-1 pr-1 pb-3">
-
-          {/* Payment block warning */}
-          {paymentBlocked && (
-            <div className="flex items-start gap-2 rounded-lg px-3 py-3 bg-red-50 border border-red-200 text-sm text-red-700">
-              <AlertCircle className="size-4 mt-0.5 shrink-0" />
-              <div>
-                <strong>无法出库：</strong>
-                {balance > 0
-                  ? `客户尚欠款 ¥${balance.toFixed(2)}，请先收清货款再出库。`
-                  : `已多付 ¥${Math.abs(balance).toFixed(2)}，请先退款再出库。`}
-              </div>
-            </div>
-          )}
 
           {/* Item selection */}
           <div className="rounded-lg border bg-card">
@@ -294,8 +277,8 @@ export function ShipDialog({
               <Info className="size-4 mt-0.5 shrink-0" />
               <div>
                 {feeDiff > 0
-                  ? <>实际运费比预收多 <strong>¥{feeDiff.toFixed(2)}</strong>，出库后会计入应收账款。</>
-                  : <>实际运费比预收少 <strong>¥{Math.abs(feeDiff).toFixed(2)}</strong>，出库后会计入应收账款。</>}
+                  ? <>实际运费比订单运费多 <strong>¥{feeDiff.toFixed(2)}</strong>，出库后将调整订单应收。</>
+                  : <>实际运费比订单运费少 <strong>¥{Math.abs(feeDiff).toFixed(2)}</strong>，出库后将调整订单应收。</>}
               </div>
             </div>
           )}
@@ -309,7 +292,7 @@ export function ShipDialog({
 
         <DialogFooter className="border-t pt-3 shrink-0">
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={confirm} disabled={paymentBlocked || saving}>
+          <Button onClick={confirm} disabled={saving}>
             <PackageCheck className="size-4 mr-1" />
             {saving ? "保存中..." : pickupOnly ? "确认自提" : "确认出库"}
           </Button>

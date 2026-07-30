@@ -5759,9 +5759,9 @@ async function handleApi(req, res, url) {
         const selectedSubtotal = orderItems
           .filter((item) => damagedItemStockIds.includes(String(item?.stockItemId ?? "")))
           .reduce((sum, item) => sum + Number(item?.price ?? 0), 0);
-        const maxRefund = Math.min(Math.max(calcAmountPaidForOrder(order), 0), selectedSubtotal);
+        const maxRefund = selectedSubtotal;
         if (refundAmount > maxRefund + 0.005) {
-          throw new Error(`退款金额不能超过已选商品可退金额 ¥${maxRefund.toFixed(2)}`);
+          throw new Error(`应收调减金额不能超过已选商品售价 ¥${maxRefund.toFixed(2)}`);
         }
         nextShipment = {
           ...nextShipment,
