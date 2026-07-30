@@ -11,6 +11,13 @@ import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
+import {
+  DEFAULT_COMMISSION_RATE,
+  calculateOrderCommission,
+  normalizeCommissionRate,
+  normalizeExternalOrderNo,
+  parseDouyinSettlementCsv,
+} from "./finance-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,6 +74,7 @@ const PERMISSION_MODULE_KEYS = [
   "lossRecords",
   "customers",
   "orders",
+  "finance",
   "accounts",
 ];
 const PERMISSION_ACTIONS = ["create", "update", "delete"];
@@ -1236,7 +1244,7 @@ function normalizePermissionsForStorage(permissions) {
     module,
     Object.fromEntries(PERMISSION_ACTIONS.map((action) => [
       action,
-      permissions?.[module]?.[action] ?? full[module][action],
+      permissions?.[module]?.[action] ?? (module === "finance" ? false : full[module][action]),
     ])),
   ]));
 }
@@ -1430,6 +1438,13 @@ function requireModulePermissionForAuth(req, module, action = "update") {
   if (!hasModulePermission(req.auth?.account, module, action)) {
     throw new Error("当前账户没有执行该操作的权限");
   }
+}
+
+function requireFinanceAccessForAuth(req) {
+  if (["create", "update", "delete"].some((action) =>
+    hasModulePermission(req.auth?.account, "finance", action)
+  )) return;
+  throw new Error("当前账户没有财务模块权限");
 }
 
 function validateStatePatchAuthorization(req, patch = {}) {
@@ -2468,6 +2483,7 @@ function normalizePaymentRecord(record = {}) {
     time: String(record.time || nowDatetimeInChina()),
     type,
     amount: normalizeMoney(record.amount, "Payment amount"),
+    account: String(record.account ?? "").trim(),
     proof: Array.isArray(record.proof) ? record.proof : [],
     notes: String(record.notes ?? ""),
   };
@@ -2553,6 +2569,276 @@ function getOrderFinancialStateForOrder(order = {}, shipments = []) {
   if (balance > 0.005) return { kind: "payable", amount: Number(balance.toFixed(2)) };
   if (balance < -0.005) return { kind: "refundable", amount: Number(Math.abs(balance).toFixed(2)) };
   return { kind: "paid", amount: 0 };
+}
+
+function roundFinance(value) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
+function financeDefaultCommissionRate(state = {}) {
+  return normalizeCommissionRate(
+    state?.systemSettings?.financeDefaultCommissionRate,
+    DEFAULT_COMMISSION_RATE
+  );
+}
+
+function financePaymentTotals(order = {}) {
+  return (Array.isArray(order?.payments) ? order.payments : []).reduce((totals, payment) => {
+    const amount = Number(payment?.amount ?? 0);
+    if (payment?.type === "refund") totals.refunded += amount;
+    else totals.received += amount;
+    return totals;
+  }, { received: 0, refunded: 0 });
+}
+
+function orderLogisticsStatusForFinance(order = {}, shipments = []) {
+  if (order?.status === "cancelled") return "已取消";
+  if (order?.status === "completed") return "已完成";
+  if (order?.status === "damaged") return "已报损";
+  const related = shipments.filter((shipment) =>
+    String(shipment?.orderId ?? "") === String(order?.id ?? "") && shipment?.status !== "preparing"
+  );
+  if (related.some((shipment) => shipment?.status === "damaged")) return "已报损";
+  if (related.length === 0) return "待出库";
+  if (related.every((shipment) => shipment?.status === "delivered")) return "已签收";
+  if (related.some((shipment) => shipment?.status === "shipped")) return "运输中";
+  if (related.some((shipment) => shipment?.status === "outbound")) return "已出库";
+  return "待发货";
+}
+
+function financeStatusLabel(order = {}, balance = 0, received = 0, hasPlatformSettlement = false) {
+  if (order?.status === "cancelled") return "已取消";
+  if (hasPlatformSettlement) return Math.abs(balance) <= 0.01 ? "已核销" : "有差异";
+  if (balance < -0.01) return "待退款";
+  if (balance <= 0.01) return "已核销";
+  if (received > 0.01) return "部分收款";
+  return "未核销";
+}
+
+function settlementRecordFromRow(row = {}) {
+  const data = row?.data && typeof row.data === "object" ? row.data : {};
+  return {
+    ...data,
+    batchId: String(row?.batch_id ?? data.batchId ?? ""),
+    importedAt: row?.created_at ? new Date(row.created_at).toISOString() : "",
+  };
+}
+
+function financeOrderLookup(orders = []) {
+  const lookup = new Map();
+  for (const order of orders) {
+    const externalOrderNo = normalizeExternalOrderNo(order?.douyinOrderNo);
+    if (externalOrderNo && !lookup.has(externalOrderNo)) lookup.set(externalOrderNo, order);
+  }
+  return lookup;
+}
+
+function buildFinanceOverview(state = {}, settlementRows = [], batchRows = []) {
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+  const customers = new Map((Array.isArray(state.customers) ? state.customers : [])
+    .map((customer) => [String(customer?.id ?? ""), customer]));
+  const defaultCommissionRate = financeDefaultCommissionRate(state);
+  const settlements = settlementRows.map(settlementRecordFromRow);
+  const settlementsByExternalOrderNo = new Map();
+  for (const settlement of settlements) {
+    const key = normalizeExternalOrderNo(settlement.externalOrderNo);
+    if (!key) continue;
+    settlementsByExternalOrderNo.set(key, [
+      ...(settlementsByExternalOrderNo.get(key) ?? []),
+      settlement,
+    ]);
+  }
+
+  const orderRows = orders.map((order) => {
+    const externalOrderNo = normalizeExternalOrderNo(order?.douyinOrderNo);
+    const platformSettlements = externalOrderNo
+      ? settlementsByExternalOrderNo.get(externalOrderNo) ?? []
+      : [];
+    const paymentTotals = financePaymentTotals(order);
+    const platformIncome = roundFinance(platformSettlements.reduce(
+      (sum, settlement) => sum + Number(settlement?.incomeTotal ?? 0),
+      0
+    ));
+    const platformRefund = roundFinance(platformSettlements.reduce(
+      (sum, settlement) => sum + Math.abs(Number(settlement?.preSettlementRefund ?? 0)),
+      0
+    ));
+    const platformFees = roundFinance(platformSettlements.reduce(
+      (sum, settlement) => sum + Math.abs(Number(settlement?.expenseTotal ?? 0)),
+      0
+    ));
+    const netSettlement = roundFinance(platformSettlements.reduce(
+      (sum, settlement) => sum + Number(settlement?.settlementAmount ?? 0),
+      0
+    ));
+    const hasPlatformSettlement = platformSettlements.length > 0;
+    const received = hasPlatformSettlement ? platformIncome : roundFinance(paymentTotals.received);
+    const refunded = hasPlatformSettlement ? platformRefund : roundFinance(paymentTotals.refunded);
+    const recognizedNet = hasPlatformSettlement
+      ? platformIncome
+      : roundFinance(paymentTotals.received - paymentTotals.refunded);
+    const receivable = order?.status === "cancelled" ? 0 : calcAmountDueForOrder(order, shipments);
+    const balance = roundFinance(receivable - recognizedNet);
+    const commission = calculateOrderCommission(order, defaultCommissionRate);
+    const customer = customers.get(String(order?.customerId ?? ""));
+    return {
+      id: String(order?.id ?? ""),
+      siteId: normalizeSiteId(order?.siteId),
+      orderNo: String(order?.orderNo ?? ""),
+      douyinOrderNo: externalOrderNo,
+      date: String(order?.date ?? ""),
+      source: String(order?.source ?? ""),
+      customerName: String(customer?.name ?? (externalOrderNo ? "抖音客户" : "未关联客户")),
+      contactPerson: String(order?.contactPerson ?? ""),
+      logisticsStatus: orderLogisticsStatusForFinance(order, shipments),
+      financeStatus: financeStatusLabel(order, balance, received, hasPlatformSettlement),
+      receivable,
+      received,
+      refunded,
+      balance,
+      platformFees,
+      netSettlement,
+      settlementCount: platformSettlements.length,
+      ...commission,
+      payments: (Array.isArray(order?.payments) ? order.payments : []).map((payment) => ({
+        id: String(payment?.id ?? ""),
+        time: String(payment?.time ?? ""),
+        type: String(payment?.type ?? "other"),
+        amount: roundFinance(payment?.amount),
+        account: String(payment?.account ?? ""),
+        proof: Array.isArray(payment?.proof) ? payment.proof : [],
+        notes: String(payment?.notes ?? ""),
+      })),
+    };
+  });
+
+  const orderLookup = financeOrderLookup(orders);
+  const reconciliationRows = [...settlementsByExternalOrderNo.entries()]
+    .map(([externalOrderNo, records]) => {
+      const matchedOrder = orderLookup.get(externalOrderNo);
+      const incomeTotal = roundFinance(records.reduce((sum, item) => sum + Number(item?.incomeTotal ?? 0), 0));
+      const orderTotal = roundFinance(records.reduce((sum, item) => sum + Number(item?.orderTotal ?? 0), 0));
+      const refundTotal = roundFinance(records.reduce(
+        (sum, item) => sum + Math.abs(Number(item?.preSettlementRefund ?? 0)),
+        0
+      ));
+      const platformFees = roundFinance(records.reduce(
+        (sum, item) => sum + Math.abs(Number(item?.expenseTotal ?? 0)),
+        0
+      ));
+      const settlementAmount = roundFinance(records.reduce(
+        (sum, item) => sum + Number(item?.settlementAmount ?? 0),
+        0
+      ));
+      const systemReceivable = matchedOrder
+        ? matchedOrder?.status === "cancelled"
+          ? 0
+          : calcAmountDueForOrder(matchedOrder, shipments)
+        : null;
+      const difference = systemReceivable == null ? null : roundFinance(systemReceivable - incomeTotal);
+      return {
+        externalOrderNo,
+        internalOrderId: matchedOrder ? String(matchedOrder.id ?? "") : "",
+        internalOrderNo: matchedOrder ? String(matchedOrder.orderNo ?? "") : "",
+        contactPerson: matchedOrder ? String(matchedOrder.contactPerson ?? "") : "",
+        settlementTime: records.map((item) => String(item?.settlementTime ?? "")).sort().at(-1) ?? "",
+        productName: [...new Set(records.map((item) => String(item?.productName ?? "")).filter(Boolean))].join("、"),
+        settlementCount: records.length,
+        orderTotal,
+        incomeTotal,
+        refundTotal,
+        platformFees,
+        settlementAmount,
+        systemReceivable,
+        difference,
+        status: !matchedOrder ? "未匹配" : Math.abs(difference ?? 0) <= 0.01 ? "已匹配" : "有差异",
+        formulaMatches: records.every((item) => item?.formulaMatches !== false),
+      };
+    })
+    .sort((left, right) => String(right.settlementTime).localeCompare(String(left.settlementTime)));
+
+  const transactions = orderRows.flatMap((order) =>
+    order.payments.map((payment) => ({
+      ...payment,
+      orderId: order.id,
+      orderNo: order.orderNo,
+      customerName: order.customerName,
+      contactPerson: order.contactPerson,
+      source: order.source,
+    }))
+  ).sort((left, right) => String(right.time).localeCompare(String(left.time)));
+
+  const settlementTotal = roundFinance(settlements.reduce(
+    (sum, settlement) => sum + Number(settlement?.settlementAmount ?? 0),
+    0
+  ));
+  const unmatchedSettlementCount = reconciliationRows.filter((row) => row.status === "未匹配").length;
+  const manualActualInflow = roundFinance(orderRows
+    .filter((order) => order.settlementCount === 0)
+    .reduce((sum, order) => sum + order.received, 0));
+  const manualRefunded = roundFinance(orderRows
+    .filter((order) => order.settlementCount === 0)
+    .reduce((sum, order) => sum + order.refunded, 0));
+  const platformRefunded = roundFinance(settlements.reduce(
+    (sum, settlement) => sum + Math.abs(Number(settlement?.preSettlementRefund ?? 0)),
+    0
+  ));
+  const summary = {
+    receivable: roundFinance(orderRows.reduce((sum, order) => sum + order.receivable, 0)),
+    actualInflow: roundFinance(manualActualInflow + settlementTotal),
+    refunded: roundFinance(manualRefunded + platformRefunded),
+    platformFees: roundFinance(settlements.reduce(
+      (sum, settlement) => sum + Math.abs(Number(settlement?.expenseTotal ?? 0)),
+      0
+    )),
+    netSettlement: roundFinance(manualActualInflow - manualRefunded + settlementTotal),
+    unreconciledOrders: orderRows.filter((order) =>
+      order.financeStatus !== "已核销" && order.financeStatus !== "已取消"
+    ).length,
+    commissionTotal: roundFinance(orderRows.reduce((sum, order) => sum + order.commissionAmount, 0)),
+    unmatchedSettlementCount,
+  };
+
+  return {
+    settings: { defaultCommissionRate },
+    summary,
+    orders: orderRows.sort((left, right) =>
+      String(right.date).localeCompare(String(left.date)) || String(right.orderNo).localeCompare(String(left.orderNo))
+    ),
+    transactions,
+    reconciliations: reconciliationRows,
+    importBatches: batchRows.map((row) => ({
+      id: String(row?.id ?? ""),
+      siteId: String(row?.site_id ?? ""),
+      fileName: String(row?.file_name ?? ""),
+      fileHash: String(row?.file_hash ?? ""),
+      importedAt: row?.imported_at ? new Date(row.imported_at).toISOString() : "",
+      importedBy: String(row?.imported_by ?? ""),
+      rowCount: Number(row?.row_count ?? 0),
+      matchedCount: Number(row?.matched_count ?? 0),
+      unmatchedCount: Number(row?.unmatched_count ?? 0),
+      duplicateCount: Number(row?.duplicate_count ?? 0),
+      totals: row?.totals && typeof row.totals === "object" ? row.totals : {},
+    })),
+  };
+}
+
+function financeSiteScope(state = {}, account = {}, requestedSiteId = ALL_SITE_ID) {
+  const visibleSiteIds = visibleSiteIdsForAccount(account, state);
+  const requested = normalizeSiteScope(requestedSiteId || ALL_SITE_ID);
+  if (requested !== ALL_SITE_ID && !visibleSiteIds.includes(requested)) {
+    throw new Error("当前账户无权查看该场地财务数据");
+  }
+  const scopedState = requested === ALL_SITE_ID
+    ? siteVisibilityFilteredState(state, account)
+    : siteFilteredState(state, requested);
+  return {
+    requested,
+    visibleSiteIds,
+    siteIds: requested === ALL_SITE_ID ? visibleSiteIds : [requested],
+    state: scopedState,
+  };
 }
 
 function orderPermissionAllowedForAccount(account = {}, action = "update") {
@@ -2790,10 +3076,6 @@ function countsAsCompletionShipment(shipment = {}) {
 }
 
 function validateOrderCanComplete(order = {}, shipments = []) {
-  const financialState = getOrderFinancialStateForOrder(order, shipments);
-  if (financialState.kind !== "paid") {
-    throw new Error("订单资金未结清，不能标记完成");
-  }
   const activeShipments = shipments.filter((shipment) =>
     String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
   );
@@ -3036,8 +3318,6 @@ function validateOrderStatusForPatch(req, currentOrder = {}, nextOrder = {}, nex
   }
   if (nextStatus === "shipped") {
     if (relatedShipments.length === 0) throw new Error("没有有效发货记录，不能直接改为已发货");
-    const financialState = getOrderFinancialStateForOrder(nextOrder, nextShipments);
-    if (financialState.kind !== "paid") throw new Error("订单未结清或存在待退款，不能改为已发货");
     return;
   }
   if (nextStatus === "damaged") {
@@ -3110,10 +3390,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
 
     const paymentAction = paymentChangeAction(currentOrder.payments ?? [], nextOrder.payments ?? []);
     if (paymentAction) {
-      requireOrderPermissionForAuth(req, paymentAction);
-      if (nextOrder.status === "completed" || nextOrder.status === "cancelled") {
-        throw new Error("已完成或已取消订单不能修改资金记录");
-      }
+      requireModulePermissionForAuth(req, "finance", paymentAction);
     }
 
     if (nextOrder.status === "completed" && currentOrder.status !== "completed") {
@@ -3693,6 +3970,45 @@ async function ensureSchema() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS finance_import_batches (
+        id TEXT PRIMARY KEY,
+        state_id TEXT NOT NULL,
+        site_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        imported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        imported_by TEXT NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        matched_count INTEGER NOT NULL DEFAULT 0,
+        unmatched_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        totals JSONB NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (state_id, site_id, platform, file_hash)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS finance_platform_settlements (
+        id TEXT PRIMARY KEY,
+        state_id TEXT NOT NULL,
+        site_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        external_order_no TEXT NOT NULL,
+        sub_order_no TEXT NOT NULL DEFAULT '',
+        settlement_time TEXT NOT NULL DEFAULT '',
+        order_time TEXT NOT NULL DEFAULT '',
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (state_id, site_id, platform, fingerprint)
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS finance_platform_settlements_order_idx
+      ON finance_platform_settlements (state_id, site_id, platform, external_order_no)
+    `);
     await importLegacyStateIfPresent();
     await backfillDefaultSites();
     await rehashPlaintextPersonnelPasswords();
@@ -3921,6 +4237,322 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/auth/me" && req.method === "GET") {
     sendJson(req, res, 200, { ok: true, user: req.auth.user });
+    return;
+  }
+
+  if (url.pathname === "/api/finance/overview" && req.method === "GET") {
+    try {
+      requireFinanceAccessForAuth(req);
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      const scope = financeSiteScope(
+        state,
+        req.auth?.account,
+        url.searchParams.get("siteId") ?? ALL_SITE_ID
+      );
+      const [settlementResult, batchResult] = await Promise.all([
+        pool.query(
+          `SELECT data, batch_id, created_at
+           FROM finance_platform_settlements
+           WHERE state_id = $1 AND site_id = ANY($2::text[])
+           ORDER BY settlement_time DESC, created_at DESC`,
+          [stateId, scope.siteIds]
+        ),
+        pool.query(
+          `SELECT id, site_id, file_name, file_hash, imported_at, imported_by,
+                  row_count, matched_count, unmatched_count, duplicate_count, totals
+           FROM finance_import_batches
+           WHERE state_id = $1 AND site_id = ANY($2::text[])
+           ORDER BY imported_at DESC
+           LIMIT 100`,
+          [stateId, scope.siteIds]
+        ),
+      ]);
+      sendJson(req, res, 200, {
+        ok: true,
+        siteId: scope.requested,
+        ...buildFinanceOverview(scope.state, settlementResult.rows, batchResult.rows),
+      });
+    } catch (error) {
+      sendJson(req, res, 403, { ok: false, error: error.message || "财务数据加载失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/settings" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "finance", "update");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const rawRate = Number(body.defaultCommissionRate);
+      if (!Number.isFinite(rawRate) || rawRate < 0 || rawRate > 100) {
+        throw new Error("默认提成比例必须在 0% 到 100% 之间");
+      }
+      const defaultCommissionRate = normalizeCommissionRate(rawRate);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const operationLog = createOperationLog(
+        req,
+        "财务管理",
+        "修改记录",
+        `默认订单负责人提成比例调整为 ${defaultCommissionRate}%`
+      );
+      const nextState = {
+        ...state,
+        systemSettings: {
+          ...(state.systemSettings && typeof state.systemSettings === "object" ? state.systemSettings : {}),
+          financeDefaultCommissionRate: defaultCommissionRate,
+        },
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, defaultCommissionRate, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "提成设置保存失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/order-commission" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "finance", "update");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const orderId = String(body.orderId ?? "").trim();
+      const rawRate = Number(body.commissionRate);
+      if (!orderId) throw new Error("缺少订单信息");
+      if (!Number.isFinite(rawRate) || rawRate < 0 || rawRate > 100) {
+        throw new Error("订单提成比例必须在 0% 到 100% 之间");
+      }
+      const commissionRate = normalizeCommissionRate(rawRate);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const scope = financeSiteScope(state, req.auth?.account, ALL_SITE_ID);
+      const order = (Array.isArray(scope.state.orders) ? scope.state.orders : [])
+        .find((item) => String(item?.id ?? "") === orderId);
+      if (!order) throw new Error("订单不存在或当前账户不可见");
+      const orders = (Array.isArray(state.orders) ? state.orders : []).map((item) =>
+        String(item?.id ?? "") === orderId ? { ...item, commissionRate } : item
+      );
+      const operationLog = createOperationLog(
+        req,
+        "财务管理",
+        "修改记录",
+        `订单「${order.orderNo}」负责人提成比例调整为 ${commissionRate}%`
+      );
+      const nextState = {
+        ...state,
+        orders,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: { ...order, commissionRate }, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "订单提成比例保存失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/douyin/preview" && req.method === "POST") {
+    try {
+      requireFinanceAccessForAuth(req);
+      const body = JSON.parse(await readBody(req) || "{}");
+      const fileName = String(body.fileName ?? "抖店结算.csv").trim() || "抖店结算.csv";
+      const parsed = parseDouyinSettlementCsv(body.csvText);
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
+      if (scope.requested === ALL_SITE_ID) throw new Error("导入抖店账单前请选择具体场地");
+      const orderLookup = financeOrderLookup(scope.state.orders ?? []);
+      const [existingBatch, existingRows] = await Promise.all([
+        pool.query(
+          `SELECT id FROM finance_import_batches
+           WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin' AND file_hash = $3
+           LIMIT 1`,
+          [stateId, scope.requested, parsed.fileHash]
+        ),
+        pool.query(
+          `SELECT fingerprint FROM finance_platform_settlements
+           WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin'
+             AND fingerprint = ANY($3::text[])`,
+          [stateId, scope.requested, parsed.records.map((record) => record.fingerprint)]
+        ),
+      ]);
+      const duplicateFingerprints = new Set(existingRows.rows.map((row) => String(row.fingerprint)));
+      const previewRows = parsed.records.map((record) => {
+        const matchedOrder = orderLookup.get(record.externalOrderNo);
+        return {
+          rowNumber: record.rowNumber,
+          externalOrderNo: record.externalOrderNo,
+          settlementTime: record.settlementTime,
+          productName: record.productName,
+          orderTotal: record.orderTotal,
+          incomeTotal: record.incomeTotal,
+          refundTotal: Math.abs(record.preSettlementRefund),
+          platformFees: Math.abs(record.expenseTotal),
+          settlementAmount: record.settlementAmount,
+          matchedOrderId: matchedOrder ? String(matchedOrder.id ?? "") : "",
+          matchedOrderNo: matchedOrder ? String(matchedOrder.orderNo ?? "") : "",
+          duplicate: duplicateFingerprints.has(record.fingerprint),
+          formulaMatches: record.formulaMatches,
+        };
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        fileName,
+        fileHash: parsed.fileHash,
+        rowCount: parsed.records.length,
+        matchedCount: previewRows.filter((row) => row.matchedOrderId).length,
+        unmatchedCount: previewRows.filter((row) => !row.matchedOrderId).length,
+        duplicateCount: previewRows.filter((row) => row.duplicate).length,
+        formulaMismatchCount: previewRows.filter((row) => !row.formulaMatches).length,
+        duplicateFile: existingBatch.rowCount > 0,
+        errors: parsed.errors,
+        totals: parsed.totals,
+        rows: previewRows.slice(0, 500),
+      });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "抖店账单解析失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/douyin/import" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "finance", "create");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const fileName = String(body.fileName ?? "抖店结算.csv").trim() || "抖店结算.csv";
+      const parsed = parseDouyinSettlementCsv(body.csvText);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
+      if (scope.requested === ALL_SITE_ID) throw new Error("导入抖店账单前请选择具体场地");
+      const duplicateBatch = await client.query(
+        `SELECT id, row_count, matched_count, unmatched_count, duplicate_count, totals
+         FROM finance_import_batches
+         WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin' AND file_hash = $3
+         LIMIT 1`,
+        [stateId, scope.requested, parsed.fileHash]
+      );
+      if (duplicateBatch.rowCount > 0) {
+        await client.query("ROLLBACK");
+        const batch = duplicateBatch.rows[0];
+        sendJson(req, res, 200, {
+          ok: true,
+          duplicateFile: true,
+          batchId: String(batch.id),
+          rowCount: Number(batch.row_count ?? 0),
+          matchedCount: Number(batch.matched_count ?? 0),
+          unmatchedCount: Number(batch.unmatched_count ?? 0),
+          duplicateCount: Number(batch.duplicate_count ?? 0),
+          totals: batch.totals ?? {},
+        });
+        return;
+      }
+
+      const existingRows = await client.query(
+        `SELECT fingerprint FROM finance_platform_settlements
+         WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin'
+           AND fingerprint = ANY($3::text[])`,
+        [stateId, scope.requested, parsed.records.map((record) => record.fingerprint)]
+      );
+      const duplicateFingerprints = new Set(existingRows.rows.map((row) => String(row.fingerprint)));
+      const records = parsed.records.filter((record) => !duplicateFingerprints.has(record.fingerprint));
+      const orderLookup = financeOrderLookup(scope.state.orders ?? []);
+      const matchedCount = records.filter((record) => orderLookup.has(record.externalOrderNo)).length;
+      const unmatchedCount = records.length - matchedCount;
+      const batchId = uid("finance-batch");
+      const operator = authenticatedOperator(req);
+
+      await client.query(
+        `INSERT INTO finance_import_batches (
+           id, state_id, site_id, platform, file_name, file_hash, imported_by,
+           row_count, matched_count, unmatched_count, duplicate_count, totals
+         ) VALUES ($1, $2, $3, 'douyin', $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+        [
+          batchId,
+          stateId,
+          scope.requested,
+          fileName,
+          parsed.fileHash,
+          operator,
+          records.length,
+          matchedCount,
+          unmatchedCount,
+          parsed.records.length - records.length,
+          JSON.stringify(parsed.totals),
+        ]
+      );
+      for (const record of records) {
+        await client.query(
+          `INSERT INTO finance_platform_settlements (
+             id, state_id, site_id, batch_id, platform, fingerprint,
+             external_order_no, sub_order_no, settlement_time, order_time, data
+           ) VALUES ($1, $2, $3, $4, 'douyin', $5, $6, $7, $8, $9, $10::jsonb)`,
+          [
+            uid("finance-row"),
+            stateId,
+            scope.requested,
+            batchId,
+            record.fingerprint,
+            record.externalOrderNo,
+            record.subOrderNo,
+            record.settlementTime,
+            record.orderTime,
+            JSON.stringify(record),
+          ]
+        );
+      }
+      const operationLog = createOperationLog(
+        req,
+        "财务管理",
+        "导入记录",
+        `导入抖店结算文件「${fileName}」${records.length} 条，匹配 ${matchedCount} 条，未匹配 ${unmatchedCount} 条`
+      );
+      const nextState = {
+        ...state,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        duplicateFile: false,
+        batchId,
+        rowCount: records.length,
+        matchedCount,
+        unmatchedCount,
+        duplicateCount: parsed.records.length - records.length,
+        totals: parsed.totals,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "抖店账单导入失败" });
+    } finally {
+      client.release();
+    }
     return;
   }
 
@@ -4482,14 +5114,13 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
-      const payments = Array.isArray(body.payments) ? body.payments.map(normalizePaymentRecord) : [];
       const order = {
         id: String(body.id || uid("order")),
         orderNo: nextOrderNo(state),
         createdAt: nowDatetimeInChina(),
         ...orderInput,
         status: "pending",
-        payments,
+        payments: [],
       };
       const nextOrders = [...(Array.isArray(state.orders) ? state.orders : []), order];
       const nextStock = setStockSoldForOrders(state, nextOrders);
@@ -4591,14 +5222,13 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      requireOrderPermissionForAuth(req, permissionAction);
+      requireModulePermissionForAuth(req, "finance", permissionAction);
 
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? "");
-      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
+      const visibleOrders = financeSiteScope(state, req.auth?.account, ALL_SITE_ID).state.orders ?? [];
+      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
-      if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑资金记录");
-      if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再编辑资金记录");
 
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       let nextPayments = currentPayments;
@@ -4632,7 +5262,7 @@ async function handleApi(req, res, url) {
         id: uid("log"),
         time: new Date().toISOString(),
         operator,
-        module: "订单管理",
+        module: "财务管理",
         action: action === "add" ? "添加记录" : action === "update" ? "修改记录" : "删除记录",
         detail,
       };
@@ -4850,9 +5480,6 @@ async function handleApi(req, res, url) {
       const order = orders.find((item) => String(item?.id ?? "") === orderId);
       if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed" || order.status === "cancelled") throw new Error("该订单当前状态不能出库");
-      const financialState = getOrderFinancialStateForOrder(order, state.shipments);
-      if (financialState.kind !== "paid") throw new Error("订单未结清或存在待退款，不能出库");
-
       const selectedItemIds = Array.isArray(body.selectedItemIds)
         ? body.selectedItemIds.map((id) => String(id ?? "").trim()).filter(Boolean)
         : [];

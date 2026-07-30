@@ -1850,7 +1850,7 @@ function AddPaymentDialog({
 }) {
   const emptyForm = () => ({
     time: nowDatetimeLocal(), type: "balance" as PaymentType,
-    amount: 0, proof: [] as string[], notes: "",
+    amount: 0, account: "", proof: [] as string[], notes: "",
   });
   const [form, setForm] = useState(emptyForm);
   const isEditing = !!editingRecord;
@@ -1862,6 +1862,7 @@ function AddPaymentDialog({
           time: editingRecord.time,
           type: editingRecord.type,
           amount: editingRecord.amount,
+          account: editingRecord.account ?? "",
           proof: [...(editingRecord.proof ?? [])],
           notes: editingRecord.notes ?? "",
         }
@@ -1908,6 +1909,14 @@ function AddPaymentDialog({
                 placeholder="0.00"
               />
             </div>
+          </div>
+          <div className="grid gap-2">
+            <Label>资金账户</Label>
+            <Input
+              value={form.account}
+              onChange={(e) => setForm((f) => ({ ...f, account: e.target.value }))}
+              placeholder="例如：微信、支付宝、银行账户"
+            />
           </div>
           <div className="grid gap-2">
             <Label>时间</Label>
@@ -2790,7 +2799,11 @@ function PaymentTimeline({
                   </div>
                 )}
               </div>
-              {p.notes && <p className="text-xs text-muted-foreground mt-0.5">{p.notes}</p>}
+              {(p.account || p.notes) && (
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {[p.account ? `账户：${p.account}` : "", p.notes].filter(Boolean).join(" · ")}
+                </p>
+              )}
               {p.proof?.length > 0 && (
                 <div className="flex gap-2 mt-2 flex-wrap">
                   {p.proof.map((img, i) => (
@@ -3950,6 +3963,7 @@ function OrderDetailDialog({
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
   const { state, setState, saveOrderPaymentChange } = useStore();
   const permission = usePermission("orders");
+  const financePermission = usePermission("finance");
   const today = todayDateString();
   const [addPayOpen, setAddPayOpen] = useState(false);
   const [editingPayment, setEditingPayment] = useState<PaymentRecord | null>(null);
@@ -4186,9 +4200,8 @@ function OrderDetailDialog({
     order.status !== "cancelled" &&
     order.status !== "completed" &&
     allItemsShipped &&
-    allShipmentsResolved &&
-    isFinancialSettled;
-  const canShip = !!order && shippableUnshippedItems.length > 0 && isFinancialSettled
+    allShipmentsResolved;
+  const canShip = !!order && shippableUnshippedItems.length > 0
     && order.status !== "cancelled" && order.status !== "completed";
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
   const returnStock = returnItem ? state.stock.find((stock) => stock.id === returnItem.stockItemId) : undefined;
@@ -4207,9 +4220,7 @@ function OrderDetailDialog({
 
   const addPayment = async (record: PaymentRecord) => {
     if (!order) return false;
-    if (!permission.requirePermission("create")) return false;
-    if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
-    if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
+    if (!financePermission.requirePermission("create")) return false;
     if (!confirmWrite("新增", "将新增一条资金往来记录。")) return false;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "add", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
@@ -4218,25 +4229,20 @@ function OrderDetailDialog({
   };
 
   const openAddPayment = () => {
-    if (!permission.requirePermission("create")) return;
-    if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
-    if (order?.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
+    if (!financePermission.requirePermission("create")) return;
     setEditingPayment(null);
     setAddPayOpen(true);
   };
 
   const openEditPayment = (record: PaymentRecord) => {
-    if (!permission.requirePermission("update")) return;
-    if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
+    if (!financePermission.requirePermission("update")) return;
     setEditingPayment(record);
     setAddPayOpen(true);
   };
 
   const updatePayment = async (record: PaymentRecord) => {
     if (!order) return false;
-    if (!permission.requirePermission("update")) return false;
-    if (order.status === "completed") { toast.error("已完成订单不能再编辑资金记录"); return false; }
-    if (order.status === "cancelled") { toast.error("已取消订单不能再编辑资金记录"); return false; }
+    if (!financePermission.requirePermission("update")) return false;
     if (!confirmWrite("修改", "将保存资金往来记录的修改。")) return false;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "update", payment: record });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
@@ -4245,17 +4251,13 @@ function OrderDetailDialog({
   };
 
   const openDeletePayment = (record: PaymentRecord) => {
-    if (!permission.requirePermission("delete")) return;
-    if (order?.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
-    if (order?.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
+    if (!financePermission.requirePermission("delete")) return;
     setDeletingPayment(record);
   };
 
   const deletePayment = async () => {
     if (!order || !deletingPayment) return;
-    if (!permission.requirePermission("delete")) return;
-    if (order.status === "completed") return toast.error("已完成订单不能再编辑资金记录");
-    if (order.status === "cancelled") return toast.error("已取消订单不能再编辑资金记录");
+    if (!financePermission.requirePermission("delete")) return;
     if (!confirmWrite("删除", "将删除这条资金往来记录。")) return;
     const deletePaymentId = deletingPayment.id;
     const ok = await saveOrderPaymentChange({ orderId: order.id, action: "delete", paymentId: deletePaymentId });
@@ -4294,10 +4296,6 @@ function OrderDetailDialog({
   const completeOrder = async () => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
-    if (!isFinancialSettled) {
-      const action = financialState.kind === "refundable" ? "退款" : "收款";
-      return toast.error(`${action}未结清（差额 ¥${financialState.amount.toFixed(2)}），请先完成${action}`);
-    }
     if (!allItemsShipped)
       return toast.error(isPickupOrderSource(order.source)
         ? "尚有商品未自提，请先完成所有自提再确认完成"
@@ -4856,9 +4854,9 @@ function OrderDetailDialog({
 		                    onAdd={openAddPayment}
 		                    onEdit={openEditPayment}
 		                    onDelete={openDeletePayment}
-		                    canAdd={order.status !== "cancelled" && order.status !== "completed" && permission.canCreate}
-		                    canEdit={order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate}
-		                    canDelete={order.status !== "cancelled" && order.status !== "completed" && permission.canDelete}
+		                    canAdd={financePermission.canCreate}
+		                    canEdit={financePermission.canUpdate}
+		                    canDelete={financePermission.canDelete}
 		                  />
                 </div>
               </>
@@ -4886,11 +4884,6 @@ function OrderDetailDialog({
 	                        {lostUnshippedItems.length} 件已损耗，不能出库，请在商品行点击退
 	                      </p>
 	                    )}
-                    {!isFinancialSettled && (
-                      <p className={financialState.kind === "refundable" ? "text-xs text-red-500" : "text-xs text-orange-500"}>
-                        {financialState.kind === "refundable" ? "处理完待退款后方可出库" : "付清货款后方可出库"}
-                      </p>
-                    )}
                     {shippableUnshippedItems.length === 0 && lostUnshippedItems.length > 0 && (
                       <p className="text-xs text-muted-foreground">无可出库商品</p>
                     )}
@@ -4917,14 +4910,7 @@ function OrderDetailDialog({
                         尚有 {unshippedItems.length} 件{isPickupOrderSource(order.source) ? "未自提" : "未发货"}
                       </p>
                     )}
-                    {allItemsShipped && !isFinancialSettled && (
-                      <p className={financialState.kind === "refundable" ? "text-xs text-red-500" : "text-xs text-orange-500"}>
-                        {financialState.kind === "refundable"
-                          ? `待退款 ¥${financialState.amount.toFixed(2)}`
-                          : `还差 ¥${financialState.amount.toFixed(2)} 未付`}
-                      </p>
-                    )}
-                    {allItemsShipped && isFinancialSettled && !allShipmentsResolved && (
+                    {allItemsShipped && !allShipmentsResolved && (
                       <p className="text-xs text-purple-500">尚有发货未签收或报损未完成处理</p>
                     )}
                     <Button
@@ -5639,9 +5625,6 @@ function NewOrderDialog({
   const [discount, setDiscount] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
-  const [draftPayments, setDraftPayments] = useState<PaymentRecord[]>([]);
-  const [paymentOpen, setPaymentOpen] = useState(false);
-  const [editingPayment, setEditingPayment] = useState<PaymentRecord | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
 
   useEffect(() => {
@@ -5651,9 +5634,6 @@ function NewOrderDialog({
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
       setCustomerDialogOpen(false);
-      setDraftPayments([]);
-      setPaymentOpen(false);
-      setEditingPayment(null);
       setSubmitAttempted(false);
     }
   }, [open, defaultContactPerson, today]);
@@ -5753,24 +5733,6 @@ function NewOrderDialog({
     return true;
   };
 
-  const addDraftPayment = async (record: PaymentRecord) => {
-    setDraftPayments((current) => [...current, record]);
-    toast.success("资金往来记录已添加");
-    return true;
-  };
-
-  const updateDraftPayment = async (record: PaymentRecord) => {
-    setDraftPayments((current) => current.map((item) => (item.id === record.id ? record : item)));
-    toast.success("资金往来记录已修改");
-    return true;
-  };
-
-  const deleteDraftPayment = (record: PaymentRecord) => {
-    if (!confirmWrite("删除", "将删除这条待随订单保存的资金往来记录。")) return;
-    setDraftPayments((current) => current.filter((item) => item.id !== record.id));
-    toast.success("资金往来记录已删除");
-  };
-
   const changeOrderDate = (newDate: string) => {
     if (newDate && newDate > today) {
       toast.error("下单日期不能晚于今天");
@@ -5816,8 +5778,7 @@ function NewOrderDialog({
         commissionRate: 0,
       };
     });
-    const paymentText = draftPayments.length > 0 ? `，并保存 ${draftPayments.length} 条资金往来记录` : "";
-    if (!confirmWrite("创建", `将创建销售订单${paymentText}。`)) return;
+    if (!confirmWrite("创建", `将创建销售订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。`)) return;
     let createdOrderNo = "";
     try {
       const result = await postOrderApi("orders/create", {
@@ -5835,7 +5796,6 @@ function NewOrderDialog({
         packagingFee,
         discount,
         notes,
-        payments: draftPayments.map((payment) => ({ ...payment, amount: Number(payment.amount) })),
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -6198,7 +6158,7 @@ function NewOrderDialog({
                 </div>
               </div>
               <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
-                <div className="text-xs font-medium text-muted-foreground mb-1">结算预览</div>
+                <div className="text-xs font-medium text-muted-foreground mb-1">应收预览</div>
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
                 {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品折后金额</span><span>¥{goodsNetTotal.toFixed(2)}</span></div>
@@ -6212,41 +6172,12 @@ function NewOrderDialog({
                 {shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
                 {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-semibold text-base border-t pt-2">
-                  <span>应付总额</span>
+                  <span>订单应收</span>
                   <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
                 </div>
               </div>
             </div>
 
-            {/* ── 4. Payment records ── */}
-            <div className="rounded-lg border bg-card p-3 sm:p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs font-medium text-muted-foreground">资金往来记录</div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">可先录入定金、尾款或退款，创建订单时一起保存。</div>
-                </div>
-                {draftPayments.length > 0 && (
-                  <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
-                    {draftPayments.length} 条
-                  </span>
-                )}
-              </div>
-              <PaymentTimeline
-                payments={draftPayments}
-                onAdd={() => {
-                  setEditingPayment(null);
-                  setPaymentOpen(true);
-                }}
-                onEdit={(record) => {
-                  setEditingPayment(record);
-                  setPaymentOpen(true);
-                }}
-                onDelete={deleteDraftPayment}
-                canAdd={permission.canCreate}
-                canEdit={permission.canCreate}
-                canDelete={permission.canCreate}
-              />
-            </div>
             </div>
           </div>
           )}
@@ -6274,16 +6205,6 @@ function NewOrderDialog({
         onCreate={createCustomer}
       />
 
-      <AddPaymentDialog
-        open={paymentOpen}
-        onOpenChange={(nextOpen) => {
-          setPaymentOpen(nextOpen);
-          if (!nextOpen) setEditingPayment(null);
-        }}
-        editingRecord={editingPayment}
-        onAdd={addDraftPayment}
-        onUpdate={updateDraftPayment}
-      />
     </>
   );
 }
@@ -6767,7 +6688,7 @@ export function OrdersView({
       <div>
         <h2>订单管理</h2>
         <p className="text-sm text-muted-foreground">
-          管理客户销售订单，记录资金往来与收付款凭证
+          创建时确认订单应收，创建后直接安排出库与发货
         </p>
       </div>
 

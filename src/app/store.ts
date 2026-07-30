@@ -16,6 +16,7 @@ export type PermissionModule =
   | "lossRecords"
   | "customers"
   | "orders"
+  | "finance"
   | "accounts";
 
 export type ModulePermission = Record<PermissionAction, boolean>;
@@ -202,6 +203,7 @@ export type PaymentRecord = {
   time: string;       // ISO datetime "2026-04-22T10:30"
   type: PaymentType;
   amount: number;     // always positive; "refund" type = outflow
+  account?: string;
   proof: string[];    // base64 dataURL images
   notes: string;
 };
@@ -224,6 +226,8 @@ export type Order = {
   discount: number;
   status: OrderStatus;
   notes: string;
+  /** 负责人提成率；未设置时使用财务模块的全局默认值。 */
+  commissionRate?: number;
   payments: PaymentRecord[];
 };
 
@@ -323,6 +327,8 @@ export const DEFAULT_FISH_LIST_FOOTER_TEXT = `【包装费运费规则】
 
 export type SystemSettings = {
   fishListFooterText: string;
+  /** 财务模块默认负责人提成率，百分比数值，例如 1 表示 1%。 */
+  financeDefaultCommissionRate?: number;
 };
 
 export type Store = {
@@ -406,6 +412,7 @@ export const fullPermissions = (): PermissionSet => ({
   lossRecords: { create: true, update: true, delete: true },
   customers: { create: true, update: true, delete: true },
   orders: { create: true, update: true, delete: true },
+  finance: { create: true, update: true, delete: true },
   accounts: { create: true, update: true, delete: true },
 });
 
@@ -419,6 +426,7 @@ export const emptyPermissions = (): PermissionSet => ({
   lossRecords: { create: false, update: false, delete: false },
   customers: { create: false, update: false, delete: false },
   orders: { create: false, update: false, delete: false },
+  finance: { create: false, update: false, delete: false },
   accounts: { create: false, update: false, delete: false },
 });
 
@@ -426,6 +434,7 @@ export const initialState: Store = {
   user: null,
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
+    financeDefaultCommissionRate: 1,
   },
   sites: [
     { id: "jiangyin", name: "江阴" },

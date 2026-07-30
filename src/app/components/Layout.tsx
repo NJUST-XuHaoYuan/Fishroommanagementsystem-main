@@ -24,9 +24,11 @@ import {
   Menu,
   UserCircle,
   MapPin,
+  CircleDollarSign,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
+import { normalizePermissions } from "../utils/permissions";
 
 export type ViewKey =
   | "dashboard"
@@ -39,6 +41,7 @@ export type ViewKey =
   | "lossRecords"
   | "customers"
   | "orders"
+  | "finance"
   | "permissions"
   | "accounts"
   | "profile"
@@ -79,6 +82,13 @@ const NAV: NavSection[] = [
     items: [
       { key: "customers", label: "客户管理" },
       { key: "orders", label: "订单管理" },
+    ],
+  },
+  {
+    title: "财务管理",
+    icon: CircleDollarSign,
+    items: [
+      { key: "finance", label: "财务工作台" },
     ],
   },
 ];
@@ -135,6 +145,13 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const sites = visibleSitesForUser(user, state);
   const activeSiteName = sites.find((site) => site.id === normalizeSiteId(activeSiteId))?.name ?? siteName(state, activeSiteId);
+  const currentAccount = (state.personnel ?? []).find((person) => person.username === user.username);
+  const financePermissions = normalizePermissions(currentAccount?.permissions).finance;
+  const canSeeFinance = user.role === "admin" ||
+    currentAccount?.accessRole === "admin" ||
+    financePermissions.create ||
+    financePermissions.update ||
+    financePermissions.delete;
 
   useEffect(() => {
     const scrollX = window.scrollX;
@@ -199,7 +216,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           <LayoutDashboard className="size-4 shrink-0" />
           <span>首页概览</span>
         </button>
-        {NAV.map((section) => {
+        {NAV.filter((section) => section.title !== "财务管理" || canSeeFinance).map((section) => {
           const Icon = section.icon;
           return (
             <div key={section.title} className="fishroom-nav-section">

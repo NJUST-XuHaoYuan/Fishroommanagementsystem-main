@@ -15,6 +15,7 @@ import { DailyView } from "./components/DailyView";
 import { LossRecordsView } from "./components/LossRecordsView";
 import { OrdersView } from "./components/OrdersView";
 import { CustomersView } from "./components/CustomersView";
+import { FinanceView } from "./components/FinanceView";
 import { PersonnelView } from "./components/PersonnelView";
 import { PermissionsView } from "./components/PermissionsView";
 import { OperationLogsView } from "./components/OperationLogsView";
@@ -75,6 +76,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
   orders: ["orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
+  finance: ["sites", "systemSettings"],
   profile: ["personnel", "orders", "customers", "shipments"],
   accounts: ["personnel"],
   permissions: ["personnel"],
@@ -90,6 +92,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   ...withoutUser(initialState),
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
+    financeDefaultCommissionRate: 1,
   },
   sites: DEFAULT_SITES.map((site) => ({ ...site })),
   personnel: [],
@@ -1330,6 +1333,7 @@ function AdminApp() {
           onOpenOrderRequestHandled={finishOpenOrderRequest}
         />
       );
+      case "finance":    return <FinanceView />;
       case "profile":    return <PersonalCenterView />;
       case "accounts":   return <PersonnelView />;
       case "permissions": return <PermissionsView />;

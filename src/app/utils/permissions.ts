@@ -12,6 +12,7 @@ export const PERMISSION_MODULES: { key: PermissionModule; label: string; group: 
   { key: "lossRecords", label: "损耗记录", group: "维护管理" },
   { key: "customers", label: "客户管理", group: "销售管理" },
   { key: "orders", label: "订单管理", group: "销售管理" },
+  { key: "finance", label: "财务管理", group: "财务管理" },
   { key: "accounts", label: "账号密码管理", group: "人员管理" },
 ];
 
@@ -26,9 +27,9 @@ export function normalizePermissions(permissions?: Partial<PermissionSet>): Perm
   const full = fullPermissions();
   for (const mod of PERMISSION_MODULES) {
     normalized[mod.key] = {
-      create: permissions?.[mod.key]?.create ?? full[mod.key].create,
-      update: permissions?.[mod.key]?.update ?? full[mod.key].update,
-      delete: permissions?.[mod.key]?.delete ?? full[mod.key].delete,
+      create: permissions?.[mod.key]?.create ?? (mod.key === "finance" ? false : full[mod.key].create),
+      update: permissions?.[mod.key]?.update ?? (mod.key === "finance" ? false : full[mod.key].update),
+      delete: permissions?.[mod.key]?.delete ?? (mod.key === "finance" ? false : full[mod.key].delete),
     };
   }
   return normalized;
