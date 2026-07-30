@@ -211,6 +211,19 @@ function sourceLabel(source: string) {
   return source || "未标注";
 }
 
+function sourceBadgeClass(source: string) {
+  if (source === "平台下单" || source === "抖音") {
+    return "border-[#fda4af] bg-[#ffe4e6] text-[#9f1239]";
+  }
+  if (source === "私域线上" || source === "线上私域") {
+    return "border-[#7dd3fc] bg-[#e0f2fe] text-[#075985]";
+  }
+  if (source === "线下" || source === "线下自提") {
+    return "border-[#6ee7b7] bg-[#d1fae5] text-[#065f46]";
+  }
+  return "border-[#cbd5e1] bg-[#f1f5f9] text-[#334155]";
+}
+
 function financeStatusClass(status: string) {
   if (status === "已核销") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   if (status === "有差异" || status === "待退款") return "border-rose-200 bg-rose-50 text-rose-700";
@@ -515,7 +528,7 @@ function OrderFinanceDialog({
             <section className="border-b pb-5">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-semibold">负责人提成</h3>
+                  <h3 className="text-sm font-semibold">订单负责人提成</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     按商品折后金额 × 比例计算，且不超过最低回厂价以上的可提成空间。
                   </p>
@@ -542,10 +555,10 @@ function OrderFinanceDialog({
                 </div>
               </div>
               <div className="grid gap-2 text-sm sm:grid-cols-4">
-                <div><span className="text-muted-foreground">负责人：</span>{order.contactPerson || "—"}</div>
+                <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
                 <div><span className="text-muted-foreground">计算基数：</span>{money(order.commissionBase)}</div>
                 <div><span className="text-muted-foreground">提成上限：</span>{money(order.commissionCap)}</div>
-                <div className="font-semibold text-emerald-700"><span className="font-normal text-muted-foreground">负责人提成：</span>{money(order.commissionAmount)}</div>
+                <div className="font-semibold text-emerald-700"><span className="font-normal text-muted-foreground">订单负责人提成：</span>{money(order.commissionAmount)}</div>
               </div>
             </section>
 
@@ -897,7 +910,7 @@ export function FinanceView() {
         <div>
           <h2>财务台账</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            逐单核对应收、收款、退款、平台扣费和负责人提成
+            逐单核对订单应收、收款、退款、平台扣费和订单负责人提成
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -954,7 +967,7 @@ export function FinanceView() {
                 <Input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="订单号、客户或负责人"
+                  placeholder="订单号、客户或订单负责人"
                   className="pl-9"
                 />
               </label>
@@ -982,44 +995,63 @@ export function FinanceView() {
             ) : (
               <>
                 <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
-                  <table className="w-full min-w-[980px] text-sm [&_td]:px-2 [&_th]:px-2">
-                    <thead className="bg-muted/40 text-xs text-muted-foreground">
+                  <table className="w-full min-w-[1180px] table-fixed text-sm [&_td]:px-2.5 [&_th]:px-2.5">
+                    <colgroup>
+                      <col style={{ width: "10%" }} />
+                      <col style={{ width: "16%" }} />
+                      <col style={{ width: "9%" }} />
+                      <col style={{ width: "9%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "7%" }} />
+                      <col style={{ width: "7%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "8%" }} />
+                      <col style={{ width: "6%" }} />
+                      <col style={{ width: "7%" }} />
+                      <col style={{ width: "5%" }} />
+                    </colgroup>
+                    <thead className="bg-muted/50 text-[15px] text-foreground">
                       <tr>
-                        <th className="px-3 py-2.5 text-left font-medium">订单</th>
-                        <th className="px-3 py-2.5 text-left font-medium">客户 / 来源</th>
-                        <th className="px-3 py-2.5 text-left font-medium">负责人</th>
-                        <th className="px-3 py-2.5 text-right font-medium">应收</th>
-                        <th className="px-3 py-2.5 text-right font-medium">已收</th>
-                        <th className="px-3 py-2.5 text-right font-medium">已退</th>
-                        <th className="px-3 py-2.5 text-right font-medium">平台费用</th>
-                        <th className="px-3 py-2.5 text-right font-medium">余额</th>
-                        <th className="px-3 py-2.5 text-right font-medium">负责人提成</th>
-                        <th className="px-3 py-2.5 text-left font-medium">物流</th>
-                        <th className="px-3 py-2.5 text-left font-medium">财务</th>
-                        <th className="px-3 py-2.5 text-right font-medium">操作</th>
+                        <th className="px-3 py-3 text-left font-semibold">订单</th>
+                        <th className="px-3 py-3 text-left font-semibold">客户 / 来源</th>
+                        <th className="px-3 py-3 text-left font-semibold">订单负责人</th>
+                        <th className="px-3 py-3 text-right font-semibold">订单应收</th>
+                        <th className="px-3 py-3 text-right font-semibold">已收</th>
+                        <th className="px-3 py-3 text-right font-semibold">已退</th>
+                        <th className="px-3 py-3 text-right font-semibold">平台费用</th>
+                        <th className="px-3 py-3 text-right font-semibold">余额</th>
+                        <th className="px-3 py-3 text-right font-semibold leading-5">订单负责人<br />提成</th>
+                        <th className="px-3 py-3 text-left font-semibold">物流</th>
+                        <th className="px-3 py-3 text-left font-semibold">财务</th>
+                        <th className="px-3 py-3 text-right font-semibold">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y">
                       {filteredOrders.map((order) => (
                         <tr key={order.id} className="hover:bg-muted/20">
-                          <td className="px-3 py-2.5">
+                          <td className="whitespace-nowrap px-3 py-2.5">
                             <div className="font-medium">{order.orderNo}</div>
                             <div className="mt-0.5 text-xs text-muted-foreground">{order.date}</div>
                           </td>
                           <td className="px-3 py-2.5">
-                            <div>{order.customerName}</div>
-                            <div className="mt-0.5 text-xs text-muted-foreground">{sourceLabel(order.source)}</div>
+                            <div className="truncate font-medium" title={order.customerName}>{order.customerName}</div>
+                            <Badge
+                              variant="outline"
+                              className={`mt-1 h-6 px-2 py-0 text-[12px] font-medium ${sourceBadgeClass(order.source)}`}
+                            >
+                              {sourceLabel(order.source)}
+                            </Badge>
                           </td>
-                          <td className="px-3 py-2.5">{order.contactPerson || "—"}</td>
-                          <td className="px-3 py-2.5 text-right tabular-nums">{money(order.receivable)}</td>
-                          <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(order.received)}</td>
-                          <td className="px-3 py-2.5 text-right tabular-nums text-rose-700">{money(order.refunded)}</td>
-                          <td className="px-3 py-2.5 text-right tabular-nums">{money(order.platformFees)}</td>
-                          <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${order.balance > 0.01 ? "text-amber-700" : order.balance < -0.01 ? "text-rose-700" : ""}`}>
+                          <td className="whitespace-nowrap px-3 py-2.5">{order.contactPerson || "—"}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">{money(order.receivable)}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-emerald-700">{money(order.received)}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-rose-700">{money(order.refunded)}</td>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">{money(order.platformFees)}</td>
+                          <td className={`whitespace-nowrap px-3 py-2.5 text-right font-medium tabular-nums ${order.balance > 0.01 ? "text-amber-700" : order.balance < -0.01 ? "text-rose-700" : ""}`}>
                             {money(order.balance)}
                           </td>
                           <td className="px-3 py-2.5 text-right">
-                            <div className="font-medium tabular-nums">{money(order.commissionAmount)}</div>
+                            <div className="whitespace-nowrap font-medium tabular-nums">{money(order.commissionAmount)}</div>
                             <div className="text-xs text-muted-foreground">{order.commissionRate}%</div>
                           </td>
                           <td className="px-3 py-2.5 text-muted-foreground">{order.logisticsStatus}</td>
@@ -1050,8 +1082,16 @@ export function FinanceView() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="truncate font-medium">{order.orderNo} · {order.customerName}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {sourceLabel(order.source)} · {order.contactPerson || "未指定负责人"} · {order.logisticsStatus}
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                            <Badge
+                              variant="outline"
+                              className={`h-6 px-2 py-0 text-[12px] font-medium ${sourceBadgeClass(order.source)}`}
+                            >
+                              {sourceLabel(order.source)}
+                            </Badge>
+                            <span>{order.contactPerson || "未指定订单负责人"}</span>
+                            <span>·</span>
+                            <span>{order.logisticsStatus}</span>
                           </div>
                         </div>
                         <Badge variant="outline" className={financeStatusClass(order.financeStatus)}>
@@ -1059,7 +1099,7 @@ export function FinanceView() {
                         </Badge>
                       </div>
                       <div className="finance-mobile-two-columns mt-3 grid grid-cols-4 gap-2 text-xs sm:grid-cols-4">
-                        <div><div className="text-muted-foreground">应收</div><div className="mt-0.5 font-medium">{money(order.receivable)}</div></div>
+                        <div><div className="text-muted-foreground">订单应收</div><div className="mt-0.5 font-medium">{money(order.receivable)}</div></div>
                         <div><div className="text-muted-foreground">已收</div><div className="mt-0.5 font-medium text-emerald-700">{money(order.received)}</div></div>
                         <div><div className="text-muted-foreground">余额</div><div className="mt-0.5 font-medium">{money(order.balance)}</div></div>
                         <div><div className="text-muted-foreground">提成</div><div className="mt-0.5 font-medium">{money(order.commissionAmount)}</div></div>
@@ -1079,7 +1119,7 @@ export function FinanceView() {
                     <tr>
                       <th className="px-3 py-2.5 text-left font-medium">时间</th>
                       <th className="px-3 py-2.5 text-left font-medium">订单</th>
-                      <th className="px-3 py-2.5 text-left font-medium">客户 / 负责人</th>
+                      <th className="px-3 py-2.5 text-left font-medium">客户 / 订单负责人</th>
                       <th className="px-3 py-2.5 text-left font-medium">类型</th>
                       <th className="px-3 py-2.5 text-right font-medium">金额</th>
                       <th className="px-3 py-2.5 text-left font-medium">账户</th>
@@ -1124,7 +1164,7 @@ export function FinanceView() {
                       </div>
                     </div>
                     <div className="mt-2 text-xs text-muted-foreground">
-                      {transaction.customerName} · {transaction.contactPerson || "未指定负责人"}
+                      {transaction.customerName} · {transaction.contactPerson || "未指定订单负责人"}
                     </div>
                     {(transaction.account || transaction.notes || transaction.proof.length > 0) && (
                       <div className="mt-1 truncate text-xs text-muted-foreground">
@@ -1380,7 +1420,7 @@ export function FinanceView() {
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent aria-describedby={undefined} className="max-w-md">
           <DialogHeader>
-            <DialogTitle>负责人提成设置</DialogTitle>
+            <DialogTitle>订单负责人提成设置</DialogTitle>
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1.5">
