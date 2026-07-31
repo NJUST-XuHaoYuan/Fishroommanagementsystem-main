@@ -56,21 +56,44 @@ type FinancePayment = PaymentRecord & {
   account?: string;
 };
 
+type FinanceOrderItem = {
+  stockItemId: string;
+  fishCode: string;
+  productName: string;
+  size: string;
+  origin: string;
+  price: number;
+  minReturnPrice: number;
+  inventoryRemoved: boolean;
+};
+
 type FinanceOrderRow = {
   id: string;
   siteId: string;
   orderNo: string;
   douyinOrderNo: string;
   date: string;
+  orderStatus: string;
   source: string;
   customerName: string;
   contactPerson: string;
   logisticsStatus: string;
   financeStatus: string;
   receivable: number;
+  itemSubtotal: number;
+  discount: number;
+  goodsNetTotal: number;
+  orderShippingFee: number;
+  billableShippingFee: number;
+  shippingFeeAdjustment: number;
+  packagingFee: number;
+  damageRefundAdjustment: number;
+  calculatedReceivable: number;
+  cancellationAdjustment: number;
   received: number;
   refunded: number;
   balance: number;
+  platformIncome: number;
   platformFees: number;
   netSettlement: number;
   settlementCount: number;
@@ -79,6 +102,7 @@ type FinanceOrderRow = {
   minimumReturnTotal: number;
   commissionCap: number;
   commissionAmount: number;
+  items: FinanceOrderItem[];
   payments: FinancePayment[];
 };
 
@@ -192,6 +216,12 @@ function money(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+function adjustmentMoney(value: number) {
+  if (value > 0.005) return `+${money(value)}`;
+  if (value < -0.005) return `−${money(Math.abs(value))}`;
+  return money(0);
 }
 
 function localDatetimeValue() {
@@ -498,213 +528,362 @@ function OrderFinanceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-h-[92vh] max-w-4xl overflow-y-auto p-0">
-        <DialogHeader className="border-b px-4 py-4 sm:px-6">
-          <DialogTitle className="flex flex-wrap items-center gap-2">
+      <DialogContent
+        aria-describedby={undefined}
+        className="h-[92dvh] max-h-[92dvh] gap-0 overflow-hidden p-0 sm:w-[96vw] sm:max-w-[1440px]"
+      >
+        <DialogHeader className="border-b px-4 py-3 pr-12 sm:px-6 sm:pr-14">
+          <DialogTitle className="flex flex-wrap items-center gap-2 text-base sm:text-lg">
             <span>{order?.orderNo ?? "订单财务"}</span>
-            {order && (
-              <Badge variant="outline" className={financeStatusClass(order.financeStatus)}>
-                {order.financeStatus}
-              </Badge>
-            )}
+            {order && <Badge variant="outline" className={sourceBadgeClass(order.source)}>{sourceLabel(order.source)}</Badge>}
+            {order && <Badge variant="outline" className={financeStatusClass(order.financeStatus)}>{order.financeStatus}</Badge>}
           </DialogTitle>
+          {order && (
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground sm:text-sm">
+              <span>客户：<strong className="font-medium text-foreground">{order.customerName}</strong></span>
+              <span>下单日期：<strong className="font-medium text-foreground">{order.date || "—"}</strong></span>
+              <span>订单负责人：<strong className="font-medium text-foreground">{order.contactPerson || "—"}</strong></span>
+              <span>物流：<strong className="font-medium text-foreground">{order.logisticsStatus}</strong></span>
+              {order.douyinOrderNo && <span>抖音订单：<strong className="font-medium text-foreground">{order.douyinOrderNo}</strong></span>}
+            </div>
+          )}
         </DialogHeader>
         {order && (
-          <div className="flex flex-col gap-5 px-4 py-4 sm:px-6">
-            <div className="finance-mobile-two-columns grid grid-cols-2 overflow-hidden rounded-lg border md:grid-cols-4">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:overflow-hidden">
+            <div className="grid shrink-0 grid-cols-2 border-b bg-muted/20 lg:grid-cols-4">
               {[
                 ["订单应收", money(order.receivable)],
                 ["已收", money(order.received)],
                 ["已退", money(order.refunded)],
                 ["余额", money(order.balance)],
               ].map(([label, value]) => (
-                <div key={label} className="border-b p-3 last:border-b-0 even:border-l md:border-b-0 md:border-l md:first:border-l-0">
+                <div key={label} className="border-b px-4 py-3 even:border-l lg:border-b-0 lg:border-l lg:first:border-l-0">
                   <div className="text-xs text-muted-foreground">{label}</div>
-                  <div className="mt-1 text-base font-semibold tabular-nums">{value}</div>
+                  <div className="mt-0.5 text-base font-semibold tabular-nums sm:text-lg">{value}</div>
                 </div>
               ))}
             </div>
 
-            <section className="border-b pb-5">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold">订单负责人提成</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    按商品折后金额 × 比例计算，且不超过最低回厂价以上的可提成空间。
-                  </p>
-                </div>
-                <div className="flex items-end gap-2">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    提成比例
-                    <span className="flex items-center gap-1">
-                      <Input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.1}
-                        value={commissionRate}
-                        onChange={(event) => setCommissionRate(Number(event.target.value))}
-                        className="h-8 w-24 text-right"
-                      />
-                      %
-                    </span>
-                  </label>
-                  <Button size="sm" onClick={saveCommission} disabled={savingCommission || !permission.canUpdate}>
-                    {savingCommission ? <Loader2 className="size-4 animate-spin" /> : "保存"}
-                  </Button>
-                </div>
-              </div>
-              <div className="grid gap-2 text-sm sm:grid-cols-4">
-                <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
-                <div><span className="text-muted-foreground">计算基数：</span>{money(order.commissionBase)}</div>
-                <div><span className="text-muted-foreground">提成上限：</span>{money(order.commissionCap)}</div>
-                <div className="font-semibold text-emerald-700"><span className="font-normal text-muted-foreground">订单负责人提成：</span>{money(order.commissionAmount)}</div>
-              </div>
-            </section>
+            <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1.35fr)_minmax(390px,0.65fr)]">
+              <div className="min-w-0 lg:overflow-y-auto">
+                <section className="border-b px-4 py-4 sm:px-6">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold sm:text-base">订单商品</h3>
+                      <p className="mt-0.5 text-xs text-muted-foreground">共 {order.items.length} 条，售价与最低回厂价均为下单时记录。</p>
+                    </div>
+                    <Badge variant="outline">{order.items.length} 条</Badge>
+                  </div>
 
-            <section>
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold">资金流水</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    抖音结算由对账导入；私域和线下资金由财务专员补录。
-                  </p>
-                </div>
-                {!paymentFormOpen && permission.canCreate && (
-                  <Button size="sm" variant="outline" onClick={startAddPayment}>
-                    <Plus className="size-4" /> 新增流水
-                  </Button>
-                )}
-              </div>
-
-              {paymentFormOpen && (
-                <div className="mb-4 grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-2">
-                  <div className="grid gap-1.5">
-                    <Label>类型</Label>
-                    <Select
-                      value={draft.type}
-                      onValueChange={(value) => setDraft((current) => ({ ...current, type: value as PaymentType }))}
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {PAYMENT_TYPES.map((type) => (
-                          <SelectItem key={type} value={type}>{PAYMENT_LABELS[type]}</SelectItem>
+                  <div className="hidden overflow-hidden rounded-md border md:block">
+                    <table className="w-full table-fixed text-sm">
+                      <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
+                        <tr>
+                          <th className="w-[42%] px-3 py-2 font-medium">商品</th>
+                          <th className="w-[22%] px-3 py-2 font-medium">鱼只编码</th>
+                          <th className="w-[18%] px-3 py-2 text-right font-medium">售价</th>
+                          <th className="w-[18%] px-3 py-2 text-right font-medium">最低回厂价</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {order.items.map((item, index) => (
+                          <tr key={`${item.stockItemId}-${index}`}>
+                            <td className="px-3 py-2.5">
+                              <div className="truncate font-medium" title={item.productName}>{item.productName}</div>
+                              {(item.size || item.origin) && (
+                                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                                  {[item.size, item.origin].filter(Boolean).join(" · ")}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-mono text-xs">{item.fishCode || "—"}</span>
+                                {item.inventoryRemoved && <Badge variant="outline" className="text-[10px] text-muted-foreground">已出库</Badge>}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-medium tabular-nums">{money(item.price)}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{money(item.minReturnPrice)}</td>
+                          </tr>
                         ))}
-                      </SelectContent>
-                    </Select>
+                      </tbody>
+                    </table>
                   </div>
-                  <div className="grid gap-1.5">
-                    <Label>金额（元）</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step={0.01}
-                      value={draft.amount || ""}
-                      onChange={(event) => setDraft((current) => ({ ...current, amount: Number(event.target.value) }))}
-                    />
-                  </div>
-                  <div className="grid gap-1.5">
-                    <Label>时间</Label>
-                    <Input
-                      type="datetime-local"
-                      value={draft.time}
-                      onChange={(event) => setDraft((current) => ({ ...current, time: event.target.value }))}
-                    />
-                  </div>
-                  <div className="grid gap-1.5">
-                    <Label>资金账户</Label>
-                    <Input
-                      value={draft.account}
-                      onChange={(event) => setDraft((current) => ({ ...current, account: event.target.value }))}
-                      placeholder="微信、支付宝、银行账户"
-                    />
-                  </div>
-                  <div className="grid gap-1.5 sm:col-span-2">
-                    <Label>备注</Label>
-                    <Textarea
-                      value={draft.notes}
-                      onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
-                      rows={2}
-                      placeholder="填写资金用途、付款人或差异原因"
-                    />
-                  </div>
-                  <div className="grid gap-1.5 sm:col-span-2">
-                    <Label>凭证</Label>
-                    <ProofUploader
-                      images={draft.proof}
-                      onChange={(proof) => setDraft((current) => ({ ...current, proof }))}
-                    />
-                  </div>
-                  <div className="flex justify-end gap-2 sm:col-span-2">
-                    <Button variant="outline" size="sm" onClick={resetPaymentForm}>取消</Button>
-                    <Button size="sm" onClick={savePayment} disabled={savingPayment}>
-                      {savingPayment && <Loader2 className="size-4 animate-spin" />}
-                      {editingPaymentId ? "保存修改" : "保存流水"}
-                    </Button>
-                  </div>
-                </div>
-              )}
 
-              <div className="divide-y rounded-lg border">
-                {order.payments.length === 0 ? (
-                  <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-                    暂无手工资金流水
-                  </div>
-                ) : (
-                  [...order.payments]
-                    .sort((left, right) => String(right.time).localeCompare(String(left.time)))
-                    .map((payment) => (
-                      <div key={payment.id} className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2 text-sm">
-                            {payment.type === "refund"
-                              ? <ArrowUpRight className="size-4 text-rose-600" />
-                              : <ArrowDownLeft className="size-4 text-emerald-600" />}
-                            <span className="font-medium">{PAYMENT_LABELS[payment.type]}</span>
-                            <span className={payment.type === "refund" ? "font-semibold text-rose-700" : "font-semibold text-emerald-700"}>
-                              {payment.type === "refund" ? "−" : "+"}{money(payment.amount)}
-                            </span>
-                            <span className="text-xs text-muted-foreground">{displayDatetime(payment.time)}</span>
+                  <div className="divide-y rounded-md border md:hidden">
+                    {order.items.map((item, index) => (
+                      <div key={`${item.stockItemId}-${index}`} className="px-3 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">{item.productName}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {[item.fishCode || "无鱼码", item.size, item.origin].filter(Boolean).join(" · ")}
+                            </div>
                           </div>
-                          {(payment.account || payment.notes) && (
-                            <div className="mt-1 truncate text-xs text-muted-foreground">
-                              {[payment.account ? `账户：${payment.account}` : "", payment.notes].filter(Boolean).join(" · ")}
-                            </div>
-                          )}
-                          {payment.proof.length > 0 && (
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {payment.proof.map((image, index) => (
-                                <ImageWithFallback
-                                  key={`${payment.id}-proof-${index}`}
-                                  src={image}
-                                  alt="资金凭证"
-                                  className="size-10 cursor-pointer rounded border object-cover"
-                                  onClick={() => void openProofImage(image)}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1">
-                          {permission.canUpdate && (
-                            <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
-                              <Pencil className="size-3.5" />
-                            </Button>
-                          )}
-                          {permission.canDelete && (
-                            <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => deletePayment(payment)} title="删除流水">
-                              <Trash2 className="size-3.5" />
-                            </Button>
-                          )}
+                          <div className="shrink-0 text-right">
+                            <div className="text-sm font-semibold tabular-nums">{money(item.price)}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">回厂价 {money(item.minReturnPrice)}</div>
+                          </div>
                         </div>
                       </div>
-                    ))
-                )}
+                    ))}
+                  </div>
+                </section>
+
+                <section className="px-4 py-4 sm:px-6">
+                  <div className="mb-3 flex items-center gap-2">
+                    <ReceiptText className="size-4 text-muted-foreground" />
+                    <h3 className="text-sm font-semibold sm:text-base">订单费用构成</h3>
+                  </div>
+                  <div className="overflow-hidden rounded-md border">
+                    <div className="flex items-center justify-between gap-4 px-3 py-2.5 text-sm">
+                      <span>商品售价小计</span>
+                      <span className="font-medium tabular-nums">{money(order.itemSubtotal)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                      <span>订单折扣</span>
+                      <span className="tabular-nums text-rose-700">−{money(order.discount)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 border-y bg-muted/30 px-3 py-2.5 text-sm">
+                      <span className="font-medium">商品折后金额</span>
+                      <span className="font-semibold tabular-nums">{money(order.goodsNetTotal)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 px-3 py-2.5 text-sm">
+                      <span>订单运费</span>
+                      <span className="tabular-nums">+{money(order.orderShippingFee)}</span>
+                    </div>
+                    {Math.abs(order.shippingFeeAdjustment) > 0.005 && (
+                      <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                        <span>
+                          实际运费调整
+                          <span className="ml-2 text-xs text-muted-foreground">计费运费 {money(order.billableShippingFee)}</span>
+                        </span>
+                        <span className="tabular-nums">{adjustmentMoney(order.shippingFeeAdjustment)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                      <span>包装费</span>
+                      <span className="tabular-nums">+{money(order.packagingFee)}</span>
+                    </div>
+                    {order.damageRefundAdjustment > 0.005 && (
+                      <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                        <span>报损应收调减</span>
+                        <span className="tabular-nums text-rose-700">−{money(order.damageRefundAdjustment)}</span>
+                      </div>
+                    )}
+                    {order.cancellationAdjustment < -0.005 && (
+                      <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                        <span>取消订单冲销</span>
+                        <span className="tabular-nums text-rose-700">{adjustmentMoney(order.cancellationAdjustment)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-4 border-t bg-foreground px-3 py-3 text-background">
+                      <span className="font-semibold">订单应收</span>
+                      <span className="text-lg font-semibold tabular-nums">{money(order.receivable)}</span>
+                    </div>
+                  </div>
+                </section>
               </div>
-            </section>
+
+              <div className="min-w-0 border-t bg-muted/10 lg:overflow-y-auto lg:border-l lg:border-t-0">
+                {order.settlementCount > 0 && (
+                  <section className="border-b px-4 py-4 sm:px-5">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold">平台结算费用</h3>
+                      <Badge variant="outline">{order.settlementCount} 条结算记录</Badge>
+                    </div>
+                    <div className="grid grid-cols-2 overflow-hidden rounded-md border bg-background text-sm">
+                      {[
+                        ["平台收入", order.platformIncome],
+                        ["结算前退款", order.refunded],
+                        ["平台费用", order.platformFees],
+                        ["净结算", order.netSettlement],
+                      ].map(([label, value], index) => (
+                        <div key={String(label)} className={`px-3 py-2.5 ${index % 2 === 1 ? "border-l" : ""} ${index > 1 ? "border-t" : ""}`}>
+                          <div className="text-xs text-muted-foreground">{label}</div>
+                          <div className="mt-0.5 font-semibold tabular-nums">{money(Number(value))}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section className="border-b px-4 py-4 sm:px-5">
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">订单负责人提成</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">按商品折后金额计算，不超过最低回厂价以上空间。</p>
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <label className="grid gap-1 text-xs text-muted-foreground">
+                        提成比例
+                        <span className="flex items-center gap-1">
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step={0.1}
+                            value={commissionRate}
+                            onChange={(event) => setCommissionRate(Number(event.target.value))}
+                            className="h-8 w-20 text-right"
+                          />
+                          %
+                        </span>
+                      </label>
+                      <Button size="sm" onClick={saveCommission} disabled={savingCommission || !permission.canUpdate}>
+                        {savingCommission ? <Loader2 className="size-4 animate-spin" /> : "保存"}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-sm">
+                    <div><span className="text-muted-foreground">计算基数：</span>{money(order.commissionBase)}</div>
+                    <div><span className="text-muted-foreground">最低回厂：</span>{money(order.minimumReturnTotal)}</div>
+                    <div><span className="text-muted-foreground">提成上限：</span>{money(order.commissionCap)}</div>
+                    <div className="font-semibold text-emerald-700"><span className="font-normal text-muted-foreground">负责人提成：</span>{money(order.commissionAmount)}</div>
+                  </div>
+                </section>
+
+                <section className="px-4 py-4 sm:px-5">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">资金流水</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">私域和线下资金由财务专员补录。</p>
+                    </div>
+                    {!paymentFormOpen && permission.canCreate && (
+                      <Button size="sm" variant="outline" onClick={startAddPayment}>
+                        <Plus className="size-4" /> 新增流水
+                      </Button>
+                    )}
+                  </div>
+
+                  {paymentFormOpen && (
+                    <div className="mb-4 grid gap-3 rounded-md border bg-background p-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                      <div className="grid gap-1.5">
+                        <Label>类型</Label>
+                        <Select
+                          value={draft.type}
+                          onValueChange={(value) => setDraft((current) => ({ ...current, type: value as PaymentType }))}
+                        >
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {PAYMENT_TYPES.map((type) => (
+                              <SelectItem key={type} value={type}>{PAYMENT_LABELS[type]}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label>金额（元）</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          step={0.01}
+                          value={draft.amount || ""}
+                          onChange={(event) => setDraft((current) => ({ ...current, amount: Number(event.target.value) }))}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label>时间</Label>
+                        <Input
+                          type="datetime-local"
+                          value={draft.time}
+                          onChange={(event) => setDraft((current) => ({ ...current, time: event.target.value }))}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label>资金账户</Label>
+                        <Input
+                          value={draft.account}
+                          onChange={(event) => setDraft((current) => ({ ...current, account: event.target.value }))}
+                          placeholder="微信、支付宝、银行账户"
+                        />
+                      </div>
+                      <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
+                        <Label>备注</Label>
+                        <Textarea
+                          value={draft.notes}
+                          onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
+                          rows={2}
+                          placeholder="填写资金用途、付款人或差异原因"
+                        />
+                      </div>
+                      <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
+                        <Label>凭证</Label>
+                        <ProofUploader
+                          images={draft.proof}
+                          onChange={(proof) => setDraft((current) => ({ ...current, proof }))}
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-1 xl:col-span-2">
+                        <Button variant="outline" size="sm" onClick={resetPaymentForm}>取消</Button>
+                        <Button size="sm" onClick={savePayment} disabled={savingPayment}>
+                          {savingPayment && <Loader2 className="size-4 animate-spin" />}
+                          {editingPaymentId ? "保存修改" : "保存流水"}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="divide-y rounded-md border bg-background">
+                    {order.payments.length === 0 ? (
+                      <div className="px-4 py-8 text-center text-sm text-muted-foreground">暂无手工资金流水</div>
+                    ) : (
+                      [...order.payments]
+                        .sort((left, right) => String(right.time).localeCompare(String(left.time)))
+                        .map((payment) => (
+                          <div key={payment.id} className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between lg:flex-col lg:items-stretch xl:flex-row xl:items-center">
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2 text-sm">
+                                {payment.type === "refund"
+                                  ? <ArrowUpRight className="size-4 text-rose-600" />
+                                  : <ArrowDownLeft className="size-4 text-emerald-600" />}
+                                <span className="font-medium">{PAYMENT_LABELS[payment.type]}</span>
+                                <span className={payment.type === "refund" ? "font-semibold text-rose-700" : "font-semibold text-emerald-700"}>
+                                  {payment.type === "refund" ? "−" : "+"}{money(payment.amount)}
+                                </span>
+                                <span className="text-xs text-muted-foreground">{displayDatetime(payment.time)}</span>
+                              </div>
+                              {(payment.account || payment.notes) && (
+                                <div className="mt-1 truncate text-xs text-muted-foreground">
+                                  {[payment.account ? `账户：${payment.account}` : "", payment.notes].filter(Boolean).join(" · ")}
+                                </div>
+                              )}
+                              {payment.proof.length > 0 && (
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {payment.proof.map((image, index) => (
+                                    <ImageWithFallback
+                                      key={`${payment.id}-proof-${index}`}
+                                      src={image}
+                                      alt="资金凭证"
+                                      className="size-10 cursor-pointer rounded border object-cover"
+                                      onClick={() => void openProofImage(image)}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1 self-end">
+                              {permission.canUpdate && (
+                                <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
+                                  <Pencil className="size-3.5" />
+                                </Button>
+                              )}
+                              {permission.canDelete && (
+                                <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => deletePayment(payment)} title="删除流水">
+                                  <Trash2 className="size-3.5" />
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
           </div>
         )}
-        <DialogFooter className="border-t px-4 py-3 sm:px-6">
+        <DialogFooter className="shrink-0 border-t px-4 py-3 sm:px-6">
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
         </DialogFooter>
       </DialogContent>

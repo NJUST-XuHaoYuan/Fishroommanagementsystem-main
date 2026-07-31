@@ -82,6 +82,42 @@ export function normalizeCommissionRate(value, fallback = DEFAULT_COMMISSION_RAT
   return Number(Math.min(100, Math.max(0, candidate)).toFixed(4));
 }
 
+export function calculateOrderFeeBreakdown(order = {}, adjustments = {}) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  const itemSubtotal = roundMoney(items.reduce(
+    (sum, item) => sum + Number(item?.price ?? 0),
+    0
+  ));
+  const discount = roundMoney(Math.max(0, Number(order?.discount ?? 0)));
+  const goodsNetTotal = roundMoney(itemSubtotal - discount);
+  const orderShippingFee = roundMoney(Math.max(0, Number(order?.shippingFee ?? 0)));
+  const billableShippingFee = roundMoney(Math.max(
+    0,
+    Number(adjustments?.billableShippingFee ?? orderShippingFee)
+  ));
+  const shippingFeeAdjustment = roundMoney(billableShippingFee - orderShippingFee);
+  const packagingFee = roundMoney(Math.max(0, Number(order?.packagingFee ?? 0)));
+  const damageRefundAdjustment = roundMoney(Math.max(
+    0,
+    Number(adjustments?.damageRefundAdjustment ?? 0)
+  ));
+  const calculatedReceivable = roundMoney(
+    goodsNetTotal + billableShippingFee + packagingFee - damageRefundAdjustment
+  );
+
+  return {
+    itemSubtotal,
+    discount,
+    goodsNetTotal,
+    orderShippingFee,
+    billableShippingFee,
+    shippingFeeAdjustment,
+    packagingFee,
+    damageRefundAdjustment,
+    calculatedReceivable,
+  };
+}
+
 export function calculateOrderCommission(order = {}, defaultRate = DEFAULT_COMMISSION_RATE) {
   const items = Array.isArray(order?.items) ? order.items : [];
   const productAmount = roundMoney(items.reduce((sum, item) => sum + Number(item?.price ?? 0), 0));

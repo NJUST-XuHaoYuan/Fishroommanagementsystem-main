@@ -14,6 +14,7 @@ import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
   DEFAULT_COMMISSION_RATE,
   calculateOrderCommission,
+  calculateOrderFeeBreakdown,
   normalizeCommissionRate,
   normalizeExternalOrderNo,
   parseDouyinSettlementCsv,
@@ -2545,15 +2546,10 @@ function calcDamageRefundAdjustmentForOrder(order = {}, shipments = []) {
 }
 
 function calcAmountDueForOrder(order = {}, shipments = []) {
-  const itemTotal = (Array.isArray(order.items) ? order.items : [])
-    .reduce((sum, item) => sum + Number(item?.price ?? 0), 0);
-  return Number((
-    itemTotal +
-    getBillableShippingFeeForOrder(order, shipments) +
-    Number(order.packagingFee ?? 0) -
-    Number(order.discount ?? 0) -
-    calcDamageRefundAdjustmentForOrder(order, shipments)
-  ).toFixed(2));
+  return calculateOrderFeeBreakdown(order, {
+    billableShippingFee: getBillableShippingFeeForOrder(order, shipments),
+    damageRefundAdjustment: calcDamageRefundAdjustmentForOrder(order, shipments),
+  }).calculatedReceivable;
 }
 
 function calcAmountPaidForOrder(order = {}) {
@@ -2638,6 +2634,10 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = []) {
   const shipments = Array.isArray(state.shipments) ? state.shipments : [];
   const customers = new Map((Array.isArray(state.customers) ? state.customers : [])
     .map((customer) => [String(customer?.id ?? ""), customer]));
+  const products = new Map((Array.isArray(state.products) ? state.products : [])
+    .map((product) => [String(product?.id ?? ""), product]));
+  const stockItems = new Map((Array.isArray(state.stock) ? state.stock : [])
+    .map((item) => [String(item?.id ?? ""), item]));
   const defaultCommissionRate = financeDefaultCommissionRate(state);
   const settlements = settlementRows.map(settlementRecordFromRow);
   const settlementsByExternalOrderNo = new Map();
@@ -2678,29 +2678,55 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = []) {
     const recognizedNet = hasPlatformSettlement
       ? platformIncome
       : roundFinance(paymentTotals.received - paymentTotals.refunded);
-    const receivable = order?.status === "cancelled" ? 0 : calcAmountDueForOrder(order, shipments);
+    const feeBreakdown = calculateOrderFeeBreakdown(order, {
+      billableShippingFee: getBillableShippingFeeForOrder(order, shipments),
+      damageRefundAdjustment: calcDamageRefundAdjustmentForOrder(order, shipments),
+    });
+    const cancellationAdjustment = order?.status === "cancelled"
+      ? roundFinance(-feeBreakdown.calculatedReceivable)
+      : 0;
+    const receivable = order?.status === "cancelled" ? 0 : feeBreakdown.calculatedReceivable;
     const balance = roundFinance(receivable - recognizedNet);
     const commission = calculateOrderCommission(order, defaultCommissionRate);
     const customer = customers.get(String(order?.customerId ?? ""));
+    const items = (Array.isArray(order?.items) ? order.items : []).map((item) => {
+      const stockItem = stockItems.get(String(item?.stockItemId ?? ""));
+      const product = products.get(String(item?.productId ?? stockItem?.productId ?? ""));
+      return {
+        stockItemId: String(item?.stockItemId ?? ""),
+        fishCode: String(item?.fishCode ?? stockItem?.code ?? ""),
+        productName: String(product?.name ?? "商品已删除"),
+        size: String(product?.size ?? ""),
+        origin: String(product?.origin ?? ""),
+        price: roundFinance(item?.price),
+        minReturnPrice: roundFinance(item?.minReturnPrice),
+        inventoryRemoved: Boolean(item?.inventoryRemovedAt) || !stockItem,
+      };
+    });
     return {
       id: String(order?.id ?? ""),
       siteId: normalizeSiteId(order?.siteId),
       orderNo: String(order?.orderNo ?? ""),
       douyinOrderNo: externalOrderNo,
       date: String(order?.date ?? ""),
+      orderStatus: String(order?.status ?? ""),
       source: String(order?.source ?? ""),
       customerName: String(customer?.name ?? (externalOrderNo ? "抖音客户" : "未关联客户")),
       contactPerson: String(order?.contactPerson ?? ""),
       logisticsStatus: orderLogisticsStatusForFinance(order, shipments),
       financeStatus: financeStatusLabel(order, balance, received, hasPlatformSettlement),
       receivable,
+      ...feeBreakdown,
+      cancellationAdjustment,
       received,
       refunded,
       balance,
+      platformIncome,
       platformFees,
       netSettlement,
       settlementCount: platformSettlements.length,
       ...commission,
+      items,
       payments: (Array.isArray(order?.payments) ? order.payments : []).map((payment) => ({
         id: String(payment?.id ?? ""),
         time: String(payment?.time ?? ""),

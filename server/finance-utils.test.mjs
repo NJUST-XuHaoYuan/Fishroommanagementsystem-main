@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   calculateOrderCommission,
+  calculateOrderFeeBreakdown,
   normalizeExternalOrderNo,
   parseDouyinSettlementCsv,
 } from "./finance-utils.mjs";
@@ -84,4 +85,28 @@ test("calculates order owner commission with the minimum-return cap", () => {
   });
   assert.equal(calculateOrderCommission({ ...order, commissionRate: 50 }, 1).commissionAmount, 200);
   assert.equal(calculateOrderCommission({ ...order, status: "cancelled" }, 1).commissionAmount, 0);
+});
+
+test("calculates a complete order fee breakdown with shipping and damage adjustments", () => {
+  const order = {
+    items: [{ price: 300 }, { price: 180 }],
+    discount: 30,
+    shippingFee: 25,
+    packagingFee: 15,
+  };
+
+  assert.deepEqual(calculateOrderFeeBreakdown(order, {
+    billableShippingFee: 35,
+    damageRefundAdjustment: 80,
+  }), {
+    itemSubtotal: 480,
+    discount: 30,
+    goodsNetTotal: 450,
+    orderShippingFee: 25,
+    billableShippingFee: 35,
+    shippingFeeAdjustment: 10,
+    packagingFee: 15,
+    damageRefundAdjustment: 80,
+    calculatedReceivable: 420,
+  });
 });
