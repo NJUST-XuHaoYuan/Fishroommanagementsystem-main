@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -298,7 +298,7 @@ function countsAsActiveShipmentForAmount(shipment: Shipment): boolean {
 
 function calcAmountRefundedForOrder(order: Order): number {
   return (order.payments ?? [])
-    .filter((payment) => payment.type === "refund")
+    .filter((payment) => payment.type === "refund" && isPaymentVerified(payment))
     .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
 }
 
@@ -1040,7 +1040,9 @@ export function Dashboard() {
   let tankGroupCount = dashboardTankGroups.length;
   let subTankCount = dashboardTankGroups.reduce((n, g) => n + (g.subTanks?.length ?? 0), 0);
   const todayPayments = dashboardOrders.flatMap((order) =>
-    (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === today)
+    (order.payments ?? []).filter((payment) =>
+      isPaymentVerified(payment) && String(payment.time ?? "").slice(0, 10) === today
+    )
   );
   let todayReceived = todayPayments
     .filter((payment) => payment.type !== "refund")
@@ -1061,7 +1063,9 @@ export function Dashboard() {
   let dailyFinanceData = Array.from({ length: financeDays }, (_, index) => {
     const date = toLocalDateString(addDays(todayDate, index - financeDays + 1));
     const payments = dashboardOrders.flatMap((order) =>
-      (order.payments ?? []).filter((payment) => String(payment.time ?? "").slice(0, 10) === date)
+      (order.payments ?? []).filter((payment) =>
+        isPaymentVerified(payment) && String(payment.time ?? "").slice(0, 10) === date
+      )
     );
     const ordersForDate = dashboardOrders.filter((order) =>
       isValidSalesOrder(order) && String(order.date ?? "").slice(0, 10) === date

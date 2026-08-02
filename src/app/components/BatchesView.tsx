@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useStore, Order, PurchaseBatch, Shipment, StockItem, uid } from "../store";
+import { isPaymentVerified, useStore, Order, PurchaseBatch, Shipment, StockItem, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -24,7 +24,9 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
 
 function calcBatchPaymentAmount(order: Order): number {
   return (Array.isArray(order.payments) ? order.payments : []).reduce(
-    (sum, payment) => payment.type === "refund"
+    (sum, payment) => !isPaymentVerified(payment)
+      ? sum
+      : payment.type === "refund"
       ? sum - Number(payment.amount || 0)
       : sum + Number(payment.amount || 0),
     0

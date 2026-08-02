@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { isPersonnelResigned, Order, PaymentType, Shipment, useStore } from "../store";
+import { isPaymentVerified, isPersonnelResigned, Order, PaymentType, Shipment, useStore } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -43,7 +43,9 @@ function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
 
 function calcAmountPaid(order: Order): number {
   return (order.payments ?? []).reduce(
-    (sum, payment) => payment.type === "refund" ? sum - payment.amount : sum + payment.amount,
+    (sum, payment) => !isPaymentVerified(payment)
+      ? sum
+      : payment.type === "refund" ? sum - payment.amount : sum + payment.amount,
     0
   );
 }

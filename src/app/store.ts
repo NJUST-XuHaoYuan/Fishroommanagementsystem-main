@@ -198,12 +198,41 @@ export type OrderItem = {
 
 export type PaymentType = "deposit" | "balance" | "shipping_fee" | "refund" | "other";
 
+export const PAYMENT_CHANNEL_OPTIONS = [
+  { value: "wechat", label: "微信" },
+  { value: "alipay", label: "支付宝" },
+  { value: "douyin", label: "抖音" },
+  { value: "bank", label: "银行卡" },
+  { value: "cash", label: "现金" },
+] as const;
+export type PaymentChannel = typeof PAYMENT_CHANNEL_OPTIONS[number]["value"];
+export type PaymentVerificationStatus = "pending" | "verified";
+export type PaymentRecordSource = "order" | "finance" | "platform";
+export type RefundMethod = "platform" | "account";
+
+export function paymentChannelLabel(channel?: string): string {
+  return PAYMENT_CHANNEL_OPTIONS.find((option) => option.value === channel)?.label ?? String(channel || "未登记");
+}
+
+/** Historical payment records predate verification states and remain verified. */
+export function isPaymentVerified(payment?: Pick<PaymentRecord, "verificationStatus"> | null): boolean {
+  return payment?.verificationStatus !== "pending";
+}
+
 export type PaymentRecord = {
   id: string;
   time: string;       // ISO datetime "2026-04-22T10:30"
   type: PaymentType;
   amount: number;     // always positive; "refund" type = outflow
+  channel?: PaymentChannel;
   account?: string;
+  externalTransactionNo?: string;
+  verificationStatus?: PaymentVerificationStatus;
+  recordSource?: PaymentRecordSource;
+  refundMethod?: RefundMethod;
+  recordedBy?: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
   proof: string[];    // base64 dataURL images
   notes: string;
 };
@@ -217,6 +246,10 @@ export type Order = {
   date: string;
   source?: OrderSource | string;
   douyinOrderNo?: string;
+  /** 订单负责人登记的预计收款路径；实际到账由财务核销。 */
+  paymentChannel?: PaymentChannel;
+  paymentAccount?: string;
+  paymentReference?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
   contactPerson?: string;

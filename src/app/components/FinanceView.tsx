@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PaymentRecord, PaymentType, uid, useStore } from "../store";
+import {
+  PAYMENT_CHANNEL_OPTIONS,
+  PaymentChannel,
+  PaymentRecord,
+  PaymentType,
+  paymentChannelLabel,
+  uid,
+  useStore,
+} from "../store";
 import { authJsonHeaders } from "../utils/authSession";
 import { uploadOriginalMedia, resolveMediaUrl } from "../utils/media";
 import { usePermission } from "../utils/permissions";
@@ -7,6 +15,7 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -30,6 +39,8 @@ import {
   FileCheck2,
   FileSpreadsheet,
   History,
+  Landmark,
+  Link2,
   Loader2,
   Pencil,
   Plus,
@@ -75,6 +86,9 @@ type FinanceOrderRow = {
   date: string;
   orderStatus: string;
   source: string;
+  paymentChannel: PaymentChannel | "";
+  paymentAccount: string;
+  paymentReference: string;
   customerName: string;
   contactPerson: string;
   logisticsStatus: string;
@@ -92,6 +106,9 @@ type FinanceOrderRow = {
   cancellationAdjustment: number;
   received: number;
   refunded: number;
+  pendingReceived: number;
+  pendingRefunded: number;
+  pendingPaymentCount: number;
   balance: number;
   platformIncome: number;
   platformFees: number;
@@ -147,6 +164,27 @@ type ImportBatch = {
   totals: Record<string, number>;
 };
 
+type FinanceTransfer = {
+  id: string;
+  siteId: string;
+  channel: PaymentChannel;
+  sourceAccount: string;
+  targetAccount: string;
+  expectedAmount: number;
+  actualAmount: number;
+  difference: number;
+  transferredAt: string;
+  transactionNo: string;
+  status: "pending" | "verified";
+  importBatchIds: string[];
+  proof: string[];
+  notes: string;
+  createdAt: string;
+  createdBy: string;
+  verifiedAt: string;
+  verifiedBy: string;
+};
+
 type FinanceOverview = {
   settings: { defaultCommissionRate: number };
   summary: {
@@ -163,6 +201,7 @@ type FinanceOverview = {
   transactions: FinanceTransaction[];
   reconciliations: ReconciliationRow[];
   importBatches: ImportBatch[];
+  transfers: FinanceTransfer[];
 };
 
 type PreviewRow = {
@@ -206,7 +245,23 @@ type PaymentDraft = {
   type: PaymentType;
   amount: number;
   time: string;
+  channel: PaymentChannel | "";
   account: string;
+  externalTransactionNo: string;
+  proof: string[];
+  notes: string;
+};
+
+type TransferDraft = {
+  id: string;
+  channel: PaymentChannel | "";
+  sourceAccount: string;
+  targetAccount: string;
+  expectedAmount: number;
+  actualAmount: number;
+  transferredAt: string;
+  transactionNo: string;
+  importBatchIds: string[];
   proof: string[];
   notes: string;
 };
@@ -257,6 +312,7 @@ function sourceBadgeClass(source: string) {
 function financeStatusClass(status: string) {
   if (status === "已核销") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   if (status === "有差异" || status === "待退款") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (status === "待核对") return "border-violet-200 bg-violet-50 text-violet-700";
   if (status === "部分收款") return "border-sky-200 bg-sky-50 text-sky-700";
   if (status === "已取消") return "border-slate-200 bg-slate-50 text-slate-500";
   return "border-amber-200 bg-amber-50 text-amber-700";
@@ -390,6 +446,7 @@ function OrderFinanceDialog({
   const [editingPaymentId, setEditingPaymentId] = useState("");
   const [paymentFormOpen, setPaymentFormOpen] = useState(false);
   const [savingPayment, setSavingPayment] = useState(false);
+  const [verifyingPaymentId, setVerifyingPaymentId] = useState("");
   const [savingCommission, setSavingCommission] = useState(false);
   const [commissionRate, setCommissionRate] = useState(1);
   const [draft, setDraft] = useState<PaymentDraft>({
@@ -397,7 +454,9 @@ function OrderFinanceDialog({
     type: "balance",
     amount: 0,
     time: localDatetimeValue(),
+    channel: "",
     account: "",
+    externalTransactionNo: "",
     proof: [],
     notes: "",
   });
@@ -416,7 +475,9 @@ function OrderFinanceDialog({
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
+      channel: order?.paymentChannel ?? "",
       account: "",
+      externalTransactionNo: "",
       proof: [],
       notes: "",
     });
@@ -431,7 +492,9 @@ function OrderFinanceDialog({
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
-      account: "",
+      channel: order?.paymentChannel ?? "",
+      account: order?.paymentAccount ?? "",
+      externalTransactionNo: "",
       proof: [],
       notes: "",
     });
@@ -446,7 +509,9 @@ function OrderFinanceDialog({
       type: payment.type,
       amount: payment.amount,
       time: payment.time,
+      channel: payment.channel ?? order?.paymentChannel ?? "",
       account: payment.account ?? "",
+      externalTransactionNo: payment.externalTransactionNo ?? "",
       proof: [...(payment.proof ?? [])],
       notes: payment.notes ?? "",
     });
@@ -461,6 +526,8 @@ function OrderFinanceDialog({
       toast.error("请输入有效的资金金额");
       return;
     }
+    if (!draft.channel) return toast.error("请选择资金渠道");
+    if (!draft.account.trim()) return toast.error("请填写资金账户");
     if (!confirmWrite(editingPaymentId ? "修改" : "新增", `保存订单 ${order.orderNo} 的${PAYMENT_LABELS[draft.type]}记录。`)) return;
     setSavingPayment(true);
     try {
@@ -505,6 +572,27 @@ function OrderFinanceDialog({
     }
   };
 
+  const verifyPayment = async (payment: FinancePayment) => {
+    if (!order || verifyingPaymentId || !permission.requirePermission("update")) return;
+    const path = payment.type === "refund"
+      ? payment.refundMethod === "platform" ? "平台退款冲减" : "退款账户出账"
+      : "收款到账";
+    if (!confirmWrite("核销", `确认订单 ${order.orderNo} 的${path} ${money(payment.amount)} 已真实发生。`)) return;
+    setVerifyingPaymentId(payment.id);
+    try {
+      await requestJson("/api/orders/payment", {
+        method: "POST",
+        body: JSON.stringify({ orderId: order.id, action: "verify", paymentId: payment.id }),
+      });
+      await onRefresh();
+      toast.success("资金记录已核销");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "资金记录核销失败");
+    } finally {
+      setVerifyingPaymentId("");
+    }
+  };
+
   const saveCommission = async () => {
     if (!order || savingCommission || !permission.requirePermission("update")) return;
     if (!Number.isFinite(commissionRate) || commissionRate < 0 || commissionRate > 100) {
@@ -544,6 +632,7 @@ function OrderFinanceDialog({
               <span>下单日期：<strong className="font-medium text-foreground">{order.date || "—"}</strong></span>
               <span>订单负责人：<strong className="font-medium text-foreground">{order.contactPerson || "—"}</strong></span>
               <span>物流：<strong className="font-medium text-foreground">{order.logisticsStatus}</strong></span>
+              <span>付款申报：<strong className="font-medium text-foreground">{order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记"} · {order.paymentAccount || "未登记账户"}</strong></span>
               {order.douyinOrderNo && <span>抖音订单：<strong className="font-medium text-foreground">{order.douyinOrderNo}</strong></span>}
             </div>
           )}
@@ -791,11 +880,37 @@ function OrderFinanceDialog({
                         />
                       </div>
                       <div className="grid gap-1.5">
+                        <Label>资金渠道</Label>
+                        <Select
+                          value={draft.channel}
+                          onValueChange={(value) => setDraft((current) => ({
+                            ...current,
+                            channel: value as PaymentChannel,
+                            account: value === "cash" && !current.account.trim() ? "现金" : current.account,
+                          }))}
+                        >
+                          <SelectTrigger><SelectValue placeholder="请选择资金渠道" /></SelectTrigger>
+                          <SelectContent>
+                            {PAYMENT_CHANNEL_OPTIONS.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="grid gap-1.5">
                         <Label>资金账户</Label>
                         <Input
                           value={draft.account}
                           onChange={(event) => setDraft((current) => ({ ...current, account: event.target.value }))}
-                          placeholder="微信、支付宝、银行账户"
+                          placeholder="账户名称或尾号"
+                        />
+                      </div>
+                      <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
+                        <Label>外部流水号</Label>
+                        <Input
+                          value={draft.externalTransactionNo}
+                          onChange={(event) => setDraft((current) => ({ ...current, externalTransactionNo: event.target.value }))}
+                          placeholder="选填"
                         />
                       </div>
                       <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
@@ -841,11 +956,25 @@ function OrderFinanceDialog({
                                 <span className={payment.type === "refund" ? "font-semibold text-rose-700" : "font-semibold text-emerald-700"}>
                                   {payment.type === "refund" ? "−" : "+"}{money(payment.amount)}
                                 </span>
+                                <Badge
+                                  variant="outline"
+                                  className={payment.verificationStatus === "pending"
+                                    ? "border-amber-200 bg-amber-50 text-amber-700"
+                                    : "border-emerald-200 bg-emerald-50 text-emerald-700"}
+                                >
+                                  {payment.verificationStatus === "pending" ? "待核销" : "已核销"}
+                                </Badge>
                                 <span className="text-xs text-muted-foreground">{displayDatetime(payment.time)}</span>
                               </div>
-                              {(payment.account || payment.notes) && (
+                              {(payment.channel || payment.account || payment.externalTransactionNo || payment.notes) && (
                                 <div className="mt-1 truncate text-xs text-muted-foreground">
-                                  {[payment.account ? `账户：${payment.account}` : "", payment.notes].filter(Boolean).join(" · ")}
+                                  {[
+                                    payment.channel ? paymentChannelLabel(payment.channel) : "",
+                                    payment.account ? `账户：${payment.account}` : "",
+                                    payment.externalTransactionNo ? `流水：${payment.externalTransactionNo}` : "",
+                                    payment.type === "refund" ? payment.refundMethod === "platform" ? "平台冲减" : "账户出账" : "",
+                                    payment.notes,
+                                  ].filter(Boolean).join(" · ")}
                                 </div>
                               )}
                               {payment.proof.length > 0 && (
@@ -863,6 +992,18 @@ function OrderFinanceDialog({
                               )}
                             </div>
                             <div className="flex shrink-0 items-center gap-1 self-end">
+                              {payment.verificationStatus === "pending" && permission.canUpdate && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8"
+                                  onClick={() => void verifyPayment(payment)}
+                                  disabled={verifyingPaymentId === payment.id}
+                                >
+                                  {verifyingPaymentId === payment.id && <Loader2 className="size-3.5 animate-spin" />}
+                                  核销
+                                </Button>
+                              )}
                               {permission.canUpdate && (
                                 <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
                                   <Pencil className="size-3.5" />
@@ -891,6 +1032,358 @@ function OrderFinanceDialog({
   );
 }
 
+function ReconciliationLinkDialog({
+  row,
+  orders,
+  siteId,
+  open,
+  onOpenChange,
+  onLinked,
+}: {
+  row: ReconciliationRow | null;
+  orders: FinanceOrderRow[];
+  siteId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onLinked: () => Promise<void>;
+}) {
+  const permission = usePermission("finance");
+  const [search, setSearch] = useState("");
+  const [selectedOrderId, setSelectedOrderId] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    setSelectedOrderId("");
+  }, [open, row?.externalOrderNo]);
+
+  const candidates = useMemo(() => {
+    if (!row) return [];
+    const normalized = search.trim().toLowerCase();
+    const settlementDate = String(row.settlementTime ?? "").slice(0, 10);
+    const settlementTimestamp = Date.parse(`${settlementDate || "1970-01-01"}T00:00:00`);
+    return orders
+      .filter((order) => !order.douyinOrderNo || order.douyinOrderNo === row.externalOrderNo)
+      .filter((order) => !normalized || [
+        order.orderNo,
+        order.customerName,
+        order.contactPerson,
+        order.date,
+        order.paymentAccount,
+      ].some((value) => String(value ?? "").toLowerCase().includes(normalized)))
+      .map((order) => {
+        const orderTimestamp = Date.parse(`${order.date || "1970-01-01"}T00:00:00`);
+        const dayDifference = Number.isFinite(orderTimestamp) && Number.isFinite(settlementTimestamp)
+          ? Math.abs(orderTimestamp - settlementTimestamp) / 86_400_000
+          : 999;
+        const amountDifference = Math.abs(order.receivable - row.incomeTotal);
+        const sourcePenalty = order.source === "平台下单" ? 0 : 500;
+        return { order, score: amountDifference + dayDifference * 4 + sourcePenalty };
+      })
+      .sort((left, right) => left.score - right.score || String(right.order.date).localeCompare(String(left.order.date)))
+      .slice(0, 60)
+      .map((candidate) => candidate.order);
+  }, [orders, row, search]);
+
+  const linkOrder = async () => {
+    if (!row || !selectedOrderId || saving || !permission.requirePermission("update")) return;
+    const selectedOrder = orders.find((order) => order.id === selectedOrderId);
+    if (!selectedOrder) return toast.error("请选择系统订单");
+    if (!confirmWrite("关联", `将抖音订单 ${row.externalOrderNo} 永久关联到系统订单 ${selectedOrder.orderNo}。`)) return;
+    setSaving(true);
+    try {
+      await requestJson("/api/finance/douyin/link", {
+        method: "POST",
+        body: JSON.stringify({ siteId, externalOrderNo: row.externalOrderNo, orderId: selectedOrderId }),
+      });
+      await onLinked();
+      onOpenChange(false);
+      toast.success("抖音结算已关联系统订单");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "订单关联失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="flex max-h-[92dvh] max-w-3xl flex-col overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>关联抖音结算</DialogTitle>
+          {row && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+              <span className="font-mono">{row.externalOrderNo}</span>
+              <span>平台收入 {money(row.incomeTotal)}</span>
+              <span>结算 {displayDatetime(row.settlementTime)}</span>
+            </div>
+          )}
+        </DialogHeader>
+        <label className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索系统订单号、客户或订单负责人" className="pl-9" />
+        </label>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border">
+          {candidates.length === 0 ? (
+            <div className="px-4 py-12 text-center text-sm text-muted-foreground">没有可关联的系统订单</div>
+          ) : (
+            <div className="divide-y">
+              {candidates.map((order) => {
+                const selected = selectedOrderId === order.id;
+                return (
+                  <button
+                    key={order.id}
+                    type="button"
+                    className={`grid w-full gap-2 px-3 py-3 text-left sm:grid-cols-[minmax(0,1fr)_120px_120px] ${selected ? "bg-sky-50 ring-1 ring-inset ring-sky-300" : "hover:bg-muted/30"}`}
+                    onClick={() => setSelectedOrderId(order.id)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block font-medium">{order.orderNo} · {order.customerName}</span>
+                      <span className="mt-1 block truncate text-xs text-muted-foreground">{sourceLabel(order.source)} · {order.contactPerson || "未指定负责人"}</span>
+                    </span>
+                    <span className="text-sm"><span className="text-xs text-muted-foreground">下单</span><br />{order.date || "—"}</span>
+                    <span className="text-sm font-medium tabular-nums"><span className="text-xs font-normal text-muted-foreground">订单应收</span><br />{money(order.receivable)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => void linkOrder()} disabled={!selectedOrderId || saving}>
+            {saving && <Loader2 className="size-4 animate-spin" />}
+            确认关联
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TransferDialog({
+  transfer,
+  importBatches,
+  transfers,
+  siteId,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  transfer: FinanceTransfer | null;
+  importBatches: ImportBatch[];
+  transfers: FinanceTransfer[];
+  siteId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => Promise<void>;
+}) {
+  const permission = usePermission("finance");
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<TransferDraft>({
+    id: "",
+    channel: "douyin",
+    sourceAccount: "抖店账户",
+    targetAccount: "",
+    expectedAmount: 0,
+    actualAmount: 0,
+    transferredAt: localDatetimeValue(),
+    transactionNo: "",
+    importBatchIds: [],
+    proof: [],
+    notes: "",
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setDraft(transfer ? {
+      id: transfer.id,
+      channel: transfer.channel,
+      sourceAccount: transfer.sourceAccount,
+      targetAccount: transfer.targetAccount,
+      expectedAmount: transfer.expectedAmount,
+      actualAmount: transfer.actualAmount,
+      transferredAt: transfer.transferredAt,
+      transactionNo: transfer.transactionNo,
+      importBatchIds: [...transfer.importBatchIds],
+      proof: [...transfer.proof],
+      notes: transfer.notes,
+    } : {
+      id: "",
+      channel: "douyin",
+      sourceAccount: "抖店账户",
+      targetAccount: "",
+      expectedAmount: 0,
+      actualAmount: 0,
+      transferredAt: localDatetimeValue(),
+      transactionNo: "",
+      importBatchIds: [],
+      proof: [],
+      notes: "",
+    });
+  }, [open, transfer?.id]);
+
+  const usedBatchIds = useMemo(() => new Set(
+    transfers.filter((item) => item.id !== transfer?.id).flatMap((item) => item.importBatchIds)
+  ), [transfers, transfer?.id]);
+  const selectableBatches = useMemo(() => importBatches.filter((batch) =>
+    !usedBatchIds.has(batch.id) || draft.importBatchIds.includes(batch.id)
+  ), [importBatches, usedBatchIds, draft.importBatchIds]);
+
+  const toggleBatch = (batchId: string, checked: boolean) => {
+    setDraft((current) => {
+      const importBatchIds = checked
+        ? [...new Set([...current.importBatchIds, batchId])]
+        : current.importBatchIds.filter((id) => id !== batchId);
+      const expectedAmount = importBatchIds.reduce((sum, id) => {
+        const batch = importBatches.find((item) => item.id === id);
+        return sum + Number(batch?.totals?.settlementAmount ?? 0);
+      }, 0);
+      return {
+        ...current,
+        importBatchIds,
+        expectedAmount,
+        actualAmount: current.actualAmount === 0 || Math.abs(current.actualAmount - current.expectedAmount) <= 0.01
+          ? expectedAmount
+          : current.actualAmount,
+      };
+    });
+  };
+
+  const saveTransfer = async () => {
+    if (saving || !permission.requirePermission(transfer ? "update" : "create")) return;
+    if (!draft.channel) return toast.error("请选择资金渠道");
+    if (!draft.sourceAccount.trim() || !draft.targetAccount.trim()) return toast.error("请填写转出账户和对公到账账户");
+    if (!Number.isFinite(draft.actualAmount) || draft.actualAmount <= 0) return toast.error("请输入有效实际到账金额");
+    if (!draft.transferredAt) return toast.error("请选择到账时间");
+    if (!confirmWrite(transfer ? "修改" : "登记", `${transfer ? "修改" : "登记"}${paymentChannelLabel(draft.channel)}到账批次 ${money(draft.actualAmount)}。`)) return;
+    setSaving(true);
+    try {
+      await requestJson("/api/finance/transfers", {
+        method: "POST",
+        body: JSON.stringify({
+          action: transfer ? "update" : "add",
+          id: transfer?.id,
+          siteId,
+          transfer: {
+            ...draft,
+            sourceAccount: draft.sourceAccount.trim(),
+            targetAccount: draft.targetAccount.trim(),
+            transactionNo: draft.transactionNo.trim(),
+            notes: draft.notes.trim(),
+          },
+        }),
+      });
+      await onSaved();
+      onOpenChange(false);
+      toast.success("到账批次已保存，待财务确认核销");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "到账批次保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="max-h-[92dvh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{transfer ? "修改到账批次" : "登记到账批次"}</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-1.5">
+            <Label>资金渠道<span className="ml-0.5 text-red-500">*</span></Label>
+            <Select value={draft.channel} onValueChange={(value) => setDraft((current) => ({
+              ...current,
+              channel: value as PaymentChannel,
+              sourceAccount: value === "douyin" && !current.sourceAccount.trim() ? "抖店账户" : current.sourceAccount,
+              importBatchIds: value === "douyin" ? current.importBatchIds : [],
+            }))}>
+              <SelectTrigger><SelectValue placeholder="请选择渠道" /></SelectTrigger>
+              <SelectContent>
+                {PAYMENT_CHANNEL_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-1.5">
+            <Label>到账时间<span className="ml-0.5 text-red-500">*</span></Label>
+            <Input type="datetime-local" value={draft.transferredAt} onChange={(event) => setDraft((current) => ({ ...current, transferredAt: event.target.value }))} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>转出账户<span className="ml-0.5 text-red-500">*</span></Label>
+            <Input value={draft.sourceAccount} onChange={(event) => setDraft((current) => ({ ...current, sourceAccount: event.target.value }))} placeholder="抖店、微信或支付宝账户" />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>对公到账账户<span className="ml-0.5 text-red-500">*</span></Label>
+            <Input value={draft.targetAccount} onChange={(event) => setDraft((current) => ({ ...current, targetAccount: event.target.value }))} placeholder="开户行及尾号" />
+          </div>
+          {draft.channel === "douyin" && (
+            <div className="grid gap-1.5 sm:col-span-2">
+              <Label>关联抖店结算批次</Label>
+              <div className="max-h-44 divide-y overflow-y-auto rounded-md border">
+                {selectableBatches.length === 0 ? (
+                  <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无未登记到账的结算批次</div>
+                ) : selectableBatches.slice(0, 40).map((batch) => (
+                  <label key={batch.id} className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-muted/30">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <Checkbox
+                        checked={draft.importBatchIds.includes(batch.id)}
+                        onCheckedChange={(checked) => toggleBatch(batch.id, checked === true)}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{batch.fileName}</span>
+                        <span className="block text-xs text-muted-foreground">{displayDatetime(batch.importedAt)} · {batch.rowCount} 条</span>
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-medium tabular-nums">{money(Number(batch.totals?.settlementAmount ?? 0))}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="grid gap-1.5">
+            <Label>渠道应到账</Label>
+            <Input
+              type="number"
+              min={0}
+              step={0.01}
+              value={draft.expectedAmount || ""}
+              readOnly={draft.channel === "douyin" && draft.importBatchIds.length > 0}
+              onChange={(event) => setDraft((current) => ({ ...current, expectedAmount: Number(event.target.value) }))}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label>对公实际到账<span className="ml-0.5 text-red-500">*</span></Label>
+            <Input type="number" min={0} step={0.01} value={draft.actualAmount || ""} onChange={(event) => setDraft((current) => ({ ...current, actualAmount: Number(event.target.value) }))} />
+          </div>
+          <div className="grid gap-1.5 sm:col-span-2">
+            <Label>银行流水号</Label>
+            <Input value={draft.transactionNo} onChange={(event) => setDraft((current) => ({ ...current, transactionNo: event.target.value }))} placeholder="选填" />
+          </div>
+          <div className="grid gap-1.5 sm:col-span-2">
+            <Label>备注</Label>
+            <Textarea rows={2} value={draft.notes} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} />
+          </div>
+          <div className="grid gap-1.5 sm:col-span-2">
+            <Label>到账凭证</Label>
+            <ProofUploader images={draft.proof} onChange={(proof) => setDraft((current) => ({ ...current, proof }))} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => void saveTransfer()} disabled={saving}>
+            {saving && <Loader2 className="size-4 animate-spin" />}
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EmptyState({ children }: { children: string }) {
   return (
     <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed px-4 text-center text-sm text-muted-foreground">
@@ -911,8 +1404,12 @@ export function FinanceView() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [financeFilter, setFinanceFilter] = useState("all");
-  const [ledgerMode, setLedgerMode] = useState<"orders" | "transactions">("orders");
+  const [ledgerMode, setLedgerMode] = useState<"orders" | "transactions" | "transfers">("orders");
   const [selectedOrderId, setSelectedOrderId] = useState("");
+  const [selectedReconciliationNo, setSelectedReconciliationNo] = useState("");
+  const [selectedTransferId, setSelectedTransferId] = useState("");
+  const [transferDialogOpen, setTransferDialogOpen] = useState(false);
+  const [verifyingTransferId, setVerifyingTransferId] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [csvPanelOpen, setCsvPanelOpen] = useState(false);
   const [defaultCommissionRate, setDefaultCommissionRate] = useState(1);
@@ -958,6 +1455,8 @@ export function FinanceView() {
   }, [activeSiteId]);
 
   const selectedOrder = data?.orders.find((order) => order.id === selectedOrderId) ?? null;
+  const selectedReconciliation = data?.reconciliations.find((row) => row.externalOrderNo === selectedReconciliationNo) ?? null;
+  const selectedTransfer = data?.transfers.find((transfer) => transfer.id === selectedTransferId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
   const filteredOrders = useMemo(() => (data?.orders ?? []).filter((order) => {
     if (financeFilter !== "all" && order.financeStatus !== financeFilter) return false;
@@ -976,10 +1475,22 @@ export function FinanceView() {
       transaction.orderNo,
       transaction.customerName,
       transaction.contactPerson,
+      transaction.channel,
       transaction.account,
+      transaction.externalTransactionNo,
       transaction.notes,
     ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch));
   }), [data?.transactions, normalizedSearch]);
+  const filteredTransfers = useMemo(() => (data?.transfers ?? []).filter((transfer) => {
+    if (!normalizedSearch) return true;
+    return [
+      transfer.sourceAccount,
+      transfer.targetAccount,
+      transfer.transactionNo,
+      transfer.notes,
+      paymentChannelLabel(transfer.channel),
+    ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch));
+  }), [data?.transfers, normalizedSearch]);
   const unresolvedReconciliations = useMemo(
     () => (data?.reconciliations ?? []).filter((row) => row.status !== "已匹配"),
     [data?.reconciliations],
@@ -1075,6 +1586,46 @@ export function FinanceView() {
     }
   };
 
+  const openNewTransfer = () => {
+    if (!permission.requirePermission("create")) return;
+    if (activeSiteId === "all") return toast.error("请先选择具体场地再登记到账批次");
+    setSelectedTransferId("");
+    setTransferDialogOpen(true);
+  };
+
+  const verifyTransfer = async (transfer: FinanceTransfer) => {
+    if (verifyingTransferId || !permission.requirePermission("update")) return;
+    if (!confirmWrite("核销", `确认 ${paymentChannelLabel(transfer.channel)} 到对公账户的 ${money(transfer.actualAmount)} 已实际到账。`)) return;
+    setVerifyingTransferId(transfer.id);
+    try {
+      await requestJson("/api/finance/transfers", {
+        method: "POST",
+        body: JSON.stringify({ action: "verify", id: transfer.id }),
+      });
+      await loadOverview(true);
+      toast.success("到账批次已核销");
+    } catch (verifyError) {
+      toast.error(verifyError instanceof Error ? verifyError.message : "到账批次核销失败");
+    } finally {
+      setVerifyingTransferId("");
+    }
+  };
+
+  const deleteTransfer = async (transfer: FinanceTransfer) => {
+    if (!permission.requirePermission("delete")) return;
+    if (!confirmWrite("删除", `删除 ${paymentChannelLabel(transfer.channel)} 到账批次 ${money(transfer.actualAmount)}。`)) return;
+    try {
+      await requestJson("/api/finance/transfers", {
+        method: "POST",
+        body: JSON.stringify({ action: "delete", id: transfer.id }),
+      });
+      await loadOverview(true);
+      toast.success("到账批次已删除");
+    } catch (deleteError) {
+      toast.error(deleteError instanceof Error ? deleteError.message : "到账批次删除失败");
+    }
+  };
+
   if (!canAccess) {
     return (
       <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground">
@@ -1139,6 +1690,14 @@ export function FinanceView() {
               >
                 <History className="size-4" /> 资金流水
               </Button>
+              <Button
+                size="sm"
+                variant={ledgerMode === "transfers" ? "default" : "ghost"}
+                onClick={() => setLedgerMode("transfers")}
+                className="h-8"
+              >
+                <Landmark className="size-4" /> 到账批次
+              </Button>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <label className="relative min-w-0 sm:w-72">
@@ -1146,7 +1705,7 @@ export function FinanceView() {
                 <Input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="订单号、客户或订单负责人"
+                  placeholder={ledgerMode === "transfers" ? "账户、银行流水号或备注" : "订单号、客户或订单负责人"}
                   className="pl-9"
                 />
               </label>
@@ -1157,11 +1716,17 @@ export function FinanceView() {
                     <SelectItem value="all">全部财务状态</SelectItem>
                     <SelectItem value="未核销">未核销</SelectItem>
                     <SelectItem value="部分收款">部分收款</SelectItem>
+                    <SelectItem value="待核对">待核对</SelectItem>
                     <SelectItem value="已核销">已核销</SelectItem>
                     <SelectItem value="待退款">待退款</SelectItem>
                     <SelectItem value="有差异">有差异</SelectItem>
                   </SelectContent>
                 </Select>
+              )}
+              {ledgerMode === "transfers" && permission.canCreate && (
+                <Button onClick={openNewTransfer}>
+                  <Plus className="size-4" />登记到账批次
+                </Button>
               )}
             </div>
           </div>
@@ -1288,10 +1853,11 @@ export function FinanceView() {
                 </div>
               </>
             )
-          ) : filteredTransactions.length === 0 ? (
-            <EmptyState>暂无符合条件的手工资金流水</EmptyState>
-          ) : (
-            <>
+          ) : ledgerMode === "transactions" ? (
+            filteredTransactions.length === 0 ? (
+              <EmptyState>暂无符合条件的手工资金流水</EmptyState>
+            ) : (
+              <>
               <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
                 <table className="w-full min-w-[860px] text-sm">
                   <thead className="bg-muted/40 text-xs text-muted-foreground">
@@ -1301,7 +1867,8 @@ export function FinanceView() {
                       <th className="px-3 py-2.5 text-left font-medium">客户 / 订单负责人</th>
                       <th className="px-3 py-2.5 text-left font-medium">类型</th>
                       <th className="px-3 py-2.5 text-right font-medium">金额</th>
-                      <th className="px-3 py-2.5 text-left font-medium">账户</th>
+                      <th className="px-3 py-2.5 text-left font-medium">渠道 / 账户</th>
+                      <th className="px-3 py-2.5 text-left font-medium">核销</th>
                       <th className="px-3 py-2.5 text-left font-medium">备注</th>
                     </tr>
                   </thead>
@@ -1318,7 +1885,15 @@ export function FinanceView() {
                         <td className={`px-3 py-2.5 text-right font-medium tabular-nums ${transaction.type === "refund" ? "text-rose-700" : "text-emerald-700"}`}>
                           {transaction.type === "refund" ? "−" : "+"}{money(transaction.amount)}
                         </td>
-                        <td className="px-3 py-2.5">{transaction.account || "—"}</td>
+                        <td className="px-3 py-2.5">
+                          <div>{transaction.channel ? paymentChannelLabel(transaction.channel) : "未登记渠道"}</div>
+                          <div className="text-xs text-muted-foreground">{transaction.account || "未登记账户"}</div>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Badge variant="outline" className={transaction.verificationStatus === "pending" ? "border-amber-200 bg-amber-50 text-amber-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}>
+                            {transaction.verificationStatus === "pending" ? "待核销" : "已核销"}
+                          </Badge>
+                        </td>
                         <td className="max-w-72 truncate px-3 py-2.5 text-muted-foreground">{transaction.notes || "—"}</td>
                       </tr>
                     ))}
@@ -1345,12 +1920,106 @@ export function FinanceView() {
                     <div className="mt-2 text-xs text-muted-foreground">
                       {transaction.customerName} · {transaction.contactPerson || "未指定订单负责人"}
                     </div>
-                    {(transaction.account || transaction.notes || transaction.proof.length > 0) && (
+                    {(transaction.channel || transaction.account || transaction.notes || transaction.proof.length > 0) && (
                       <div className="mt-1 truncate text-xs text-muted-foreground">
-                        {[transaction.account, transaction.notes, transaction.proof.length > 0 ? `凭证 ${transaction.proof.length} 张` : ""].filter(Boolean).join(" · ")}
+                        {[transaction.channel ? paymentChannelLabel(transaction.channel) : "", transaction.account, transaction.verificationStatus === "pending" ? "待核销" : "已核销", transaction.notes, transaction.proof.length > 0 ? `凭证 ${transaction.proof.length} 张` : ""].filter(Boolean).join(" · ")}
                       </div>
                     )}
                   </button>
+                ))}
+              </div>
+              </>
+            )
+          ) : filteredTransfers.length === 0 ? (
+            <EmptyState>暂无到账批次记录</EmptyState>
+          ) : (
+            <>
+              <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
+                <table className="w-full min-w-[980px] text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2.5 text-left font-medium">到账时间</th>
+                      <th className="px-3 py-2.5 text-left font-medium">渠道</th>
+                      <th className="px-3 py-2.5 text-left font-medium">转出账户</th>
+                      <th className="px-3 py-2.5 text-left font-medium">对公到账账户</th>
+                      <th className="px-3 py-2.5 text-right font-medium">渠道应到账</th>
+                      <th className="px-3 py-2.5 text-right font-medium">实际到账</th>
+                      <th className="px-3 py-2.5 text-right font-medium">差异</th>
+                      <th className="px-3 py-2.5 text-left font-medium">状态</th>
+                      <th className="px-3 py-2.5 text-right font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {filteredTransfers.map((transfer) => (
+                      <tr key={transfer.id}>
+                        <td className="px-3 py-2.5 text-muted-foreground">{displayDatetime(transfer.transferredAt)}</td>
+                        <td className="px-3 py-2.5 font-medium">{paymentChannelLabel(transfer.channel)}</td>
+                        <td className="px-3 py-2.5">{transfer.sourceAccount}</td>
+                        <td className="px-3 py-2.5">{transfer.targetAccount}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{money(transfer.expectedAmount)}</td>
+                        <td className="px-3 py-2.5 text-right font-medium tabular-nums">{money(transfer.actualAmount)}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${Math.abs(transfer.difference) > 0.01 ? "text-amber-700" : "text-muted-foreground"}`}>
+                          {adjustmentMoney(transfer.difference)}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Badge variant="outline" className={transfer.status === "verified" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}>
+                            {transfer.status === "verified" ? "已核销" : "待核销"}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <div className="flex justify-end gap-1">
+                            {transfer.status === "pending" && permission.canUpdate && (
+                              <Button size="sm" variant="outline" onClick={() => void verifyTransfer(transfer)} disabled={verifyingTransferId === transfer.id}>
+                                {verifyingTransferId === transfer.id && <Loader2 className="size-3.5 animate-spin" />}
+                                核销
+                              </Button>
+                            )}
+                            {transfer.status === "pending" && permission.canUpdate && (
+                              <Button size="icon" variant="ghost" className="size-8" title="修改到账批次" onClick={() => { setSelectedTransferId(transfer.id); setTransferDialogOpen(true); }}>
+                                <Pencil className="size-3.5" />
+                              </Button>
+                            )}
+                            {transfer.status === "pending" && permission.canDelete && (
+                              <Button size="icon" variant="ghost" className="size-8 text-rose-600" title="删除到账批次" onClick={() => void deleteTransfer(transfer)}>
+                                <Trash2 className="size-3.5" />
+                              </Button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="divide-y rounded-lg border bg-card md:hidden">
+                {filteredTransfers.map((transfer) => (
+                  <div key={transfer.id} className="px-3 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium">{paymentChannelLabel(transfer.channel)} · {money(transfer.actualAmount)}</div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">{transfer.sourceAccount} → {transfer.targetAccount}</div>
+                      </div>
+                      <Badge variant="outline" className={transfer.status === "verified" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}>
+                        {transfer.status === "verified" ? "已核销" : "待核销"}
+                      </Badge>
+                    </div>
+                    <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                      <div><span className="text-muted-foreground">渠道应到</span><div className="font-medium">{money(transfer.expectedAmount)}</div></div>
+                      <div><span className="text-muted-foreground">差异</span><div className="font-medium">{adjustmentMoney(transfer.difference)}</div></div>
+                      <div><span className="text-muted-foreground">到账时间</span><div className="font-medium">{displayDatetime(transfer.transferredAt)}</div></div>
+                    </div>
+                    <div className="mt-3 flex justify-end gap-1">
+                      {transfer.status === "pending" && permission.canUpdate && (
+                        <Button size="sm" variant="outline" onClick={() => void verifyTransfer(transfer)}>核销</Button>
+                      )}
+                      {transfer.status === "pending" && permission.canUpdate && (
+                        <Button size="sm" variant="ghost" onClick={() => { setSelectedTransferId(transfer.id); setTransferDialogOpen(true); }}>修改</Button>
+                      )}
+                      {transfer.status === "pending" && permission.canDelete && (
+                        <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => void deleteTransfer(transfer)} title="删除到账批次"><Trash2 className="size-3.5" /></Button>
+                      )}
+                    </div>
+                  </div>
                 ))}
               </div>
             </>
@@ -1508,6 +2177,7 @@ export function FinanceView() {
                       <th className="px-3 py-2.5 text-right font-medium">净结算</th>
                       <th className="px-3 py-2.5 text-right font-medium">差异</th>
                       <th className="px-3 py-2.5 text-left font-medium">状态</th>
+                      <th className="px-3 py-2.5 text-right font-medium">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
@@ -1528,6 +2198,15 @@ export function FinanceView() {
                           <Badge variant="outline" className={reconciliationStatusClass(row.status)}>
                             {row.status}
                           </Badge>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          {row.status === "未匹配" && permission.canUpdate ? (
+                            <Button size="sm" variant="outline" onClick={() => setSelectedReconciliationNo(row.externalOrderNo)}>
+                              <Link2 className="size-3.5" />关联订单
+                            </Button>
+                          ) : row.internalOrderId ? (
+                            <Button size="sm" variant="ghost" onClick={() => setSelectedOrderId(row.internalOrderId)}>查看订单</Button>
+                          ) : "—"}
                         </td>
                       </tr>
                     ))}
@@ -1555,6 +2234,15 @@ export function FinanceView() {
                     </div>
                     <div className={`mt-2 text-xs ${Math.abs(row.difference ?? 0) > 0.01 ? "text-amber-700" : "text-muted-foreground"}`}>
                       系统应收 {row.systemReceivable == null ? "—" : money(row.systemReceivable)} · 差异 {row.difference == null ? "—" : money(row.difference)}
+                    </div>
+                    <div className="mt-3 flex justify-end">
+                      {row.status === "未匹配" && permission.canUpdate ? (
+                        <Button size="sm" variant="outline" onClick={() => setSelectedReconciliationNo(row.externalOrderNo)}>
+                          <Link2 className="size-3.5" />关联订单
+                        </Button>
+                      ) : row.internalOrderId ? (
+                        <Button size="sm" variant="ghost" onClick={() => setSelectedOrderId(row.internalOrderId)}>查看订单</Button>
+                      ) : null}
                     </div>
                   </div>
                 ))}
@@ -1594,6 +2282,30 @@ export function FinanceView() {
           if (!open) setSelectedOrderId("");
         }}
         onRefresh={() => loadOverview(true)}
+      />
+
+      <ReconciliationLinkDialog
+        row={selectedReconciliation}
+        orders={data?.orders ?? []}
+        siteId={activeSiteId}
+        open={!!selectedReconciliation}
+        onOpenChange={(open) => {
+          if (!open) setSelectedReconciliationNo("");
+        }}
+        onLinked={() => loadOverview(true)}
+      />
+
+      <TransferDialog
+        transfer={selectedTransfer}
+        importBatches={data?.importBatches ?? []}
+        transfers={data?.transfers ?? []}
+        siteId={activeSiteId}
+        open={transferDialogOpen}
+        onOpenChange={(open) => {
+          setTransferDialogOpen(open);
+          if (!open) setSelectedTransferId("");
+        }}
+        onSaved={() => loadOverview(true)}
       />
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
