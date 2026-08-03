@@ -1,4 +1,11 @@
 export const PAYMENT_CHANNELS = ["wechat", "alipay", "douyin", "bank", "cash"];
+export const DEFAULT_PAYMENT_METHOD_SETTINGS = [
+  { channel: "wechat", account: "", enabled: false },
+  { channel: "alipay", account: "", enabled: false },
+  { channel: "douyin", account: "抖店账户", enabled: true },
+  { channel: "bank", account: "", enabled: false },
+  { channel: "cash", account: "现金", enabled: true },
+];
 
 export function normalizePaymentChannel(value = "") {
   const channel = String(value ?? "").trim();
@@ -13,6 +20,29 @@ export function paymentChannelLabel(channel = "") {
     bank: "银行卡",
     cash: "现金",
   }[normalizePaymentChannel(channel)] || "未登记";
+}
+
+export function normalizePaymentMethodSettings(settings = {}) {
+  const configured = new Map();
+  const methods = Array.isArray(settings?.paymentMethods) ? settings.paymentMethods : [];
+  for (const method of methods) {
+    const channel = normalizePaymentChannel(method?.channel);
+    if (!channel || configured.has(channel)) continue;
+    configured.set(channel, {
+      channel,
+      account: String(method?.account ?? "").trim(),
+      enabled: method?.enabled === true,
+    });
+  }
+  return DEFAULT_PAYMENT_METHOD_SETTINGS.map((fallback) => configured.get(fallback.channel) ?? { ...fallback });
+}
+
+export function configuredPaymentMethod(settings = {}, channel = "") {
+  const normalizedChannel = normalizePaymentChannel(channel);
+  if (!normalizedChannel) return undefined;
+  return normalizePaymentMethodSettings(settings).find((method) =>
+    method.channel === normalizedChannel && method.enabled && method.account
+  );
 }
 
 export function paymentVerificationStatus(payment = {}) {

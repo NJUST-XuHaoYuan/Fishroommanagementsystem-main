@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, normalizePaymentMethodSettings, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -20,6 +20,7 @@ import { PersonnelView } from "./components/PersonnelView";
 import { PermissionsView } from "./components/PermissionsView";
 import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
+import { PaymentMethodsView } from "./components/PaymentMethodsView";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
@@ -75,8 +76,9 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   daily: ["products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "bioRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
-  orders: ["orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
+  orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
   finance: ["sites", "systemSettings"],
+  paymentMethods: ["systemSettings"],
   profile: ["personnel", "orders", "customers", "shipments"],
   accounts: ["personnel"],
   permissions: ["personnel"],
@@ -93,6 +95,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
+    paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
   },
   sites: DEFAULT_SITES.map((site) => ({ ...site })),
   personnel: [],
@@ -324,6 +327,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     ...initialState.systemSettings,
     ...(migratedData.systemSettings && typeof migratedData.systemSettings === "object" ? migratedData.systemSettings : {}),
   };
+  migratedSystemSettings.paymentMethods = normalizePaymentMethodSettings(migratedSystemSettings);
 
   return {
     ...initialState,
@@ -1334,6 +1338,7 @@ function AdminApp() {
         />
       );
       case "finance":    return <FinanceView />;
+      case "paymentMethods": return <PaymentMethodsView />;
       case "profile":    return <PersonalCenterView />;
       case "accounts":   return <PersonnelView />;
       case "permissions": return <PermissionsView />;

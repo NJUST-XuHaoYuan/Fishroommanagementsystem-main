@@ -25,6 +25,8 @@ import {
   UserCircle,
   MapPin,
   CircleDollarSign,
+  Settings,
+  WalletCards,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
@@ -42,6 +44,7 @@ export type ViewKey =
   | "customers"
   | "orders"
   | "finance"
+  | "paymentMethods"
   | "permissions"
   | "accounts"
   | "profile"
@@ -177,6 +180,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? "账号密码管理"
       : view === "operationLogs"
         ? "操作日志"
+      : view === "paymentMethods"
+        ? "付款方式管理"
       : NAV.flatMap((s) => s.items).find((i) => i.key === view)?.label ?? "";
 
   const currentSection =
@@ -188,6 +193,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? "人员管理"
       : view === "operationLogs"
         ? "日志管理"
+      : view === "paymentMethods"
+        ? "后台管理"
       : NAV.find((s) => s.items.some((i) => i.key === view))?.title;
 
   const navigate = (nextView: ViewKey) => {
@@ -261,6 +268,21 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               >
                 <span>账号密码管理</span>
                 {view === "accounts" && <ChevronRight className="size-3.5 shrink-0" />}
+              </button>
+            </div>
+            <div className="fishroom-nav-section">
+              <div className="fishroom-nav-title">
+                <span className="fishroom-nav-title-icon">
+                  <Settings className="size-3.5 shrink-0" />
+                </span>
+                <span>后台管理</span>
+              </div>
+              <button
+                onClick={() => navigate("paymentMethods")}
+                className={navButtonClass(view === "paymentMethods")}
+              >
+                <span className="flex items-center gap-2"><WalletCards className="size-3.5" />付款方式管理</span>
+                {view === "paymentMethods" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
             </div>
             <div className="fishroom-nav-section">

@@ -1,11 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  configuredPaymentMethod,
   isPaymentVerified,
   normalizePaymentChannel,
+  normalizePaymentMethodSettings,
   refundMethodForChannel,
   verifiedPaymentTotals,
 } from "./payment-utils.mjs";
+
+test("payment methods fail closed until an account is configured", () => {
+  assert.equal(configuredPaymentMethod({}, "wechat"), undefined);
+  assert.deepEqual(configuredPaymentMethod({}, "douyin"), {
+    channel: "douyin",
+    account: "抖店账户",
+    enabled: true,
+  });
+  assert.deepEqual(configuredPaymentMethod({}, "cash"), {
+    channel: "cash",
+    account: "现金",
+    enabled: true,
+  });
+});
+
+test("configured payment methods normalize channel order and account text", () => {
+  const methods = normalizePaymentMethodSettings({
+    paymentMethods: [
+      { channel: "bank", account: "  农行 1234  ", enabled: true },
+      { channel: "wechat", account: "南京海森", enabled: true },
+      { channel: "unknown", account: "ignored", enabled: true },
+    ],
+  });
+  assert.deepEqual(methods.map((method) => method.channel), ["wechat", "alipay", "douyin", "bank", "cash"]);
+  assert.equal(configuredPaymentMethod({ paymentMethods: methods }, "bank")?.account, "农行 1234");
+  assert.equal(configuredPaymentMethod({ paymentMethods: methods }, "alipay"), undefined);
+});
 
 test("legacy payments remain verified", () => {
   assert.equal(isPaymentVerified({ type: "balance", amount: 100 }), true);

@@ -2,8 +2,8 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
-  ORDER_SOURCE_OPTIONS, isPersonnelResigned, PAYMENT_CHANNEL_OPTIONS,
-  PaymentChannel, isPaymentVerified, paymentChannelLabel,
+  ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
+  isPersonnelResigned, PaymentChannel, isPaymentVerified, paymentChannelLabel,
 } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -1767,10 +1767,7 @@ function ProofUploader({
 
 type OrderRefundDraft = {
   amount: number;
-  channel: PaymentChannel | "";
-  account: string;
   time: string;
-  externalTransactionNo: string;
   proof: string[];
   notes: string;
 };
@@ -1788,37 +1785,32 @@ function OrderRefundDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: (draft: OrderRefundDraft) => Promise<boolean>;
 }) {
+  const { state } = useStore();
   const [draft, setDraft] = useState<OrderRefundDraft>({
     amount: 0,
-    channel: "",
-    account: "",
     time: nowDatetimeLocal(),
-    externalTransactionNo: "",
     proof: [],
     notes: "",
   });
 
   useEffect(() => {
     if (!open || !order) return;
-    const channel = (isDouyinOrderSource(order.source) ? "douyin" : order.paymentChannel ?? "") as PaymentChannel | "";
     setDraft({
       amount: 0,
-      channel,
-      account: order.paymentAccount ?? (channel === "douyin" ? "抖店账户" : channel === "cash" ? "现金" : ""),
       time: nowDatetimeLocal(),
-      externalTransactionNo: "",
       proof: [],
       notes: "",
     });
   }, [open, order?.id]);
 
   if (!order) return null;
-  const platformRefund = draft.channel === "douyin";
+  const refundChannel = (isDouyinOrderSource(order.source) ? "douyin" : order.paymentChannel ?? "") as PaymentChannel | "";
+  const refundAccount = order.paymentAccount || configuredPaymentMethod(state.systemSettings, refundChannel)?.account || "";
+  const platformRefund = refundChannel === "douyin";
 
   const submit = async () => {
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return toast.error("请输入有效退款金额");
-    if (!draft.channel) return toast.error("请选择退款渠道");
-    if (!draft.account.trim()) return toast.error("请填写退款账户");
+    if (!refundChannel || !refundAccount) return toast.error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
     const confirmed = confirmWrite(
       "登记退款",
       platformRefund
@@ -1826,7 +1818,7 @@ function OrderRefundDialog({
         : `登记订单「${order.orderNo}」的账户退款 ¥${draft.amount.toFixed(2)}，后续由财务核对独立出账。`
     );
     if (!confirmed) return;
-    if (await onConfirm({ ...draft, account: draft.account.trim(), notes: draft.notes.trim() })) {
+    if (await onConfirm({ ...draft, notes: draft.notes.trim() })) {
       onOpenChange(false);
     }
   };
@@ -1858,41 +1850,15 @@ function OrderRefundDialog({
           </div>
           <div className="grid gap-1.5">
             <Label>退款渠道<span className="ml-0.5 text-red-500">*</span></Label>
-            <Select
-              value={draft.channel}
-              disabled={isDouyinOrderSource(order.source)}
-              onValueChange={(value) => setDraft((current) => {
-                const channel = value as PaymentChannel;
-                return {
-                  ...current,
-                  channel,
-                  account: channel === "cash" && !current.account.trim() ? "现金" : current.account,
-                };
-              })}
-            >
-              <SelectTrigger><SelectValue placeholder="请选择退款渠道" /></SelectTrigger>
-              <SelectContent>
-                {PAYMENT_CHANNEL_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm">
+              {refundChannel ? paymentChannelLabel(refundChannel) : "未配置"}
+            </div>
           </div>
           <div className="grid gap-1.5">
             <Label>{platformRefund ? "平台账户" : "退款账户"}<span className="ml-0.5 text-red-500">*</span></Label>
-            <Input
-              value={draft.account}
-              onChange={(event) => setDraft((current) => ({ ...current, account: event.target.value }))}
-              placeholder={platformRefund ? "抖店账户" : "账户名称或尾号"}
-            />
-          </div>
-          <div className="grid gap-1.5 sm:col-span-2">
-            <Label>{platformRefund ? "平台退款单号" : "退款流水号"}</Label>
-            <Input
-              value={draft.externalTransactionNo}
-              onChange={(event) => setDraft((current) => ({ ...current, externalTransactionNo: event.target.value }))}
-              placeholder="选填"
-            />
+            <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm">
+              {refundAccount || "未配置"}
+            </div>
           </div>
           <div className={`sm:col-span-2 rounded-md border px-3 py-2 text-sm ${platformRefund ? "border-rose-200 bg-rose-50 text-rose-800" : "border-sky-200 bg-sky-50 text-sky-800"}`}>
             {platformRefund
@@ -3746,7 +3712,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; douyinOrderNo: string; paymentChannel: PaymentChannel | ""; paymentAccount: string; paymentReference: string; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; douyinOrderNo: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3781,6 +3747,32 @@ function OrderDetailDialog({
   const personnel = state.personnel ?? [];
   const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
+  const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
+  const editPaymentMethod = configuredPaymentMethod(state.systemSettings, editForm?.paymentChannel);
+  const preserveHistoricalPaymentAccount = Boolean(
+    editForm && order &&
+    editForm.source === order.source &&
+    editForm.paymentChannel === order.paymentChannel &&
+    String(order.paymentAccount ?? "").trim()
+  );
+  const editPaymentAccount = preserveHistoricalPaymentAccount
+    ? String(order?.paymentAccount ?? "").trim()
+    : editPaymentMethod?.account ?? "";
+  const editPaymentOptions = useMemo(() => {
+    const options = availablePaymentMethods.filter((method) => method.channel !== "douyin");
+    if (
+      editForm?.paymentChannel &&
+      editForm.paymentChannel !== "douyin" &&
+      !options.some((method) => method.channel === editForm.paymentChannel)
+    ) {
+      return [...options, {
+        channel: editForm.paymentChannel,
+        account: String(order?.paymentAccount ?? "").trim(),
+        enabled: false,
+      }];
+    }
+    return options;
+  }, [availablePaymentMethods, editForm?.paymentChannel, order?.paymentAccount]);
 
   useEffect(() => {
     if (!open) {
@@ -3805,8 +3797,6 @@ function OrderDetailDialog({
       source: order.source ?? "",
       douyinOrderNo: order.douyinOrderNo ?? "",
       paymentChannel: order.paymentChannel ?? (isDouyinOrderSource(order.source) ? "douyin" : ""),
-      paymentAccount: order.paymentAccount ?? (isDouyinOrderSource(order.source) ? "抖店账户" : ""),
-      paymentReference: order.paymentReference ?? order.douyinOrderNo ?? "",
       shippingAddress: order.shippingAddress ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
       shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
@@ -3835,7 +3825,7 @@ function OrderDetailDialog({
     if (!isDouyinOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
     if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
     if (!editForm.paymentChannel) return toast.error("请选择付款方式");
-    if (!editForm.paymentAccount.trim()) return toast.error("请填写对应收款账户");
+    if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
@@ -3853,8 +3843,6 @@ function OrderDetailDialog({
         source: editForm.source.trim(),
         douyinOrderNo: isDouyinOrderSource(editForm.source) ? editForm.douyinOrderNo.trim() : "",
         paymentChannel: editForm.paymentChannel,
-        paymentAccount: editForm.paymentAccount.trim(),
-        paymentReference: isDouyinOrderSource(editForm.source) ? editForm.douyinOrderNo.trim() : editForm.paymentReference.trim(),
         shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
@@ -3922,10 +3910,6 @@ function OrderDetailDialog({
         customerId: isDouyinOrderSource(nextSource) ? "" : form.customerId,
         douyinOrderNo: isDouyinOrderSource(nextSource) ? form.douyinOrderNo : "",
         paymentChannel: isDouyinOrderSource(nextSource) ? "douyin" : form.paymentChannel === "douyin" ? "" : form.paymentChannel,
-        paymentAccount: isDouyinOrderSource(nextSource)
-          ? form.paymentChannel === "douyin" ? form.paymentAccount || "抖店账户" : "抖店账户"
-          : form.paymentChannel === "douyin" ? "" : form.paymentAccount,
-        paymentReference: isDouyinOrderSource(nextSource) ? form.douyinOrderNo : form.paymentReference,
         shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
         plannedShipDate: isPickupOrderSource(nextSource) ? "" : form.plannedShipDate,
         shippingFee: isPickupOrderSource(nextSource) ? 0 : form.shippingFee,
@@ -4062,7 +4046,9 @@ function OrderDetailDialog({
         ...draft,
       });
       applyOrderApiResult(setState, result);
-      toast.success(draft.channel === "douyin" ? "平台退款已登记，待财务按平台账单核销" : "账户退款已登记，待财务核对出账");
+      toast.success(isDouyinOrderSource(order.source) || order.paymentChannel === "douyin"
+        ? "平台退款已登记，待财务按平台账单核销"
+        : "账户退款已登记，待财务核对出账");
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "退款登记失败，请重试");
@@ -4327,38 +4313,26 @@ function OrderDetailDialog({
                     onValueChange={(value) => setEditForm((form) => form ? {
                       ...form,
                       paymentChannel: value as PaymentChannel,
-                      paymentAccount: value === "cash" && !form.paymentAccount.trim() ? "现金" : form.paymentAccount,
                     } : form)}
                   >
                     <SelectTrigger className={!editForm.paymentChannel ? "border-red-500 focus-visible:ring-red-500" : ""}>
                       <SelectValue placeholder="请选择付款方式" />
                     </SelectTrigger>
                     <SelectContent>
-                      {PAYMENT_CHANNEL_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      {editPaymentOptions.map((method) => (
+                        <SelectItem key={method.channel} value={method.channel}>
+                          {paymentChannelLabel(method.channel)}{method.enabled ? "" : "（历史）"}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs">对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    value={editForm.paymentAccount}
-                    placeholder={editForm.paymentChannel === "cash" ? "现金" : "账户名称或尾号"}
-                    onChange={(event) => setEditForm((form) => form ? { ...form, paymentAccount: event.target.value } : form)}
-                    className={!editForm.paymentAccount.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
-                  />
-                </div>
-                {!isDouyinOrderSource(editForm.source) && (
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">支付流水号</Label>
-                    <Input
-                      value={editForm.paymentReference}
-                      placeholder="选填"
-                      onChange={(event) => setEditForm((form) => form ? { ...form, paymentReference: event.target.value } : form)}
-                    />
+                  <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${editPaymentAccount ? "text-foreground" : "border-red-500 text-red-500"}`}>
+                    {editPaymentAccount || "未配置，请联系管理员"}
                   </div>
-                )}
+                </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs">创建时间</Label>
                   <div className="h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm text-muted-foreground">
@@ -4408,9 +4382,6 @@ function OrderDetailDialog({
                   <span className="text-muted-foreground">收款账户：</span>
                   {order.paymentAccount || "未登记"}
                 </div>
-                {order.paymentReference && !isDouyinOrderSource(order.source) && (
-                  <div><span className="text-muted-foreground">支付流水号：</span>{order.paymentReference}</div>
-                )}
                 <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
                 <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
                 {order.status !== "completed" && !isPickupOrderSource(order.source) && (
@@ -5393,8 +5364,6 @@ function NewOrderDialog({
   const [source, setSource] = useState("");
   const [douyinOrderNo, setDouyinOrderNo] = useState("");
   const [paymentChannel, setPaymentChannel] = useState<PaymentChannel | "">("");
-  const [paymentAccount, setPaymentAccount] = useState("");
-  const [paymentReference, setPaymentReference] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
@@ -5409,7 +5378,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setPaymentChannel(""); setPaymentAccount(""); setPaymentReference(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setPaymentChannel(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5426,6 +5395,12 @@ function NewOrderDialog({
   const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
   const douyinOrder = isDouyinOrderSource(source);
   const pickupOrder = isPickupOrderSource(source);
+  const availablePaymentMethods = useMemo(
+    () => configuredPaymentMethods(state.systemSettings).filter((method) => method.channel !== "douyin"),
+    [state.systemSettings]
+  );
+  const paymentMethod = configuredPaymentMethod(state.systemSettings, paymentChannel);
+  const paymentAccount = paymentMethod?.account ?? "";
 
   const chooseSource = (nextSource: string) => {
     setSource(nextSource);
@@ -5433,8 +5408,6 @@ function NewOrderDialog({
     setCustomerId("");
     setDouyinOrderNo("");
     setPaymentChannel(isDouyinOrderSource(nextSource) ? "douyin" : "");
-    setPaymentAccount(isDouyinOrderSource(nextSource) ? "抖店账户" : "");
-    setPaymentReference("");
     setShippingAddress("");
     setPlannedShipDate("");
     setShippingFee(0);
@@ -5539,7 +5512,7 @@ function NewOrderDialog({
     if (!douyinOrder && !customerId) return toast.error("请选择客户");
     if (douyinOrder && !douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
     if (!paymentChannel) return toast.error("请选择付款方式");
-    if (!paymentAccount.trim()) return toast.error("请填写对应收款账户");
+    if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
@@ -5574,8 +5547,6 @@ function NewOrderDialog({
         source: source.trim(),
         douyinOrderNo: douyinOrder ? douyinOrderNo.trim() : "",
         paymentChannel,
-        paymentAccount: paymentAccount.trim(),
-        paymentReference: douyinOrder ? douyinOrderNo.trim() : paymentReference.trim(),
         shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
         contactPerson: contactPerson.trim(),
@@ -5753,41 +5724,26 @@ function NewOrderDialog({
                 <Select
                   value={paymentChannel}
                   disabled={douyinOrder}
-                  onValueChange={(value) => {
-                    const channel = value as PaymentChannel;
-                    setPaymentChannel(channel);
-                    if (channel === "cash" && !paymentAccount.trim()) setPaymentAccount("现金");
-                  }}
+                  onValueChange={(value) => setPaymentChannel(value as PaymentChannel)}
                 >
                   <SelectTrigger className={submitAttempted && !paymentChannel ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择付款方式" />
                   </SelectTrigger>
                   <SelectContent>
-                    {PAYMENT_CHANNEL_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    {douyinOrder ? (
+                      <SelectItem value="douyin">抖音</SelectItem>
+                    ) : availablePaymentMethods.map((method) => (
+                      <SelectItem key={method.channel} value={method.channel}>{paymentChannelLabel(method.channel)}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
               <div className="grid gap-2">
                 <Label>对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
-                <Input
-                  value={paymentAccount}
-                  onChange={(event) => setPaymentAccount(event.target.value)}
-                  placeholder={paymentChannel === "cash" ? "现金" : "账户名称或尾号"}
-                  className={submitAttempted && !paymentAccount.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
-                />
-              </div>
-              {!douyinOrder && (
-                <div className="grid gap-2">
-                  <Label>支付流水号</Label>
-                  <Input
-                    value={paymentReference}
-                    onChange={(event) => setPaymentReference(event.target.value)}
-                    placeholder="选填"
-                  />
+                <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${submitAttempted && !paymentAccount ? "border-red-500 text-red-500" : "text-foreground"}`}>
+                  {paymentAccount || (paymentChannel ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
                 </div>
-              )}
+              </div>
               {source === "私域线上" && (
                 <div className="grid gap-2 md:col-span-2 xl:col-span-3">
                   <Label>本单收货地址</Label>

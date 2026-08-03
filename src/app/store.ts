@@ -206,6 +206,18 @@ export const PAYMENT_CHANNEL_OPTIONS = [
   { value: "cash", label: "现金" },
 ] as const;
 export type PaymentChannel = typeof PAYMENT_CHANNEL_OPTIONS[number]["value"];
+export type PaymentMethodSetting = {
+  channel: PaymentChannel;
+  account: string;
+  enabled: boolean;
+};
+export const DEFAULT_PAYMENT_METHOD_SETTINGS: PaymentMethodSetting[] = [
+  { channel: "wechat", account: "", enabled: false },
+  { channel: "alipay", account: "", enabled: false },
+  { channel: "douyin", account: "抖店账户", enabled: true },
+  { channel: "bank", account: "", enabled: false },
+  { channel: "cash", account: "现金", enabled: true },
+];
 export type PaymentVerificationStatus = "pending" | "verified";
 export type PaymentRecordSource = "order" | "finance" | "platform";
 export type RefundMethod = "platform" | "account";
@@ -246,9 +258,11 @@ export type Order = {
   date: string;
   source?: OrderSource | string;
   douyinOrderNo?: string;
-  /** 订单负责人登记的预计收款路径；实际到账由财务核销。 */
+  /** 订单选择的付款方式；实际到账由财务核销。 */
   paymentChannel?: PaymentChannel;
+  /** 创建订单时使用的后台收款账户快照。 */
   paymentAccount?: string;
+  /** 历史兼容字段；外部交易标识由财务流水维护。 */
   paymentReference?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
@@ -362,7 +376,36 @@ export type SystemSettings = {
   fishListFooterText: string;
   /** 财务模块默认负责人提成率，百分比数值，例如 1 表示 1%。 */
   financeDefaultCommissionRate?: number;
+  /** 后台配置的可用付款方式及默认收款账户。 */
+  paymentMethods?: PaymentMethodSetting[];
 };
+
+export function normalizePaymentMethodSettings(settings?: SystemSettings | null): PaymentMethodSetting[] {
+  const configured = new Map<PaymentChannel, PaymentMethodSetting>();
+  if (Array.isArray(settings?.paymentMethods)) {
+    settings.paymentMethods.forEach((item) => {
+      const channel = PAYMENT_CHANNEL_OPTIONS.find((option) => option.value === item?.channel)?.value;
+      if (!channel || configured.has(channel)) return;
+      configured.set(channel, {
+        channel,
+        account: String(item?.account ?? "").trim(),
+        enabled: item?.enabled === true,
+      });
+    });
+  }
+  return DEFAULT_PAYMENT_METHOD_SETTINGS.map((fallback) => configured.get(fallback.channel) ?? { ...fallback });
+}
+
+export function configuredPaymentMethods(settings?: SystemSettings | null): PaymentMethodSetting[] {
+  return normalizePaymentMethodSettings(settings).filter((method) => method.enabled && method.account.trim());
+}
+
+export function configuredPaymentMethod(
+  settings: SystemSettings | null | undefined,
+  channel?: string
+): PaymentMethodSetting | undefined {
+  return configuredPaymentMethods(settings).find((method) => method.channel === channel);
+}
 
 export type Store = {
   user: User;
@@ -468,6 +511,7 @@ export const initialState: Store = {
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
+    paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
   },
   sites: [
     { id: "jiangyin", name: "江阴" },

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  configuredPaymentMethod,
+  configuredPaymentMethods,
   PAYMENT_CHANNEL_OPTIONS,
   PaymentChannel,
   PaymentRecord,
@@ -442,6 +444,7 @@ function OrderFinanceDialog({
   onOpenChange: (open: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { state } = useStore();
   const permission = usePermission("finance");
   const [editingPaymentId, setEditingPaymentId] = useState("");
   const [paymentFormOpen, setPaymentFormOpen] = useState(false);
@@ -468,15 +471,39 @@ function OrderFinanceDialog({
     setEditingPaymentId("");
   }, [open, order?.id, order?.commissionRate]);
 
+  const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
+  const orderPaymentAccount = String(order?.paymentAccount ?? "").trim();
+  const orderPaymentMethod = order?.paymentChannel && orderPaymentAccount
+    ? { channel: order.paymentChannel, account: orderPaymentAccount, enabled: true }
+    : null;
+  const paymentMethodOptions = useMemo(() => {
+    if (
+      draft.channel &&
+      draft.account &&
+      !availablePaymentMethods.some((method) => method.channel === draft.channel)
+    ) {
+      return [...availablePaymentMethods, {
+        channel: draft.channel,
+        account: draft.account,
+        enabled: false,
+      }];
+    }
+    return availablePaymentMethods;
+  }, [availablePaymentMethods, draft.account, draft.channel]);
+
+  const defaultPaymentMethod = () =>
+    orderPaymentMethod ?? configuredPaymentMethod(state.systemSettings, order?.paymentChannel) ?? availablePaymentMethods[0] ?? null;
+
   const resetPaymentForm = () => {
+    const paymentMethod = defaultPaymentMethod();
     setEditingPaymentId("");
     setDraft({
       id: "",
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
-      channel: order?.paymentChannel ?? "",
-      account: "",
+      channel: paymentMethod?.channel ?? "",
+      account: paymentMethod?.account ?? "",
       externalTransactionNo: "",
       proof: [],
       notes: "",
@@ -486,14 +513,15 @@ function OrderFinanceDialog({
 
   const startAddPayment = () => {
     if (!permission.requirePermission("create")) return;
+    const paymentMethod = defaultPaymentMethod();
     setEditingPaymentId("");
     setDraft({
       id: "",
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
-      channel: order?.paymentChannel ?? "",
-      account: order?.paymentAccount ?? "",
+      channel: paymentMethod?.channel ?? "",
+      account: paymentMethod?.account ?? "",
       externalTransactionNo: "",
       proof: [],
       notes: "",
@@ -883,27 +911,32 @@ function OrderFinanceDialog({
                         <Label>资金渠道</Label>
                         <Select
                           value={draft.channel}
-                          onValueChange={(value) => setDraft((current) => ({
-                            ...current,
-                            channel: value as PaymentChannel,
-                            account: value === "cash" && !current.account.trim() ? "现金" : current.account,
-                          }))}
+                          onValueChange={(value) => {
+                            const paymentMethod = orderPaymentMethod?.channel === value
+                              ? orderPaymentMethod
+                              : configuredPaymentMethod(state.systemSettings, value);
+                            setDraft((current) => ({
+                              ...current,
+                              channel: value as PaymentChannel,
+                              account: paymentMethod?.account ?? "",
+                            }));
+                          }}
                         >
                           <SelectTrigger><SelectValue placeholder="请选择资金渠道" /></SelectTrigger>
                           <SelectContent>
-                            {PAYMENT_CHANNEL_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                            {paymentMethodOptions.map((method) => (
+                              <SelectItem key={method.channel} value={method.channel}>
+                                {paymentChannelLabel(method.channel)}{method.enabled ? "" : "（历史）"}
+                              </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="grid gap-1.5">
                         <Label>资金账户</Label>
-                        <Input
-                          value={draft.account}
-                          onChange={(event) => setDraft((current) => ({ ...current, account: event.target.value }))}
-                          placeholder="账户名称或尾号"
-                        />
+                        <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${draft.account ? "text-foreground" : "border-red-500 text-red-500"}`}>
+                          {draft.account || "未配置，请先到付款方式管理设置"}
+                        </div>
                       </div>
                       <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
                         <Label>外部流水号</Label>

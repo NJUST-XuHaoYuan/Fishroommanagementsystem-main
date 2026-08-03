@@ -20,6 +20,7 @@ import {
   parseDouyinSettlementCsv,
 } from "./finance-utils.mjs";
 import {
+  configuredPaymentMethod,
   isPaymentVerified,
   normalizePaymentChannel,
   paymentChannelLabel,
@@ -3081,27 +3082,28 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     );
     if (duplicateOrder) throw new Error(`抖音订单编号已存在：${douyinOrderNo}`);
   }
-  const hasPaymentDeclarationInput = ["paymentChannel", "paymentAccount", "paymentReference"]
-    .some((key) => Object.prototype.hasOwnProperty.call(body, key));
   const sourceChanged = Boolean(currentOrder) && String(currentOrder?.source ?? "").trim() !== source;
-  const hasExistingPaymentDeclaration = Boolean(
-    currentOrder?.paymentChannel || currentOrder?.paymentAccount || currentOrder?.paymentReference
-  );
-  const shouldNormalizePaymentDeclaration = !currentOrder || hasPaymentDeclarationInput || sourceChanged || hasExistingPaymentDeclaration;
-  const paymentChannel = isDouyinOrder && shouldNormalizePaymentDeclaration
+  const paymentChannel = isDouyinOrder
     ? "douyin"
     : normalizePaymentChannel(body.paymentChannel ?? currentOrder?.paymentChannel);
   if ((body.paymentChannel ?? currentOrder?.paymentChannel) && !paymentChannel) {
     throw new Error("请选择有效付款方式");
   }
-  const paymentAccount = String(body.paymentAccount ?? currentOrder?.paymentAccount ?? "").trim();
-  const paymentReference = isDouyinOrder && shouldNormalizePaymentDeclaration
-    ? douyinOrderNo
-    : String(body.paymentReference ?? currentOrder?.paymentReference ?? "").trim();
-  if (!currentOrder || hasPaymentDeclarationInput || sourceChanged) {
-    if (!paymentChannel) throw new Error("请选择付款方式");
-    if (!paymentAccount) throw new Error("请填写对应收款账户");
+  if (!paymentChannel) throw new Error("请选择付款方式");
+  const currentPaymentChannel = normalizePaymentChannel(currentOrder?.paymentChannel);
+  const currentPaymentAccount = String(currentOrder?.paymentAccount ?? "").trim();
+  const preserveCurrentAccount = Boolean(currentOrder) &&
+    !sourceChanged &&
+    currentPaymentChannel === paymentChannel &&
+    Boolean(currentPaymentAccount);
+  const paymentMethod = preserveCurrentAccount
+    ? null
+    : configuredPaymentMethod(state.systemSettings, paymentChannel);
+  if (!preserveCurrentAccount && !paymentMethod) {
+    throw new Error(`付款方式「${paymentChannelLabel(paymentChannel)}」未启用或未配置收款账户，请联系管理员处理`);
   }
+  const paymentAccount = preserveCurrentAccount ? currentPaymentAccount : paymentMethod.account;
+  const paymentReference = String(currentOrder?.paymentReference ?? "").trim();
   const shippingAddress = source === "私域线上"
     ? String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim()
     : "";
@@ -4749,14 +4751,18 @@ async function handleApi(req, res, url) {
         normalizeExternalOrderNo(order?.douyinOrderNo) === externalOrderNo
       );
       if (conflict) throw new Error(`抖音订单已关联到 ${conflict.orderNo || "其他系统订单"}`);
+      const configuredDouyinAccount = configuredPaymentMethod(state.systemSettings, "douyin")?.account ?? "";
+      const existingDouyinAccount = normalizePaymentChannel(currentOrder.paymentChannel) === "douyin"
+        ? String(currentOrder.paymentAccount ?? "").trim()
+        : "";
+      const douyinAccount = existingDouyinAccount || configuredDouyinAccount;
+      if (!douyinAccount) throw new Error("抖音付款方式尚未配置收款账户");
 
       const nextOrder = {
         ...currentOrder,
         douyinOrderNo: externalOrderNo,
         paymentChannel: "douyin",
-        paymentAccount: normalizePaymentChannel(currentOrder.paymentChannel) === "douyin"
-          ? String(currentOrder.paymentAccount ?? "").trim() || "抖店账户"
-          : "抖店账户",
+        paymentAccount: douyinAccount,
         paymentReference: externalOrderNo,
       };
       const nextOrders = (Array.isArray(state.orders) ? state.orders : []).map((order) =>
@@ -5661,13 +5667,26 @@ async function handleApi(req, res, url) {
       let detail = "";
 
       if (action === "add") {
-        const payment = normalizePaymentRecord({
+        const incomingPayment = normalizePaymentRecord({
           ...(body.payment ?? {}),
           verificationStatus: "verified",
           recordSource: "finance",
           recordedBy: operator,
           verifiedAt: nowDatetimeInChina(),
           verifiedBy: operator,
+        });
+        const orderPaymentChannel = normalizePaymentChannel(currentOrder.paymentChannel);
+        const orderPaymentAccount = String(currentOrder.paymentAccount ?? "").trim();
+        const useOrderAccountSnapshot = orderPaymentChannel === incomingPayment.channel && Boolean(orderPaymentAccount);
+        const paymentMethod = useOrderAccountSnapshot
+          ? null
+          : configuredPaymentMethod(state.systemSettings, incomingPayment.channel);
+        if (!useOrderAccountSnapshot && !paymentMethod) {
+          throw new Error(`付款方式「${paymentChannelLabel(incomingPayment.channel)}」未启用或未配置收款账户`);
+        }
+        const payment = normalizePaymentRecord({
+          ...incomingPayment,
+          account: useOrderAccountSnapshot ? orderPaymentAccount : paymentMethod.account,
         });
         if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
           throw new Error("资金记录已存在，请刷新后重试");
@@ -5680,7 +5699,7 @@ async function handleApi(req, res, url) {
         if (!currentPayment) {
           throw new Error("资金记录不存在，请刷新后重试");
         }
-        const payment = normalizePaymentRecord({
+        const incomingPayment = normalizePaymentRecord({
           ...currentPayment,
           ...(body.payment ?? {}),
           verificationStatus: paymentVerificationStatus(currentPayment),
@@ -5688,6 +5707,19 @@ async function handleApi(req, res, url) {
           recordedBy: currentPayment?.recordedBy || operator,
           verifiedAt: currentPayment?.verifiedAt || "",
           verifiedBy: currentPayment?.verifiedBy || "",
+        });
+        const currentChannel = normalizePaymentChannel(currentPayment.channel);
+        const currentAccount = String(currentPayment.account ?? "").trim();
+        const preserveCurrentAccount = currentChannel === incomingPayment.channel && Boolean(currentAccount);
+        const paymentMethod = preserveCurrentAccount
+          ? null
+          : configuredPaymentMethod(state.systemSettings, incomingPayment.channel);
+        if (!preserveCurrentAccount && !paymentMethod) {
+          throw new Error(`付款方式「${paymentChannelLabel(incomingPayment.channel)}」未启用或未配置收款账户`);
+        }
+        const payment = normalizePaymentRecord({
+          ...incomingPayment,
+          account: preserveCurrentAccount ? currentAccount : paymentMethod.account,
         });
         nextPayments = currentPayments.map((item) => String(item?.id ?? "") === payment.id ? payment : item);
         detail = `订单「${currentOrder.orderNo}」修改${paymentTypeLabel(payment.type)}记录 ¥${payment.amount.toFixed(2)}`;
@@ -5759,10 +5791,11 @@ async function handleApi(req, res, url) {
         throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
       }
 
-      const channel = normalizePaymentChannel(body.channel ?? currentOrder.paymentChannel);
+      const channel = normalizePaymentChannel(currentOrder.paymentChannel);
       if (!channel) throw new Error("请选择退款渠道");
-      const account = String(body.account ?? currentOrder.paymentAccount ?? "").trim();
-      if (!account) throw new Error("请填写退款账户");
+      const account = String(currentOrder.paymentAccount ?? "").trim() ||
+        configuredPaymentMethod(state.systemSettings, channel)?.account || "";
+      if (!account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
       const amount = normalizeMoney(body.amount, "Refund amount");
       if (amount <= 0) throw new Error("退款金额必须大于 0");
       const payment = normalizePaymentRecord({
@@ -5772,7 +5805,7 @@ async function handleApi(req, res, url) {
         amount,
         channel,
         account,
-        externalTransactionNo: body.externalTransactionNo,
+        externalTransactionNo: "",
         verificationStatus: "pending",
         recordSource: "order",
         refundMethod: refundMethodForChannel(channel),
@@ -5847,13 +5880,15 @@ async function handleApi(req, res, url) {
 
       let refundRecord = null;
       if (body.refund && typeof body.refund === "object") {
-        const channel = normalizePaymentChannel(body.refund.channel ?? currentOrder.paymentChannel);
-        const account = String(body.refund.account ?? currentOrder.paymentAccount ?? "").trim();
-        if (!channel || !account) throw new Error("登记退款时必须填写退款渠道和账户");
+        const channel = normalizePaymentChannel(currentOrder.paymentChannel);
+        const account = String(currentOrder.paymentAccount ?? "").trim() ||
+          configuredPaymentMethod(state.systemSettings, channel)?.account || "";
+        if (!channel || !account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
         refundRecord = normalizePaymentRecord({
           ...body.refund,
           channel,
           account,
+          externalTransactionNo: "",
           verificationStatus: "pending",
           recordSource: "order",
           refundMethod: refundMethodForChannel(channel),
