@@ -27,6 +27,10 @@ import {
   refundMethodForChannel,
   verifiedPaymentTotals,
 } from "./payment-utils.mjs";
+import {
+  orderHasActuallyShipped,
+  shipmentHasActuallyShipped,
+} from "./order-refund-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -5750,6 +5754,9 @@ async function handleApi(req, res, url) {
       const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
       const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
       if (!currentOrder) throw new Error("订单不存在或当前账户不可见");
+      if (orderHasActuallyShipped(state.shipments, currentOrder.id)) {
+        throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
+      }
 
       const channel = normalizePaymentChannel(body.channel ?? currentOrder.paymentChannel);
       if (!channel) throw new Error("请选择退款渠道");
@@ -6254,6 +6261,9 @@ async function handleApi(req, res, url) {
       const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
       if (!shipment) throw new Error("发货单不存在，请刷新后重试");
       if (shipment.shipMethod === "pickup") throw new Error("上门自取订单不可报损");
+      if (!shipmentHasActuallyShipped(shipment)) {
+        throw new Error("发货单尚未确认发货，不能报损退款或补发");
+      }
       const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
       if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed") throw new Error("已完成订单不能再报损");
@@ -6354,7 +6364,7 @@ async function handleApi(req, res, url) {
         module: "订单管理",
         action: "修改记录",
         detail: resolution === "refund"
-          ? `订单「${order.orderNo}」发货报损，计入待退款 ¥${Number(nextShipment.damageRefundAmount ?? 0).toFixed(2)}`
+          ? `订单「${order.orderNo}」登记发货报损退款，订单应收调减 ¥${Number(nextShipment.damageRefundAmount ?? 0).toFixed(2)}，待财务核销`
           : `订单「${order.orderNo}」发货报损，已选择补发商品`,
       };
       const nextState = {

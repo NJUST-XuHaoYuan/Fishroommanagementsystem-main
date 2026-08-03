@@ -191,6 +191,12 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
 }
 
+function shipmentHasActuallyShipped(shipment: Shipment): boolean {
+  if (shipment.shipMethod === "pickup" && shipment.status !== "preparing") return true;
+  return ["shipped", "delivered", "damaged"].includes(shipment.status) ||
+    Boolean(String(shipment.shippedAt ?? "").trim());
+}
+
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipment(shipment)
@@ -1926,6 +1932,7 @@ function ReturnItemDialog({
   product,
   stock,
   saving = false,
+  hasActuallyShipped = false,
   onConfirm,
 }: {
   open: boolean;
@@ -1935,6 +1942,7 @@ function ReturnItemDialog({
   product?: Product;
   stock?: StockItem;
   saving?: boolean;
+  hasActuallyShipped?: boolean;
   onConfirm: () => boolean | Promise<boolean>;
 }) {
   if (!order || !item) return null;
@@ -1964,7 +1972,9 @@ function ReturnItemDialog({
             )}
           </div>
           <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
-            确认后会从订单中移除此商品，订单应收自动减少 ¥{item.price.toFixed(2)}。需要退回资金时，请在订单详情登记退款。
+            {hasActuallyShipped
+              ? `确认后会从订单中移除此未发货商品，订单应收自动减少 ¥${item.price.toFixed(2)}。该订单已有商品发货，不能再登记普通退款；已发货商品退款必须走报损退款。`
+              : `确认后会从订单中移除此商品，订单应收自动减少 ¥${item.price.toFixed(2)}。如需退回资金，可在本订单登记退款。`}
           </div>
         </div>
         <DialogFooter>
@@ -2411,7 +2421,7 @@ function ReportDamageDialog({
                   </p>
                 </div>
                 <div className="rounded-lg border border-orange-100 bg-orange-50 px-3 py-2 text-xs text-orange-800">
-                  确认后只会调整订单应收。退款操作请在订单详情登记，随后由财务核销。
+                  确认后会登记报损退款并调减订单应收；如已收款，财务台账会据此显示待退款并由财务核销。
                 </div>
               </div>
             </div>
@@ -2610,7 +2620,7 @@ function ReportDamageDialog({
             <div className="grid gap-2">
               <Label>报损凭证</Label>
               <ProofUploader images={proof} onChange={setProof} />
-              <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录等凭证；退款凭证在订单详情登记退款时上传。</p>
+              <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录或退款凭证，记录会随报损退款保留。</p>
             </div>
           )}
         </div>
@@ -2618,7 +2628,7 @@ function ReportDamageDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button variant="destructive" onClick={submit}>
             <XCircle className="size-4 mr-1" />
-            {resolution === "refund" ? "确认报损待退款" : "确认报损补发"}
+            {resolution === "refund" ? "确认报损退款" : "确认报损补发"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3979,6 +3989,7 @@ function OrderDetailDialog({
   const displayAmountDue = editMode && editForm ? draftAmountDue : amountDue;
 
   const activeOrderShipments = orderShipments.filter(countsAsActiveShipment);
+  const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
   const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
   const unshippedItems = inventoryActiveItems.filter((i) => !shippedItemIds.has(i.stockItemId));
@@ -4040,6 +4051,10 @@ function OrderDetailDialog({
 
   const submitOrderRefund = async (draft: OrderRefundDraft) => {
     if (!order || refundSaving || !permission.requirePermission("update")) return false;
+    if (hasActuallyShipped) {
+      toast.error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
+      return false;
+    }
     setRefundSaving(true);
     try {
       const result = await postOrderApi("orders/refund", {
@@ -4138,7 +4153,7 @@ function OrderDetailDialog({
     if (!order) return false;
     if (!permission.requirePermission("update")) return false;
     if (shipment.shipMethod === "pickup") { toast.error("上门自取订单不可报损"); return false; }
-    if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并调整订单应收，随后可在订单详情登记退款。" : "将发货单报损并选择库存鱼补发。")) return false;
+    if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并登记报损退款，订单应收同步调减，后续由财务核销。" : "将发货单报损并选择库存鱼补发。")) return false;
     try {
       const response = await postOrderApi("shipments/damage", {
         shipmentId: shipment.id,
@@ -4147,7 +4162,7 @@ function OrderDetailDialog({
       applyOrderApiResult(setState, response);
       setShipmentAction(null);
       setDamageShipment(null);
-      toast.success(result.resolution === "refund" ? "已报损，待退款金额已计入订单" : "已报损，已选择库存鱼进入待发货");
+      toast.success(result.resolution === "refund" ? "报损退款已登记，待财务核销" : "已报损，已选择库存鱼进入待发货");
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
@@ -4699,7 +4714,7 @@ function OrderDetailDialog({
                   </div>
                 )}
 
-                {permission.canUpdate && (
+                {permission.canUpdate && !hasActuallyShipped && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -4726,6 +4741,7 @@ function OrderDetailDialog({
         product={returnProduct}
         stock={returnStock}
         saving={returnSaving}
+        hasActuallyShipped={hasActuallyShipped}
         onConfirm={submitReturnItem}
       />
 
