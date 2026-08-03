@@ -1,4 +1,5 @@
 import { verifiedPaymentTotals } from "./payment-utils.mjs";
+import { isPlatformOrderSource } from "./order-source-rules.mjs";
 
 const MONEY_EPSILON = 0.005;
 
@@ -17,7 +18,7 @@ export function shipmentPaymentGate(order = {}, amountDue = 0) {
   const verifiedAmount = verifiedNetPaymentAmount(order?.payments);
   const outstandingAmount = Math.max(0, money(due - verifiedAmount));
 
-  if (String(order?.source ?? "").trim() === "平台下单") {
+  if (isPlatformOrderSource(order?.source)) {
     return {
       status: "platform_exempt",
       amountDue: due,

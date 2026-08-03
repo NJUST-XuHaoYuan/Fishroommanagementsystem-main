@@ -29,9 +29,11 @@ test("fully reconciled non-platform orders may ship", () => {
 });
 
 test("platform orders bypass pre-shipment reconciliation", () => {
-  const result = shipmentPaymentGate({ source: "平台下单", payments: [] }, 1800);
-  assert.equal(result.status, "platform_exempt");
-  assert.equal(result.canShip, true);
+  for (const source of ["平台下单", "闲鱼平台", "微拍堂平台"]) {
+    const result = shipmentPaymentGate({ source, payments: [] }, 1800);
+    assert.equal(result.status, "platform_exempt");
+    assert.equal(result.canShip, true);
+  }
 });
 
 test("offline pickup orders default to credit before reconciliation", () => {

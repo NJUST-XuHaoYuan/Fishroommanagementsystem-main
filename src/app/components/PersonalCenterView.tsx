@@ -15,6 +15,12 @@ import {
 import { toast } from "sonner";
 import { Eye, KeyRound } from "lucide-react";
 import { confirmWrite } from "../utils/writeConfirm";
+import {
+  isPlatformOrderSource,
+  platformOrderDisplayName,
+  platformOrderNoForOrder,
+  platformOrderNoLabel,
+} from "../utils/orderSources";
 
 const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = {
   deposit: "定金",
@@ -87,8 +93,8 @@ export function PersonalCenterView() {
     return (state.orders ?? [])
       .filter((order) => order.status === "completed" && order.contactPerson === currentContactName)
       .map((order) => {
-        const customer = order.source === "平台下单"
-          ? `抖音订单 ${order.douyinOrderNo || ""}`.trim()
+        const customer = isPlatformOrderSource(order.source)
+          ? platformOrderDisplayName(order)
           : customerName(order.customerId);
         const products = order.items.map((item) => productName(item.productId)).join(" ");
         return {
@@ -292,9 +298,9 @@ export function PersonalCenterView() {
               <div className="grid gap-2 rounded-lg border bg-slate-50 p-4 text-sm md:grid-cols-3">
                 <div><span className="text-muted-foreground">订单号：</span>{viewOrder.orderNo}</div>
                 <div>
-                  <span className="text-muted-foreground">{viewOrder.source === "平台下单" ? "抖音订单：" : "客户："}</span>
-                  {viewOrder.source === "平台下单"
-                    ? viewOrder.douyinOrderNo || "—"
+                  <span className="text-muted-foreground">{isPlatformOrderSource(viewOrder.source) ? `${platformOrderNoLabel(viewOrder.source)}：` : "客户："}</span>
+                  {isPlatformOrderSource(viewOrder.source)
+                    ? platformOrderNoForOrder(viewOrder) || "—"
                     : customerName(viewOrder.customerId)}
                 </div>
                 <div><span className="text-muted-foreground">下单日期：</span>{viewOrder.date}</div>

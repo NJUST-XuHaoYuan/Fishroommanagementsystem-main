@@ -7,8 +7,10 @@ test("offline pickup orders require pickup", () => {
   assert.equal(requiredShipMethodForOrderSource("线下自提"), "pickup");
 });
 
-test("Douyin and private-domain orders require express shipping", () => {
-  assert.equal(requiredShipMethodForOrderSource("平台下单"), "express");
+test("marketplace and private-domain orders require express shipping", () => {
+  for (const source of ["平台下单", "闲鱼平台", "微拍堂平台"]) {
+    assert.equal(requiredShipMethodForOrderSource(source), "express");
+  }
   assert.equal(requiredShipMethodForOrderSource("私域线上"), "express");
 });
 

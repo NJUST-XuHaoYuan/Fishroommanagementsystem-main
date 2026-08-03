@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
+import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 
 function todayDateString(): string {
   const now = new Date();
@@ -1089,7 +1090,7 @@ export function Dashboard() {
         .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
       orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
       platformAmount: salesRows
-        .filter((row) => String(row.order.source ?? "").trim() === "平台下单")
+        .filter((row) => isPlatformOrderSource(row.order.source))
         .reduce((sum, row) => sum + row.amount, 0),
       offlinePickupAmount: salesRows
         .filter((row) => isOfflinePickupOrder(row.order, row.orderShipments))
@@ -1298,8 +1299,8 @@ export function Dashboard() {
         orderId: order.id,
         orderNo: order.orderNo,
         customerName: customer?.name ?? (
-          String(order.source ?? "").trim() === "平台下单"
-            ? `抖音订单 ${String(order.douyinOrderNo ?? "").trim()}`.trim()
+          isPlatformOrderSource(order.source)
+            ? platformOrderDisplayName(order)
             : order.customerId || "未关联客户"
         ),
         contactPerson: salesperson,

@@ -12,6 +12,15 @@ import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
+  ORDER_SOURCE_VALUES,
+  isPlatformOrderSource,
+  isPlatformPaymentChannel,
+  orderSourceLabel,
+  platformOrderNoForOrder,
+  platformOrderNoLabel,
+  platformPaymentChannelForOrderSource,
+} from "./order-source-rules.mjs";
+import {
   DEFAULT_COMMISSION_RATE,
   calculateOrderCommission,
   calculateOrderFeeBreakdown,
@@ -45,7 +54,7 @@ import {
   resolveCreditSaleNotifications,
 } from "./station-notifications.mjs";
 import {
-  batchRequiresLateStockApproval,
+  classifyStockMutationForApproval,
   preserveBatchCreationTimes,
 } from "./stock-approval-rules.mjs";
 
@@ -1198,7 +1207,7 @@ function buildDashboardSummary(state = {}, options = {}) {
         .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
       orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
       platformAmount: salesRows
-        .filter((row) => String(row.order?.source ?? "").trim() === "平台下单")
+        .filter((row) => isPlatformOrderSource(row.order?.source))
         .reduce((sum, row) => sum + row.amount, 0),
       offlinePickupAmount: salesRows
         .filter((row) => isOfflinePickupDashboardOrder(row.order, row.orderShipments))
@@ -2566,13 +2575,17 @@ function currentApprovalRequests(state = {}) {
 }
 
 function stockApprovalPlan(state = {}, mutation = {}, req) {
-  if (req.auth?.account?.accessRole === "admin") return null;
-  const newItems = mutation.upsertItems.filter((item) => !mutation.existingIds.has(item.id));
   const batchById = new Map((Array.isArray(state.batches) ? state.batches : [])
     .map((batch) => [String(batch?.id ?? ""), batch]));
-  const lateItems = newItems.filter((item) => batchRequiresLateStockApproval(batchById.get(item.batchId)));
-  const hasDeletes = mutation.deleteIds.length > 0;
-  if (!hasDeletes && lateItems.length === 0) return null;
+  const classification = classifyStockMutationForApproval({
+    isAdmin: req.auth?.account?.accessRole === "admin",
+    existingIds: mutation.existingIds,
+    upsertItems: mutation.upsertItems,
+    deleteIds: mutation.deleteIds,
+    batches: Array.isArray(state.batches) ? state.batches : [],
+  });
+  if (!classification.requiresApproval) return null;
+  const { updatedItems, lateItems, hasDeletes } = classification;
 
   const stockById = new Map((Array.isArray(state.stock) ? state.stock : [])
     .map((item) => [String(item?.id ?? ""), item]));
@@ -2583,20 +2596,32 @@ function stockApprovalPlan(state = {}, mutation = {}, req) {
   const deletedCodes = mutation.deleteIds
     .map((id) => String(stockById.get(id)?.code ?? id).trim())
     .filter(Boolean);
-  const approvalAction = hasDeletes && lateItems.length > 0
+  const updatedCodes = updatedItems
+    .map((item) => String(stockById.get(String(item?.id ?? ""))?.code ?? item?.code ?? item?.id ?? "").trim())
+    .filter(Boolean);
+  const actionCount = Number(hasDeletes) + Number(updatedItems.length > 0) + Number(lateItems.length > 0);
+  const approvalAction = actionCount > 1
     ? "mixed_stock_change"
     : hasDeletes
       ? "delete_stock"
-      : "add_stock_to_old_batch";
+      : updatedItems.length > 0
+        ? "update_stock"
+        : "add_stock_to_old_batch";
   const title = approvalAction === "delete_stock"
     ? "库存删除待审批"
-    : approvalAction === "add_stock_to_old_batch"
-      ? "超时批次入库待审批"
-      : "库存变更待审批";
+    : approvalAction === "update_stock"
+      ? "库存修改待审批"
+      : approvalAction === "add_stock_to_old_batch"
+        ? "超时批次入库待审批"
+        : "库存变更待审批";
   const details = [];
   if (hasDeletes) {
     const codeSummary = deletedCodes.slice(0, 6).join("、");
     details.push(`申请删除 ${mutation.deleteIds.length} 条库存${codeSummary ? `（${codeSummary}${deletedCodes.length > 6 ? "等" : ""}）` : ""}`);
+  }
+  if (updatedItems.length > 0) {
+    const codeSummary = updatedCodes.slice(0, 6).join("、");
+    details.push(`申请修改 ${updatedItems.length} 条库存${codeSummary ? `（${codeSummary}${updatedCodes.length > 6 ? "等" : ""}）` : ""}`);
   }
   if (lateItems.length > 0) {
     details.push(`申请向创建已超过 48 小时的批次「${lateBatchLabels.join("、")}」补录 ${lateItems.length} 条库存`);
@@ -2606,16 +2631,18 @@ function stockApprovalPlan(state = {}, mutation = {}, req) {
   const requestKey = createHash("sha256")
     .update(`${createdBy}\0${approvalAction}\0${stableJson(payload)}`)
     .digest("hex");
-  const firstItem = lateItems[0] ?? stockById.get(mutation.deleteIds[0]);
+  const firstItem = lateItems[0] ?? updatedItems[0] ?? stockById.get(mutation.deleteIds[0]);
   return {
     approvalAction,
     title,
     message: `${details.join("；")}。批准后才会执行。`,
     responseMessage: approvalAction === "delete_stock"
       ? "删除申请已提交管理员审批，批准前库存不会删除"
-      : approvalAction === "add_stock_to_old_batch"
-        ? "该批次创建已超过 48 小时，入库申请已提交管理员审批"
-        : "库存变更已提交管理员审批，批准前不会执行",
+      : approvalAction === "update_stock"
+        ? "修改申请已提交管理员审批，批准前库存不会变更"
+        : approvalAction === "add_stock_to_old_batch"
+          ? "该批次创建已超过 48 小时，入库申请已提交管理员审批"
+          : "库存变更已提交管理员审批，批准前不会执行",
     payload,
     requestKey,
     siteId: normalizeSiteId(firstItem?.siteId),
@@ -3018,6 +3045,7 @@ function financeTransferFromRow(row = {}) {
 function financeOrderLookup(orders = []) {
   const lookup = new Map();
   for (const order of orders) {
+    if (String(order?.source ?? "").trim() !== "平台下单") continue;
     const externalOrderNo = normalizeExternalOrderNo(order?.douyinOrderNo);
     if (externalOrderNo && !lookup.has(externalOrderNo)) lookup.set(externalOrderNo, order);
   }
@@ -3074,7 +3102,10 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
   }
 
   const orderRows = orders.map((order) => {
-    const externalOrderNo = normalizeExternalOrderNo(order?.douyinOrderNo);
+    const platformOrderNo = platformOrderNoForOrder(order);
+    const externalOrderNo = String(order?.source ?? "").trim() === "平台下单"
+      ? normalizeExternalOrderNo(order?.douyinOrderNo)
+      : "";
     const platformSettlements = externalOrderNo
       ? settlementsByExternalOrderNo.get(externalOrderNo) ?? []
       : [];
@@ -3131,10 +3162,11 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
       siteId: normalizeSiteId(order?.siteId),
       orderNo: String(order?.orderNo ?? ""),
       douyinOrderNo: externalOrderNo,
+      platformOrderNo,
       date: String(order?.date ?? ""),
       orderStatus: String(order?.status ?? ""),
       source: String(order?.source ?? ""),
-      customerName: String(customer?.name ?? (externalOrderNo ? "抖音客户" : "未关联客户")),
+      customerName: String(customer?.name ?? (platformOrderNo ? `${orderSourceLabel(order?.source)}客户` : "未关联客户")),
       contactPerson: String(order?.contactPerson ?? ""),
       logisticsStatus: orderLogisticsStatusForFinance(order, shipments),
       financeStatus: financeStatusLabel(order, balance, received, hasPlatformSettlement, paymentTotals.pendingCount),
@@ -3396,10 +3428,11 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
   };
 }
 
-const ORDER_SOURCE_VALUES = new Set(["线下", "平台下单", "私域线上"]);
-
 function paymentMethodAllowedForOrderSource(method, source) {
-  return source === "平台下单" ? method?.channel === "douyin" : method?.channel !== "douyin";
+  const requiredPlatformChannel = platformPaymentChannelForOrderSource(source);
+  return requiredPlatformChannel
+    ? method?.channel === requiredPlatformChannel
+    : !isPlatformPaymentChannel(method?.channel);
 }
 
 function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
@@ -3412,28 +3445,29 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const source = String(body.source ?? currentOrder?.source ?? "").trim();
   if (!source && (!currentOrder || hasSourceInput)) throw new Error("请选择订单来源");
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
-  const isDouyinOrder = source === "平台下单";
+  const isPlatformOrder = isPlatformOrderSource(source);
   const isPickupOrder = source === "线下";
   const requestedCustomerId = String(body.customerId ?? currentOrder?.customerId ?? "").trim();
   const customerExists = (Array.isArray(state.customers) ? state.customers : [])
     .some((customer) => String(customer?.id ?? "") === requestedCustomerId);
-  if (!isDouyinOrder && (!requestedCustomerId || !customerExists)) throw new Error("请选择有效客户");
-  const customerId = isDouyinOrder ? "" : requestedCustomerId;
-  const douyinOrderNo = isDouyinOrder
-    ? String(body.douyinOrderNo ?? currentOrder?.douyinOrderNo ?? "").trim()
+  if (!isPlatformOrder && (!requestedCustomerId || !customerExists)) throw new Error("请选择有效客户");
+  const customerId = isPlatformOrder ? "" : requestedCustomerId;
+  const platformOrderNo = isPlatformOrder
+    ? String(body.platformOrderNo ?? body.douyinOrderNo ?? platformOrderNoForOrder(currentOrder)).trim()
     : "";
-  if (isDouyinOrder && !douyinOrderNo) throw new Error("请填写抖音订单编号");
-  if (isDouyinOrder) {
+  if (isPlatformOrder && !platformOrderNo) throw new Error(`请填写${platformOrderNoLabel(source)}`);
+  if (isPlatformOrder) {
     const duplicateOrder = (Array.isArray(state.orders) ? state.orders : []).find((order) =>
       String(order?.id ?? "") !== String(currentOrder?.id ?? "") &&
-      String(order?.douyinOrderNo ?? "").trim().toLowerCase() === douyinOrderNo.toLowerCase()
+      String(order?.source ?? "").trim() === source &&
+      platformOrderNoForOrder(order).toLowerCase() === platformOrderNo.toLowerCase()
     );
-    if (duplicateOrder) throw new Error(`抖音订单编号已存在：${douyinOrderNo}`);
+    if (duplicateOrder) throw new Error(`${platformOrderNoLabel(source)}已存在：${platformOrderNo}`);
   }
   const sourceChanged = Boolean(currentOrder) && String(currentOrder?.source ?? "").trim() !== source;
   const requestedPaymentMethodId = String(body.paymentMethodId ?? "").trim();
-  const requestedPaymentChannel = isDouyinOrder
-    ? "douyin"
+  const requestedPaymentChannel = isPlatformOrder
+    ? platformPaymentChannelForOrderSource(source)
     : normalizePaymentChannel(body.paymentChannel ?? currentOrder?.paymentChannel);
   if ((body.paymentChannel ?? currentOrder?.paymentChannel) && !requestedPaymentChannel) {
     throw new Error("请选择有效付款方式");
@@ -3458,7 +3492,9 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   }
   const paymentChannel = preserveCurrentPayment ? currentPaymentChannel : paymentMethod.channel;
   if (!paymentMethodAllowedForOrderSource({ channel: paymentChannel }, source)) {
-    throw new Error(isDouyinOrder ? "抖音订单只能选择抖音付款方式" : "非抖音订单不能选择抖音付款方式");
+    throw new Error(isPlatformOrder
+      ? `${orderSourceLabel(source)}订单只能选择${orderSourceLabel(source)}付款方式`
+      : "非平台订单不能选择平台付款方式");
   }
   const paymentMethodId = preserveCurrentPayment ? currentPaymentMethodId : paymentMethod.id;
   const paymentMethodName = preserveCurrentPayment
@@ -3534,7 +3570,8 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     customerId,
     date,
     source,
-    douyinOrderNo,
+    platformOrderNo: platformOrderNo || undefined,
+    douyinOrderNo: source === "平台下单" ? platformOrderNo : "",
     paymentMethodId: paymentMethodId || undefined,
     paymentMethodName,
     paymentChannel: paymentChannel || undefined,
@@ -3749,6 +3786,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "customerId",
   "date",
   "source",
+  "platformOrderNo",
   "douyinOrderNo",
   "paymentMethodId",
   "paymentMethodName",
@@ -3771,6 +3809,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
     customerId: String(order.customerId ?? "").trim(),
     date: String(order.date ?? "").trim(),
     source: String(order.source ?? "").trim(),
+    platformOrderNo: platformOrderNoForOrder(order),
     douyinOrderNo: String(order.douyinOrderNo ?? "").trim(),
     paymentMethodId: String(order.paymentMethodId ?? "").trim() || undefined,
     paymentMethodName: String(order.paymentMethodName ?? "").trim(),
@@ -5210,12 +5249,16 @@ async function handleApi(req, res, url) {
 
       const currentOrder = (scope.state.orders ?? []).find((order) => String(order?.id ?? "") === orderId);
       if (!currentOrder) throw new Error("系统订单不存在或当前账户不可见");
+      if (isPlatformOrderSource(currentOrder.source) && String(currentOrder.source ?? "").trim() !== "平台下单") {
+        throw new Error(`${orderSourceLabel(currentOrder.source)}订单不能关联抖店结算`);
+      }
       const existingExternalOrderNo = normalizeExternalOrderNo(currentOrder?.douyinOrderNo);
       if (existingExternalOrderNo && existingExternalOrderNo !== externalOrderNo) {
         throw new Error(`该系统订单已关联抖音订单 ${existingExternalOrderNo}`);
       }
       const conflict = (Array.isArray(state.orders) ? state.orders : []).find((order) =>
         String(order?.id ?? "") !== orderId &&
+        String(order?.source ?? "").trim() === "平台下单" &&
         normalizeExternalOrderNo(order?.douyinOrderNo) === externalOrderNo
       );
       if (conflict) throw new Error(`抖音订单已关联到 ${conflict.orderNo || "其他系统订单"}`);
@@ -5229,6 +5272,7 @@ async function handleApi(req, res, url) {
 
       const nextOrder = {
         ...currentOrder,
+        platformOrderNo: externalOrderNo,
         douyinOrderNo: externalOrderNo,
         paymentMethodId: preserveDouyinSnapshot
           ? String(currentOrder.paymentMethodId ?? "").trim() || undefined
@@ -6276,7 +6320,7 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "添加记录",
-        detail: `创建订单「${order.orderNo}」${order.douyinOrderNo ? `，抖音订单编号 ${order.douyinOrderNo}` : ""}，商品 ${order.items.length} 条`,
+        detail: `创建订单「${order.orderNo}」${platformOrderNoForOrder(order) ? `，${platformOrderNoLabel(order.source)} ${platformOrderNoForOrder(order)}` : ""}，商品 ${order.items.length} 条`,
       };
       const nextState = {
         ...state,
@@ -7376,6 +7420,8 @@ async function handleApi(req, res, url) {
 
       const actionLabel = approvalRequest.approvalAction === "delete_stock"
         ? "库存删除"
+        : approvalRequest.approvalAction === "update_stock"
+          ? "库存修改"
         : approvalRequest.approvalAction === "add_stock_to_old_batch"
           ? "超时批次入库"
           : "库存变更";

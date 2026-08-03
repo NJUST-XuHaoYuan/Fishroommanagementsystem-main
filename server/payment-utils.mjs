@@ -1,8 +1,10 @@
-export const PAYMENT_CHANNELS = ["wechat", "alipay", "douyin", "bank", "cash"];
+export const PAYMENT_CHANNELS = ["wechat", "alipay", "douyin", "xianyu", "weipaitang", "bank", "cash"];
 export const DEFAULT_PAYMENT_METHOD_SETTINGS = [
   { id: "pm-wechat", name: "微信", channel: "wechat", account: "", enabled: false },
   { id: "pm-alipay", name: "支付宝", channel: "alipay", account: "", enabled: false },
   { id: "pm-douyin", name: "抖音", channel: "douyin", account: "抖店账户", enabled: true },
+  { id: "pm-xianyu", name: "闲鱼", channel: "xianyu", account: "闲鱼账户", enabled: true },
+  { id: "pm-weipaitang", name: "微拍堂", channel: "weipaitang", account: "微拍堂账户", enabled: true },
   { id: "pm-bank", name: "银行卡", channel: "bank", account: "", enabled: false },
   { id: "pm-cash", name: "现金", channel: "cash", account: "现金", enabled: true },
 ];
@@ -17,6 +19,8 @@ export function paymentChannelLabel(channel = "") {
     wechat: "微信",
     alipay: "支付宝",
     douyin: "抖音",
+    xianyu: "闲鱼",
+    weipaitang: "微拍堂",
     bank: "银行卡",
     cash: "现金",
   }[normalizePaymentChannel(channel)] || "未登记";
@@ -27,7 +31,7 @@ export function normalizePaymentMethodSettings(settings = {}) {
     return DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method }));
   }
   const usedIds = new Set();
-  return settings.paymentMethods.flatMap((method) => {
+  const normalized = settings.paymentMethods.flatMap((method) => {
     const channel = normalizePaymentChannel(method?.channel);
     if (!channel) return [];
     const fallbackId = `pm-${channel}`;
@@ -43,6 +47,18 @@ export function normalizePaymentMethodSettings(settings = {}) {
       enabled: method?.enabled === true,
     }];
   });
+  const requiredPlatformDefaults = DEFAULT_PAYMENT_METHOD_SETTINGS.filter((method) =>
+    method.channel === "xianyu" || method.channel === "weipaitang"
+  );
+  for (const fallback of requiredPlatformDefaults) {
+    if (normalized.some((method) => method.channel === fallback.channel)) continue;
+    let id = fallback.id;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${fallback.id}-${suffix++}`;
+    usedIds.add(id);
+    normalized.push({ ...fallback, id });
+  }
+  return normalized;
 }
 
 export function configuredPaymentMethods(settings = {}) {
@@ -96,7 +112,7 @@ export function isPaymentVerified(payment = {}) {
 }
 
 export function refundMethodForChannel(channel = "") {
-  return normalizePaymentChannel(channel) === "douyin" ? "platform" : "account";
+  return ["douyin", "xianyu", "weipaitang"].includes(normalizePaymentChannel(channel)) ? "platform" : "account";
 }
 
 export function verifiedPaymentTotals(payments = []) {

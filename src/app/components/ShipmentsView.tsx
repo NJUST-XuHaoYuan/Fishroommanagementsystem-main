@@ -20,6 +20,7 @@ import { ShipDialog, ShipFormData } from "./ShipDialog";
 import React from "react";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
+import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -414,7 +415,7 @@ export function ShipmentsView() {
                         <tr key={o.id} className="border-t hover:bg-orange-50/30 transition-colors">
                           <td className="px-4 py-3 text-sm font-mono text-sky-700">{o.orderNo}</td>
                           <td className="px-4 py-3 text-sm font-medium">
-                            {customer?.name ?? (o.source === "平台下单" ? `抖音订单 ${o.douyinOrderNo || ""}`.trim() : "—")}
+                            {customer?.name ?? (isPlatformOrderSource(o.source) ? platformOrderDisplayName(o) : "—")}
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">{o.items.length} 条</td>
                           <td className="px-4 py-3 text-sm text-right">¥{(o.shippingFee ?? 0).toFixed(2)}</td>
@@ -466,7 +467,7 @@ export function ShipmentsView() {
                         <tr key={o.id} className="border-t hover:bg-muted/20 transition-colors">
                           <td className="px-4 py-3 text-sm font-mono text-sky-700">{o.orderNo}</td>
                           <td className="px-4 py-3 text-sm font-medium">
-                            {customer?.name ?? (o.source === "平台下单" ? `抖音订单 ${o.douyinOrderNo || ""}`.trim() : "—")}
+                            {customer?.name ?? (isPlatformOrderSource(o.source) ? platformOrderDisplayName(o) : "—")}
                           </td>
                           <td className="px-4 py-3 text-sm">
                             {o.source === "线下"
@@ -561,7 +562,7 @@ export function ShipmentsView() {
                         </td>
                         <td className="px-4 py-3 text-sm font-mono text-sky-700">{order?.orderNo ?? "—"}</td>
                         <td className="px-4 py-3 text-sm font-medium">
-                          {customer?.name ?? (order?.source === "平台下单" ? `抖音订单 ${order.douyinOrderNo || ""}`.trim() : "—")}
+                          {customer?.name ?? (isPlatformOrderSource(order?.source) ? platformOrderDisplayName(order) : "—")}
                         </td>
                         <td className="px-4 py-3 text-sm">{sh.shipDate}</td>
                         <td className="px-4 py-3 text-sm">

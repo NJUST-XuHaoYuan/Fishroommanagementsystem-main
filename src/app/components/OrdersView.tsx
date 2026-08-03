@@ -30,7 +30,7 @@ import {
   ChevronDown, Check, Truck, X, MapPin, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
-  Loader2, Send, ShieldCheck,
+  Loader2, Send, ShieldCheck, Tag, Gavel,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -41,6 +41,16 @@ import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
+import {
+  isPlatformOrderSource,
+  isPlatformPaymentChannel,
+  orderSourceBadgeClass,
+  orderSourceLabel,
+  platformOrderDisplayName,
+  platformOrderNoForOrder,
+  platformOrderNoLabel,
+  platformPaymentChannelForOrderSource,
+} from "../utils/orderSources";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -59,11 +69,6 @@ const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }
   { value: "B", label: "B端（批发）" },
   { value: "C", label: "C端（零售）" },
 ];
-const ORDER_SOURCE_LABELS: Record<string, string> = {
-  "平台下单": "抖音",
-  "私域线上": "线上私域",
-  "线下": "线下自提",
-};
 const ORDER_FORM_SCHEMA_VERSION = 2;
 const NEW_ORDER_SOURCE_CHOICES = [
   {
@@ -71,44 +76,57 @@ const NEW_ORDER_SOURCE_CHOICES = [
     label: "抖音",
     description: "填写抖音订单编号，无需客户和地址",
     icon: Video,
-    activeClass: "border-rose-400 bg-rose-50 text-rose-800",
-    iconClass: "bg-rose-100 text-rose-700",
+    activeClass: "border-zinc-900 bg-zinc-950 text-white hover:border-black hover:bg-black",
+    iconClass: "bg-white/10 text-white",
+    descriptionClass: "text-zinc-300",
+  },
+  {
+    value: "闲鱼平台",
+    label: "闲鱼",
+    description: "填写闲鱼订单编号，无需客户和地址",
+    icon: Tag,
+    activeClass: "border-amber-400 bg-amber-50 text-amber-950 hover:border-amber-500 hover:bg-amber-100",
+    iconClass: "bg-amber-200 text-amber-900",
+    descriptionClass: "text-amber-800",
+  },
+  {
+    value: "微拍堂平台",
+    label: "微拍堂",
+    description: "填写微拍堂订单编号，无需客户和地址",
+    icon: Gavel,
+    activeClass: "border-red-400 bg-red-50 text-red-900 hover:border-red-500 hover:bg-red-100",
+    iconClass: "bg-red-200 text-red-800",
+    descriptionClass: "text-red-700",
   },
   {
     value: "私域线上",
     label: "线上私域",
     description: "选择客户、收货地址并按现有流程发货",
     icon: MessageCircle,
-    activeClass: "border-sky-400 bg-sky-50 text-sky-800",
-    iconClass: "bg-sky-100 text-sky-700",
+    activeClass: "border-emerald-400 bg-emerald-50 text-emerald-900 hover:border-emerald-500 hover:bg-emerald-100",
+    iconClass: "bg-emerald-200 text-emerald-800",
+    descriptionClass: "text-emerald-700",
   },
   {
     value: "线下",
     label: "线下自提",
     description: "选择客户并确认自提，无需填写发货信息",
     icon: MapPin,
-    activeClass: "border-emerald-400 bg-emerald-50 text-emerald-800",
-    iconClass: "bg-emerald-100 text-emerald-700",
+    activeClass: "border-sky-400 bg-sky-50 text-sky-900 hover:border-sky-500 hover:bg-sky-100",
+    iconClass: "bg-sky-200 text-sky-800",
+    descriptionClass: "text-sky-700",
   },
 ] as const;
-
-function orderSourceLabel(source?: string): string {
-  const normalized = String(source ?? "").trim();
-  return ORDER_SOURCE_LABELS[normalized] ?? normalized;
-}
-
-function isDouyinOrderSource(source?: string): boolean {
-  return String(source ?? "").trim() === "平台下单";
-}
 
 function isPickupOrderSource(source?: string): boolean {
   return ["线下", "线下自提"].includes(String(source ?? "").trim());
 }
 
 function paymentMethodsForOrderSource(methods: PaymentMethodSetting[], source?: string): PaymentMethodSetting[] {
-  return methods.filter((method) => isDouyinOrderSource(source)
-    ? method.channel === "douyin"
-    : method.channel !== "douyin");
+  const platformChannel = platformPaymentChannelForOrderSource(source);
+  return methods.filter((method) => platformChannel
+    ? method.channel === platformChannel
+    : !isPlatformPaymentChannel(method.channel));
 }
 
 function paymentMethodDisplayLabel(method: Pick<PaymentMethodSetting, "name" | "channel">): string {
@@ -332,7 +350,7 @@ const ORDER_STATUS_TAG_STYLE = {
 
 function getOrderPaymentStatusTag(order: Order, shipments: Shipment[] = []): OrderStatusTag | null {
   if (order.status === "cancelled") return null;
-  if (isDouyinOrderSource(order.source)) {
+  if (isPlatformOrderSource(order.source)) {
     return { label: "平台免核销", className: ORDER_STATUS_TAG_STYLE.paymentExempt };
   }
   const amountDue = Math.max(0, Number(calcAmountDue(order, shipments).toFixed(2)));
@@ -1101,8 +1119,8 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       order.orderNo,
       getOrderStatusText(order, state.shipments),
       orderSourceLabel(order.source),
-      order.douyinOrderNo || "",
-      orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
+      platformOrderNoForOrder(order),
+      orderCustomer?.name ?? (isPlatformOrderSource(order.source) ? platformOrderDisplayName(order) : "—"),
       orderCustomer?.phone || "",
       order.source === "私域线上" ? effectiveOrderAddress(order, orderCustomer) || "" : "",
       order.date,
@@ -1133,7 +1151,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       const itemShipment = shipmentForItem(orderShipments, orderItem.stockItemId);
       return [
         order.orderNo,
-        orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
+        orderCustomer?.name ?? (isPlatformOrderSource(order.source) ? platformOrderDisplayName(order) : "—"),
         index + 1,
         stock?.code ?? "",
         orderItem.stockItemId,
@@ -1164,7 +1182,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
     const orderCustomer = customer(order.customerId);
     return shipmentsForOrder(order.id).map((shipment, index) => [
       order.orderNo,
-      orderCustomer?.name ?? (isDouyinOrderSource(order.source) ? "抖音订单" : "—"),
+      orderCustomer?.name ?? (isPlatformOrderSource(order.source) ? platformOrderDisplayName(order) : "—"),
       index + 1,
       SHIP_METHOD_LABEL[shipment.shipMethod ?? "express"],
       shipment.shipDate,
@@ -1193,7 +1211,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "平台订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
       </body>
@@ -1897,11 +1915,12 @@ function OrderRefundDialog({
   }, [open, order?.id]);
 
   if (!order) return null;
-  const refundChannel = (isDouyinOrderSource(order.source) ? "douyin" : order.paymentChannel ?? "") as PaymentChannel | "";
+  const sourcePlatformChannel = platformPaymentChannelForOrderSource(order.source);
+  const refundChannel = (sourcePlatformChannel || order.paymentChannel || "") as PaymentChannel | "";
   const refundMethod = configuredPaymentMethod(state.systemSettings, order.paymentMethodId || refundChannel);
   const refundAccount = order.paymentAccount || refundMethod?.account || "";
   const refundMethodName = order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
-  const platformRefund = refundChannel === "douyin";
+  const platformRefund = isPlatformPaymentChannel(refundChannel);
 
   const submit = async () => {
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return toast.error("请输入有效退款金额");
@@ -3807,7 +3826,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; douyinOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3969,7 +3988,7 @@ function OrderDetailDialog({
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
-      douyinOrderNo: order.douyinOrderNo ?? "",
+      platformOrderNo: platformOrderNoForOrder(order),
       paymentMethodId,
       paymentChannel,
       shippingAddress: order.shippingAddress ?? "",
@@ -3997,8 +4016,10 @@ function OrderDetailDialog({
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
     if (!editForm.source.trim()) return toast.error("请选择订单来源");
-    if (!isDouyinOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
-    if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
+    if (!isPlatformOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
+    if (isPlatformOrderSource(editForm.source) && !editForm.platformOrderNo.trim()) {
+      return toast.error(`请填写${platformOrderNoLabel(editForm.source)}`);
+    }
     if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (!editForm.contactPerson.trim()) return toast.error("请选择订单负责人");
@@ -4013,10 +4034,11 @@ function OrderDetailDialog({
       const result = await postOrderApi("orders/update", {
         orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
         orderId: order.id,
-        customerId: isDouyinOrderSource(editForm.source) ? "" : editForm.customerId,
+        customerId: isPlatformOrderSource(editForm.source) ? "" : editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
-        douyinOrderNo: isDouyinOrderSource(editForm.source) ? editForm.douyinOrderNo.trim() : "",
+        platformOrderNo: isPlatformOrderSource(editForm.source) ? editForm.platformOrderNo.trim() : "",
+        douyinOrderNo: editForm.source === "平台下单" ? editForm.platformOrderNo.trim() : "",
         paymentMethodId: editForm.paymentMethodId === historicalOrderPaymentMethodId(order.id)
           ? ""
           : editForm.paymentMethodId,
@@ -4088,8 +4110,8 @@ function OrderDetailDialog({
       return {
         ...form,
         source: nextSource,
-        customerId: isDouyinOrderSource(nextSource) ? "" : form.customerId,
-        douyinOrderNo: isDouyinOrderSource(nextSource) ? form.douyinOrderNo : "",
+        customerId: isPlatformOrderSource(nextSource) ? "" : form.customerId,
+        platformOrderNo: isPlatformOrderSource(nextSource) ? form.platformOrderNo : "",
         paymentMethodId: selectedPaymentMethod?.id ?? "",
         paymentChannel: selectedPaymentMethod?.channel ?? "",
         shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
@@ -4228,7 +4250,7 @@ function OrderDetailDialog({
         ...draft,
       });
       applyOrderApiResult(setState, result);
-      toast.success(isDouyinOrderSource(order.source) || order.paymentChannel === "douyin"
+      toast.success(isPlatformOrderSource(order.source) || isPlatformPaymentChannel(order.paymentChannel)
         ? "平台退款已登记，待财务按平台账单核销"
         : "账户退款已登记，待财务核对出账");
       return true;
@@ -4408,7 +4430,7 @@ function OrderDetailDialog({
             {/* ── 基本信息 ── */}
             {editMode && editForm ? (
               <div className="rounded-lg border p-4 grid grid-cols-5 gap-3 bg-amber-50/50">
-                {!isDouyinOrderSource(editForm.source) && (
+                {!isPlatformOrderSource(editForm.source) && (
                   <div className="grid gap-1.5">
                     <Label className="text-xs">客户<span className="ml-0.5 text-red-500">*</span></Label>
                     <CustomerCombobox value={editForm.customerId}
@@ -4416,14 +4438,14 @@ function OrderDetailDialog({
                       customers={state.customers ?? []} />
                   </div>
                 )}
-                {isDouyinOrderSource(editForm.source) && (
+                {isPlatformOrderSource(editForm.source) && (
                   <div className="grid gap-1.5">
-                    <Label className="text-xs">抖音订单编号<span className="ml-0.5 text-red-500">*</span></Label>
+                    <Label className="text-xs">{platformOrderNoLabel(editForm.source)}<span className="ml-0.5 text-red-500">*</span></Label>
                     <Input
-                      value={editForm.douyinOrderNo}
-                      placeholder="请输入抖音订单编号"
-                      onChange={(event) => setEditForm((form) => form ? { ...form, douyinOrderNo: event.target.value } : form)}
-                      className={!editForm.douyinOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
+                      value={editForm.platformOrderNo}
+                      placeholder={`请输入${platformOrderNoLabel(editForm.source)}`}
+                      onChange={(event) => setEditForm((form) => form ? { ...form, platformOrderNo: event.target.value } : form)}
+                      className={!editForm.platformOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
                     />
                   </div>
                 )}
@@ -4548,10 +4570,10 @@ function OrderDetailDialog({
               </div>
             ) : (
               <div className="rounded-lg border p-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm bg-muted/30">
-                {isDouyinOrderSource(order.source) ? (
+                {isPlatformOrderSource(order.source) ? (
                   <div className="col-span-2">
-                    <span className="text-muted-foreground">抖音订单编号：</span>
-                    <span className="font-medium">{order.douyinOrderNo || "—"}</span>
+                    <span className="text-muted-foreground">{platformOrderNoLabel(order.source)}：</span>
+                    <span className="font-medium">{platformOrderNoForOrder(order) || "—"}</span>
                   </div>
                 ) : (
                   <>
@@ -5677,7 +5699,7 @@ function NewOrderDialog({
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
-  const [douyinOrderNo, setDouyinOrderNo] = useState("");
+  const [platformOrderNo, setPlatformOrderNo] = useState("");
   const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
@@ -5693,7 +5715,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5708,7 +5730,7 @@ function NewOrderDialog({
     [state.customers, customerId]
   );
   const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
-  const douyinOrder = isDouyinOrderSource(source);
+  const platformOrder = isPlatformOrderSource(source);
   const pickupOrder = isPickupOrderSource(source);
   const availablePaymentMethods = useMemo(
     () => paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), source),
@@ -5722,7 +5744,7 @@ function NewOrderDialog({
     setSource(nextSource);
     setSubmitAttempted(false);
     setCustomerId("");
-    setDouyinOrderNo("");
+    setPlatformOrderNo("");
     const nextPaymentMethods = paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), nextSource);
     setPaymentMethodId(nextPaymentMethods.length === 1 ? nextPaymentMethods[0].id : "");
     setShippingAddress("");
@@ -5826,8 +5848,8 @@ function NewOrderDialog({
     if (!permission.requirePermission("create")) return;
     setSubmitAttempted(true);
     if (!source.trim()) return toast.error("请选择订单来源");
-    if (!douyinOrder && !customerId) return toast.error("请选择客户");
-    if (douyinOrder && !douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
+    if (!platformOrder && !customerId) return toast.error("请选择客户");
+    if (platformOrder && !platformOrderNo.trim()) return toast.error(`请填写${platformOrderNoLabel(source)}`);
     if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
     if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
@@ -5862,7 +5884,8 @@ function NewOrderDialog({
         customerId,
         date,
         source: source.trim(),
-        douyinOrderNo: douyinOrder ? douyinOrderNo.trim() : "",
+        platformOrderNo: platformOrder ? platformOrderNo.trim() : "",
+        douyinOrderNo: source === "平台下单" ? platformOrderNo.trim() : "",
         paymentMethodId,
         paymentChannel,
         shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
@@ -5909,13 +5932,13 @@ function NewOrderDialog({
           </DialogHeader>
 
           {!source ? (
-            <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto p-4 sm:p-8">
+            <div className="flex flex-1 flex-col items-center justify-start overflow-y-auto p-4 sm:justify-center sm:p-8">
               <div className="w-full max-w-3xl">
                 <div className="mb-5 text-center">
                   <div className="text-base font-semibold text-foreground">选择订单来源</div>
                   <div className="mt-1 text-sm text-muted-foreground">不同来源会自动显示对应的必填信息和履约方式</div>
                 </div>
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
                     const SourceIcon = choice.icon;
                     return (
@@ -5930,7 +5953,7 @@ function NewOrderDialog({
                         </span>
                         <span className="mt-5">
                           <span className="block text-lg font-semibold">{choice.label}</span>
-                          <span className="mt-1 block text-sm leading-5 text-muted-foreground">{choice.description}</span>
+                          <span className={`mt-1 block text-sm leading-5 ${choice.descriptionClass}`}>{choice.description}</span>
                         </span>
                       </button>
                     );
@@ -5954,7 +5977,7 @@ function NewOrderDialog({
 
             {/* ── 1. Customer + date + notes ── */}
             <div className="grid grid-cols-1 items-end gap-3 rounded-lg border bg-card p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-4">
-              {!douyinOrder && (
+              {!platformOrder && (
                 <div className="grid gap-2">
                   <div className="flex items-center justify-between gap-2">
                     <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
@@ -5972,18 +5995,18 @@ function NewOrderDialog({
                   <CustomerCombobox value={customerId} onChange={setCustomerId} customers={state.customers ?? []} />
                 </div>
               )}
-              {douyinOrder && (
+              {platformOrder && (
                 <div className="grid gap-2">
-                  <Label>抖音订单编号<span className="ml-0.5 text-red-500">*</span></Label>
+                  <Label>{platformOrderNoLabel(source)}<span className="ml-0.5 text-red-500">*</span></Label>
                   <Input
-                    value={douyinOrderNo}
-                    onChange={(event) => setDouyinOrderNo(event.target.value)}
-                    placeholder="请输入抖音订单编号"
+                    value={platformOrderNo}
+                    onChange={(event) => setPlatformOrderNo(event.target.value)}
+                    placeholder={`请输入${platformOrderNoLabel(source)}`}
                     autoComplete="off"
-                    className={submitAttempted && !douyinOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    className={submitAttempted && !platformOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
                   />
-                  {submitAttempted && !douyinOrderNo.trim() && (
-                    <p className="-mt-1 text-xs text-red-500">请填写抖音订单编号</p>
+                  {submitAttempted && !platformOrderNo.trim() && (
+                    <p className="-mt-1 text-xs text-red-500">请填写{platformOrderNoLabel(source)}</p>
                   )}
                 </div>
               )}
@@ -6457,7 +6480,7 @@ export function OrdersView({
         order.date,
         order.source,
         orderSourceLabel(order.source),
-        order.douyinOrderNo,
+        platformOrderNoForOrder(order),
         order.plannedShipDate,
         getOrderStatusText(order, state.shipments),
         customer?.name,
@@ -6647,12 +6670,15 @@ export function OrdersView({
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="truncate text-xs font-medium text-muted-foreground">
-                  {order.orderNo} · {orderSourceLabel(order.source) || "未设置来源"}
+                <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <span className="truncate">{order.orderNo}</span>
+                  <span className={`shrink-0 rounded-full border px-1.5 py-0.5 ${orderSourceBadgeClass(order.source)}`}>
+                    {orderSourceLabel(order.source) || "未设置来源"}
+                  </span>
                 </div>
                 <div className="mt-0.5 truncate text-base font-semibold text-foreground">
-                  {customer?.name ?? (isDouyinOrderSource(order.source)
-                    ? `抖音订单 ${order.douyinOrderNo || ""}`.trim()
+                  {customer?.name ?? (isPlatformOrderSource(order.source)
+                    ? platformOrderDisplayName(order)
                     : "未找到客户")}
                 </div>
               </div>
@@ -7177,10 +7203,10 @@ export function OrdersView({
             render: (r) => {
               const customer = getCustomer(r.customerId);
               if (!customer) {
-                return isDouyinOrderSource(r.source) ? (
+                return isPlatformOrderSource(r.source) ? (
                   <div>
-                    <div className="text-sm font-medium text-foreground">抖音订单</div>
-                    <div className="text-xs text-muted-foreground">{r.douyinOrderNo || "未填写编号"}</div>
+                    <div className="text-sm font-medium text-foreground">{orderSourceLabel(r.source)}订单</div>
+                    <div className="text-xs text-muted-foreground">{platformOrderNoForOrder(r) || "未填写编号"}</div>
                   </div>
                 ) : <span className="text-muted-foreground">—</span>;
               }
@@ -7203,7 +7229,7 @@ export function OrdersView({
             key: "source",
             title: "来源",
             render: (r) => r.source ? (
-              <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
+              <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${orderSourceBadgeClass(r.source)}`}>
                 {orderSourceLabel(r.source)}
               </span>
             ) : (

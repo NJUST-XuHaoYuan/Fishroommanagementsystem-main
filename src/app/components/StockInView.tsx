@@ -24,6 +24,7 @@ import { getInventoryHiddenStockIds, isVisibleInStockInventory } from "../utils/
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
+import { orderSourceLabel } from "../utils/orderSources";
 
 type StockViewMode = "tank" | "species";
 type StockInViewProps = {
@@ -38,16 +39,6 @@ const ORDER_STATUS_META: Record<string, { label: string; className: string }> = 
   damaged: { label: "已报损", className: "bg-rose-100 text-rose-800" },
   cancelled: { label: "已取消", className: "bg-slate-100 text-slate-700" },
 };
-
-function orderSourceLabel(source?: string): string {
-  const labels: Record<string, string> = {
-    "平台下单": "抖音",
-    "私域线上": "线上私域",
-    "线下": "线下自提",
-  };
-  const normalized = String(source ?? "").trim();
-  return labels[normalized] ?? (normalized || "未填写来源");
-}
 
 function buildStockItems(item: StockItem, quantity: number): StockItem[] {
   return item.id
@@ -565,7 +556,9 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     setSaveConfirm(null);
     setOpen(false);
     if (result.pendingApproval) {
-      toast.success(result.message || "入库申请已提交管理员审批");
+      toast.success(result.message || (saveConfirm.isEdit
+        ? "修改申请已提交管理员审批"
+        : "入库申请已提交管理员审批"));
       return;
     }
     toast.success(saveConfirm.isEdit ? "已保存入库记录" : qty > 1 ? `已入库 ${qty} 条` : "已入库");
@@ -1476,10 +1469,12 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
       <AlertDialog open={!!saveConfirm} onOpenChange={(o) => !o && setSaveConfirm(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{saveConfirm?.isEdit ? "保存入库记录" : "确认入库"}</AlertDialogTitle>
+            <AlertDialogTitle>{saveConfirm?.isEdit && !permission.isAdmin ? "提交库存修改申请" : saveConfirm?.isEdit ? "保存入库记录" : "确认入库"}</AlertDialogTitle>
             <AlertDialogDescription>
               {saveConfirm?.isEdit
-                ? "将保存这条入库记录的修改。"
+                ? permission.isAdmin
+                  ? "将保存这条入库记录的修改。"
+                  : "将提交这条库存记录的修改申请，管理员批准后才会生效。"
                 : !permission.isAdmin && saveConfirm?.stockItems.some((item) => {
                     const selectedBatch = state.batches.find((batchItem) => batchItem.id === item.batchId);
                     const createdAt = Date.parse(String(selectedBatch?.createdAt ?? ""));

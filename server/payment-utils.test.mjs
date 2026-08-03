@@ -20,6 +20,8 @@ test("payment methods fail closed until an account is configured", () => {
     account: "抖店账户",
     enabled: true,
   });
+  assert.equal(configuredPaymentMethod({}, "xianyu")?.account, "闲鱼账户");
+  assert.equal(configuredPaymentMethod({}, "weipaitang")?.account, "微拍堂账户");
   assert.deepEqual(configuredPaymentMethod({}, "cash"), {
     id: "pm-cash",
     name: "现金",
@@ -37,7 +39,7 @@ test("configured payment methods preserve custom rows and normalize account text
       { channel: "unknown", account: "ignored", enabled: true },
     ],
   });
-  assert.deepEqual(methods.map((method) => method.id), ["bank-main", "wechat-nanjing"]);
+  assert.deepEqual(methods.map((method) => method.id), ["bank-main", "wechat-nanjing", "pm-xianyu", "pm-weipaitang"]);
   assert.equal(configuredPaymentMethod({ paymentMethods: methods }, "bank-main")?.account, "农行 1234");
   assert.equal(configuredPaymentMethod({ paymentMethods: methods }, "alipay"), undefined);
 });
@@ -50,13 +52,16 @@ test("multiple methods may share a channel and remain selectable by id", () => {
       { id: "wechat-disabled", name: "微信停用", channel: "wechat", account: "旧账户", enabled: false },
     ],
   };
-  assert.deepEqual(configuredPaymentMethods(settings).map((method) => method.id), ["wechat-nanjing", "wechat-beijing"]);
+  assert.deepEqual(configuredPaymentMethods(settings).map((method) => method.id), ["wechat-nanjing", "wechat-beijing", "pm-xianyu", "pm-weipaitang"]);
   assert.equal(configuredPaymentMethod(settings, "wechat-beijing")?.account, "北京账户");
   assert.equal(configuredPaymentMethod(settings, "wechat")?.id, "wechat-nanjing");
 });
 
-test("an explicitly empty payment method list stays empty", () => {
-  assert.deepEqual(normalizePaymentMethodSettings({ paymentMethods: [] }), []);
+test("new marketplace payment methods are added to an existing configuration", () => {
+  assert.deepEqual(
+    normalizePaymentMethodSettings({ paymentMethods: [] }).map((method) => method.channel),
+    ["xianyu", "weipaitang"]
+  );
   assert.equal(configuredPaymentMethod({ paymentMethods: [] }, "cash"), undefined);
 });
 
@@ -139,6 +144,8 @@ test("verified totals exclude pending declarations", () => {
 
 test("refund path follows the actual funds location", () => {
   assert.equal(refundMethodForChannel("douyin"), "platform");
+  assert.equal(refundMethodForChannel("xianyu"), "platform");
+  assert.equal(refundMethodForChannel("weipaitang"), "platform");
   assert.equal(refundMethodForChannel("wechat"), "account");
   assert.equal(refundMethodForChannel("alipay"), "account");
   assert.equal(refundMethodForChannel("bank"), "account");

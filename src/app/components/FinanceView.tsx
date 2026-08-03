@@ -13,6 +13,12 @@ import {
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
 import { uploadOriginalMedia, resolveMediaUrl } from "../utils/media";
+import {
+  isPlatformOrderSource,
+  orderSourceBadgeClass,
+  orderSourceLabel,
+  platformOrderNoLabel,
+} from "../utils/orderSources";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
@@ -86,6 +92,7 @@ type FinanceOrderRow = {
   siteId: string;
   orderNo: string;
   douyinOrderNo: string;
+  platformOrderNo: string;
   date: string;
   orderStatus: string;
   source: string;
@@ -305,26 +312,6 @@ function localDatetimeValue() {
 function displayDatetime(value: string) {
   if (!value) return "—";
   return value.replace("T", " ").slice(0, 16);
-}
-
-function sourceLabel(source: string) {
-  if (source === "平台下单") return "抖音";
-  if (source === "私域线上") return "线上私域";
-  if (source === "线下") return "线下自提";
-  return source || "未标注";
-}
-
-function sourceBadgeClass(source: string) {
-  if (source === "平台下单" || source === "抖音") {
-    return "border-[#fda4af] bg-[#ffe4e6] text-[#9f1239]";
-  }
-  if (source === "私域线上" || source === "线上私域") {
-    return "border-[#7dd3fc] bg-[#e0f2fe] text-[#075985]";
-  }
-  if (source === "线下" || source === "线下自提") {
-    return "border-[#6ee7b7] bg-[#d1fae5] text-[#065f46]";
-  }
-  return "border-[#cbd5e1] bg-[#f1f5f9] text-[#334155]";
 }
 
 function financeStatusClass(status: string) {
@@ -683,7 +670,7 @@ function OrderFinanceDialog({
         <DialogHeader className="border-b px-4 py-3 pr-12 sm:px-6 sm:pr-14">
           <DialogTitle className="flex flex-wrap items-center gap-2 text-base sm:text-lg">
             <span>{order?.orderNo ?? "订单财务"}</span>
-            {order && <Badge variant="outline" className={sourceBadgeClass(order.source)}>{sourceLabel(order.source)}</Badge>}
+            {order && <Badge variant="outline" className={orderSourceBadgeClass(order.source)}>{orderSourceLabel(order.source)}</Badge>}
             {order && <Badge variant="outline" className={financeStatusClass(order.financeStatus)}>{order.financeStatus}</Badge>}
           </DialogTitle>
           {order && (
@@ -693,7 +680,7 @@ function OrderFinanceDialog({
               <span>订单负责人：<strong className="font-medium text-foreground">{order.contactPerson || "—"}</strong></span>
               <span>物流：<strong className="font-medium text-foreground">{order.logisticsStatus}</strong></span>
               <span>付款申报：<strong className="font-medium text-foreground">{order.paymentMethodName || (order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记")} · {order.paymentAccount || "未登记账户"}</strong></span>
-              {order.douyinOrderNo && <span>抖音订单：<strong className="font-medium text-foreground">{order.douyinOrderNo}</strong></span>}
+              {order.platformOrderNo && <span>{platformOrderNoLabel(order.source)}：<strong className="font-medium text-foreground">{order.platformOrderNo}</strong></span>}
             </div>
           )}
         </DialogHeader>
@@ -1130,6 +1117,7 @@ function ReconciliationLinkDialog({
     const settlementDate = String(row.settlementTime ?? "").slice(0, 10);
     const settlementTimestamp = Date.parse(`${settlementDate || "1970-01-01"}T00:00:00`);
     return orders
+      .filter((order) => order.source === "平台下单" || !isPlatformOrderSource(order.source))
       .filter((order) => !order.douyinOrderNo || order.douyinOrderNo === row.externalOrderNo)
       .filter((order) => !normalized || [
         order.orderNo,
@@ -1206,7 +1194,7 @@ function ReconciliationLinkDialog({
                   >
                     <span className="min-w-0">
                       <span className="block font-medium">{order.orderNo} · {order.customerName}</span>
-                      <span className="mt-1 block truncate text-xs text-muted-foreground">{sourceLabel(order.source)} · {order.contactPerson || "未指定负责人"}</span>
+                      <span className="mt-1 block truncate text-xs text-muted-foreground">{orderSourceLabel(order.source)} · {order.contactPerson || "未指定负责人"}</span>
                     </span>
                     <span className="text-sm"><span className="text-xs text-muted-foreground">下单</span><br />{order.date || "—"}</span>
                     <span className="text-sm font-medium tabular-nums"><span className="text-xs font-normal text-muted-foreground">订单应收</span><br />{money(order.receivable)}</span>
@@ -1529,7 +1517,7 @@ export function FinanceView() {
     if (!normalizedSearch) return true;
     return [
       order.orderNo,
-      order.douyinOrderNo,
+      order.platformOrderNo,
       order.customerName,
       order.contactPerson,
       order.source,
@@ -1847,9 +1835,9 @@ export function FinanceView() {
                             <div className="truncate font-medium" title={order.customerName}>{order.customerName}</div>
                             <Badge
                               variant="outline"
-                              className={`mt-1 h-6 px-2 py-0 text-[12px] font-medium ${sourceBadgeClass(order.source)}`}
+                              className={`mt-1 h-6 px-2 py-0 text-[12px] font-medium ${orderSourceBadgeClass(order.source)}`}
                             >
-                              {sourceLabel(order.source)}
+                              {orderSourceLabel(order.source)}
                             </Badge>
                           </td>
                           <td className="whitespace-nowrap px-3 py-2.5">{order.contactPerson || "—"}</td>
@@ -1895,9 +1883,9 @@ export function FinanceView() {
                           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                             <Badge
                               variant="outline"
-                              className={`h-6 px-2 py-0 text-[12px] font-medium ${sourceBadgeClass(order.source)}`}
+                              className={`h-6 px-2 py-0 text-[12px] font-medium ${orderSourceBadgeClass(order.source)}`}
                             >
-                              {sourceLabel(order.source)}
+                              {orderSourceLabel(order.source)}
                             </Badge>
                             <span>{order.contactPerson || "未指定订单负责人"}</span>
                             <span>·</span>

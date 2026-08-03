@@ -179,7 +179,7 @@ export type StockLossRecord = {
 };
 
 export type OrderStatus = "pending" | "confirmed" | "shipped" | "completed" | "cancelled" | "damaged";
-export const ORDER_SOURCE_OPTIONS = ["线下", "平台下单", "私域线上"] as const;
+export const ORDER_SOURCE_OPTIONS = ["平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下"] as const;
 export type OrderSource = typeof ORDER_SOURCE_OPTIONS[number];
 
 export type OrderItem = {
@@ -204,6 +204,8 @@ export const PAYMENT_CHANNEL_OPTIONS = [
   { value: "wechat", label: "微信" },
   { value: "alipay", label: "支付宝" },
   { value: "douyin", label: "抖音" },
+  { value: "xianyu", label: "闲鱼" },
+  { value: "weipaitang", label: "微拍堂" },
   { value: "bank", label: "银行卡" },
   { value: "cash", label: "现金" },
 ] as const;
@@ -219,6 +221,8 @@ export const DEFAULT_PAYMENT_METHOD_SETTINGS: PaymentMethodSetting[] = [
   { id: "pm-wechat", name: "微信", channel: "wechat", account: "", enabled: false },
   { id: "pm-alipay", name: "支付宝", channel: "alipay", account: "", enabled: false },
   { id: "pm-douyin", name: "抖音", channel: "douyin", account: "抖店账户", enabled: true },
+  { id: "pm-xianyu", name: "闲鱼", channel: "xianyu", account: "闲鱼账户", enabled: true },
+  { id: "pm-weipaitang", name: "微拍堂", channel: "weipaitang", account: "微拍堂账户", enabled: true },
   { id: "pm-bank", name: "银行卡", channel: "bank", account: "", enabled: false },
   { id: "pm-cash", name: "现金", channel: "cash", account: "现金", enabled: true },
 ];
@@ -276,6 +280,9 @@ export type Order = {
   customerId: string;
   date: string;
   source?: OrderSource | string;
+  /** 闲鱼、抖音、微拍堂等第三方平台的订单编号。 */
+  platformOrderNo?: string;
+  /** 抖店对账兼容字段，仅抖音订单使用。 */
   douyinOrderNo?: string;
   /** 订单选择的付款方式；实际到账由财务核销。 */
   paymentChannel?: PaymentChannel;
@@ -409,7 +416,7 @@ export function normalizePaymentMethodSettings(settings?: SystemSettings | null)
     return DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method }));
   }
   const usedIds = new Set<string>();
-  return settings.paymentMethods.flatMap((item) => {
+  const normalized = settings.paymentMethods.flatMap((item) => {
     const channel = PAYMENT_CHANNEL_OPTIONS.find((option) => option.value === item?.channel)?.value;
     if (!channel) return [];
     const fallbackId = `pm-${channel}`;
@@ -425,6 +432,18 @@ export function normalizePaymentMethodSettings(settings?: SystemSettings | null)
       enabled: item?.enabled === true,
     }];
   });
+  const requiredPlatformDefaults = DEFAULT_PAYMENT_METHOD_SETTINGS.filter((method) =>
+    method.channel === "xianyu" || method.channel === "weipaitang"
+  );
+  for (const fallback of requiredPlatformDefaults) {
+    if (normalized.some((method) => method.channel === fallback.channel)) continue;
+    let id = fallback.id;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${fallback.id}-${suffix++}`;
+    usedIds.add(id);
+    normalized.push({ ...fallback, id });
+  }
+  return normalized;
 }
 
 export function configuredPaymentMethods(settings?: SystemSettings | null): PaymentMethodSetting[] {
