@@ -3,7 +3,7 @@ import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
-  isPersonnelResigned, PaymentChannel, isPaymentVerified, paymentChannelLabel,
+  isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
 } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -102,6 +102,21 @@ function isDouyinOrderSource(source?: string): boolean {
 
 function isPickupOrderSource(source?: string): boolean {
   return ["线下", "线下自提"].includes(String(source ?? "").trim());
+}
+
+function paymentMethodsForOrderSource(methods: PaymentMethodSetting[], source?: string): PaymentMethodSetting[] {
+  return methods.filter((method) => isDouyinOrderSource(source)
+    ? method.channel === "douyin"
+    : method.channel !== "douyin");
+}
+
+function paymentMethodDisplayLabel(method: Pick<PaymentMethodSetting, "name" | "channel">): string {
+  const channelLabel = paymentChannelLabel(method.channel);
+  return method.name === channelLabel ? method.name : `${method.name} · ${channelLabel}`;
+}
+
+function historicalOrderPaymentMethodId(orderId: string): string {
+  return `historical-order-${orderId}`;
 }
 
 function customerTypeLabel(type?: CustomerType) {
@@ -1805,7 +1820,9 @@ function OrderRefundDialog({
 
   if (!order) return null;
   const refundChannel = (isDouyinOrderSource(order.source) ? "douyin" : order.paymentChannel ?? "") as PaymentChannel | "";
-  const refundAccount = order.paymentAccount || configuredPaymentMethod(state.systemSettings, refundChannel)?.account || "";
+  const refundMethod = configuredPaymentMethod(state.systemSettings, order.paymentMethodId || refundChannel);
+  const refundAccount = order.paymentAccount || refundMethod?.account || "";
+  const refundMethodName = order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
   const platformRefund = refundChannel === "douyin";
 
   const submit = async () => {
@@ -1851,7 +1868,7 @@ function OrderRefundDialog({
           <div className="grid gap-1.5">
             <Label>退款渠道<span className="ml-0.5 text-red-500">*</span></Label>
             <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm">
-              {refundChannel ? paymentChannelLabel(refundChannel) : "未配置"}
+              {refundMethodName || "未配置"}
             </div>
           </div>
           <div className="grid gap-1.5">
@@ -3712,7 +3729,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; douyinOrderNo: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; douyinOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
   shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -3748,31 +3765,26 @@ function OrderDetailDialog({
   const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
-  const editPaymentMethod = configuredPaymentMethod(state.systemSettings, editForm?.paymentChannel);
-  const preserveHistoricalPaymentAccount = Boolean(
-    editForm && order &&
-    editForm.source === order.source &&
-    editForm.paymentChannel === order.paymentChannel &&
-    String(order.paymentAccount ?? "").trim()
-  );
-  const editPaymentAccount = preserveHistoricalPaymentAccount
-    ? String(order?.paymentAccount ?? "").trim()
-    : editPaymentMethod?.account ?? "";
   const editPaymentOptions = useMemo(() => {
-    const options = availablePaymentMethods.filter((method) => method.channel !== "douyin");
-    if (
-      editForm?.paymentChannel &&
-      editForm.paymentChannel !== "douyin" &&
-      !options.some((method) => method.channel === editForm.paymentChannel)
-    ) {
-      return [...options, {
-        channel: editForm.paymentChannel,
-        account: String(order?.paymentAccount ?? "").trim(),
-        enabled: false,
-      }];
+    if (!editForm) return [];
+    const options = paymentMethodsForOrderSource(availablePaymentMethods, editForm.source);
+    if (!order || editForm.source !== order.source || !order.paymentChannel || !String(order.paymentAccount ?? "").trim()) {
+      return options;
     }
-    return options;
-  }, [availablePaymentMethods, editForm?.paymentChannel, order?.paymentAccount]);
+    const snapshotId = order.paymentMethodId || historicalOrderPaymentMethodId(order.id);
+    const snapshot: PaymentMethodSetting = {
+      id: snapshotId,
+      name: order.paymentMethodName || paymentChannelLabel(order.paymentChannel),
+      channel: order.paymentChannel,
+      account: String(order.paymentAccount).trim(),
+      enabled: options.some((method) => method.id === snapshotId),
+    };
+    const existingIndex = options.findIndex((method) => method.id === snapshotId);
+    if (existingIndex < 0) return [snapshot, ...options];
+    return options.map((method, index) => index === existingIndex ? snapshot : method);
+  }, [availablePaymentMethods, editForm, order]);
+  const editPaymentMethod = editPaymentOptions.find((method) => method.id === editForm?.paymentMethodId);
+  const editPaymentAccount = editPaymentMethod?.account ?? "";
 
   useEffect(() => {
     if (!open) {
@@ -3792,11 +3804,20 @@ function OrderDetailDialog({
   const enterEdit = () => {
     if (!order) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
+    const sourceMethods = paymentMethodsForOrderSource(availablePaymentMethods, order.source);
+    const configuredOrderMethod = order.paymentMethodId
+      ? sourceMethods.find((method) => method.id === order.paymentMethodId)
+      : sourceMethods.find((method) => method.channel === order.paymentChannel);
+    const paymentMethodId = String(order.paymentAccount ?? "").trim() && order.paymentChannel
+      ? order.paymentMethodId || historicalOrderPaymentMethodId(order.id)
+      : configuredOrderMethod?.id ?? (sourceMethods.length === 1 ? sourceMethods[0].id : "");
+    const paymentChannel = order.paymentChannel ?? configuredOrderMethod?.channel ?? "";
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
       douyinOrderNo: order.douyinOrderNo ?? "",
-      paymentChannel: order.paymentChannel ?? (isDouyinOrderSource(order.source) ? "douyin" : ""),
+      paymentMethodId,
+      paymentChannel,
       shippingAddress: order.shippingAddress ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
       shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
@@ -3824,7 +3845,7 @@ function OrderDetailDialog({
     if (!editForm.source.trim()) return toast.error("请选择订单来源");
     if (!isDouyinOrderSource(editForm.source) && !editForm.customerId) return toast.error("请选择客户");
     if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
-    if (!editForm.paymentChannel) return toast.error("请选择付款方式");
+    if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
@@ -3842,7 +3863,10 @@ function OrderDetailDialog({
         date: editForm.date,
         source: editForm.source.trim(),
         douyinOrderNo: isDouyinOrderSource(editForm.source) ? editForm.douyinOrderNo.trim() : "",
-        paymentChannel: editForm.paymentChannel,
+        paymentMethodId: editForm.paymentMethodId === historicalOrderPaymentMethodId(order.id)
+          ? ""
+          : editForm.paymentMethodId,
+        paymentChannel: editPaymentMethod.channel,
         shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
@@ -3904,12 +3928,16 @@ function OrderDetailDialog({
   const changeEditSource = (nextSource: string) => {
     setEditForm((form) => {
       if (!form) return form;
+      const nextPaymentMethods = paymentMethodsForOrderSource(availablePaymentMethods, nextSource);
+      const selectedPaymentMethod = nextPaymentMethods.find((method) => method.id === form.paymentMethodId) ??
+        (nextPaymentMethods.length === 1 ? nextPaymentMethods[0] : undefined);
       return {
         ...form,
         source: nextSource,
         customerId: isDouyinOrderSource(nextSource) ? "" : form.customerId,
         douyinOrderNo: isDouyinOrderSource(nextSource) ? form.douyinOrderNo : "",
-        paymentChannel: isDouyinOrderSource(nextSource) ? "douyin" : form.paymentChannel === "douyin" ? "" : form.paymentChannel,
+        paymentMethodId: selectedPaymentMethod?.id ?? "",
+        paymentChannel: selectedPaymentMethod?.channel ?? "",
         shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
         plannedShipDate: isPickupOrderSource(nextSource) ? "" : form.plannedShipDate,
         shippingFee: isPickupOrderSource(nextSource) ? 0 : form.shippingFee,
@@ -4308,20 +4336,23 @@ function OrderDetailDialog({
                 <div className="grid gap-1.5">
                   <Label className="text-xs">付款方式<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
-                    value={editForm.paymentChannel}
-                    disabled={isDouyinOrderSource(editForm.source)}
-                    onValueChange={(value) => setEditForm((form) => form ? {
-                      ...form,
-                      paymentChannel: value as PaymentChannel,
-                    } : form)}
+                    value={editForm.paymentMethodId}
+                    onValueChange={(value) => {
+                      const selectedMethod = editPaymentOptions.find((method) => method.id === value);
+                      setEditForm((form) => form && selectedMethod ? {
+                        ...form,
+                        paymentMethodId: value,
+                        paymentChannel: selectedMethod.channel,
+                      } : form);
+                    }}
                   >
-                    <SelectTrigger className={!editForm.paymentChannel ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectTrigger className={!editForm.paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
                       <SelectValue placeholder="请选择付款方式" />
                     </SelectTrigger>
                     <SelectContent>
                       {editPaymentOptions.map((method) => (
-                        <SelectItem key={method.channel} value={method.channel}>
-                          {paymentChannelLabel(method.channel)}{method.enabled ? "" : "（历史）"}
+                        <SelectItem key={method.id} value={method.id}>
+                          {paymentMethodDisplayLabel(method)}{method.enabled ? "" : "（历史）"}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -4376,7 +4407,7 @@ function OrderDetailDialog({
                 <div><span className="text-muted-foreground">订单来源：</span>{orderSourceLabel(order.source) || "—"}</div>
                 <div>
                   <span className="text-muted-foreground">付款方式：</span>
-                  {order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记"}
+                  {order.paymentMethodName || (order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记")}
                 </div>
                 <div>
                   <span className="text-muted-foreground">收款账户：</span>
@@ -4414,7 +4445,7 @@ function OrderDetailDialog({
                     <div key={payment.id} className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span className="font-medium text-rose-700">¥{payment.amount.toFixed(2)}</span>
-                        <span>{payment.channel ? paymentChannelLabel(payment.channel) : "渠道未登记"}</span>
+                        <span>{payment.paymentMethodName || (payment.channel ? paymentChannelLabel(payment.channel) : "渠道未登记")}</span>
                         <span className="text-xs text-muted-foreground">{payment.refundMethod === "platform" ? "平台冲减" : "账户出账"}</span>
                         <span className="text-xs text-muted-foreground">{payment.time.replace("T", " ").slice(0, 16)}</span>
                       </div>
@@ -5363,7 +5394,7 @@ function NewOrderDialog({
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
   const [douyinOrderNo, setDouyinOrderNo] = useState("");
-  const [paymentChannel, setPaymentChannel] = useState<PaymentChannel | "">("");
+  const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
@@ -5378,7 +5409,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setPaymentChannel(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setDouyinOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
       setShippingFee(0); setPackagingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -5396,10 +5427,11 @@ function NewOrderDialog({
   const douyinOrder = isDouyinOrderSource(source);
   const pickupOrder = isPickupOrderSource(source);
   const availablePaymentMethods = useMemo(
-    () => configuredPaymentMethods(state.systemSettings).filter((method) => method.channel !== "douyin"),
-    [state.systemSettings]
+    () => paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), source),
+    [source, state.systemSettings]
   );
-  const paymentMethod = configuredPaymentMethod(state.systemSettings, paymentChannel);
+  const paymentMethod = configuredPaymentMethod(state.systemSettings, paymentMethodId);
+  const paymentChannel = paymentMethod?.channel ?? "";
   const paymentAccount = paymentMethod?.account ?? "";
 
   const chooseSource = (nextSource: string) => {
@@ -5407,7 +5439,8 @@ function NewOrderDialog({
     setSubmitAttempted(false);
     setCustomerId("");
     setDouyinOrderNo("");
-    setPaymentChannel(isDouyinOrderSource(nextSource) ? "douyin" : "");
+    const nextPaymentMethods = paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), nextSource);
+    setPaymentMethodId(nextPaymentMethods.length === 1 ? nextPaymentMethods[0].id : "");
     setShippingAddress("");
     setPlannedShipDate("");
     setShippingFee(0);
@@ -5511,7 +5544,7 @@ function NewOrderDialog({
     if (!source.trim()) return toast.error("请选择订单来源");
     if (!douyinOrder && !customerId) return toast.error("请选择客户");
     if (douyinOrder && !douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
-    if (!paymentChannel) return toast.error("请选择付款方式");
+    if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
     if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
     if (!contactPerson.trim()) return toast.error("请选择对接人");
@@ -5546,6 +5579,7 @@ function NewOrderDialog({
         date,
         source: source.trim(),
         douyinOrderNo: douyinOrder ? douyinOrderNo.trim() : "",
+        paymentMethodId,
         paymentChannel,
         shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
@@ -5722,18 +5756,15 @@ function NewOrderDialog({
               <div className="grid gap-2">
                 <Label>付款方式<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
-                  value={paymentChannel}
-                  disabled={douyinOrder}
-                  onValueChange={(value) => setPaymentChannel(value as PaymentChannel)}
+                  value={paymentMethodId}
+                  onValueChange={setPaymentMethodId}
                 >
-                  <SelectTrigger className={submitAttempted && !paymentChannel ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger className={submitAttempted && !paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择付款方式" />
                   </SelectTrigger>
                   <SelectContent>
-                    {douyinOrder ? (
-                      <SelectItem value="douyin">抖音</SelectItem>
-                    ) : availablePaymentMethods.map((method) => (
-                      <SelectItem key={method.channel} value={method.channel}>{paymentChannelLabel(method.channel)}</SelectItem>
+                    {availablePaymentMethods.map((method) => (
+                      <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -5741,7 +5772,7 @@ function NewOrderDialog({
               <div className="grid gap-2">
                 <Label>对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
                 <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${submitAttempted && !paymentAccount ? "border-red-500 text-red-500" : "text-foreground"}`}>
-                  {paymentAccount || (paymentChannel ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
+                  {paymentAccount || (paymentMethodId ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
                 </div>
               </div>
               {source === "私域线上" && (

@@ -4,6 +4,7 @@ import {
   configuredPaymentMethods,
   PAYMENT_CHANNEL_OPTIONS,
   PaymentChannel,
+  PaymentMethodSetting,
   PaymentRecord,
   PaymentType,
   paymentChannelLabel,
@@ -88,6 +89,8 @@ type FinanceOrderRow = {
   date: string;
   orderStatus: string;
   source: string;
+  paymentMethodId: string;
+  paymentMethodName: string;
   paymentChannel: PaymentChannel | "";
   paymentAccount: string;
   paymentReference: string;
@@ -247,12 +250,25 @@ type PaymentDraft = {
   type: PaymentType;
   amount: number;
   time: string;
+  paymentMethodId: string;
+  paymentMethodName: string;
   channel: PaymentChannel | "";
   account: string;
   externalTransactionNo: string;
   proof: string[];
   notes: string;
 };
+
+type PaymentMethodOption = PaymentMethodSetting & { historical?: boolean };
+
+function historicalFinancePaymentMethodId(scope: string): string {
+  return `historical-finance-${scope}`;
+}
+
+function paymentMethodDisplayLabel(method: Pick<PaymentMethodSetting, "name" | "channel">): string {
+  const channelLabel = paymentChannelLabel(method.channel);
+  return method.name === channelLabel ? method.name : `${method.name} · ${channelLabel}`;
+}
 
 type TransferDraft = {
   id: string;
@@ -457,6 +473,8 @@ function OrderFinanceDialog({
     type: "balance",
     amount: 0,
     time: localDatetimeValue(),
+    paymentMethodId: "",
+    paymentMethodName: "",
     channel: "",
     account: "",
     externalTransactionNo: "",
@@ -473,26 +491,33 @@ function OrderFinanceDialog({
 
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const orderPaymentAccount = String(order?.paymentAccount ?? "").trim();
-  const orderPaymentMethod = order?.paymentChannel && orderPaymentAccount
-    ? { channel: order.paymentChannel, account: orderPaymentAccount, enabled: true }
+  const orderPaymentMethod: PaymentMethodOption | null = order?.paymentChannel && orderPaymentAccount
+    ? {
+        id: order.paymentMethodId || historicalFinancePaymentMethodId(`order-${order.id}`),
+        name: order.paymentMethodName || paymentChannelLabel(order.paymentChannel),
+        channel: order.paymentChannel,
+        account: orderPaymentAccount,
+        enabled: Boolean(order.paymentMethodId && availablePaymentMethods.some((method) => method.id === order.paymentMethodId)),
+        historical: !order.paymentMethodId || !availablePaymentMethods.some((method) => method.id === order.paymentMethodId),
+      }
     : null;
-  const paymentMethodOptions = useMemo(() => {
-    if (
-      draft.channel &&
-      draft.account &&
-      !availablePaymentMethods.some((method) => method.channel === draft.channel)
-    ) {
-      return [...availablePaymentMethods, {
-        channel: draft.channel,
-        account: draft.account,
-        enabled: false,
-      }];
-    }
-    return availablePaymentMethods;
-  }, [availablePaymentMethods, draft.account, draft.channel]);
+  const paymentMethodOptions = useMemo<PaymentMethodOption[]>(() => {
+    if (!draft.paymentMethodId || !draft.channel || !draft.account) return availablePaymentMethods;
+    const existingIndex = availablePaymentMethods.findIndex((method) => method.id === draft.paymentMethodId);
+    const snapshot: PaymentMethodOption = {
+      id: draft.paymentMethodId,
+      name: draft.paymentMethodName || paymentChannelLabel(draft.channel),
+      channel: draft.channel,
+      account: draft.account,
+      enabled: existingIndex >= 0,
+      historical: draft.paymentMethodId.startsWith("historical-finance-") || existingIndex < 0,
+    };
+    if (existingIndex < 0) return [snapshot, ...availablePaymentMethods];
+    return availablePaymentMethods.map((method, index) => index === existingIndex ? snapshot : method);
+  }, [availablePaymentMethods, draft.account, draft.channel, draft.paymentMethodId, draft.paymentMethodName]);
 
   const defaultPaymentMethod = () =>
-    orderPaymentMethod ?? configuredPaymentMethod(state.systemSettings, order?.paymentChannel) ?? availablePaymentMethods[0] ?? null;
+    orderPaymentMethod ?? configuredPaymentMethod(state.systemSettings, order?.paymentMethodId || order?.paymentChannel) ?? availablePaymentMethods[0] ?? null;
 
   const resetPaymentForm = () => {
     const paymentMethod = defaultPaymentMethod();
@@ -502,6 +527,8 @@ function OrderFinanceDialog({
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
+      paymentMethodId: paymentMethod?.id ?? "",
+      paymentMethodName: paymentMethod?.name ?? "",
       channel: paymentMethod?.channel ?? "",
       account: paymentMethod?.account ?? "",
       externalTransactionNo: "",
@@ -520,6 +547,8 @@ function OrderFinanceDialog({
       type: "balance",
       amount: 0,
       time: localDatetimeValue(),
+      paymentMethodId: paymentMethod?.id ?? "",
+      paymentMethodName: paymentMethod?.name ?? "",
       channel: paymentMethod?.channel ?? "",
       account: paymentMethod?.account ?? "",
       externalTransactionNo: "",
@@ -537,6 +566,8 @@ function OrderFinanceDialog({
       type: payment.type,
       amount: payment.amount,
       time: payment.time,
+      paymentMethodId: payment.paymentMethodId || historicalFinancePaymentMethodId(`payment-${payment.id}`),
+      paymentMethodName: payment.paymentMethodName || paymentChannelLabel(payment.channel ?? order?.paymentChannel ?? ""),
       channel: payment.channel ?? order?.paymentChannel ?? "",
       account: payment.account ?? "",
       externalTransactionNo: payment.externalTransactionNo ?? "",
@@ -554,7 +585,7 @@ function OrderFinanceDialog({
       toast.error("请输入有效的资金金额");
       return;
     }
-    if (!draft.channel) return toast.error("请选择资金渠道");
+    if (!draft.paymentMethodId || !draft.channel) return toast.error("请选择付款方式");
     if (!draft.account.trim()) return toast.error("请填写资金账户");
     if (!confirmWrite(editingPaymentId ? "修改" : "新增", `保存订单 ${order.orderNo} 的${PAYMENT_LABELS[draft.type]}记录。`)) return;
     setSavingPayment(true);
@@ -566,6 +597,7 @@ function OrderFinanceDialog({
           action,
           payment: {
             ...draft,
+            paymentMethodId: draft.paymentMethodId.startsWith("historical-finance-") ? "" : draft.paymentMethodId,
             id: editingPaymentId || uid(),
             amount: Number(draft.amount),
           },
@@ -660,7 +692,7 @@ function OrderFinanceDialog({
               <span>下单日期：<strong className="font-medium text-foreground">{order.date || "—"}</strong></span>
               <span>订单负责人：<strong className="font-medium text-foreground">{order.contactPerson || "—"}</strong></span>
               <span>物流：<strong className="font-medium text-foreground">{order.logisticsStatus}</strong></span>
-              <span>付款申报：<strong className="font-medium text-foreground">{order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记"} · {order.paymentAccount || "未登记账户"}</strong></span>
+              <span>付款申报：<strong className="font-medium text-foreground">{order.paymentMethodName || (order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记")} · {order.paymentAccount || "未登记账户"}</strong></span>
               {order.douyinOrderNo && <span>抖音订单：<strong className="font-medium text-foreground">{order.douyinOrderNo}</strong></span>}
             </div>
           )}
@@ -908,25 +940,26 @@ function OrderFinanceDialog({
                         />
                       </div>
                       <div className="grid gap-1.5">
-                        <Label>资金渠道</Label>
+                        <Label>付款方式</Label>
                         <Select
-                          value={draft.channel}
+                          value={draft.paymentMethodId}
                           onValueChange={(value) => {
-                            const paymentMethod = orderPaymentMethod?.channel === value
-                              ? orderPaymentMethod
-                              : configuredPaymentMethod(state.systemSettings, value);
+                            const paymentMethod = paymentMethodOptions.find((method) => method.id === value);
+                            if (!paymentMethod) return;
                             setDraft((current) => ({
                               ...current,
-                              channel: value as PaymentChannel,
-                              account: paymentMethod?.account ?? "",
+                              paymentMethodId: paymentMethod.id,
+                              paymentMethodName: paymentMethod.name,
+                              channel: paymentMethod.channel,
+                              account: paymentMethod.account,
                             }));
                           }}
                         >
-                          <SelectTrigger><SelectValue placeholder="请选择资金渠道" /></SelectTrigger>
+                          <SelectTrigger><SelectValue placeholder="请选择付款方式" /></SelectTrigger>
                           <SelectContent>
                             {paymentMethodOptions.map((method) => (
-                              <SelectItem key={method.channel} value={method.channel}>
-                                {paymentChannelLabel(method.channel)}{method.enabled ? "" : "（历史）"}
+                              <SelectItem key={method.id} value={method.id}>
+                                {paymentMethodDisplayLabel(method)}{method.historical ? "（历史）" : ""}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -1002,7 +1035,7 @@ function OrderFinanceDialog({
                               {(payment.channel || payment.account || payment.externalTransactionNo || payment.notes) && (
                                 <div className="mt-1 truncate text-xs text-muted-foreground">
                                   {[
-                                    payment.channel ? paymentChannelLabel(payment.channel) : "",
+                                    payment.paymentMethodName || (payment.channel ? paymentChannelLabel(payment.channel) : ""),
                                     payment.account ? `账户：${payment.account}` : "",
                                     payment.externalTransactionNo ? `流水：${payment.externalTransactionNo}` : "",
                                     payment.type === "refund" ? payment.refundMethod === "platform" ? "平台冲减" : "账户出账" : "",

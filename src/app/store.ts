@@ -207,16 +207,18 @@ export const PAYMENT_CHANNEL_OPTIONS = [
 ] as const;
 export type PaymentChannel = typeof PAYMENT_CHANNEL_OPTIONS[number]["value"];
 export type PaymentMethodSetting = {
+  id: string;
+  name: string;
   channel: PaymentChannel;
   account: string;
   enabled: boolean;
 };
 export const DEFAULT_PAYMENT_METHOD_SETTINGS: PaymentMethodSetting[] = [
-  { channel: "wechat", account: "", enabled: false },
-  { channel: "alipay", account: "", enabled: false },
-  { channel: "douyin", account: "抖店账户", enabled: true },
-  { channel: "bank", account: "", enabled: false },
-  { channel: "cash", account: "现金", enabled: true },
+  { id: "pm-wechat", name: "微信", channel: "wechat", account: "", enabled: false },
+  { id: "pm-alipay", name: "支付宝", channel: "alipay", account: "", enabled: false },
+  { id: "pm-douyin", name: "抖音", channel: "douyin", account: "抖店账户", enabled: true },
+  { id: "pm-bank", name: "银行卡", channel: "bank", account: "", enabled: false },
+  { id: "pm-cash", name: "现金", channel: "cash", account: "现金", enabled: true },
 ];
 export type PaymentVerificationStatus = "pending" | "verified";
 export type PaymentRecordSource = "order" | "finance" | "platform";
@@ -236,6 +238,8 @@ export type PaymentRecord = {
   time: string;       // ISO datetime "2026-04-22T10:30"
   type: PaymentType;
   amount: number;     // always positive; "refund" type = outflow
+  paymentMethodId?: string;
+  paymentMethodName?: string;
   channel?: PaymentChannel;
   account?: string;
   externalTransactionNo?: string;
@@ -260,6 +264,9 @@ export type Order = {
   douyinOrderNo?: string;
   /** 订单选择的付款方式；实际到账由财务核销。 */
   paymentChannel?: PaymentChannel;
+  /** 创建订单时使用的付款方式配置及名称快照。 */
+  paymentMethodId?: string;
+  paymentMethodName?: string;
   /** 创建订单时使用的后台收款账户快照。 */
   paymentAccount?: string;
   /** 历史兼容字段；外部交易标识由财务流水维护。 */
@@ -381,19 +388,26 @@ export type SystemSettings = {
 };
 
 export function normalizePaymentMethodSettings(settings?: SystemSettings | null): PaymentMethodSetting[] {
-  const configured = new Map<PaymentChannel, PaymentMethodSetting>();
-  if (Array.isArray(settings?.paymentMethods)) {
-    settings.paymentMethods.forEach((item) => {
-      const channel = PAYMENT_CHANNEL_OPTIONS.find((option) => option.value === item?.channel)?.value;
-      if (!channel || configured.has(channel)) return;
-      configured.set(channel, {
-        channel,
-        account: String(item?.account ?? "").trim(),
-        enabled: item?.enabled === true,
-      });
-    });
+  if (!Array.isArray(settings?.paymentMethods)) {
+    return DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method }));
   }
-  return DEFAULT_PAYMENT_METHOD_SETTINGS.map((fallback) => configured.get(fallback.channel) ?? { ...fallback });
+  const usedIds = new Set<string>();
+  return settings.paymentMethods.flatMap((item) => {
+    const channel = PAYMENT_CHANNEL_OPTIONS.find((option) => option.value === item?.channel)?.value;
+    if (!channel) return [];
+    const fallbackId = `pm-${channel}`;
+    let id = String(item?.id ?? "").trim() || fallbackId;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${fallbackId}-${suffix++}`;
+    usedIds.add(id);
+    return [{
+      id,
+      name: String(item?.name ?? "").trim() || paymentChannelLabel(channel),
+      channel,
+      account: String(item?.account ?? "").trim(),
+      enabled: item?.enabled === true,
+    }];
+  });
 }
 
 export function configuredPaymentMethods(settings?: SystemSettings | null): PaymentMethodSetting[] {
@@ -402,9 +416,11 @@ export function configuredPaymentMethods(settings?: SystemSettings | null): Paym
 
 export function configuredPaymentMethod(
   settings: SystemSettings | null | undefined,
-  channel?: string
+  idOrChannel?: string
 ): PaymentMethodSetting | undefined {
-  return configuredPaymentMethods(settings).find((method) => method.channel === channel);
+  const selector = String(idOrChannel ?? "").trim();
+  const methods = configuredPaymentMethods(settings);
+  return methods.find((method) => method.id === selector) ?? methods.find((method) => method.channel === selector);
 }
 
 export type Store = {
