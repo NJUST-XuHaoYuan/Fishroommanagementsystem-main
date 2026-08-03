@@ -1394,7 +1394,7 @@ function AdminApp() {
       ) : !state.user ? (
         <Login />
       ) : (
-        <Layout view={view} setView={handleSetView} saveStatus={saveStatus}>
+        <Layout view={view} setView={handleSetView} saveStatus={saveStatus} onOpenOrder={requestOpenOrder}>
           <div key={`${activeSiteId}:${view}`}>{viewContent}</div>
         </Layout>
       )}

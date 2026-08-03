@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
+import { NotificationCenter } from "./NotificationCenter";
 import { normalizePermissions } from "../utils/permissions";
 
 export type ViewKey =
@@ -101,6 +102,7 @@ type Props = {
   setView: (v: ViewKey) => void;
   children: ReactNode;
   saveStatus: "idle" | "saving" | "saved" | "error";
+  onOpenOrder: (orderId: string) => void;
 };
 
 function SaveStatus({ saveStatus }: { saveStatus: Props["saveStatus"] }) {
@@ -142,7 +144,7 @@ function Brand() {
   );
 }
 
-export function Layout({ view, setView, children, saveStatus }: Props) {
+export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Props) {
   const { state, activeSiteId, setActiveSiteId, setState } = useStore();
   const user = state.user!;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -379,19 +381,19 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       </Sheet>
 
       <main className="flex-1 flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <header className="fishroom-topbar sticky top-0 z-30 flex min-h-[3.25rem] items-center justify-between gap-3 px-3 py-2 text-sm lg:hidden">
+        <header className="fishroom-topbar sticky top-0 z-30 flex min-h-[3.25rem] items-center justify-between gap-3 px-3 py-2 text-sm lg:px-5">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <Button
               variant="ghost"
               size="icon"
               onClick={() => setMobileNavOpen(true)}
-              className="fishroom-mobile-menu-trigger shrink-0"
+              className="fishroom-mobile-menu-trigger shrink-0 lg:hidden"
               title="打开菜单"
               aria-label="打开菜单"
             >
               <Menu className="size-5" />
             </Button>
-            <div className="min-w-0">
+            <div className="min-w-0 lg:hidden">
               {currentSection && (
                 <div className="truncate text-[11px] leading-4 text-muted-foreground">
                   {currentSection}
@@ -399,29 +401,24 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               )}
               <div className="truncate font-semibold text-foreground">{currentLabel}</div>
             </div>
+            <div className="hidden items-center gap-2 lg:flex">
+              {currentSection && (
+                <>
+                  <span className="text-muted-foreground">{currentSection}</span>
+                  <ChevronRight className="size-4 text-muted-foreground" />
+                </>
+              )}
+              <span className="font-semibold text-foreground">{currentLabel}</span>
+            </div>
           </div>
           <div className="flex min-w-0 shrink-0 items-center gap-2">
-            <SiteSelector compact />
+            <NotificationCenter onOpenOrder={onOpenOrder} />
+            <div className="lg:hidden"><SiteSelector compact /></div>
+            <div className="hidden text-xs text-muted-foreground lg:block">当前：{activeSiteName}</div>
+            <div className="hidden lg:block"><SiteSelector /></div>
             <div className="fishroom-mobile-save-status">
               <SaveStatus saveStatus={saveStatus} />
             </div>
-          </div>
-        </header>
-
-        <header className="fishroom-topbar hidden h-[3.25rem] px-5 lg:flex items-center justify-between text-sm">
-          <div className="flex items-center gap-2">
-            {currentSection && (
-              <>
-                <span className="text-muted-foreground">{currentSection}</span>
-                <ChevronRight className="size-4 text-muted-foreground" />
-              </>
-            )}
-            <span className="font-semibold text-foreground">{currentLabel}</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="text-xs text-muted-foreground">当前：{activeSiteName}</div>
-            <SiteSelector />
-            <SaveStatus saveStatus={saveStatus} />
           </div>
         </header>
 

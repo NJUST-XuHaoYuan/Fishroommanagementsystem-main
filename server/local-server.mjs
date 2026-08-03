@@ -34,6 +34,13 @@ import {
   shipmentHasActuallyShipped,
 } from "./order-refund-rules.mjs";
 import { requiredShipMethodForOrderSource } from "./shipment-rules.mjs";
+import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
+import {
+  ensureCreditSaleNotification,
+  markNotificationsRead,
+  notificationsForRecipient,
+  resolveCreditSaleNotifications,
+} from "./station-notifications.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -1352,6 +1359,7 @@ function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
+  delete next.notifications;
   next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
@@ -1571,6 +1579,75 @@ function createOperationLog(req, module, action, detail) {
     module,
     action,
     detail,
+  };
+}
+
+function activePersonnelForReference(state = {}, value = "") {
+  const reference = String(value ?? "").trim();
+  if (!reference) return null;
+  return (Array.isArray(state.personnel) ? state.personnel : []).find((person) =>
+    !isPersonnelResigned(person) &&
+    (String(person?.name ?? "").trim() === reference || String(person?.username ?? "").trim() === reference)
+  ) ?? null;
+}
+
+function creditSaleRecipientForOrder(state = {}, order = {}) {
+  const person = activePersonnelForReference(state, order?.contactPerson);
+  if (!person || !String(person?.username ?? "").trim()) {
+    throw new Error("找不到订单负责人的有效登录账号，请先更新订单负责人");
+  }
+  return {
+    username: String(person.username).trim(),
+    name: String(person.name ?? person.username).trim(),
+  };
+}
+
+function currentStationNotifications(state = {}) {
+  return Array.isArray(state.notifications) ? state.notifications : [];
+}
+
+function ensureOrderCreditSaleNotification(state = {}, order = {}, gate = {}, createdBy = "system") {
+  const recipient = creditSaleRecipientForOrder(state, order);
+  return ensureCreditSaleNotification(currentStationNotifications(state), {
+    id: uid("notice"),
+    orderId: String(order?.id ?? ""),
+    orderNo: String(order?.orderNo ?? ""),
+    siteId: normalizeSiteId(order?.siteId),
+    recipientUsername: recipient.username,
+    recipientName: recipient.name,
+    requiredOutstandingAmount: gate.outstandingAmount,
+    createdAt: new Date().toISOString(),
+    createdBy,
+  });
+}
+
+async function commitShipmentPaymentBlock(client, req, state = {}, order = {}, gate = {}) {
+  const operator = authenticatedOperator(req);
+  const ensured = ensureOrderCreditSaleNotification(state, order, gate, operator);
+  const operationLog = ensured.changed
+    ? createOperationLog(
+        req,
+        "订单管理",
+        "发货拦截",
+        `订单「${order.orderNo}」尚有 ¥${Number(gate.outstandingAmount ?? 0).toFixed(2)} 未核销，已通知负责人确认赊销`
+      )
+    : null;
+  if (ensured.changed) {
+    const nextState = {
+      ...state,
+      notifications: ensured.notifications,
+      operationLogs: pushOperationLog(state.operationLogs, operationLog),
+    };
+    await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+      stateId,
+      JSON.stringify(nextState),
+    ]);
+  }
+  await client.query("COMMIT");
+  return {
+    notification: ensured.notification,
+    operationLog,
+    error: `订单尚有 ¥${Number(gate.outstandingAmount ?? 0).toFixed(2)} 未经财务核销，已向负责人 ${ensured.notification.recipientName} 发送站内信；确认赊销后可继续发货`,
   };
 }
 
@@ -2604,6 +2681,24 @@ function getOrderFinancialStateForOrder(order = {}, shipments = []) {
   return { kind: "paid", amount: 0 };
 }
 
+function shipmentPaymentGateForOrder(order = {}, shipments = []) {
+  return shipmentPaymentGate(order, calcAmountDueForOrder(order, shipments));
+}
+
+function creditApprovalSensitiveSnapshot(order = {}) {
+  return stableJson({
+    source: String(order?.source ?? ""),
+    paymentMethodId: String(order?.paymentMethodId ?? ""),
+    paymentChannel: String(order?.paymentChannel ?? ""),
+    paymentAccount: String(order?.paymentAccount ?? ""),
+    contactPerson: String(order?.contactPerson ?? ""),
+    items: Array.isArray(order?.items) ? order.items : [],
+    shippingFee: Number(order?.shippingFee ?? 0),
+    packagingFee: Number(order?.packagingFee ?? 0),
+    discount: Number(order?.discount ?? 0),
+  });
+}
+
 function roundFinance(value) {
   return Number(Number(value || 0).toFixed(2));
 }
@@ -3138,7 +3233,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   if (!isPickupOrder && !plannedShipDate) throw new Error("请选择预计发货日期");
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
   const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
-  assertActivePersonnelName(state, contactPerson, "对接人", currentOrder?.contactPerson);
+  assertActivePersonnelName(state, contactPerson, "订单负责人", currentOrder?.contactPerson);
   const itemsInput = Array.isArray(body.items) ? body.items : [];
   if (itemsInput.length === 0) throw new Error("请至少添加一条商品");
   const itemIds = itemsInput.map((item) => String(item?.stockItemId ?? "").trim()).filter(Boolean);
@@ -3275,6 +3370,10 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   if (!allShipmentsResolved) {
     throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
   }
+  const paymentGate = shipmentPaymentGateForOrder(order, shipments);
+  if (!paymentGate.canShip) {
+    throw new Error(`订单尚有 ¥${paymentGate.outstandingAmount.toFixed(2)} 未核销，不能标记完成`);
+  }
 }
 
 function applyAutomaticOrderTransitions(state = {}) {
@@ -3287,12 +3386,33 @@ function applyAutomaticOrderTransitions(state = {}) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
   let autoShippedCount = 0;
   let autoDeliveredCount = 0;
+  let paymentBlockedCount = 0;
+  let notificationCount = 0;
+  let nextNotifications = currentStationNotifications(state);
 
   const nextShipments = shipments.map((shipment) => {
     const status = String(shipment?.status ?? "");
     if (status === "outbound") {
       const outboundDate = datePart(shipment.outboundDate || shipment.createdAt || shipment.shipDate);
       if (isDateOnOrBefore(outboundDate, outboundThreshold)) {
+        const order = orders.find((item) => String(item?.id ?? "") === String(shipment?.orderId ?? ""));
+        const gate = order ? shipmentPaymentGateForOrder(order, shipments) : null;
+        if (gate && !gate.canShip) {
+          paymentBlockedCount += 1;
+          try {
+            const ensured = ensureOrderCreditSaleNotification(
+              { ...state, notifications: nextNotifications },
+              order,
+              gate,
+              "system"
+            );
+            nextNotifications = ensured.notifications;
+            if (ensured.changed) notificationCount += 1;
+          } catch (error) {
+            console.warn(`[auto-orders] failed to notify order ${order?.orderNo ?? order?.id}: ${error.message}`);
+          }
+          return shipment;
+        }
         autoShippedCount += 1;
         return {
           ...shipment,
@@ -3343,12 +3463,12 @@ function applyAutomaticOrderTransitions(state = {}) {
     return { ...order, status: "completed" };
   });
 
-  const changed = autoShippedCount > 0 || autoDeliveredCount > 0 || autoCompletedCount > 0;
+  const changed = autoShippedCount > 0 || autoDeliveredCount > 0 || autoCompletedCount > 0 || notificationCount > 0;
   if (!changed) {
     return {
       changed: false,
       state,
-      summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount },
+      summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount, paymentBlockedCount, notificationCount },
     };
   }
 
@@ -3356,6 +3476,7 @@ function applyAutomaticOrderTransitions(state = {}) {
     autoShippedCount > 0 ? `出库满 3 天自动确认发货 ${autoShippedCount} 单` : "",
     autoDeliveredCount > 0 ? `发货满 5 天自动签收 ${autoDeliveredCount} 单` : "",
     autoCompletedCount > 0 ? `签收满 3 天自动完成订单 ${autoCompletedCount} 单` : "",
+    notificationCount > 0 ? `未核销订单发送赊销确认站内信 ${notificationCount} 条` : "",
   ].filter(Boolean).join("；");
   const operationLog = {
     id: uid("log"),
@@ -3372,10 +3493,11 @@ function applyAutomaticOrderTransitions(state = {}) {
       ...state,
       shipments: nextShipments,
       orders: nextOrders,
+      notifications: nextNotifications,
       operationLogs: pushOperationLog(state.operationLogs, operationLog),
     },
     operationLog,
-    summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount },
+    summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount, paymentBlockedCount, notificationCount },
   };
 }
 
@@ -3605,6 +3727,14 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
       throw new Error("已完成或已取消订单不能修改发货状态");
     }
     validateShipmentPatchTransition(currentShipment, nextShipment);
+    if (
+      String(currentShipment.status ?? "") === "outbound" &&
+      ["shipped", "delivered"].includes(String(nextShipment.status ?? "")) &&
+      relatedOrder
+    ) {
+      const gate = shipmentPaymentGateForOrder(relatedOrder, nextShipments);
+      if (!gate.canShip) throw new Error(`订单尚有 ¥${gate.outstandingAmount.toFixed(2)} 未核销，不能确认发货`);
+    }
   }
 
   for (const [shipmentId, currentShipment] of currentShipmentsById.entries()) {
@@ -4455,6 +4585,66 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/auth/me" && req.method === "GET") {
     sendJson(req, res, 200, { ok: true, user: req.auth.user });
+    return;
+  }
+
+  if (url.pathname === "/api/notifications" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const notifications = notificationsForRecipient(
+        currentStationNotifications(rows[0]?.data ?? {}),
+        req.auth?.user?.username
+      );
+      sendJson(req, res, 200, {
+        ok: true,
+        notifications: notifications.slice(0, 100),
+        unreadCount: notifications.filter((notification) => !notification?.readAt).length,
+      });
+    } catch (error) {
+      sendJson(req, res, 500, { ok: false, error: error.message || "站内信加载失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/notifications/read" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const ids = body.all === true
+        ? []
+        : Array.isArray(body.ids)
+          ? body.ids
+          : body.id
+            ? [body.id]
+            : [];
+      if (body.all !== true && ids.length === 0) throw new Error("请选择要标记的站内信");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const marked = markNotificationsRead(
+        currentStationNotifications(state),
+        req.auth?.user?.username,
+        ids
+      );
+      if (marked.changed) {
+        await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+          stateId,
+          JSON.stringify({ ...state, notifications: marked.notifications }),
+        ]);
+      }
+      await client.query("COMMIT");
+      const notifications = notificationsForRecipient(marked.notifications, req.auth?.user?.username);
+      sendJson(req, res, 200, {
+        ok: true,
+        notifications: notifications.slice(0, 100),
+        unreadCount: notifications.filter((notification) => !notification?.readAt).length,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "站内信状态更新失败" });
+    } finally {
+      client.release();
+    }
     return;
   }
 
@@ -5566,6 +5756,116 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/credit-sale/confirm" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const orderId = String(body.orderId ?? "").trim();
+      const note = String(body.note ?? "").trim().slice(0, 500);
+      if (!orderId) throw new Error("缺少订单信息，请刷新后重试");
+      requireOrderPermissionForAuth(req, "update");
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
+      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
+      if (!currentOrder) throw new Error("订单不存在或不属于当前账户可见场地");
+      if (["completed", "cancelled"].includes(String(currentOrder.status ?? ""))) {
+        throw new Error("该订单当前状态不能确认赊销");
+      }
+
+      const recipient = creditSaleRecipientForOrder(state, currentOrder);
+      const operator = authenticatedOperator(req);
+      const isAdmin = req.auth?.account?.accessRole === "admin";
+      if (!isAdmin && recipient.username !== operator) {
+        throw new Error("只有订单负责人本人或管理员可以确认赊销");
+      }
+
+      const gate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
+      if (gate.status === "platform_exempt") throw new Error("平台订单无需确认赊销");
+
+      const notifications = currentStationNotifications(state);
+      const pendingNotification = notifications
+        .filter((notification) =>
+          notification?.type === "credit_sale_confirmation" &&
+          notification?.status === "pending" &&
+          String(notification?.orderId ?? "") === orderId &&
+          String(notification?.recipientUsername ?? "") === recipient.username
+        )
+        .sort((left, right) => Number(right?.requiredOutstandingAmount ?? 0) - Number(left?.requiredOutstandingAmount ?? 0))[0];
+
+      if (gate.status === "verified") {
+        const resolved = resolveCreditSaleNotifications(
+          notifications,
+          orderId,
+          "finance_verified",
+          operator,
+          new Date().toISOString()
+        );
+        if (resolved.changed) {
+          await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+            stateId,
+            JSON.stringify({ ...state, notifications: resolved.notifications }),
+          ]);
+        }
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, alreadyVerified: true, order: currentOrder, orders });
+        return;
+      }
+      if (!pendingNotification) throw new Error("没有待处理的赊销确认站内信，请重新发起发货检查");
+
+      const approvedAmount = Math.max(
+        Number(gate.outstandingAmount ?? 0),
+        Number(pendingNotification.requiredOutstandingAmount ?? 0)
+      );
+      const confirmedAt = new Date().toISOString();
+      const nextOrder = {
+        ...currentOrder,
+        creditSaleApproval: {
+          amount: Number(approvedAmount.toFixed(2)),
+          confirmedAt,
+          confirmedBy: operator,
+          confirmedByName: String(req.auth?.account?.name ?? operator),
+          note,
+        },
+      };
+      const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
+      const resolved = resolveCreditSaleNotifications(
+        notifications,
+        orderId,
+        "credit_confirmed",
+        operator,
+        confirmedAt
+      );
+      const operationLog = createOperationLog(
+        req,
+        "订单管理",
+        "确认赊销",
+        `订单「${currentOrder.orderNo}」由负责人确认赊销 ¥${approvedAmount.toFixed(2)}${note ? `，备注：${note}` : ""}`
+      );
+      const nextState = {
+        ...state,
+        orders: nextOrders,
+        notifications: resolved.notifications,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "确认赊销失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/create" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -5641,10 +5941,27 @@ async function handleApi(req, res, url) {
       const removedShippedIds = removedItemIds.filter((id) => blockingShipmentIds.has(id));
       if (removedShippedIds.length > 0) throw new Error("已出库或发货的商品不能直接从订单中删除");
 
-      const nextOrder = {
+      let nextOrder = {
         ...currentOrder,
         ...nextOrderInput,
       };
+      let nextNotifications = currentStationNotifications(state);
+      let creditApprovalCleared = false;
+      const creditTermsChanged = creditApprovalSensitiveSnapshot(currentOrder) !== creditApprovalSensitiveSnapshot(nextOrder);
+      if (creditTermsChanged) {
+        if (currentOrder.creditSaleApproval) {
+          const { creditSaleApproval: _removedApproval, ...orderWithoutApproval } = nextOrder;
+          nextOrder = orderWithoutApproval;
+          creditApprovalCleared = true;
+        }
+        nextNotifications = resolveCreditSaleNotifications(
+          nextNotifications,
+          orderId,
+          "order_updated",
+          operator,
+          new Date().toISOString()
+        ).notifications;
+      }
       const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
       const nextStock = setStockSoldForOrders(state, nextOrders);
       const operationLog = {
@@ -5653,12 +5970,13 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `修改订单「${nextOrder.orderNo}」`,
+        detail: `修改订单「${nextOrder.orderNo}」${creditApprovalCleared ? "，原赊销确认已失效" : ""}`,
       };
       const nextState = {
         ...state,
         orders: nextOrders,
         stock: nextStock,
+        notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
@@ -5773,6 +6091,17 @@ async function handleApi(req, res, url) {
 
       const nextOrder = { ...currentOrder, payments: nextPayments };
       const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
+      let nextNotifications = currentStationNotifications(state);
+      const nextGate = shipmentPaymentGateForOrder(nextOrder, state.shipments);
+      if (nextGate.status === "verified" || nextGate.status === "platform_exempt") {
+        nextNotifications = resolveCreditSaleNotifications(
+          nextNotifications,
+          orderId,
+          nextGate.status === "verified" ? "finance_verified" : "platform_exempt",
+          operator,
+          new Date().toISOString()
+        ).notifications;
+      }
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -5784,6 +6113,7 @@ async function handleApi(req, res, url) {
       const nextState = {
         ...state,
         orders: nextOrders,
+        notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
 
@@ -5993,6 +6323,18 @@ async function handleApi(req, res, url) {
         return;
       }
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能标记完成");
+      const paymentGate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
+      if (!paymentGate.canShip) {
+        const blocked = await commitShipmentPaymentBlock(client, req, state, currentOrder, paymentGate);
+        sendJson(req, res, 409, {
+          ok: false,
+          code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
+          error: blocked.error,
+          notification: blocked.notification,
+          operationLog: blocked.operationLog,
+        });
+        return;
+      }
       validateOrderCanComplete(currentOrder, state.shipments);
 
       const nextOrder = { ...currentOrder, status: "completed" };
@@ -6041,6 +6383,13 @@ async function handleApi(req, res, url) {
       const nextShipments = (Array.isArray(state.shipments) ? state.shipments : [])
         .filter((shipment) => String(shipment?.orderId ?? "") !== orderId);
       const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders);
+      const nextNotifications = resolveCreditSaleNotifications(
+        currentStationNotifications(state),
+        orderId,
+        "order_deleted",
+        operator,
+        new Date().toISOString()
+      ).notifications;
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -6054,6 +6403,7 @@ async function handleApi(req, res, url) {
         orders: nextOrders,
         shipments: nextShipments,
         stock: nextStock,
+        notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
@@ -6134,6 +6484,21 @@ async function handleApi(req, res, url) {
         itemStockIds: selectedItemIds,
         ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
+      const paymentGate = shipmentPaymentGateForOrder(order, [
+        ...(Array.isArray(state.shipments) ? state.shipments : []),
+        shipment,
+      ]);
+      if (!paymentGate.canShip) {
+        const blocked = await commitShipmentPaymentBlock(client, req, state, order, paymentGate);
+        sendJson(req, res, 409, {
+          ok: false,
+          code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
+          error: blocked.error,
+          notification: blocked.notification,
+          operationLog: blocked.operationLog,
+        });
+        return;
+      }
       const nextShipments = [...(Array.isArray(state.shipments) ? state.shipments : []), shipment];
       const nextOrders = orders.map((item) =>
         String(item?.id ?? "") === order.id
@@ -6196,6 +6561,19 @@ async function handleApi(req, res, url) {
       if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed") throw new Error("已完成订单不能再确认发货");
       if (order.status === "cancelled") throw new Error("已取消订单不能再确认发货");
+
+      const paymentGate = shipmentPaymentGateForOrder(order, shipments);
+      if (!paymentGate.canShip) {
+        const blocked = await commitShipmentPaymentBlock(client, req, state, order, paymentGate);
+        sendJson(req, res, 409, {
+          ok: false,
+          code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
+          error: blocked.error,
+          notification: blocked.notification,
+          operationLog: blocked.operationLog,
+        });
+        return;
+      }
 
       const now = nowDatetimeInChina();
       const shipMethod = shipment.shipMethod === "pickup" ? "pickup" : "express";
@@ -7448,7 +7826,7 @@ async function runAutomaticOrderTransitions(reason = "scheduled") {
     );
     await client.query("COMMIT");
     console.log(
-      `[auto-orders] ${reason}: shipped=${result.summary.autoShippedCount}, delivered=${result.summary.autoDeliveredCount}, completed=${result.summary.autoCompletedCount}`
+      `[auto-orders] ${reason}: shipped=${result.summary.autoShippedCount}, delivered=${result.summary.autoDeliveredCount}, completed=${result.summary.autoCompletedCount}, paymentBlocked=${result.summary.paymentBlockedCount ?? 0}, notifications=${result.summary.notificationCount ?? 0}`
     );
   } catch (error) {
     await client?.query("ROLLBACK").catch(() => undefined);

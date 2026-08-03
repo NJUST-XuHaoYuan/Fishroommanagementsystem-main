@@ -169,6 +169,9 @@ async function postOrderApi(path: string, body: Record<string, unknown>) {
     body: JSON.stringify(body),
   });
   const result = await response.json().catch(() => ({}));
+  if (result.notification || result.code === "CREDIT_SALE_CONFIRMATION_REQUIRED") {
+    window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+  }
   if (!response.ok || !result.ok) {
     throw new Error(result.error || `HTTP ${response.status}`);
   }
@@ -258,6 +261,15 @@ function calcAmountRefunded(order: Order): number {
     .reduce((sum, payment) => sum + payment.amount, 0);
 }
 
+function calcVerifiedNetPayment(order: Order): number {
+  return Number((order.payments ?? [])
+    .filter(isPaymentVerified)
+    .reduce((sum, payment) => payment.type === "refund"
+      ? sum - Number(payment.amount ?? 0)
+      : sum + Number(payment.amount ?? 0), 0)
+    .toFixed(2));
+}
+
 function isDamageRefundOrder(order: Order, shipments: Shipment[] = []): boolean {
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   return order.status === "damaged" ||
@@ -278,7 +290,36 @@ const ORDER_STATUS_TAG_STYLE = {
   damaged: "bg-red-100 text-red-700",
   outbound: "bg-sky-100 text-sky-700",
   delivered: "bg-emerald-100 text-emerald-700",
+  paymentVerified: "bg-emerald-100 text-emerald-700",
+  paymentPending: "bg-amber-100 text-amber-700",
+  paymentCredit: "bg-violet-100 text-violet-700",
+  paymentExempt: "bg-cyan-100 text-cyan-700",
 };
+
+function getOrderPaymentStatusTag(order: Order, shipments: Shipment[] = []): OrderStatusTag | null {
+  if (order.status === "cancelled") return null;
+  if (isDouyinOrderSource(order.source)) {
+    return { label: "平台免核销", className: ORDER_STATUS_TAG_STYLE.paymentExempt };
+  }
+  const amountDue = Math.max(0, Number(calcAmountDue(order, shipments).toFixed(2)));
+  const verifiedAmount = calcVerifiedNetPayment(order);
+  const outstandingAmount = Math.max(0, Number((amountDue - verifiedAmount).toFixed(2)));
+  if (outstandingAmount <= 0.005) {
+    return { label: "已核销", className: ORDER_STATUS_TAG_STYLE.paymentVerified };
+  }
+  const approvedAmount = order.creditSaleApproval?.confirmedAt && order.creditSaleApproval?.confirmedBy
+    ? Number(order.creditSaleApproval.amount ?? 0)
+    : 0;
+  if (approvedAmount + 0.005 >= outstandingAmount) {
+    return { label: "赊销已确认", className: ORDER_STATUS_TAG_STYLE.paymentCredit };
+  }
+  return { label: "待核销", className: ORDER_STATUS_TAG_STYLE.paymentPending };
+}
+
+function getAllOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
+  const paymentTag = getOrderPaymentStatusTag(order, shipments);
+  return paymentTag ? [...getOrderStatusTags(order, shipments), paymentTag] : getOrderStatusTags(order, shipments);
+}
 
 function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
@@ -367,7 +408,7 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
 }
 
 function getOrderStatusText(order: Order, shipments: Shipment[] = []): string {
-  return getOrderStatusTags(order, shipments).map((tag) => tag.label).join("、");
+  return getAllOrderStatusTags(order, shipments).map((tag) => tag.label).join("、");
 }
 
 function hasPaymentRecords(order: Order): boolean {
@@ -1115,7 +1156,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "对接人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "抖音订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
       </body>
@@ -1145,7 +1186,7 @@ function OrderStatusTags({
 }) {
   return (
     <span className={`inline-flex flex-wrap items-center gap-1 ${className}`}>
-      {getOrderStatusTags(order, shipments).map((tag) => (
+      {getAllOrderStatusTags(order, shipments).map((tag) => (
         <span key={tag.label} className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${tag.className}`}>
           {tag.label}
         </span>
@@ -3847,7 +3888,7 @@ function OrderDetailDialog({
     if (isDouyinOrderSource(editForm.source) && !editForm.douyinOrderNo.trim()) return toast.error("请填写抖音订单编号");
     if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
-    if (!editForm.contactPerson.trim()) return toast.error("请选择对接人");
+    if (!editForm.contactPerson.trim()) return toast.error("请选择订单负责人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
@@ -4316,13 +4357,13 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">对接人<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
                     value={editForm.contactPerson}
                     onValueChange={(value) => setEditForm((f) => f ? { ...f, contactPerson: value } : f)}
                   >
                     <SelectTrigger className={!editForm.contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                      <SelectValue placeholder="请选择对接人" />
+                      <SelectValue placeholder="请选择订单负责人" />
                     </SelectTrigger>
                     <SelectContent>
                       {editContactOptions.map((person) => (
@@ -4423,7 +4464,7 @@ function OrderDetailDialog({
                       : "—"}
                   </div>
                 )}
-                <div><span className="text-muted-foreground">对接人：</span>{order.contactPerson || "—"}</div>
+                <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
                 {order.source === "私域线上" && displayAddress && (
                   <div className="col-span-2">
                     <span className="text-muted-foreground">收货地址：</span>
@@ -4434,6 +4475,23 @@ function OrderDetailDialog({
                   </div>
                 )}
                 {order.notes && <div className="col-span-2"><span className="text-muted-foreground">备注：</span>{order.notes}</div>}
+              </div>
+            )}
+
+            {order.creditSaleApproval && (
+              <div className="flex flex-col gap-1 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <span className="font-medium">赊销确认记录</span>
+                  <span className="ml-2">¥{Number(order.creditSaleApproval.amount ?? 0).toFixed(2)}</span>
+                  {order.creditSaleApproval.note && (
+                    <span className="ml-2 text-violet-700">{order.creditSaleApproval.note}</span>
+                  )}
+                </div>
+                <div className="text-xs text-violet-700">
+                  {order.creditSaleApproval.confirmedByName || order.creditSaleApproval.confirmedBy}
+                  <span className="mx-1">·</span>
+                  {String(order.creditSaleApproval.confirmedAt ?? "").replace("T", " ").slice(0, 16)}
+                </div>
               </div>
             )}
 
@@ -5547,7 +5605,7 @@ function NewOrderDialog({
     if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
     if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
-    if (!contactPerson.trim()) return toast.error("请选择对接人");
+    if (!contactPerson.trim()) return toast.error("请选择订单负责人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
     if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
@@ -5736,13 +5794,13 @@ function NewOrderDialog({
                 </div>
               )}
               <div className="grid gap-2">
-                <Label>对接人<span className="text-red-500 ml-0.5">*</span></Label>
+                <Label>订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
                   value={contactPerson}
                   onValueChange={setContactPerson}
                 >
                   <SelectTrigger className={submitAttempted && !contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                    <SelectValue placeholder="请选择对接人" />
+                    <SelectValue placeholder="请选择订单负责人" />
                   </SelectTrigger>
                   <SelectContent>
                     {contactOptions.map((person) => (
