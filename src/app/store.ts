@@ -70,6 +70,8 @@ export type TankGroup = {
 export type PurchaseBatch = {
   id: string;
   siteId?: string;
+  /** 服务端记录的批次创建时间，用于超时补录审批。 */
+  createdAt?: string;
   batchNo: string;
   supplier: string;
   arrivalDate: string;
@@ -464,7 +466,13 @@ export type StoreContextType = {
   setState: React.Dispatch<React.SetStateAction<Store>>;
   savePatch: (patch: Partial<Omit<Store, "user">>) => Promise<boolean>;
   saveProduct: (product: Product) => Promise<boolean>;
-  saveStockChange: (change: { upsert?: StockItem[]; deleteIds?: string[] }) => Promise<{ ok: boolean; error?: string }>;
+  saveStockChange: (change: { upsert?: StockItem[]; deleteIds?: string[] }) => Promise<{
+    ok: boolean;
+    error?: string;
+    pendingApproval?: boolean;
+    approvalRequestId?: string;
+    message?: string;
+  }>;
   saveMaintenanceAction: (change:
     | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
     | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }

@@ -36,11 +36,18 @@ import {
 import { requiredShipMethodForOrderSource } from "./shipment-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import {
+  addApprovalResultNotification,
+  ensureApprovalNotifications,
   ensureCreditSaleNotification,
   markNotificationsRead,
   notificationsForRecipient,
+  resolveApprovalNotifications,
   resolveCreditSaleNotifications,
 } from "./station-notifications.mjs";
+import {
+  batchRequiresLateStockApproval,
+  preserveBatchCreationTimes,
+} from "./stock-approval-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -408,7 +415,6 @@ function preserveMissingById(currentItems, incomingItems, label) {
 
 function mergeStockFromGenericPost(currentItems, incomingItems) {
   if (!Array.isArray(currentItems) || !Array.isArray(incomingItems)) return incomingItems;
-  if (currentItems.length === 0) return incomingItems;
 
   const incomingById = new Map(
     incomingItems
@@ -1360,6 +1366,7 @@ function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
   delete next.notifications;
+  delete next.approvalRequests;
   next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
@@ -1444,6 +1451,10 @@ function authenticatedOperator(req) {
   return req.auth?.user?.username || "system";
 }
 
+function authenticatedOperatorName(req) {
+  return String(req.auth?.account?.name ?? req.auth?.user?.username ?? "系统").trim() || "系统";
+}
+
 function sanitizeOperationLogsForAuth(logs = [], req) {
   const operator = authenticatedOperator(req);
   return (Array.isArray(logs) ? logs : []).map((log) =>
@@ -1469,6 +1480,12 @@ function requireFinanceAccessForAuth(req) {
     hasModulePermission(req.auth?.account, "finance", action)
   )) return;
   throw new Error("当前账户没有财务模块权限");
+}
+
+function requireAdminForAuth(req) {
+  if (req.auth?.account?.accessRole !== "admin") {
+    throw new Error("仅管理员可以处理库存审批");
+  }
 }
 
 function validateStatePatchAuthorization(req, patch = {}) {
@@ -1554,6 +1571,19 @@ function countAdmins(personnel = [], excludeId = "") {
     .length;
 }
 
+function activeAdminRecipients(state = {}) {
+  return (Array.isArray(state.personnel) ? state.personnel : [])
+    .filter((person) =>
+      person?.accessRole === "admin" &&
+      !isPersonnelResigned(person) &&
+      String(person?.username ?? "").trim()
+    )
+    .map((person) => ({
+      username: String(person.username).trim(),
+      name: String(person.name ?? person.username).trim(),
+    }));
+}
+
 function isActivePersonnelName(state = {}, value = "") {
   const normalized = String(value ?? "").trim();
   if (!normalized) return false;
@@ -1618,6 +1648,7 @@ function ensureOrderCreditSaleNotification(state = {}, order = {}, gate = {}, cr
     requiredOutstandingAmount: gate.outstandingAmount,
     createdAt: new Date().toISOString(),
     createdBy,
+    createdByName: activePersonnelForReference(state, createdBy)?.name ?? createdBy,
   });
 }
 
@@ -2396,6 +2427,207 @@ function normalizeStockItem(item) {
     throw new Error("Stock item basePrice must be greater than 0");
   }
   return normalized;
+}
+
+function applyStockMutationToState(state = {}, change = {}, operator = "system", options = {}) {
+  const stock = Array.isArray(state.stock) ? state.stock : [];
+  const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+  const upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map(normalizeStockItem);
+  const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
+    .map((id) => String(id ?? "").trim())
+    .filter(Boolean);
+  if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
+
+  const upsertIds = upsertItems.map((item) => item.id);
+  if (new Set(upsertIds).size !== upsertIds.length) throw new Error("入库记录编号重复，请刷新后重试");
+  const deleteIdSet = new Set(deleteIds);
+  const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const existingDeleteIds = new Set(
+    stock
+      .map((item) => String(item?.id ?? ""))
+      .filter((id) => id && deleteIdSet.has(id))
+  );
+  if (deleteIdSet.size > 0 && existingDeleteIds.size !== deleteIdSet.size) {
+    throw new Error("部分库存记录已不存在，请刷新后重试");
+  }
+
+  const batches = Array.isArray(state.batches) ? state.batches : [];
+  const batchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
+  for (const item of upsertItems) {
+    if (!batchById.has(item.batchId)) throw new Error("采购批次不存在，请刷新后重试");
+  }
+
+  const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+  const blockingShipment = shipments.find((shipment) =>
+    shipmentBlocksInventory(shipment) &&
+    (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [])
+      .some((id) => existingDeleteIds.has(String(id ?? "")))
+  );
+  if (blockingShipment) throw new Error("所选库存已出库或发货，不能删除");
+
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const protectedOrder = orders.find((order) =>
+    !["cancelled", "pending", "confirmed"].includes(String(order?.status ?? "")) &&
+    (Array.isArray(order?.items) ? order.items : []).some((item) =>
+      orderItemKeepsInventory(item) && existingDeleteIds.has(String(item?.stockItemId ?? ""))
+    )
+  );
+  if (protectedOrder) {
+    throw new Error(`库存已进入订单「${protectedOrder.orderNo || protectedOrder.id}」的完成或异常流程，不能删除`);
+  }
+
+  const removedAt = new Date().toISOString();
+  const stockById = new Map(stock.map((item) => [String(item?.id ?? ""), item]));
+  const affectedOrderIds = new Set();
+  const nextOrders = orders.map((order) => {
+    if (!["pending", "confirmed"].includes(String(order?.status ?? ""))) return order;
+    let changed = false;
+    const items = (Array.isArray(order.items) ? order.items : []).map((item) => {
+      if (!orderItemKeepsInventory(item) || !existingDeleteIds.has(String(item?.stockItemId ?? ""))) {
+        return item;
+      }
+      changed = true;
+      const fishCode = String(item?.fishCode ?? stockById.get(String(item?.stockItemId ?? ""))?.code ?? "").trim();
+      return {
+        ...item,
+        ...(fishCode ? { fishCode } : {}),
+        inventoryRemovedAt: removedAt,
+        inventoryRemovedBy: operator,
+      };
+    });
+    if (!changed) return order;
+    affectedOrderIds.add(String(order.id ?? ""));
+    return { ...order, items };
+  });
+  const nextShipments = shipments.map((shipment) => {
+    if (shipment?.status !== "preparing") return shipment;
+    const currentItemIds = Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [];
+    const itemStockIds = currentItemIds.filter((id) => !existingDeleteIds.has(String(id ?? "")));
+    if (itemStockIds.length === currentItemIds.length) return shipment;
+    return {
+      ...shipment,
+      itemStockIds,
+      damageItemStockIds: Array.isArray(shipment?.damageItemStockIds)
+        ? shipment.damageItemStockIds.filter((id) => !existingDeleteIds.has(String(id ?? "")))
+        : shipment.damageItemStockIds,
+    };
+  });
+  const orderUpdates = nextOrders.filter((order) => affectedOrderIds.has(String(order?.id ?? "")));
+  const shipmentUpdates = nextShipments.filter((shipment, index) =>
+    stableJson(shipment) !== stableJson(shipments[index])
+  );
+  const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
+  const changedStock = stock
+    .filter((item) => !deleteIdSet.has(String(item?.id ?? "")))
+    .map((item) => upsertById.get(String(item?.id ?? "")) ?? item);
+  for (const item of upsertItems) {
+    if (!existingIds.has(item.id)) changedStock.push(item);
+  }
+  const nextStock = setStockSoldForOrders({ ...state, stock: changedStock }, nextOrders);
+  const nextBatches = refreshBatchStockCounts(batches, nextStock);
+  const defaultAction = deleteIdSet.size > 0
+    ? "删除记录"
+    : upsertItems.some((item) => existingIds.has(item.id))
+      ? "修改记录"
+      : "添加记录";
+  const defaultDetail = deleteIdSet.size > 0
+    ? `删除入库记录 ${deleteIdSet.size} 条${affectedOrderIds.size > 0 ? `，保留并标记未出库订单 ${affectedOrderIds.size} 个` : ""}`
+    : `保存入库记录 ${upsertItems.length} 条`;
+  const operationLog = options.operationLog === null
+    ? null
+    : options.operationLog ?? {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator,
+        module: "库存明细",
+        action: defaultAction,
+        detail: defaultDetail,
+      };
+  const nextState = {
+    ...state,
+    stock: nextStock,
+    batches: nextBatches,
+    orders: nextOrders,
+    shipments: nextShipments,
+    operationLogs: operationLog ? pushOperationLog(operationLogs, operationLog) : operationLogs,
+  };
+  return {
+    nextState,
+    stock: nextStock,
+    batches: nextBatches,
+    orders: nextOrders,
+    shipments: nextShipments,
+    orderUpdates,
+    shipmentUpdates,
+    affectedOrderCount: affectedOrderIds.size,
+    operationLog,
+    upsertItems,
+    deleteIds,
+    existingIds,
+    defaultAction,
+    defaultDetail,
+  };
+}
+
+function currentApprovalRequests(state = {}) {
+  return Array.isArray(state.approvalRequests) ? state.approvalRequests : [];
+}
+
+function stockApprovalPlan(state = {}, mutation = {}, req) {
+  if (req.auth?.account?.accessRole === "admin") return null;
+  const newItems = mutation.upsertItems.filter((item) => !mutation.existingIds.has(item.id));
+  const batchById = new Map((Array.isArray(state.batches) ? state.batches : [])
+    .map((batch) => [String(batch?.id ?? ""), batch]));
+  const lateItems = newItems.filter((item) => batchRequiresLateStockApproval(batchById.get(item.batchId)));
+  const hasDeletes = mutation.deleteIds.length > 0;
+  if (!hasDeletes && lateItems.length === 0) return null;
+
+  const stockById = new Map((Array.isArray(state.stock) ? state.stock : [])
+    .map((item) => [String(item?.id ?? ""), item]));
+  const lateBatchIds = [...new Set(lateItems.map((item) => item.batchId))];
+  const lateBatchLabels = lateBatchIds
+    .map((id) => String(batchById.get(id)?.batchNo ?? id))
+    .filter(Boolean);
+  const deletedCodes = mutation.deleteIds
+    .map((id) => String(stockById.get(id)?.code ?? id).trim())
+    .filter(Boolean);
+  const approvalAction = hasDeletes && lateItems.length > 0
+    ? "mixed_stock_change"
+    : hasDeletes
+      ? "delete_stock"
+      : "add_stock_to_old_batch";
+  const title = approvalAction === "delete_stock"
+    ? "库存删除待审批"
+    : approvalAction === "add_stock_to_old_batch"
+      ? "超时批次入库待审批"
+      : "库存变更待审批";
+  const details = [];
+  if (hasDeletes) {
+    const codeSummary = deletedCodes.slice(0, 6).join("、");
+    details.push(`申请删除 ${mutation.deleteIds.length} 条库存${codeSummary ? `（${codeSummary}${deletedCodes.length > 6 ? "等" : ""}）` : ""}`);
+  }
+  if (lateItems.length > 0) {
+    details.push(`申请向创建已超过 48 小时的批次「${lateBatchLabels.join("、")}」补录 ${lateItems.length} 条库存`);
+  }
+  const payload = { upsert: mutation.upsertItems, deleteIds: mutation.deleteIds };
+  const createdBy = authenticatedOperator(req);
+  const requestKey = createHash("sha256")
+    .update(`${createdBy}\0${approvalAction}\0${stableJson(payload)}`)
+    .digest("hex");
+  const firstItem = lateItems[0] ?? stockById.get(mutation.deleteIds[0]);
+  return {
+    approvalAction,
+    title,
+    message: `${details.join("；")}。批准后才会执行。`,
+    responseMessage: approvalAction === "delete_stock"
+      ? "删除申请已提交管理员审批，批准前库存不会删除"
+      : approvalAction === "add_stock_to_old_batch"
+        ? "该批次创建已超过 48 小时，入库申请已提交管理员审批"
+        : "库存变更已提交管理员审批，批准前不会执行",
+    payload,
+    requestKey,
+    siteId: normalizeSiteId(firstItem?.siteId),
+  };
 }
 
 function findSubTank(state = {}, subTankId) {
@@ -6975,6 +7207,9 @@ async function handleApi(req, res, url) {
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
 	      const patch = await externalizeDataUrls(rawPatch);
+	      if (Object.prototype.hasOwnProperty.call(patch, "batches") && Array.isArray(patch.batches)) {
+	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
+	      }
 	      const nextState = buildStatePatch(current, patch, basePatch, incomingLogs, req);
 
 	      await client.query(
@@ -6995,10 +7230,130 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/approvals/stock" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireAdminForAuth(req);
+      const body = JSON.parse(await readBody(req) || "{}");
+      const requestId = String(body.requestId ?? "").trim();
+      const decision = body.decision === "approve" ? "approved" : body.decision === "reject" ? "rejected" : "";
+      const note = String(body.note ?? "").trim().slice(0, 500);
+      if (!requestId || !decision) throw new Error("请选择有效的审批操作");
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      const requests = currentApprovalRequests(state);
+      const approvalRequest = requests.find((request) => String(request?.id ?? "") === requestId);
+      if (!approvalRequest) throw new Error("审批记录不存在，请刷新后重试");
+      if (approvalRequest.status !== "pending") throw new Error("该审批已由其他管理员处理");
+      if (approvalRequest.type !== "stock_change") throw new Error("不支持的审批类型");
+
+      const resolvedAt = new Date().toISOString();
+      const resolvedBy = authenticatedOperator(req);
+      const resolvedByName = authenticatedOperatorName(req);
+      let mutation = null;
+      let stateAfterMutation = state;
+      if (decision === "approved") {
+        const payload = approvalRequest.payload && typeof approvalRequest.payload === "object"
+          ? approvalRequest.payload
+          : {};
+        if (approvalRequest.approvalAction === "add_stock_to_old_batch") {
+          const existingIds = new Set((Array.isArray(state.stock) ? state.stock : [])
+            .map((item) => String(item?.id ?? ""))
+            .filter(Boolean));
+          if ((Array.isArray(payload.upsert) ? payload.upsert : []).some((item) => existingIds.has(String(item?.id ?? "")))) {
+            throw new Error("待补录库存中已有记录存在，请驳回后让发起人重新提交");
+          }
+        }
+        mutation = applyStockMutationToState(state, payload, resolvedBy, { operationLog: null });
+        stateAfterMutation = mutation.nextState;
+      }
+
+      const actionLabel = approvalRequest.approvalAction === "delete_stock"
+        ? "库存删除"
+        : approvalRequest.approvalAction === "add_stock_to_old_batch"
+          ? "超时批次入库"
+          : "库存变更";
+      const resolutionLabel = decision === "approved" ? "批准并执行" : "驳回";
+      const operationLog = {
+        id: uid("log"),
+        time: resolvedAt,
+        operator: resolvedBy,
+        module: "库存明细",
+        action: decision === "approved" ? "批准审批" : "驳回审批",
+        detail: `${resolutionLabel}${approvalRequest.createdByName || approvalRequest.createdBy}提交的${actionLabel}申请${note ? `；说明：${note}` : ""}`,
+      };
+      const resolvedRequest = {
+        ...approvalRequest,
+        status: decision,
+        resolvedAt,
+        resolvedBy,
+        resolvedByName,
+        resolutionNote: note,
+      };
+      const resolvedNotifications = resolveApprovalNotifications(
+        currentStationNotifications(stateAfterMutation),
+        requestId,
+        {
+          resolution: decision,
+          resolvedAt,
+          resolvedBy,
+          resolvedByName,
+          resolutionNote: note,
+        }
+      );
+      const resultMessage = `${actionLabel}申请已由 ${resolvedByName} ${resolutionLabel}${note ? `。说明：${note}` : "。"}`;
+      const withResult = addApprovalResultNotification(resolvedNotifications.notifications, {
+        id: uid("notice"),
+        approvalRequestId: requestId,
+        approvalAction: approvalRequest.approvalAction,
+        resolution: decision,
+        title: `${actionLabel}${decision === "approved" ? "已批准" : "已驳回"}`,
+        message: resultMessage,
+        siteId: approvalRequest.siteId,
+        recipientUsername: approvalRequest.createdBy,
+        recipientName: approvalRequest.createdByName,
+        createdAt: resolvedAt,
+        createdBy: resolvedBy,
+        createdByName: resolvedByName,
+        resolutionNote: note,
+      });
+      const nextState = {
+        ...stateAfterMutation,
+        approvalRequests: requests.map((request) => request === approvalRequest ? resolvedRequest : request),
+        notifications: withResult.notifications,
+        operationLogs: pushOperationLog(stateAfterMutation.operationLogs, operationLog),
+      };
+      await client.query(
+        "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        decision,
+        message: resultMessage,
+        ...(mutation ? {
+          stock: mutation.stock,
+          batches: mutation.batches,
+          orders: mutation.orders,
+          shipments: mutation.shipments,
+        } : {}),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "库存审批处理失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
 		  if (url.pathname === "/api/stock/save" && req.method === "POST") {
 		    try {
-		      const body = await readBody(req);
-		      const rawChange = JSON.parse(body);
+		      const rawChange = JSON.parse(await readBody(req) || "{}");
 		      const rawUpsert = Array.isArray(rawChange?.upsert) ? rawChange.upsert : [];
 		      const rawDeleteIds = Array.isArray(rawChange?.deleteIds) ? rawChange.deleteIds : [];
 	      const operator = authenticatedOperator(req);
@@ -7011,9 +7366,8 @@ async function handleApi(req, res, url) {
       try {
         await client.query("BEGIN");
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-	        const state = rows[0]?.data ?? {};
+	        const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
-	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
 	        const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
 	        const rawUpsertIds = rawUpsert.map((item) => String(item?.id ?? "")).filter(Boolean);
 	        const hasCreates = rawUpsert.some((item) => !existingIds.has(String(item?.id ?? "")));
@@ -7021,111 +7375,93 @@ async function handleApi(req, res, url) {
 	        if (rawDeleteIds.length > 0) requireModulePermissionForAuth(req, "stockIn", "delete");
 	        if (hasCreates) requireModulePermissionForAuth(req, "stockIn", "create");
 	        if (hasUpdates) requireModulePermissionForAuth(req, "stockIn", "update");
-	        const {
-	          upsert = [],
-	          deleteIds = [],
-	        } = await externalizeDataUrls(rawChange);
-	        const upsertItems = Array.isArray(upsert) ? upsert.map(normalizeStockItem) : [];
-	        const deleteIdSet = new Set(Array.isArray(deleteIds) ? deleteIds.map((id) => String(id)) : []);
-	        const existingDeleteIds = new Set(
-	          stock
-	            .map((item) => String(item?.id ?? ""))
-	            .filter((id) => id && deleteIdSet.has(id))
-	        );
-	        if (deleteIdSet.size > 0 && existingDeleteIds.size !== deleteIdSet.size) {
-	          throw new Error("部分库存记录已不存在，请刷新后重试");
-	        }
 
-	        const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-	        const blockingShipment = shipments.find((shipment) =>
-	          shipmentBlocksInventory(shipment) &&
-	          (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [])
-	            .some((id) => existingDeleteIds.has(String(id ?? "")))
-	        );
-	        if (blockingShipment) {
-	          throw new Error("所选库存已出库或发货，不能删除");
-	        }
-
-	        const orders = Array.isArray(state.orders) ? state.orders : [];
-	        const protectedOrder = orders.find((order) =>
-	          !["cancelled", "pending", "confirmed"].includes(String(order?.status ?? "")) &&
-	          (Array.isArray(order?.items) ? order.items : []).some((item) =>
-	            orderItemKeepsInventory(item) && existingDeleteIds.has(String(item?.stockItemId ?? ""))
-	          )
-	        );
-	        if (protectedOrder) {
-	          throw new Error(`库存已进入订单「${protectedOrder.orderNo || protectedOrder.id}」的完成或异常流程，不能删除`);
-	        }
-
-	        const removedAt = new Date().toISOString();
-	        const stockById = new Map(stock.map((item) => [String(item?.id ?? ""), item]));
-	        const affectedOrderIds = new Set();
-	        const nextOrders = orders.map((order) => {
-	          if (!["pending", "confirmed"].includes(String(order?.status ?? ""))) return order;
-	          let changed = false;
-	          const items = (Array.isArray(order.items) ? order.items : []).map((item) => {
-	            if (
-	              !orderItemKeepsInventory(item) ||
-	              !existingDeleteIds.has(String(item?.stockItemId ?? ""))
-	            ) {
-	              return item;
-	            }
-	            changed = true;
-	            const fishCode = String(item?.fishCode ?? stockById.get(String(item?.stockItemId ?? ""))?.code ?? "").trim();
-	            return {
-	              ...item,
-	              ...(fishCode ? { fishCode } : {}),
-	              inventoryRemovedAt: removedAt,
-	              inventoryRemovedBy: operator,
-	            };
-	          });
-	          if (!changed) return order;
-	          affectedOrderIds.add(String(order.id ?? ""));
-	          return { ...order, items };
-	        });
-	        const nextShipments = shipments.map((shipment) => {
-	          if (shipment?.status !== "preparing") return shipment;
-	          const currentItemIds = Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [];
-	          const itemStockIds = currentItemIds.filter((id) => !existingDeleteIds.has(String(id ?? "")));
-	          if (itemStockIds.length === currentItemIds.length) return shipment;
-	          return {
-	            ...shipment,
-	            itemStockIds,
-	            damageItemStockIds: Array.isArray(shipment?.damageItemStockIds)
-	              ? shipment.damageItemStockIds.filter((id) => !existingDeleteIds.has(String(id ?? "")))
-	              : shipment.damageItemStockIds,
+	        const externalizedChange = await externalizeDataUrls(rawChange);
+	        const mutation = applyStockMutationToState(state, externalizedChange, operator, { operationLog: null });
+	        const approvalPlan = stockApprovalPlan(state, mutation, req);
+	        if (approvalPlan) {
+	          const recipients = activeAdminRecipients(state);
+	          if (recipients.length === 0) throw new Error("当前没有可处理审批的在职管理员");
+	          const requests = currentApprovalRequests(state);
+	          const existingRequest = requests.find((request) =>
+	            request?.status === "pending" &&
+	            String(request?.requestKey ?? "") === approvalPlan.requestKey &&
+	            String(request?.createdBy ?? "") === operator
+	          );
+	          const createdAt = new Date().toISOString();
+	          const approvalRequest = existingRequest ?? {
+	            id: uid("approval"),
+	            type: "stock_change",
+	            status: "pending",
+	            approvalAction: approvalPlan.approvalAction,
+	            title: approvalPlan.title,
+	            message: approvalPlan.message,
+	            siteId: approvalPlan.siteId,
+	            requestKey: approvalPlan.requestKey,
+	            payload: approvalPlan.payload,
+	            createdAt,
+	            createdBy: operator,
+	            createdByName: authenticatedOperatorName(req),
 	          };
-	        });
-	        const orderUpdates = nextOrders.filter((order) => affectedOrderIds.has(String(order?.id ?? "")));
-	        const shipmentUpdates = nextShipments.filter((shipment, index) =>
-	          stableJson(shipment) !== stableJson(shipments[index])
-	        );
-	        const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
-	        const changedStock = stock
-	          .filter((item) => !deleteIdSet.has(item?.id))
-	          .map((item) => upsertById.get(item.id) ?? item);
-        for (const item of upsertItems) {
-          if (!existingIds.has(item.id)) changedStock.push(item);
-        }
-        const nextStock = setStockSoldForOrders({ ...state, stock: changedStock }, nextOrders);
-        const nextBatches = refreshBatchStockCounts(state.batches, nextStock);
-        const operationLog = {
-          id: uid("log"),
-          time: new Date().toISOString(),
-          operator,
-          module: "库存明细",
-          action: deleteIdSet.size > 0 ? "删除记录" : upsertItems.some((item) => existingIds.has(item.id)) ? "修改记录" : "添加记录",
-          detail: deleteIdSet.size > 0
-            ? `删除入库记录 ${deleteIdSet.size} 条${affectedOrderIds.size > 0 ? `，保留并标记未出库订单 ${affectedOrderIds.size} 个` : ""}`
-            : `保存入库记录 ${upsertItems.length} 条`,
-        };
+	          const ensured = ensureApprovalNotifications(currentStationNotifications(state), {
+	            approvalRequestId: approvalRequest.id,
+	            approvalAction: approvalRequest.approvalAction,
+	            title: approvalRequest.title,
+	            message: approvalRequest.message,
+	            siteId: approvalRequest.siteId,
+	            createdAt: approvalRequest.createdAt,
+	            createdBy: approvalRequest.createdBy,
+	            createdByName: approvalRequest.createdByName,
+	            recipients,
+	            notificationIds: recipients.map(() => uid("notice")),
+	          });
+	          const operationLog = existingRequest
+	            ? null
+	            : {
+	                id: uid("log"),
+	                time: createdAt,
+	                operator,
+	                module: "库存明细",
+	                action: "提交审批",
+	                detail: approvalPlan.message,
+	              };
+	          const nextRequests = existingRequest
+	            ? requests
+	            : [approvalRequest, ...requests].slice(0, 2000);
+	          const nextState = {
+	            ...state,
+	            approvalRequests: nextRequests,
+	            notifications: ensured.notifications,
+	            operationLogs: operationLog
+	              ? pushOperationLog(state.operationLogs, operationLog)
+	              : state.operationLogs,
+	          };
+	          await client.query(
+	            "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+	            [stateId, JSON.stringify(nextState)]
+	          );
+	          await client.query("COMMIT");
+	          sendJson(req, res, 200, {
+	            ok: true,
+	            pendingApproval: true,
+	            approvalRequestId: approvalRequest.id,
+	            message: approvalPlan.responseMessage,
+	            operationLog,
+	          });
+	          return;
+	        }
+
+	        const operationLog = {
+	          id: uid("log"),
+	          time: new Date().toISOString(),
+	          operator,
+	          module: "库存明细",
+	          action: mutation.defaultAction,
+	          detail: mutation.defaultDetail,
+	        };
 	        const nextState = {
-	          ...state,
-	          stock: nextStock,
-	          batches: nextBatches,
-	          orders: nextOrders,
-	          shipments: nextShipments,
-	          operationLogs: pushOperationLog(operationLogs, operationLog),
+	          ...mutation.nextState,
+	          operationLogs: pushOperationLog(state.operationLogs, operationLog),
 	        };
         await client.query(
           "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
@@ -7134,11 +7470,11 @@ async function handleApi(req, res, url) {
         await client.query("COMMIT");
         sendJson(req, res, 200, {
           ok: true,
-          stock: nextStock,
-          batches: nextBatches,
-          orderUpdates,
-          shipmentUpdates,
-          affectedOrderCount: affectedOrderIds.size,
+          stock: mutation.stock,
+          batches: mutation.batches,
+          orderUpdates: mutation.orderUpdates,
+          shipmentUpdates: mutation.shipmentUpdates,
+          affectedOrderCount: mutation.affectedOrderCount,
           operationLog,
         });
       } catch (error) {

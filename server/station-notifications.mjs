@@ -50,6 +50,7 @@ export function ensureCreditSaleNotification(notifications = [], input = {}) {
       message: notificationMessage(orderNo, requiredOutstandingAmount),
       requiredOutstandingAmount,
       updatedAt: createdAt,
+      createdByName: String(input.createdByName ?? pending.createdByName ?? input.createdBy ?? pending.createdBy ?? "system"),
       readAt: "",
     };
     return {
@@ -80,6 +81,7 @@ export function ensureCreditSaleNotification(notifications = [], input = {}) {
     message: notificationMessage(orderNo, requiredOutstandingAmount),
     createdAt,
     createdBy: String(input.createdBy ?? "system"),
+    createdByName: String(input.createdByName ?? input.createdBy ?? "system"),
     readAt: "",
     recipientUsername,
     recipientName,
@@ -91,6 +93,126 @@ export function ensureCreditSaleNotification(notifications = [], input = {}) {
   if (!notification.id) throw new Error("站内信缺少编号");
   return {
     notifications: sortedNotifications([notification, ...reassigned]),
+    notification,
+    changed: true,
+  };
+}
+
+export function ensureApprovalNotifications(notifications = [], input = {}) {
+  const current = Array.isArray(notifications) ? notifications : [];
+  const approvalRequestId = String(input.approvalRequestId ?? "").trim();
+  const recipients = (Array.isArray(input.recipients) ? input.recipients : [])
+    .map((recipient) => ({
+      username: String(recipient?.username ?? "").trim(),
+      name: String(recipient?.name ?? recipient?.username ?? "").trim(),
+    }))
+    .filter((recipient, index, all) =>
+      recipient.username && all.findIndex((item) => item.username === recipient.username) === index
+    );
+  if (!approvalRequestId || recipients.length === 0) {
+    throw new Error("无法创建库存审批站内信");
+  }
+
+  const existingRecipients = new Set(current
+    .filter((notification) =>
+      notification?.type === "stock_approval" &&
+      notification?.status === "pending" &&
+      String(notification?.approvalRequestId ?? "") === approvalRequestId
+    )
+    .map((notification) => String(notification?.recipientUsername ?? "").trim())
+    .filter(Boolean));
+  const createdAt = String(input.createdAt ?? new Date().toISOString());
+  let next = current;
+  const created = [];
+  recipients.forEach((recipient, index) => {
+    if (existingRecipients.has(recipient.username)) return;
+    const notification = {
+      id: String(input.notificationIds?.[index] ?? `${approvalRequestId}-${recipient.username}`).trim(),
+      type: "stock_approval",
+      status: "pending",
+      title: String(input.title ?? "库存操作待审批"),
+      message: String(input.message ?? "有一项库存操作等待审批。"),
+      createdAt,
+      createdBy: String(input.createdBy ?? "system"),
+      createdByName: String(input.createdByName ?? input.createdBy ?? "system"),
+      readAt: "",
+      recipientUsername: recipient.username,
+      recipientName: recipient.name,
+      approvalRequestId,
+      approvalAction: String(input.approvalAction ?? "stock_change"),
+      siteId: String(input.siteId ?? ""),
+    };
+    if (!notification.id) throw new Error("库存审批站内信缺少编号");
+    created.push(notification);
+    next = [notification, ...next];
+  });
+  return {
+    notifications: sortedNotifications(next),
+    notificationsCreated: created,
+    changed: created.length > 0,
+  };
+}
+
+export function resolveApprovalNotifications(notifications = [], approvalRequestId = "", input = {}) {
+  const requestId = String(approvalRequestId ?? "").trim();
+  const resolution = input.resolution === "approved" ? "approved" : "rejected";
+  const resolvedAt = String(input.resolvedAt ?? new Date().toISOString());
+  let changed = false;
+  const next = (Array.isArray(notifications) ? notifications : []).map((notification) => {
+    if (
+      notification?.type !== "stock_approval" ||
+      notification?.status !== "pending" ||
+      String(notification?.approvalRequestId ?? "") !== requestId
+    ) return notification;
+    changed = true;
+    return {
+      ...notification,
+      status: "completed",
+      resolution,
+      resolvedAt,
+      resolvedBy: String(input.resolvedBy ?? "system"),
+      resolvedByName: String(input.resolvedByName ?? input.resolvedBy ?? "system"),
+      resolutionNote: String(input.resolutionNote ?? ""),
+      readAt: notification.readAt || resolvedAt,
+    };
+  });
+  return { notifications: sortedNotifications(next), changed };
+}
+
+export function addApprovalResultNotification(notifications = [], input = {}) {
+  const recipientUsername = String(input.recipientUsername ?? "").trim();
+  const approvalRequestId = String(input.approvalRequestId ?? "").trim();
+  const resolution = input.resolution === "approved" ? "approved" : "rejected";
+  if (!recipientUsername || !approvalRequestId) throw new Error("无法发送库存审批结果站内信");
+  const existing = (Array.isArray(notifications) ? notifications : []).find((notification) =>
+    notification?.type === "approval_result" &&
+    String(notification?.approvalRequestId ?? "") === approvalRequestId &&
+    String(notification?.recipientUsername ?? "") === recipientUsername
+  );
+  if (existing) return { notifications, notification: existing, changed: false };
+  const notification = {
+    id: String(input.id ?? "").trim(),
+    type: "approval_result",
+    status: "completed",
+    resolution,
+    title: String(input.title ?? (resolution === "approved" ? "库存操作已批准" : "库存操作已驳回")),
+    message: String(input.message ?? "库存操作审批已处理。"),
+    createdAt: String(input.createdAt ?? new Date().toISOString()),
+    createdBy: String(input.createdBy ?? "system"),
+    createdByName: String(input.createdByName ?? input.createdBy ?? "system"),
+    readAt: "",
+    recipientUsername,
+    recipientName: String(input.recipientName ?? recipientUsername),
+    approvalRequestId,
+    approvalAction: String(input.approvalAction ?? "stock_change"),
+    siteId: String(input.siteId ?? ""),
+    resolvedBy: String(input.createdBy ?? "system"),
+    resolvedByName: String(input.createdByName ?? input.createdBy ?? "system"),
+    resolutionNote: String(input.resolutionNote ?? ""),
+  };
+  if (!notification.id) throw new Error("审批结果站内信缺少编号");
+  return {
+    notifications: sortedNotifications([notification, ...(Array.isArray(notifications) ? notifications : [])]),
     notification,
     changed: true,
   };

@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bell, CheckCheck, ExternalLink, HandCoins, Loader2 } from "lucide-react";
+import {
+  Bell,
+  CheckCheck,
+  CheckCircle2,
+  ExternalLink,
+  HandCoins,
+  Loader2,
+  UserRound,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useStore } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
@@ -24,6 +33,8 @@ type StationNotification = {
   title: string;
   message: string;
   createdAt: string;
+  createdBy?: string;
+  createdByName?: string;
   updatedAt?: string;
   readAt?: string;
   recipientUsername: string;
@@ -32,6 +43,12 @@ type StationNotification = {
   orderNo?: string;
   siteId?: string;
   requiredOutstandingAmount?: number;
+  approvalRequestId?: string;
+  approvalAction?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  resolutionNote?: string;
 };
 
 function formatNotificationTime(value?: string): string {
@@ -48,8 +65,12 @@ function formatNotificationTime(value?: string): string {
 }
 
 function notificationResultLabel(notification: StationNotification): string {
-  if (notification.status === "pending") return "待处理";
+  if (notification.status === "pending") {
+    return notification.type === "stock_approval" ? "待审批" : "待处理";
+  }
   return {
+    approved: "已批准",
+    rejected: "已驳回",
     credit_confirmed: "已确认赊销",
     finance_verified: "财务已核销",
     platform_exempt: "平台免核销",
@@ -60,6 +81,13 @@ function notificationResultLabel(notification: StationNotification): string {
   }[notification.resolution ?? ""] ?? "已处理";
 }
 
+function actorLabel(name?: string, username?: string): string {
+  const safeName = String(name ?? "").trim();
+  const safeUsername = String(username ?? "").trim();
+  if (safeName && safeUsername && safeName !== safeUsername) return `${safeName}（${safeUsername}）`;
+  return safeName || safeUsername || "系统";
+}
+
 export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
   const { setState, setActiveSiteId } = useStore();
   const [open, setOpen] = useState(false);
@@ -68,6 +96,10 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
   const [selected, setSelected] = useState<StationNotification | null>(null);
   const [creditNote, setCreditNote] = useState("");
   const [confirming, setConfirming] = useState(false);
+  const [selectedApproval, setSelectedApproval] = useState<StationNotification | null>(null);
+  const [approvalDecision, setApprovalDecision] = useState<"approve" | "reject">("approve");
+  const [approvalNote, setApprovalNote] = useState("");
+  const [processingApproval, setProcessingApproval] = useState(false);
 
   const unreadCount = useMemo(
     () => notifications.filter((notification) => !notification.readAt).length,
@@ -189,6 +221,56 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
     }
   };
 
+  const startStockApproval = (
+    notification: StationNotification,
+    decision: "approve" | "reject"
+  ) => {
+    void markRead(notification);
+    setOpen(false);
+    setApprovalDecision(decision);
+    setApprovalNote("");
+    setSelectedApproval(notification);
+  };
+
+  const processStockApproval = async () => {
+    if (!selectedApproval?.approvalRequestId || processingApproval) return;
+    setProcessingApproval(true);
+    try {
+      const response = await fetch("/api/approvals/stock", {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify({
+          requestId: selectedApproval.approvalRequestId,
+          decision: approvalDecision,
+          note: approvalNote.trim(),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || "库存审批处理失败");
+      setState((current) => ({
+        ...current,
+        stock: Array.isArray(result.stock) ? result.stock : current.stock,
+        batches: Array.isArray(result.batches) ? result.batches : current.batches,
+        orders: Array.isArray(result.orders) ? result.orders : current.orders,
+        shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
+        operationLogs: result.operationLog
+          ? [result.operationLog, ...(current.operationLogs ?? [])]
+              .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
+              .slice(0, 10000)
+          : current.operationLogs,
+      }));
+      setSelectedApproval(null);
+      setApprovalNote("");
+      await loadNotifications(true);
+      window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+      toast.success(result.message || (approvalDecision === "approve" ? "已批准并执行" : "已驳回"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "库存审批处理失败");
+    } finally {
+      setProcessingApproval(false);
+    }
+  };
+
   return (
     <>
       <Popover open={open} onOpenChange={(nextOpen) => {
@@ -253,11 +335,29 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
                             <div className="truncate text-sm font-semibold">{notification.title}</div>
                           </div>
                           <div className="mt-1 text-xs leading-5 text-muted-foreground">{notification.message}</div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                            <span className="inline-flex items-center gap-1">
+                              <UserRound className="size-3.5" />
+                              来自：{actorLabel(notification.createdByName, notification.createdBy)}
+                            </span>
+                            {notification.resolvedBy && (
+                              <span>
+                                处理人：{actorLabel(notification.resolvedByName, notification.resolvedBy)}
+                              </span>
+                            )}
+                          </div>
+                          {notification.resolutionNote && (
+                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                              处理说明：{notification.resolutionNote}
+                            </div>
+                          )}
                         </div>
                         <Badge
                           variant="outline"
                           className={pending
                             ? "shrink-0 border-amber-200 bg-amber-50 text-amber-700"
+                            : notification.resolution === "rejected"
+                              ? "shrink-0 border-red-200 bg-red-50 text-red-700"
                             : "shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700"}
                         >
                           {notificationResultLabel(notification)}
@@ -277,6 +377,20 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
                             <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                               <HandCoins className="size-3.5" />确认赊销
                             </Button>
+                          )}
+                          {pending && notification.type === "stock_approval" && (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => startStockApproval(notification, "reject")}
+                              >
+                                <XCircle className="size-3.5" />驳回
+                              </Button>
+                              <Button size="sm" onClick={() => startStockApproval(notification, "approve")}>
+                                <CheckCircle2 className="size-3.5" />批准
+                              </Button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -315,6 +429,64 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
             <Button disabled={confirming} onClick={() => void confirmCreditSale()}>
               {confirming ? <Loader2 className="size-4 animate-spin" /> : <HandCoins className="size-4" />}
               {confirming ? "确认中" : "确认赊销"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!selectedApproval} onOpenChange={(nextOpen) => {
+        if (!nextOpen && !processingApproval) setSelectedApproval(null);
+      }}>
+        <DialogContent aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>
+              {approvalDecision === "approve" ? "批准库存操作" : "驳回库存操作"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className={`rounded-md border px-3 py-2 text-sm leading-6 ${
+            approvalDecision === "approve"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : "border-red-200 bg-red-50 text-red-900"
+          }`}>
+            <div>{selectedApproval?.message}</div>
+            <div className="mt-1 text-xs opacity-80">
+              发起人：{actorLabel(selectedApproval?.createdByName, selectedApproval?.createdBy)}
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="stock-approval-note">审批说明</label>
+            <Textarea
+              id="stock-approval-note"
+              rows={3}
+              maxLength={500}
+              value={approvalNote}
+              onChange={(event) => setApprovalNote(event.target.value)}
+              placeholder={approvalDecision === "approve" ? "可填写批准说明" : "建议填写驳回原因"}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={processingApproval}
+              onClick={() => setSelectedApproval(null)}
+            >
+              取消
+            </Button>
+            <Button
+              variant={approvalDecision === "approve" ? "default" : "destructive"}
+              disabled={processingApproval}
+              onClick={() => void processStockApproval()}
+            >
+              {processingApproval
+                ? <Loader2 className="size-4 animate-spin" />
+                : approvalDecision === "approve"
+                  ? <CheckCircle2 className="size-4" />
+                  : <XCircle className="size-4" />}
+              {processingApproval
+                ? "处理中"
+                : approvalDecision === "approve"
+                  ? "批准并执行"
+                  : "确认驳回"}
             </Button>
           </DialogFooter>
         </DialogContent>

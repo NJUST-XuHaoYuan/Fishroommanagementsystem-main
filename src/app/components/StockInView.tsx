@@ -564,6 +564,10 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     const qty = saveConfirm.qty;
     setSaveConfirm(null);
     setOpen(false);
+    if (result.pendingApproval) {
+      toast.success(result.message || "入库申请已提交管理员审批");
+      return;
+    }
     toast.success(saveConfirm.isEdit ? "已保存入库记录" : qty > 1 ? `已入库 ${qty} 条` : "已入库");
   };
 
@@ -580,6 +584,10 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
       return;
     }
     setDel(null);
+    if (result.pendingApproval) {
+      toast.success(result.message || "删除申请已提交管理员审批");
+      return;
+    }
     toast.success(linkedOrderCount > 0 ? "已删除库存，订单历史已保留" : "已删除");
   };
 
@@ -668,6 +676,13 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     setSaving(false);
     if (!result.ok) {
       toast.error(result.error || "批量删除失败，请重试");
+      return;
+    }
+    if (result.pendingApproval) {
+      setSelectedIds(new Set());
+      setBulkDeleteIds([]);
+      setSelectMode(false);
+      toast.success(result.message || "批量删除申请已提交管理员审批");
       return;
     }
     setSelectedIds((prev) => {
@@ -1465,7 +1480,13 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
             <AlertDialogDescription>
               {saveConfirm?.isEdit
                 ? "将保存这条入库记录的修改。"
-                : `将入库 ${saveConfirm?.qty ?? 0} 条商品。`}
+                : !permission.isAdmin && saveConfirm?.stockItems.some((item) => {
+                    const selectedBatch = state.batches.find((batchItem) => batchItem.id === item.batchId);
+                    const createdAt = Date.parse(String(selectedBatch?.createdAt ?? ""));
+                    return !Number.isFinite(createdAt) || Date.now() - createdAt >= 48 * 60 * 60 * 1000;
+                  })
+                  ? `将向创建已超过 48 小时的批次补录 ${saveConfirm?.qty ?? 0} 条商品，确认后提交管理员审批。`
+                  : `将入库 ${saveConfirm?.qty ?? 0} 条商品。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1489,7 +1510,9 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
           <AlertDialogHeader>
             <AlertDialogTitle>删除入库记录</AlertDialogTitle>
             <AlertDialogDescription>
-              {del && pendingOrdersForStockIds([del.id]).length > 0
+              {!permission.isAdmin
+                ? "确认后将提交管理员审批，批准前不会删除库存。"
+                : del && pendingOrdersForStockIds([del.id]).length > 0
                 ? `确认删除该条库存记录？关联的 ${pendingOrdersForStockIds([del.id]).length} 个未出库订单会保留商品和收款历史，并标记为“库存记录已删除”。`
                 : "确认删除该条入库记录？"}
             </AlertDialogDescription>
@@ -1504,7 +1527,7 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
 	                confirmDelete();
 	              }}
 	            >
-	              {saving ? "删除中..." : "确认删除"}
+	              {saving ? "提交中..." : permission.isAdmin ? "确认删除" : "提交审批"}
 	            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1515,7 +1538,9 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
           <AlertDialogHeader>
             <AlertDialogTitle>批量删除入库记录</AlertDialogTitle>
             <AlertDialogDescription>
-              确认删除已选的 {bulkDeleteIds.length} 条入库记录？
+              {permission.isAdmin
+                ? `确认删除已选的 ${bulkDeleteIds.length} 条入库记录？`
+                : `确认提交删除 ${bulkDeleteIds.length} 条入库记录的审批？批准前不会删除库存。`}
               {pendingOrdersForStockIds(bulkDeleteIds).length > 0
                 ? ` 其中关联 ${pendingOrdersForStockIds(bulkDeleteIds).length} 个未出库订单，订单商品和收款历史会保留并标记。`
                 : ""}
@@ -1532,7 +1557,7 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
                 confirmBulkDelete();
               }}
             >
-              {saving ? "删除中..." : "确认删除"}
+              {saving ? "提交中..." : permission.isAdmin ? "确认删除" : "提交审批"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

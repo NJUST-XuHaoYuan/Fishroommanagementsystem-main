@@ -80,6 +80,7 @@ export function BatchesView() {
 
   const empty = (): PurchaseBatch => ({
     id: "",
+    createdAt: new Date().toISOString(),
     batchNo: generateBatchNo(),
     supplier: "",
     arrivalDate: today,
@@ -194,7 +195,10 @@ export function BatchesView() {
     const ok = await saveStateTransform((latest) => {
       const exists = latest.batches.find((b) => b.id === finalEditing.id);
       if (exists) return { ...latest, batches: latest.batches.map((b) => (b.id === finalEditing.id ? finalEditing : b)) };
-      return { ...latest, batches: [...latest.batches, { ...finalEditing, id: uid() }] };
+      return {
+        ...latest,
+        batches: [...latest.batches, { ...finalEditing, id: uid(), createdAt: new Date().toISOString() }],
+      };
     });
     if (!ok) return toast.error("保存失败，请重试");
     setOpen(false);

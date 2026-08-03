@@ -749,7 +749,13 @@ function AdminApp() {
 
 	  const saveStockChange = async (
 	    change: { upsert?: StockItem[]; deleteIds?: string[] }
-	  ): Promise<{ ok: boolean; error?: string }> => {
+	  ): Promise<{
+	    ok: boolean;
+	    error?: string;
+	    pendingApproval?: boolean;
+	    approvalRequestId?: string;
+	    message?: string;
+	  }> => {
 	    clearTimeout(saveTimer.current);
 	    if (saveAbort.current) {
 	      saveAbort.current.abort();
@@ -808,7 +814,12 @@ function AdminApp() {
       });
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
-      return { ok: true };
+      return {
+        ok: true,
+        pendingApproval: result.pendingApproval === true,
+        approvalRequestId: String(result.approvalRequestId ?? "") || undefined,
+        message: String(result.message ?? "") || undefined,
+      };
     } catch (error) {
       console.error("Failed to save stock:", error);
       setSaveStatus("error");
