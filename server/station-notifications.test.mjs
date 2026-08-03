@@ -4,6 +4,7 @@ import {
   addApprovalResultNotification,
   ensureApprovalNotifications,
   ensureCreditSaleNotification,
+  ensureCreditSaleNotifications,
   markNotificationsRead,
   notificationsForRecipient,
   resolveCreditSaleNotifications,
@@ -65,6 +66,64 @@ test("credit confirmation resolves the pending notification", () => {
   assert.equal(resolved.changed, true);
   assert.equal(resolved.notifications[0].status, "completed");
   assert.equal(resolved.notifications[0].resolution, "credit_confirmed");
+});
+
+test("credit-sale approval fans out to the selected administrators only", () => {
+  const input = {
+    creditSaleRequestId: "credit-1",
+    notificationIds: ["credit-notice-a", "credit-notice-b"],
+    orderId: "order-1",
+    orderNo: "SO-2026-001",
+    requiredOutstandingAmount: 300,
+    createdBy: "sales-a",
+    createdByName: "销售A",
+    recipients: [
+      { username: "admin-a", name: "管理员A" },
+      { username: "admin-b", name: "管理员B" },
+    ],
+  };
+  const first = ensureCreditSaleNotifications([], input);
+  const duplicate = ensureCreditSaleNotifications(first.notifications, {
+    ...input,
+    creditSaleRequestId: "credit-2",
+    notificationIds: ["credit-notice-c", "credit-notice-d"],
+  });
+  assert.equal(first.notificationsCreated.length, 2);
+  assert.equal(duplicate.changed, false);
+  assert.deepEqual(
+    duplicate.notifications.map((notification) => notification.recipientUsername).sort(),
+    ["admin-a", "admin-b"]
+  );
+  assert.equal(notificationsForRecipient(first.notifications, "sales-a").length, 0);
+});
+
+test("one selected administrator resolves every credit-sale approval copy", () => {
+  const pending = ensureCreditSaleNotifications([], {
+    creditSaleRequestId: "credit-3",
+    orderId: "order-3",
+    orderNo: "SO-2026-003",
+    requiredOutstandingAmount: 500,
+    recipients: [{ username: "admin-a" }, { username: "admin-b" }],
+  });
+  const resolved = resolveCreditSaleNotifications(
+    pending.notifications,
+    "order-3",
+    "credit_confirmed",
+    "admin-a",
+    "2026-08-04T10:00:00.000Z",
+    "管理员A",
+    "老客户约定后付",
+    "credit-3"
+  );
+  assert.equal(resolved.changed, true);
+  assert.ok(resolved.notifications.every((notification) => notification.status === "completed"));
+  assert.ok(resolved.notifications.every((notification) => notification.resolvedByName === "管理员A"));
+  assert.ok(resolved.notifications.every((notification) => notification.resolutionNote === "老客户约定后付"));
+  assert.ok(resolved.notifications.find((notification) => notification.recipientUsername === "admin-a")?.readAt);
+  assert.equal(
+    resolved.notifications.find((notification) => notification.recipientUsername === "admin-b")?.readAt,
+    ""
+  );
 });
 
 test("stock approval notifications fan out once to every active admin", () => {

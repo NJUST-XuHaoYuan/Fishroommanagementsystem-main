@@ -98,6 +98,98 @@ export function ensureCreditSaleNotification(notifications = [], input = {}) {
   };
 }
 
+export function ensureCreditSaleNotifications(notifications = [], input = {}) {
+  const current = Array.isArray(notifications) ? notifications : [];
+  const orderId = String(input.orderId ?? "").trim();
+  const orderNo = String(input.orderNo ?? "").trim();
+  const requiredOutstandingAmount = normalizedMoney(input.requiredOutstandingAmount);
+  const recipients = (Array.isArray(input.recipients) ? input.recipients : [])
+    .map((recipient) => ({
+      username: String(recipient?.username ?? "").trim(),
+      name: String(recipient?.name ?? recipient?.username ?? "").trim(),
+    }))
+    .filter((recipient, index, all) =>
+      recipient.username && all.findIndex((item) => item.username === recipient.username) === index
+    );
+  if (!orderId || !orderNo || requiredOutstandingAmount <= 0 || recipients.length === 0) {
+    throw new Error("无法创建赊销审批站内信");
+  }
+
+  const pending = current.filter((notification) =>
+    notification?.type === "credit_sale_confirmation" &&
+    notification?.status === "pending" &&
+    String(notification?.orderId ?? "") === orderId
+  );
+  const pendingRecipients = [...new Set(pending
+    .map((notification) => String(notification?.recipientUsername ?? "").trim())
+    .filter(Boolean))].sort();
+  const requestedRecipients = recipients.map((recipient) => recipient.username).sort();
+  const sameRecipients = pendingRecipients.length === requestedRecipients.length &&
+    pendingRecipients.every((username, index) => username === requestedRecipients[index]);
+  const sameAmount = pending.length > 0 && pending.every((notification) =>
+    Math.abs(Number(notification?.requiredOutstandingAmount ?? 0) - requiredOutstandingAmount) <= 0.005
+  );
+  if (sameRecipients && sameAmount) {
+    return {
+      notifications: current,
+      notificationsCreated: [],
+      notification: pending[0],
+      creditSaleRequestId: String(pending[0]?.creditSaleRequestId ?? ""),
+      changed: false,
+    };
+  }
+
+  const createdAt = String(input.createdAt ?? new Date().toISOString());
+  const createdBy = String(input.createdBy ?? "system");
+  const createdByName = String(input.createdByName ?? input.createdBy ?? "system");
+  const creditSaleRequestId = String(input.creditSaleRequestId ?? "").trim();
+  if (!creditSaleRequestId) throw new Error("赊销审批申请缺少编号");
+  const reassigned = current.map((notification) =>
+    notification?.type === "credit_sale_confirmation" &&
+    notification?.status === "pending" &&
+    String(notification?.orderId ?? "") === orderId
+      ? {
+          ...notification,
+          status: "completed",
+          resolution: "reassigned",
+          resolvedAt: createdAt,
+          resolvedBy: createdBy,
+          resolvedByName: createdByName,
+          resolutionNote: "审批管理员已重新选择",
+        }
+      : notification
+  );
+  const created = recipients.map((recipient, index) => {
+    const notification = {
+      id: String(input.notificationIds?.[index] ?? `${creditSaleRequestId}-${recipient.username}`).trim(),
+      type: "credit_sale_confirmation",
+      status: "pending",
+      title: `订单 ${orderNo} 待审批赊销`,
+      message: notificationMessage(orderNo, requiredOutstandingAmount),
+      createdAt,
+      createdBy,
+      createdByName,
+      readAt: "",
+      recipientUsername: recipient.username,
+      recipientName: recipient.name,
+      creditSaleRequestId,
+      orderId,
+      orderNo,
+      siteId: String(input.siteId ?? ""),
+      requiredOutstandingAmount,
+    };
+    if (!notification.id) throw new Error("赊销审批站内信缺少编号");
+    return notification;
+  });
+  return {
+    notifications: sortedNotifications([...created, ...reassigned]),
+    notificationsCreated: created,
+    notification: created[0],
+    creditSaleRequestId,
+    changed: true,
+  };
+}
+
 export function ensureApprovalNotifications(notifications = [], input = {}) {
   const current = Array.isArray(notifications) ? notifications : [];
   const approvalRequestId = String(input.approvalRequestId ?? "").trim();
@@ -223,14 +315,18 @@ export function resolveCreditSaleNotifications(
   orderId = "",
   resolution = "resolved",
   resolvedBy = "system",
-  resolvedAt = new Date().toISOString()
+  resolvedAt = new Date().toISOString(),
+  resolvedByName = resolvedBy,
+  resolutionNote = "",
+  creditSaleRequestId = ""
 ) {
   let changed = false;
   const next = (Array.isArray(notifications) ? notifications : []).map((notification) => {
     if (
       notification?.type !== "credit_sale_confirmation" ||
       notification?.status !== "pending" ||
-      String(notification?.orderId ?? "") !== String(orderId ?? "")
+      String(notification?.orderId ?? "") !== String(orderId ?? "") ||
+      (creditSaleRequestId && String(notification?.creditSaleRequestId ?? "") !== String(creditSaleRequestId))
     ) return notification;
     changed = true;
     return {
@@ -239,7 +335,11 @@ export function resolveCreditSaleNotifications(
       resolution,
       resolvedAt,
       resolvedBy,
-      ...(resolution === "credit_confirmed" ? { readAt: notification.readAt || resolvedAt } : {}),
+      resolvedByName: String(resolvedByName ?? resolvedBy),
+      resolutionNote: String(resolutionNote ?? ""),
+      ...(resolution === "credit_confirmed" && String(notification?.recipientUsername ?? "") === String(resolvedBy)
+        ? { readAt: notification.readAt || resolvedAt }
+        : {}),
     };
   });
   return { notifications: next, changed };

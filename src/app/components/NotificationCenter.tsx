@@ -70,7 +70,7 @@ function formatNotificationTime(value?: string): string {
 
 function notificationResultLabel(notification: StationNotification): string {
   if (notification.status === "pending") {
-    return notification.type === "stock_approval" ? "待审批" : "待处理";
+    return ["stock_approval", "credit_sale_confirmation"].includes(notification.type) ? "待审批" : "待处理";
   }
   return {
     approved: "已批准",
@@ -462,7 +462,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                             来自：{actorLabel(notification.createdByName, notification.createdBy)}
                           </span>
                           {notification.resolvedBy && (
-                            <span>处理人：{actorLabel(notification.resolvedByName, notification.resolvedBy)}</span>
+                            <span>
+                              {notification.type === "credit_sale_confirmation" ? "审批人" : "处理人"}：
+                              {actorLabel(notification.resolvedByName, notification.resolvedBy)}
+                            </span>
                           )}
                         </div>
                         {notification.resolutionNote && (
@@ -495,7 +498,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                       )}
                       {pending && notification.type === "credit_sale_confirmation" && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
-                          <HandCoins className="size-3.5" />确认赊销
+                          <HandCoins className="size-3.5" />同意赊销
                         </Button>
                       )}
                       {pending && notification.type === "stock_approval" && (
@@ -532,10 +535,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       }}>
         <DialogContent aria-describedby={undefined}>
           <DialogHeader>
-            <DialogTitle>确认赊销 · {selected?.orderNo}</DialogTitle>
+            <DialogTitle>审批赊销 · {selected?.orderNo}</DialogTitle>
           </DialogHeader>
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
-            确认后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。此操作会记录确认人和时间。
+            同意后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。审批人、时间和说明会同步给其他被选管理员。
           </div>
           <div className="grid gap-1.5">
             <label className="text-sm font-medium" htmlFor="credit-sale-note">赊销说明</label>
@@ -552,7 +555,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             <Button variant="outline" disabled={confirming} onClick={() => setSelected(null)}>取消</Button>
             <Button disabled={confirming} onClick={() => void confirmCreditSale()}>
               {confirming ? <Loader2 className="size-4 animate-spin" /> : <HandCoins className="size-4" />}
-              {confirming ? "确认中" : "确认赊销"}
+              {confirming ? "提交中" : "同意赊销"}
             </Button>
           </DialogFooter>
         </DialogContent>

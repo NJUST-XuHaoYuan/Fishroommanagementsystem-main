@@ -46,14 +46,14 @@ test("offline pickup orders default to credit before reconciliation", () => {
   });
 });
 
-test("the responsible person may approve only the unreconciled amount", () => {
+test("an administrator approval covers only the unreconciled amount", () => {
   const order = {
     source: "私域线上",
     payments: [{ type: "deposit", amount: 200, verificationStatus: "verified" }],
     creditSaleApproval: {
       amount: 800,
       confirmedAt: "2026-08-03T12:00",
-      confirmedBy: "sales-a",
+      confirmedBy: "admin-a",
     },
   };
   assert.equal(shipmentPaymentGate(order, 1000).status, "credit_approved");

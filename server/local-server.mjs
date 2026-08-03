@@ -38,7 +38,7 @@ import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import {
   addApprovalResultNotification,
   ensureApprovalNotifications,
-  ensureCreditSaleNotification,
+  ensureCreditSaleNotifications,
   markNotificationsRead,
   notificationsForRecipient,
   resolveApprovalNotifications,
@@ -1621,30 +1621,36 @@ function activePersonnelForReference(state = {}, value = "") {
   ) ?? null;
 }
 
-function creditSaleRecipientForOrder(state = {}, order = {}) {
-  const person = activePersonnelForReference(state, order?.contactPerson);
-  if (!person || !String(person?.username ?? "").trim()) {
-    throw new Error("找不到订单负责人的有效登录账号，请先更新订单负责人");
-  }
-  return {
-    username: String(person.username).trim(),
-    name: String(person.name ?? person.username).trim(),
-  };
-}
-
 function currentStationNotifications(state = {}) {
   return Array.isArray(state.notifications) ? state.notifications : [];
 }
 
-function ensureOrderCreditSaleNotification(state = {}, order = {}, gate = {}, createdBy = "system") {
-  const recipient = creditSaleRecipientForOrder(state, order);
-  return ensureCreditSaleNotification(currentStationNotifications(state), {
-    id: uid("notice"),
+function pendingCreditSaleRecipients(state = {}, orderId = "") {
+  return currentStationNotifications(state)
+    .filter((notification) =>
+      notification?.type === "credit_sale_confirmation" &&
+      notification?.status === "pending" &&
+      String(notification?.orderId ?? "") === String(orderId ?? "")
+    )
+    .map((notification) => String(notification?.recipientUsername ?? "").trim())
+    .filter((username, index, all) => username && all.indexOf(username) === index);
+}
+
+function ensureOrderCreditSaleNotifications(
+  state = {},
+  order = {},
+  gate = {},
+  createdBy = "system",
+  recipients = activeAdminRecipients(state)
+) {
+  const creditSaleRequestId = uid("credit");
+  return ensureCreditSaleNotifications(currentStationNotifications(state), {
+    creditSaleRequestId,
+    notificationIds: recipients.map(() => uid("notice")),
     orderId: String(order?.id ?? ""),
     orderNo: String(order?.orderNo ?? ""),
     siteId: normalizeSiteId(order?.siteId),
-    recipientUsername: recipient.username,
-    recipientName: recipient.name,
+    recipients,
     requiredOutstandingAmount: gate.outstandingAmount,
     createdAt: new Date().toISOString(),
     createdBy,
@@ -1653,32 +1659,18 @@ function ensureOrderCreditSaleNotification(state = {}, order = {}, gate = {}, cr
 }
 
 async function commitShipmentPaymentBlock(client, req, state = {}, order = {}, gate = {}) {
-  const operator = authenticatedOperator(req);
-  const ensured = ensureOrderCreditSaleNotification(state, order, gate, operator);
-  const operationLog = ensured.changed
-    ? createOperationLog(
-        req,
-        "订单管理",
-        "发货拦截",
-        `订单「${order.orderNo}」尚有 ¥${Number(gate.outstandingAmount ?? 0).toFixed(2)} 未核销，已通知负责人确认赊销`
-      )
-    : null;
-  if (ensured.changed) {
-    const nextState = {
-      ...state,
-      notifications: ensured.notifications,
-      operationLogs: pushOperationLog(state.operationLogs, operationLog),
-    };
-    await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
-      stateId,
-      JSON.stringify(nextState),
-    ]);
-  }
+  const eligibleApprovers = activeAdminRecipients(state);
+  const selectedApproverUsernames = pendingCreditSaleRecipients(state, order?.id);
   await client.query("COMMIT");
   return {
-    notification: ensured.notification,
-    operationLog,
-    error: `订单尚有 ¥${Number(gate.outstandingAmount ?? 0).toFixed(2)} 未经财务核销，已向负责人 ${ensured.notification.recipientName} 发送站内信；确认赊销后可继续发货`,
+    orderId: String(order?.id ?? ""),
+    orderNo: String(order?.orderNo ?? ""),
+    outstandingAmount: Number(gate.outstandingAmount ?? 0),
+    eligibleApprovers,
+    selectedApproverUsernames,
+    error: eligibleApprovers.length > 0
+      ? `订单尚有 ¥${Number(gate.outstandingAmount ?? 0).toFixed(2)} 未经财务核销，请选择管理员发起赊销审批；任一被选管理员同意后可继续发货`
+      : "当前没有可处理赊销审批的在职管理员，请先维护管理员账号",
   };
 }
 
@@ -3650,7 +3642,7 @@ function applyAutomaticOrderTransitions(state = {}) {
         if (gate && !gate.canShip) {
           paymentBlockedCount += 1;
           try {
-            const ensured = ensureOrderCreditSaleNotification(
+            const ensured = ensureOrderCreditSaleNotifications(
               { ...state, notifications: nextNotifications },
               order,
               gate,
@@ -6011,6 +6003,106 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/credit-sale/request" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const orderId = String(body.orderId ?? "").trim();
+      const requestedUsernames = [...new Set((Array.isArray(body.recipientUsernames) ? body.recipientUsernames : [])
+        .map((username) => String(username ?? "").trim())
+        .filter(Boolean))];
+      const requestedOutstandingAmount = Number(body.outstandingAmount ?? 0);
+      if (!orderId) throw new Error("缺少订单信息，请刷新后重试");
+      if (requestedUsernames.length === 0) throw new Error("请至少选择一位管理员");
+      if (!Number.isFinite(requestedOutstandingAmount) || requestedOutstandingAmount <= 0) {
+        throw new Error("赊销审批金额无效，请重新发起发货检查");
+      }
+      requireOrderPermissionForAuth(req, "update");
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
+      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
+      if (!currentOrder) throw new Error("订单不存在或不属于当前账户可见场地");
+      if (["completed", "cancelled"].includes(String(currentOrder.status ?? ""))) {
+        throw new Error("该订单当前状态不能申请赊销审批");
+      }
+
+      const currentGate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
+      const requiredOutstandingAmount = Number(Math.max(
+        Number(currentGate.outstandingAmount ?? 0),
+        requestedOutstandingAmount
+      ).toFixed(2));
+      const existingApprovedAmount = currentOrder.creditSaleApproval?.confirmedAt && currentOrder.creditSaleApproval?.confirmedBy
+        ? Math.max(0, Number(currentOrder.creditSaleApproval.amount ?? 0))
+        : 0;
+      if (
+        ["platform_exempt", "offline_credit"].includes(currentGate.status) ||
+        existingApprovedAmount + 0.005 >= requiredOutstandingAmount
+      ) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, alreadyAllowed: true, order: currentOrder, orders });
+        return;
+      }
+      const approvalGate = {
+        ...currentGate,
+        status: "confirmation_required",
+        canShip: false,
+        outstandingAmount: requiredOutstandingAmount,
+      };
+
+      const eligibleApprovers = activeAdminRecipients(state);
+      const eligibleByUsername = new Map(eligibleApprovers.map((recipient) => [recipient.username, recipient]));
+      const invalidUsernames = requestedUsernames.filter((username) => !eligibleByUsername.has(username));
+      if (invalidUsernames.length > 0) {
+        throw new Error("所选管理员已离职、账号无效或不再具有管理员权限，请刷新后重选");
+      }
+      const recipients = requestedUsernames.map((username) => eligibleByUsername.get(username));
+      const operator = authenticatedOperator(req);
+      const ensured = ensureOrderCreditSaleNotifications(state, currentOrder, approvalGate, operator, recipients);
+      const recipientNames = recipients.map((recipient) => recipient.name || recipient.username);
+      const operationLog = ensured.changed
+        ? createOperationLog(
+            req,
+            "订单管理",
+            "申请赊销",
+            `订单「${currentOrder.orderNo}」申请赊销 ¥${requiredOutstandingAmount.toFixed(2)}，审批人：${recipientNames.join("、")}`
+          )
+        : null;
+      if (ensured.changed) {
+        const nextState = {
+          ...state,
+          notifications: ensured.notifications,
+          operationLogs: pushOperationLog(state.operationLogs, operationLog),
+        };
+        await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+          stateId,
+          JSON.stringify(nextState),
+        ]);
+      }
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        changed: ensured.changed,
+        creditSaleRequestId: ensured.creditSaleRequestId,
+        recipients,
+        outstandingAmount: requiredOutstandingAmount,
+        operationLog,
+        message: ensured.changed
+          ? `已向 ${recipientNames.join("、")} 发送赊销审批`
+          : `赊销审批已发送给 ${recipientNames.join("、")}，无需重复提交`,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "发起赊销审批失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/credit-sale/confirm" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -6031,12 +6123,9 @@ async function handleApi(req, res, url) {
         throw new Error("该订单当前状态不能确认赊销");
       }
 
-      const recipient = creditSaleRecipientForOrder(state, currentOrder);
       const operator = authenticatedOperator(req);
       const isAdmin = req.auth?.account?.accessRole === "admin";
-      if (!isAdmin && recipient.username !== operator) {
-        throw new Error("只有订单负责人本人或管理员可以确认赊销");
-      }
+      if (!isAdmin) throw new Error("只有被选中的管理员可以审批赊销");
 
       const gate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
       const notifications = currentStationNotifications(state);
@@ -6069,7 +6158,7 @@ async function handleApi(req, res, url) {
           notification?.type === "credit_sale_confirmation" &&
           notification?.status === "pending" &&
           String(notification?.orderId ?? "") === orderId &&
-          String(notification?.recipientUsername ?? "") === recipient.username
+          String(notification?.recipientUsername ?? "") === operator
         )
         .sort((left, right) => Number(right?.requiredOutstandingAmount ?? 0) - Number(left?.requiredOutstandingAmount ?? 0))[0];
 
@@ -6091,13 +6180,20 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 200, { ok: true, alreadyVerified: true, order: currentOrder, orders });
         return;
       }
-      if (!pendingNotification) throw new Error("没有待处理的赊销确认站内信，请重新发起发货检查");
+      if (!pendingNotification) throw new Error("你不在本次赊销审批人名单中，或该申请已被其他管理员处理");
 
       const approvedAmount = Math.max(
         Number(gate.outstandingAmount ?? 0),
         Number(pendingNotification.requiredOutstandingAmount ?? 0)
       );
       const confirmedAt = new Date().toISOString();
+      const creditSaleRequestId = String(pendingNotification.creditSaleRequestId ?? "");
+      const requestNotifications = notifications.filter((notification) =>
+        notification?.type === "credit_sale_confirmation" &&
+        notification?.status === "pending" &&
+        String(notification?.orderId ?? "") === orderId &&
+        (!creditSaleRequestId || String(notification?.creditSaleRequestId ?? "") === creditSaleRequestId)
+      );
       const nextOrder = {
         ...currentOrder,
         creditSaleApproval: {
@@ -6106,6 +6202,12 @@ async function handleApi(req, res, url) {
           confirmedBy: operator,
           confirmedByName: String(req.auth?.account?.name ?? operator),
           note,
+          requestId: creditSaleRequestId || undefined,
+          requestedBy: String(pendingNotification.createdBy ?? ""),
+          requestedByName: String(pendingNotification.createdByName ?? pendingNotification.createdBy ?? ""),
+          approverUsernames: requestNotifications
+            .map((notification) => String(notification?.recipientUsername ?? "").trim())
+            .filter((username, index, all) => username && all.indexOf(username) === index),
         },
       };
       const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
@@ -6114,13 +6216,16 @@ async function handleApi(req, res, url) {
         orderId,
         "credit_confirmed",
         operator,
-        confirmedAt
+        confirmedAt,
+        String(req.auth?.account?.name ?? operator),
+        note,
+        creditSaleRequestId
       );
       const operationLog = createOperationLog(
         req,
         "订单管理",
         "确认赊销",
-        `订单「${currentOrder.orderNo}」由负责人确认赊销 ¥${approvedAmount.toFixed(2)}${note ? `，备注：${note}` : ""}`
+        `订单「${currentOrder.orderNo}」由管理员 ${String(req.auth?.account?.name ?? operator)} 同意赊销 ¥${approvedAmount.toFixed(2)}${note ? `，备注：${note}` : ""}`
       );
       const nextState = {
         ...state,
@@ -6606,9 +6711,7 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 409, {
           ok: false,
           code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
-          error: blocked.error,
-          notification: blocked.notification,
-          operationLog: blocked.operationLog,
+          ...blocked,
         });
         return;
       }
@@ -6770,9 +6873,7 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 409, {
           ok: false,
           code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
-          error: blocked.error,
-          notification: blocked.notification,
-          operationLog: blocked.operationLog,
+          ...blocked,
         });
         return;
       }
@@ -6852,9 +6953,7 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 409, {
           ok: false,
           code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
-          error: blocked.error,
-          notification: blocked.notification,
-          operationLog: blocked.operationLog,
+          ...blocked,
         });
         return;
       }

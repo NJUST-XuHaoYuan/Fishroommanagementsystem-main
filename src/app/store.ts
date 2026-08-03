@@ -256,12 +256,16 @@ export type PaymentRecord = {
 };
 
 export type CreditSaleApproval = {
-  /** 负责人同意在未核销情况下先行发货的金额。 */
+  /** 管理员同意在未核销情况下先行发货的金额。 */
   amount: number;
   confirmedAt: string;
   confirmedBy: string;
   confirmedByName?: string;
   note?: string;
+  requestId?: string;
+  requestedBy?: string;
+  requestedByName?: string;
+  approverUsernames?: string[];
 };
 
 export type Order = {
@@ -293,7 +297,7 @@ export type Order = {
   notes: string;
   /** 负责人提成率；未设置时使用财务模块的全局默认值。 */
   commissionRate?: number;
-  /** 订单负责人确认的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */
+  /** 管理员审批的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */
   creditSaleApproval?: CreditSaleApproval;
   payments: PaymentRecord[];
 };

@@ -30,6 +30,7 @@ import {
   ChevronDown, Check, Truck, X, MapPin, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
+  Loader2, Send, ShieldCheck,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -162,6 +163,39 @@ function splitFishCodeInput(value: string): string[] {
     });
 }
 
+type CreditSaleApprover = {
+  username: string;
+  name: string;
+};
+
+type CreditSaleRequiredPayload = {
+  code?: string;
+  orderId?: string;
+  orderNo?: string;
+  outstandingAmount?: number;
+  eligibleApprovers?: CreditSaleApprover[];
+  selectedApproverUsernames?: string[];
+};
+
+type CreditSaleRequestDialogState = {
+  orderId: string;
+  orderNo: string;
+  outstandingAmount: number;
+  eligibleApprovers: CreditSaleApprover[];
+};
+
+class OrderApiError extends Error {
+  code: string;
+  payload: CreditSaleRequiredPayload;
+
+  constructor(message: string, payload: CreditSaleRequiredPayload = {}) {
+    super(message);
+    this.name = "OrderApiError";
+    this.code = String(payload.code ?? "");
+    this.payload = payload;
+  }
+}
+
 async function postOrderApi(path: string, body: Record<string, unknown>) {
   const response = await fetch(`/api/${path}`, {
     method: "POST",
@@ -173,7 +207,7 @@ async function postOrderApi(path: string, body: Record<string, unknown>) {
     window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
   }
   if (!response.ok || !result.ok) {
-    throw new Error(result.error || `HTTP ${response.status}`);
+    throw new OrderApiError(result.error || `HTTP ${response.status}`, result);
   }
   return result;
 }
@@ -3805,6 +3839,9 @@ function OrderDetailDialog({
   const [returnSaving, setReturnSaving] = useState(false);
   const [refundOpen, setRefundOpen] = useState(false);
   const [refundSaving, setRefundSaving] = useState(false);
+  const [creditSaleRequest, setCreditSaleRequest] = useState<CreditSaleRequestDialogState | null>(null);
+  const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
+  const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
   const personnel = state.personnel ?? [];
   const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
@@ -3842,8 +3879,81 @@ function OrderDetailDialog({
       setReturnSaving(false);
       setRefundOpen(false);
       setRefundSaving(false);
+      setCreditSaleRequest(null);
+      setSelectedCreditApprovers([]);
+      setRequestingCreditApproval(false);
     }
   }, [open]);
+
+  const showCreditSaleRequest = (error: unknown): boolean => {
+    if (!(error instanceof OrderApiError) || error.code !== "CREDIT_SALE_CONFIRMATION_REQUIRED") return false;
+    const payload = error.payload;
+    const fallbackApprovers = personnel
+      .filter((person) =>
+        person.accessRole === "admin" &&
+        !isPersonnelResigned(person) &&
+        String(person.username ?? "").trim()
+      )
+      .map((person) => ({
+        username: String(person.username).trim(),
+        name: String(person.name ?? person.username).trim(),
+      }));
+    const eligibleApprovers = (Array.isArray(payload.eligibleApprovers)
+      ? payload.eligibleApprovers
+      : fallbackApprovers)
+      .map((person) => ({
+        username: String(person?.username ?? "").trim(),
+        name: String(person?.name ?? person?.username ?? "").trim(),
+      }))
+      .filter((person, index, all) =>
+        person.username && all.findIndex((item) => item.username === person.username) === index
+      );
+    const eligibleUsernames = new Set(eligibleApprovers.map((person) => person.username));
+    const existingSelection = (Array.isArray(payload.selectedApproverUsernames)
+      ? payload.selectedApproverUsernames
+      : [])
+      .map((username) => String(username ?? "").trim())
+      .filter((username, index, all) =>
+        username && eligibleUsernames.has(username) && all.indexOf(username) === index
+      );
+    setCreditSaleRequest({
+      orderId: String(payload.orderId ?? order?.id ?? ""),
+      orderNo: String(payload.orderNo ?? order?.orderNo ?? ""),
+      outstandingAmount: Math.max(0, Number(payload.outstandingAmount ?? 0)),
+      eligibleApprovers,
+    });
+    setSelectedCreditApprovers(existingSelection);
+    setShipDialogOpen(false);
+    setShipmentAction(null);
+    return true;
+  };
+
+  const submitCreditSaleRequest = async () => {
+    if (!creditSaleRequest || requestingCreditApproval) return;
+    if (selectedCreditApprovers.length === 0) {
+      toast.error("请至少选择一位管理员");
+      return;
+    }
+    setRequestingCreditApproval(true);
+    try {
+      const result = await postOrderApi("orders/credit-sale/request", {
+        orderId: creditSaleRequest.orderId,
+        recipientUsernames: selectedCreditApprovers,
+        outstandingAmount: creditSaleRequest.outstandingAmount,
+      });
+      applyOrderApiResult(setState, result);
+      setCreditSaleRequest(null);
+      setSelectedCreditApprovers([]);
+      setShipDialogOpen(false);
+      setShipmentAction(null);
+      window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+      toast.success(result.message || "赊销审批已发送，审批通过后可继续发货");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "发起赊销审批失败，请重试");
+    } finally {
+      setRequestingCreditApproval(false);
+    }
+  };
 
   const enterEdit = () => {
     if (!order) return;
@@ -4145,6 +4255,7 @@ function OrderDetailDialog({
       applyOrderApiResult(setState, result);
       toast.success("订单已完成");
     } catch (error) {
+      if (showCreditSaleRequest(error)) return;
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
     }
   };
@@ -4181,6 +4292,7 @@ function OrderDetailDialog({
       setShipmentAction(null);
       toast.success(shipment.shipMethod === "pickup" ? "已上传凭证并确认自取完成" : "已上传凭证并确认发货");
     } catch (error) {
+      if (showCreditSaleRequest(error)) return;
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
     } finally {
       setShipmentConfirmSaving(false);
@@ -4250,6 +4362,7 @@ function OrderDetailDialog({
       });
       applyOrderApiResult(setState, result);
     } catch (error) {
+      if (showCreditSaleRequest(error)) return false;
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
       return false;
     }
@@ -4484,7 +4597,7 @@ function OrderDetailDialog({
             {order.creditSaleApproval && (
               <div className="flex flex-col gap-1 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <span className="font-medium">赊销确认记录</span>
+                  <span className="font-medium">赊销审批记录</span>
                   <span className="ml-2">¥{Number(order.creditSaleApproval.amount ?? 0).toFixed(2)}</span>
                   {order.creditSaleApproval.note && (
                     <span className="ml-2 text-violet-700">{order.creditSaleApproval.note}</span>
@@ -4852,6 +4965,116 @@ function OrderDetailDialog({
         }}
         pickupOnly={isPickupOrderSource(order.source)}
       />
+
+      <Dialog open={!!creditSaleRequest} onOpenChange={(nextOpen) => {
+        if (!nextOpen && !requestingCreditApproval) {
+          setCreditSaleRequest(null);
+          setSelectedCreditApprovers([]);
+        }
+      }}>
+        <DialogContent aria-describedby={undefined} className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldCheck className="size-5 text-amber-700" />
+              申请赊销审批 · {creditSaleRequest?.orderNo}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950">
+            该订单尚有 <strong>¥{Number(creditSaleRequest?.outstandingAmount ?? 0).toFixed(2)}</strong> 未经财务核销。
+            请选择接收审批的管理员，任一人同意后即可继续发货。
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-medium">审批管理员（可多选）</div>
+            {Number(creditSaleRequest?.eligibleApprovers.length ?? 0) > 0 && (
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={requestingCreditApproval}
+                  onClick={() => setSelectedCreditApprovers(
+                    creditSaleRequest?.eligibleApprovers.map((person) => person.username) ?? []
+                  )}
+                >
+                  全选
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={requestingCreditApproval || selectedCreditApprovers.length === 0}
+                  onClick={() => setSelectedCreditApprovers([])}
+                >
+                  清空
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {creditSaleRequest?.eligibleApprovers.length ? (
+            <div className="max-h-72 overflow-y-auto rounded-md border divide-y">
+              {creditSaleRequest.eligibleApprovers.map((person) => {
+                const checked = selectedCreditApprovers.includes(person.username);
+                return (
+                  <label
+                    key={person.username}
+                    className="flex min-h-12 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/45"
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={requestingCreditApproval}
+                      onCheckedChange={(nextChecked) => setSelectedCreditApprovers((current) =>
+                        nextChecked
+                          ? [...current, person.username].filter((username, index, all) => all.indexOf(username) === index)
+                          : current.filter((username) => username !== person.username)
+                      )}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">{person.name || person.username}</span>
+                      <span className="block truncate text-xs text-muted-foreground">{person.username}</span>
+                    </span>
+                    {checked && <Badge variant="secondary">已选择</Badge>}
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800">
+              当前没有可审批的在职管理员，请先在“人员与权限”中配置管理员账号。
+            </div>
+          )}
+
+          <div className="text-xs text-muted-foreground">
+            已选择 {selectedCreditApprovers.length} 人。审批结果会同步显示给本次选择的所有管理员。
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={requestingCreditApproval}
+              onClick={() => {
+                setCreditSaleRequest(null);
+                setSelectedCreditApprovers([]);
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={requestingCreditApproval || selectedCreditApprovers.length === 0}
+              onClick={() => void submitCreditSaleRequest()}
+            >
+              {requestingCreditApproval ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+              {requestingCreditApproval ? "发送中" : "发送审批"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {editMode && (
         <StockPickerDialog
