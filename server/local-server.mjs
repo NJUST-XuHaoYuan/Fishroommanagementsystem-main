@@ -31,6 +31,7 @@ import {
   orderHasActuallyShipped,
   shipmentHasActuallyShipped,
 } from "./order-refund-rules.mjs";
+import { requiredShipMethodForOrderSource } from "./shipment-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -6038,8 +6039,12 @@ async function handleApi(req, res, url) {
       }
 
       const shipMethod = body.shipMethod === "pickup" ? "pickup" : "express";
-      if (String(order.source ?? "") === "线下" && shipMethod !== "pickup") {
+      const requiredShipMethod = requiredShipMethodForOrderSource(order.source);
+      if (requiredShipMethod === "pickup" && shipMethod !== "pickup") {
         throw new Error("线下自提订单不需要快递发货，请使用上门自取");
+      }
+      if (requiredShipMethod === "express" && shipMethod !== "express") {
+        throw new Error("只有线下自提订单可以使用上门自取，当前订单只能物流发货");
       }
       const carrier = String(body.carrier ?? "").trim();
       if (shipMethod === "express" && !carrier) throw new Error("请选择快递公司");

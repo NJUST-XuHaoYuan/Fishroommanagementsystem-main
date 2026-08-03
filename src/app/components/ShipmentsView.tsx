@@ -91,6 +91,10 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
 }
 
+function isPickupOrderSource(source?: string): boolean {
+  return ["线下", "线下自提"].includes(String(source ?? "").trim());
+}
+
 function PlannedShipBadge({ date }: { date?: string }) {
   if (!date) return <span className="text-muted-foreground text-xs">未设置</span>;
   if (date === today)
@@ -683,7 +687,7 @@ export function ShipmentsView() {
         unshippedItems={shipOrder ? getUnshippedItems(shipOrder) : []}
         getProductName={getProductName}
         getTankName={getTankName}
-        pickupOnly={shipOrder?.source === "线下"}
+        pickupOnly={isPickupOrderSource(shipOrder?.source)}
       />
 
       {/* ── Edit Shipment Dialog ── */}

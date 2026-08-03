@@ -101,7 +101,7 @@ function isDouyinOrderSource(source?: string): boolean {
 }
 
 function isPickupOrderSource(source?: string): boolean {
-  return String(source ?? "").trim() === "线下";
+  return ["线下", "线下自提"].includes(String(source ?? "").trim());
 }
 
 function customerTypeLabel(type?: CustomerType) {
