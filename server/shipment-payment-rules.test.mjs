@@ -34,6 +34,18 @@ test("platform orders bypass pre-shipment reconciliation", () => {
   assert.equal(result.canShip, true);
 });
 
+test("offline pickup orders default to credit before reconciliation", () => {
+  const result = shipmentPaymentGate({ source: "线下", payments: [] }, 360);
+  assert.deepEqual(result, {
+    status: "offline_credit",
+    amountDue: 360,
+    verifiedAmount: 0,
+    outstandingAmount: 360,
+    approvedAmount: 360,
+    canShip: true,
+  });
+});
+
 test("the responsible person may approve only the unreconciled amount", () => {
   const order = {
     source: "私域线上",

@@ -307,6 +307,9 @@ function getOrderPaymentStatusTag(order: Order, shipments: Shipment[] = []): Ord
   if (outstandingAmount <= 0.005) {
     return { label: "已核销", className: ORDER_STATUS_TAG_STYLE.paymentVerified };
   }
+  if (String(order.source ?? "").trim() === "线下") {
+    return { label: "线下默认赊销", className: ORDER_STATUS_TAG_STYLE.paymentCredit };
+  }
   const approvedAmount = order.creditSaleApproval?.confirmedAt && order.creditSaleApproval?.confirmedBy
     ? Number(order.creditSaleApproval.amount ?? 0)
     : 0;

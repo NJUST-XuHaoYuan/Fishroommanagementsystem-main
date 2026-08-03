@@ -53,6 +53,7 @@ function notificationResultLabel(notification: StationNotification): string {
     credit_confirmed: "已确认赊销",
     finance_verified: "财务已核销",
     platform_exempt: "平台免核销",
+    offline_credit: "线下默认赊销",
     order_updated: "订单已更新",
     order_deleted: "订单已删除",
     reassigned: "已转交",
@@ -172,7 +173,15 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
       setSelected(null);
       setCreditNote("");
       await loadNotifications(true);
-      toast.success(result.alreadyVerified ? "财务已经核销，无需确认赊销" : "赊销已确认，可以继续发货");
+      toast.success(
+        result.alreadyVerified
+          ? "财务已经核销，无需确认赊销"
+          : result.alreadyAllowed
+            ? result.allowance === "offline_credit"
+              ? "线下自提默认赊销，可以直接出库"
+              : "平台订单无需确认赊销"
+            : "赊销已确认，可以继续发货"
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "确认赊销失败");
     } finally {

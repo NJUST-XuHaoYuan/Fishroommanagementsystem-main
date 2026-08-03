@@ -39,6 +39,17 @@ export function shipmentPaymentGate(order = {}, amountDue = 0) {
     };
   }
 
+  if (String(order?.source ?? "").trim() === "线下") {
+    return {
+      status: "offline_credit",
+      amountDue: due,
+      verifiedAmount,
+      outstandingAmount,
+      approvedAmount: outstandingAmount,
+      canShip: true,
+    };
+  }
+
   const approval = order?.creditSaleApproval;
   const approvedAmount = approval?.confirmedAt && approval?.confirmedBy
     ? Math.max(0, money(approval.amount))

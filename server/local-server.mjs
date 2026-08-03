@@ -2685,6 +2685,24 @@ function shipmentPaymentGateForOrder(order = {}, shipments = []) {
   return shipmentPaymentGate(order, calcAmountDueForOrder(order, shipments));
 }
 
+function resolveShipmentGateNotifications(notifications = [], orderId = "", gate = {}, operator = "system") {
+  const resolution = {
+    verified: "finance_verified",
+    platform_exempt: "platform_exempt",
+    offline_credit: "offline_credit",
+    credit_approved: "credit_confirmed",
+  }[gate?.status];
+  if (!resolution) return notifications;
+  const resolved = resolveCreditSaleNotifications(
+    notifications,
+    orderId,
+    resolution,
+    operator,
+    new Date().toISOString()
+  );
+  return resolved.changed ? resolved.notifications : notifications;
+}
+
 function creditApprovalSensitiveSnapshot(order = {}) {
   return stableJson({
     source: String(order?.source ?? ""),
@@ -5784,9 +5802,31 @@ async function handleApi(req, res, url) {
       }
 
       const gate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
-      if (gate.status === "platform_exempt") throw new Error("平台订单无需确认赊销");
-
       const notifications = currentStationNotifications(state);
+      if (gate.status === "platform_exempt" || gate.status === "offline_credit") {
+        const resolvedNotifications = resolveShipmentGateNotifications(
+          notifications,
+          orderId,
+          gate,
+          operator
+        );
+        if (resolvedNotifications !== notifications) {
+          await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+            stateId,
+            JSON.stringify({ ...state, notifications: resolvedNotifications }),
+          ]);
+        }
+        await client.query("COMMIT");
+        sendJson(req, res, 200, {
+          ok: true,
+          alreadyAllowed: true,
+          allowance: gate.status,
+          order: currentOrder,
+          orders,
+        });
+        return;
+      }
+
       const pendingNotification = notifications
         .filter((notification) =>
           notification?.type === "credit_sale_confirmation" &&
@@ -6505,6 +6545,12 @@ async function handleApi(req, res, url) {
           ? { ...item, status: item.status === "damaged" ? "damaged" : "shipped" }
           : item
       );
+      const nextNotifications = resolveShipmentGateNotifications(
+        currentStationNotifications(state),
+        order.id,
+        paymentGate,
+        operator
+      );
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -6519,6 +6565,7 @@ async function handleApi(req, res, url) {
         ...state,
         orders: nextOrders,
         shipments: nextShipments,
+        notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
@@ -6596,6 +6643,12 @@ async function handleApi(req, res, url) {
           ? { ...item, status: "shipped" }
           : item
       );
+      const nextNotifications = resolveShipmentGateNotifications(
+        currentStationNotifications(state),
+        order.id,
+        paymentGate,
+        operator
+      );
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -6608,6 +6661,7 @@ async function handleApi(req, res, url) {
         ...state,
         orders: nextOrders,
         shipments: nextShipments,
+        notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
