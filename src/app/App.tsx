@@ -16,8 +16,7 @@ import { LossRecordsView } from "./components/LossRecordsView";
 import { OrdersView } from "./components/OrdersView";
 import { CustomersView } from "./components/CustomersView";
 import { FinanceView } from "./components/FinanceView";
-import { PersonnelView } from "./components/PersonnelView";
-import { PermissionsView } from "./components/PermissionsView";
+import { PersonnelAdminView } from "./components/PersonnelAdminView";
 import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
@@ -82,7 +81,6 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   finance: ["sites", "systemSettings"],
   paymentMethods: ["systemSettings"],
   profile: ["personnel", "orders", "customers", "shipments"],
-  accounts: ["personnel"],
   permissions: ["personnel"],
   operationLogs: ["operationLogs"],
 };
@@ -1354,8 +1352,7 @@ function AdminApp() {
       case "finance":    return <FinanceView />;
       case "paymentMethods": return <PaymentMethodsView />;
       case "profile":    return <PersonalCenterView />;
-      case "accounts":   return <PersonnelView />;
-      case "permissions": return <PermissionsView />;
+      case "permissions": return <PersonnelAdminView />;
       case "operationLogs": return <OperationLogsView />;
       default:           return <Dashboard />;
     }

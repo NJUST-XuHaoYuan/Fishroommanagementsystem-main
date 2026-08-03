@@ -26,7 +26,7 @@ const ACCESS_ROLE_LABEL: Record<Role, string> = {
   staff: "店员",
 };
 
-export function PersonnelView() {
+export function PersonnelView({ embedded = false }: { embedded?: boolean } = {}) {
   const { state, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount } = useStore();
   const [editing, setEditing] = useState<Personnel | null>(null);
   const [open, setOpen] = useState(false);
@@ -40,7 +40,7 @@ export function PersonnelView() {
   if (state.user?.role !== "admin") {
     return (
       <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground">
-        当前账户没有人员管理权限。
+        当前账户没有人员与权限管理权限。
       </div>
     );
   }
@@ -173,10 +173,12 @@ export function PersonnelView() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2>账号密码管理</h2>
-        <p className="text-sm text-muted-foreground">账号密码管理，维护登录账户与订单对接人名单</p>
-      </div>
+      {!embedded && (
+        <div>
+          <h2>人员账号</h2>
+          <p className="text-sm text-muted-foreground">维护登录账号、密码与订单负责人名单</p>
+        </div>
+      )}
 
       <DataTable
         data={state.personnel ?? []}

@@ -49,7 +49,6 @@ export type ViewKey =
   | "finance"
   | "paymentMethods"
   | "permissions"
-  | "accounts"
   | "profile"
   | "operationLogs";
 
@@ -180,9 +179,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : view === "profile"
         ? "个人中心"
       : view === "permissions"
-        ? "权限管理"
-      : view === "accounts"
-        ? "账号密码管理"
+        ? "人员与权限"
       : view === "operationLogs"
         ? "操作日志"
       : view === "paymentMethods"
@@ -196,8 +193,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? null
       : view === "profile"
         ? "个人中心"
-      : view === "permissions" || view === "accounts"
-        ? "人员管理"
+      : view === "permissions"
+        ? "后台管理"
       : view === "operationLogs"
         ? "日志管理"
       : view === "paymentMethods"
@@ -265,32 +262,17 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             <div className="fishroom-nav-section">
               <div className="fishroom-nav-title">
                 <span className="fishroom-nav-title-icon">
-                  <Users className="size-3.5 shrink-0" />
+                  <Settings className="size-3.5 shrink-0" />
                 </span>
-                <span>人员管理</span>
+                <span>后台管理</span>
               </div>
               <button
                 onClick={() => navigate("permissions")}
                 className={navButtonClass(view === "permissions")}
               >
-                <span>权限管理</span>
+                <span className="flex items-center gap-2"><Users className="size-3.5" />人员与权限</span>
                 {view === "permissions" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
-              <button
-                onClick={() => navigate("accounts")}
-                className={navButtonClass(view === "accounts")}
-              >
-                <span>账号密码管理</span>
-                {view === "accounts" && <ChevronRight className="size-3.5 shrink-0" />}
-              </button>
-            </div>
-            <div className="fishroom-nav-section">
-              <div className="fishroom-nav-title">
-                <span className="fishroom-nav-title-icon">
-                  <Settings className="size-3.5 shrink-0" />
-                </span>
-                <span>后台管理</span>
-              </div>
               <button
                 onClick={() => navigate("paymentMethods")}
                 className={navButtonClass(view === "paymentMethods")}

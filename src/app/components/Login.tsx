@@ -99,7 +99,7 @@ export function Login() {
               员工入口
             </div>
             <h2 className="fishroom-page-title mt-4">登录后台</h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">使用人员管理中维护的账号进入系统。</p>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">使用人员与权限中维护的账号进入系统。</p>
           </div>
 
           <div className="mt-7 flex flex-col gap-4">

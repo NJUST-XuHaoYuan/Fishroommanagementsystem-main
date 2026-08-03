@@ -13,7 +13,7 @@ export const PERMISSION_MODULES: { key: PermissionModule; label: string; group: 
   { key: "customers", label: "客户管理", group: "销售管理" },
   { key: "orders", label: "订单管理", group: "销售管理" },
   { key: "finance", label: "财务管理", group: "财务管理" },
-  { key: "accounts", label: "账号密码管理", group: "人员管理" },
+  { key: "accounts", label: "人员与权限", group: "后台管理" },
 ];
 
 export const ACTION_LABELS: Record<PermissionAction, string> = {

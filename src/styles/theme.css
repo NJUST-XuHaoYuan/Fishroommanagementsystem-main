@@ -257,13 +257,13 @@
   .fishroom-nav-title {
     display: flex;
     align-items: center;
-    gap: 0.45rem;
-    min-height: 1.85rem;
-    padding: 0.25rem 0.45rem 0.2rem;
-    color: oklch(0.42 0.011 260);
-    font-size: 0.75rem;
-    font-weight: 680;
-    line-height: 1.1;
+    gap: 0.5rem;
+    min-height: 2rem;
+    padding: 0.3rem 0.45rem 0.22rem;
+    color: oklch(0.31 0.012 260);
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.2;
   }
 
   .fishroom-nav-title-icon {
@@ -301,8 +301,8 @@
     width: calc(100% - 2.25rem);
     min-height: 2.15rem;
     margin-left: 1.75rem;
-    color: oklch(0.395 0.01 260);
-    font-size: 0.93rem;
+    color: oklch(0.43 0.009 260);
+    font-size: 0.82rem;
     font-weight: 500;
   }
 

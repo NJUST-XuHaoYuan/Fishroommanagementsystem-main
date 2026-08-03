@@ -23,7 +23,7 @@ function permissionsEqual(a: PermissionSet, b: PermissionSet): boolean {
   );
 }
 
-export function PermissionsView() {
+export function PermissionsView({ embedded = false }: { embedded?: boolean } = {}) {
   const { state, savePersonnelPermissions } = useStore();
   const accounts = useMemo(
     () => (state.personnel ?? [])
@@ -55,7 +55,7 @@ export function PermissionsView() {
   if (state.user?.role !== "admin") {
     return (
       <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground">
-        当前账户没有权限管理权限。
+        当前账户没有人员与权限管理权限。
       </div>
     );
   }
@@ -160,10 +160,12 @@ export function PermissionsView() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2>权限管理</h2>
-        <p className="text-sm text-muted-foreground">为每个账户配置各业务模块的添加、修改和删除权限</p>
-      </div>
+      {!embedded && (
+        <div>
+          <h2>权限设置</h2>
+          <p className="text-sm text-muted-foreground">为每个账户配置各业务模块的添加、修改和删除权限</p>
+        </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
         <Card className="gap-2 p-3">
