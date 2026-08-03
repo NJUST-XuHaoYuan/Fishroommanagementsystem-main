@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
+  Check,
   CheckCheck,
   CheckCircle2,
   ExternalLink,
   HandCoins,
+  Inbox,
   Loader2,
+  RefreshCw,
   UserRound,
   XCircle,
 } from "lucide-react";
@@ -21,13 +24,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
-import { ScrollArea } from "./ui/scroll-area";
 import { Textarea } from "./ui/textarea";
 
 type StationNotification = {
   id: string;
-  type: "credit_sale_confirmation" | string;
+  type: "credit_sale_confirmation" | "stock_approval" | "approval_result" | string;
   status: "pending" | "completed";
   resolution?: string;
   title: string;
@@ -51,11 +52,14 @@ type StationNotification = {
   resolutionNote?: string;
 };
 
+type NotificationFilter = "all" | "unread" | "pending" | "completed";
+
 function formatNotificationTime(value?: string): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value.replace("T", " ").slice(0, 16);
   return date.toLocaleString("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -81,6 +85,13 @@ function notificationResultLabel(notification: StationNotification): string {
   }[notification.resolution ?? ""] ?? "已处理";
 }
 
+function notificationTypeLabel(type: StationNotification["type"]): string {
+  if (type === "stock_approval") return "库存审批";
+  if (type === "approval_result") return "审批结果";
+  if (type === "credit_sale_confirmation") return "赊销确认";
+  return "系统消息";
+}
+
 function actorLabel(name?: string, username?: string): string {
   const safeName = String(name ?? "").trim();
   const safeUsername = String(username ?? "").trim();
@@ -88,11 +99,66 @@ function actorLabel(name?: string, username?: string): string {
   return safeName || safeUsername || "系统";
 }
 
-export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
+function notifyNotificationRefresh() {
+  window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+}
+
+export function NotificationBell({ onOpenCenter }: { onOpenCenter: () => void }) {
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const loadUnreadCount = useCallback(async () => {
+    try {
+      const response = await fetch("/api/notifications?limit=1", { headers: authJsonHeaders() });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) return;
+      setUnreadCount(Math.max(0, Number(result.unreadCount ?? 0)));
+    } catch {
+      // The indicator stays silent when the background refresh is unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUnreadCount();
+    const timer = window.setInterval(() => void loadUnreadCount(), 30_000);
+    const refresh = () => void loadUnreadCount();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("fishroom:notifications-refresh", refresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("fishroom:notifications-refresh", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [loadUnreadCount]);
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="relative shrink-0"
+      onClick={onOpenCenter}
+      title={unreadCount > 0 ? `站内信中心，${unreadCount} 条未读` : "站内信中心"}
+      aria-label={unreadCount > 0 ? `站内信中心，${unreadCount} 条未读` : "站内信中心"}
+    >
+      <Bell className="size-4.5" />
+      {unreadCount > 0 && (
+        <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-4 text-white">
+          {unreadCount > 99 ? "99+" : unreadCount}
+        </span>
+      )}
+    </Button>
+  );
+}
+
+export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
   const { setState, setActiveSiteId } = useStore();
-  const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [notifications, setNotifications] = useState<StationNotification[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [filter, setFilter] = useState<NotificationFilter>("all");
   const [selected, setSelected] = useState<StationNotification | null>(null);
   const [creditNote, setCreditNote] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -101,18 +167,31 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
   const [approvalNote, setApprovalNote] = useState("");
   const [processingApproval, setProcessingApproval] = useState(false);
 
-  const unreadCount = useMemo(
-    () => notifications.filter((notification) => !notification.readAt).length,
+  const pendingCount = useMemo(
+    () => notifications.filter((notification) => notification.status === "pending").length,
     [notifications]
   );
+  const completedCount = useMemo(
+    () => notifications.filter((notification) => notification.status === "completed").length,
+    [notifications]
+  );
+  const filteredNotifications = useMemo(() => notifications.filter((notification) => {
+    if (filter === "unread") return !notification.readAt;
+    if (filter === "pending") return notification.status === "pending";
+    if (filter === "completed") return notification.status === "completed";
+    return true;
+  }), [filter, notifications]);
 
   const loadNotifications = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const response = await fetch("/api/notifications", { headers: authJsonHeaders() });
+      const response = await fetch("/api/notifications?limit=500", { headers: authJsonHeaders() });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.ok) throw new Error(result.error || "站内信加载失败");
-      setNotifications(Array.isArray(result.notifications) ? result.notifications : []);
+      const loaded = Array.isArray(result.notifications) ? result.notifications : [];
+      setNotifications(loaded);
+      setTotalCount(Math.max(loaded.length, Number(result.totalCount ?? loaded.length)));
+      setUnreadCount(Math.max(0, Number(result.unreadCount ?? 0)));
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "站内信加载失败");
     } finally {
@@ -121,7 +200,7 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
   }, []);
 
   useEffect(() => {
-    void loadNotifications(true);
+    void loadNotifications();
     const timer = window.setInterval(() => void loadNotifications(true), 30_000);
     const refresh = () => void loadNotifications(true);
     const refreshWhenVisible = () => {
@@ -138,29 +217,43 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
 
   const markRead = async (notification: StationNotification) => {
     if (notification.readAt) return;
+    const readAt = new Date().toISOString();
     setNotifications((current) => current.map((item) =>
-      item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item
+      item.id === notification.id ? { ...item, readAt } : item
     ));
-    await fetch("/api/notifications/read", {
-      method: "POST",
-      headers: authJsonHeaders(),
-      body: JSON.stringify({ id: notification.id }),
-    }).catch(() => undefined);
+    setUnreadCount((current) => Math.max(0, current - 1));
+    try {
+      const response = await fetch("/api/notifications/read", {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify({ id: notification.id }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.ok === false) throw new Error(result.error || "标记失败");
+      notifyNotificationRefresh();
+    } catch {
+      toast.error("标记已读失败，请重试");
+      void loadNotifications(true);
+    }
   };
 
   const markAllRead = async () => {
     if (unreadCount === 0) return;
+    const readAt = new Date().toISOString();
     setNotifications((current) => current.map((notification) => ({
       ...notification,
-      readAt: notification.readAt || new Date().toISOString(),
+      readAt: notification.readAt || readAt,
     })));
+    setUnreadCount(0);
     try {
       const response = await fetch("/api/notifications/read", {
         method: "POST",
         headers: authJsonHeaders(),
         body: JSON.stringify({ all: true }),
       });
-      if (!response.ok) throw new Error("标记失败");
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.ok === false) throw new Error(result.error || "标记失败");
+      notifyNotificationRefresh();
     } catch {
       toast.error("全部已读保存失败，请重试");
       void loadNotifications(true);
@@ -171,13 +264,11 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
     void markRead(notification);
     if (!notification.orderId) return;
     if (notification.siteId) setActiveSiteId(notification.siteId);
-    setOpen(false);
     onOpenOrder(notification.orderId);
   };
 
   const startCreditConfirmation = (notification: StationNotification) => {
     void markRead(notification);
-    setOpen(false);
     setCreditNote("");
     setSelected(notification);
   };
@@ -205,6 +296,7 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
       setSelected(null);
       setCreditNote("");
       await loadNotifications(true);
+      notifyNotificationRefresh();
       toast.success(
         result.alreadyVerified
           ? "财务已经核销，无需确认赊销"
@@ -226,7 +318,6 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
     decision: "approve" | "reject"
   ) => {
     void markRead(notification);
-    setOpen(false);
     setApprovalDecision(decision);
     setApprovalNote("");
     setSelectedApproval(notification);
@@ -262,7 +353,7 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
       setSelectedApproval(null);
       setApprovalNote("");
       await loadNotifications(true);
-      window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+      notifyNotificationRefresh();
       toast.success(result.message || (approvalDecision === "approve" ? "已批准并执行" : "已驳回"));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "库存审批处理失败");
@@ -271,137 +362,170 @@ export function NotificationCenter({ onOpenOrder }: { onOpenOrder: (orderId: str
     }
   };
 
+  const filters: { value: NotificationFilter; label: string; count: number }[] = [
+    { value: "all", label: "全部", count: totalCount },
+    { value: "unread", label: "未读", count: unreadCount },
+    { value: "pending", label: "待处理", count: pendingCount },
+    { value: "completed", label: "已处理", count: completedCount },
+  ];
+
   return (
     <>
-      <Popover open={open} onOpenChange={(nextOpen) => {
-        setOpen(nextOpen);
-        if (nextOpen) void loadNotifications();
-      }}>
-        <PopoverTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="relative shrink-0"
-            title="站内信"
-            aria-label={unreadCount > 0 ? `站内信，${unreadCount} 条未读` : "站内信"}
-          >
-            <Bell className="size-4.5" />
-            {unreadCount > 0 && (
-              <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-4 text-white">
-                {unreadCount > 99 ? "99+" : unreadCount}
-              </span>
-            )}
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align="end" className="w-[min(92vw,420px)] p-0">
-          <div className="flex h-12 items-center justify-between border-b px-3.5">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold">站内信</span>
-              {unreadCount > 0 && <Badge variant="secondary">{unreadCount} 条未读</Badge>}
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-md border bg-card text-sky-700">
+              <Inbox className="size-5" />
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => void markAllRead()}
-              disabled={unreadCount === 0}
-              title="全部标为已读"
-            >
-              <CheckCheck className="size-4" />
-              全部已读
-            </Button>
+            <div>
+              <h1 className="text-xl font-semibold">站内信中心</h1>
+              <p className="mt-1 text-sm text-muted-foreground">集中查看系统提醒、审批事项和处理结果</p>
+            </div>
           </div>
-          <ScrollArea className="max-h-[min(65dvh,460px)]">
-            {loading && notifications.length === 0 ? (
-              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-                <Loader2 className="mr-2 size-4 animate-spin" />加载中
-              </div>
-            ) : notifications.length === 0 ? (
-              <div className="flex h-32 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Bell className="size-5" />暂无站内信
-              </div>
-            ) : (
-              <div className="divide-y">
-                {notifications.map((notification) => {
-                  const pending = notification.status === "pending";
-                  return (
-                    <div
-                      key={notification.id}
-                      className={`px-3.5 py-3 ${notification.readAt ? "bg-background" : "bg-sky-50/70"}`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            {!notification.readAt && <span className="size-2 shrink-0 rounded-full bg-sky-500" />}
-                            <div className="truncate text-sm font-semibold">{notification.title}</div>
-                          </div>
-                          <div className="mt-1 text-xs leading-5 text-muted-foreground">{notification.message}</div>
-                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                            <span className="inline-flex items-center gap-1">
-                              <UserRound className="size-3.5" />
-                              来自：{actorLabel(notification.createdByName, notification.createdBy)}
-                            </span>
-                            {notification.resolvedBy && (
-                              <span>
-                                处理人：{actorLabel(notification.resolvedByName, notification.resolvedBy)}
-                              </span>
-                            )}
-                          </div>
-                          {notification.resolutionNote && (
-                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                              处理说明：{notification.resolutionNote}
-                            </div>
+          <Button variant="outline" size="sm" onClick={() => void loadNotifications()} disabled={loading}>
+            <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
+            刷新
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+          <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border bg-muted/40 p-1">
+            {filters.map((item) => (
+              <Button
+                key={item.value}
+                type="button"
+                variant={filter === item.value ? "default" : "ghost"}
+                size="sm"
+                className="h-8 shrink-0"
+                onClick={() => setFilter(item.value)}
+              >
+                {item.label}
+                <span className={filter === item.value ? "text-primary-foreground/75" : "text-muted-foreground"}>
+                  {item.count}
+                </span>
+              </Button>
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void markAllRead()}
+            disabled={unreadCount === 0}
+          >
+            <CheckCheck className="size-4" />
+            全部已读
+          </Button>
+        </div>
+
+        <div className="overflow-hidden rounded-md border bg-card">
+          <div className="flex min-h-11 items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
+            <div className="text-sm font-semibold">
+              {filters.find((item) => item.value === filter)?.label}消息
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {filteredNotifications.length} 条
+            </div>
+          </div>
+
+          {loading && notifications.length === 0 ? (
+            <div className="flex min-h-56 items-center justify-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />正在加载站内信
+            </div>
+          ) : filteredNotifications.length === 0 ? (
+            <div className="flex min-h-56 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Inbox className="size-6" />
+              当前筛选下暂无站内信
+            </div>
+          ) : (
+            <div className="divide-y">
+              {filteredNotifications.map((notification) => {
+                const pending = notification.status === "pending";
+                return (
+                  <div
+                    key={notification.id}
+                    className={`px-4 py-4 sm:px-5 ${notification.readAt ? "bg-card" : "bg-sky-50/60"}`}
+                  >
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {!notification.readAt && <span className="size-2 shrink-0 rounded-full bg-sky-500" />}
+                          <div className="text-sm font-semibold text-foreground">{notification.title}</div>
+                          <Badge variant="secondary" className="font-normal">
+                            {notificationTypeLabel(notification.type)}
+                          </Badge>
+                        </div>
+                        <div className="mt-1.5 text-sm leading-6 text-muted-foreground">{notification.message}</div>
+                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>{formatNotificationTime(notification.updatedAt || notification.createdAt)}</span>
+                          <span className="inline-flex items-center gap-1">
+                            <UserRound className="size-3.5" />
+                            来自：{actorLabel(notification.createdByName, notification.createdBy)}
+                          </span>
+                          {notification.resolvedBy && (
+                            <span>处理人：{actorLabel(notification.resolvedByName, notification.resolvedBy)}</span>
                           )}
                         </div>
-                        <Badge
-                          variant="outline"
-                          className={pending
-                            ? "shrink-0 border-amber-200 bg-amber-50 text-amber-700"
-                            : notification.resolution === "rejected"
-                              ? "shrink-0 border-red-200 bg-red-50 text-red-700"
-                            : "shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700"}
-                        >
-                          {notificationResultLabel(notification)}
-                        </Badge>
+                        {notification.resolutionNote && (
+                          <div className="mt-2 rounded-md bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                            处理说明：{notification.resolutionNote}
+                          </div>
+                        )}
                       </div>
-                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs text-muted-foreground">
-                          {formatNotificationTime(notification.updatedAt || notification.createdAt)}
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          {notification.orderId && (
-                            <Button variant="ghost" size="sm" onClick={() => openOrder(notification)}>
-                              <ExternalLink className="size-3.5" />查看订单
-                            </Button>
-                          )}
-                          {pending && notification.type === "credit_sale_confirmation" && (
-                            <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
-                              <HandCoins className="size-3.5" />确认赊销
-                            </Button>
-                          )}
-                          {pending && notification.type === "stock_approval" && (
-                            <>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => startStockApproval(notification, "reject")}
-                              >
-                                <XCircle className="size-3.5" />驳回
-                              </Button>
-                              <Button size="sm" onClick={() => startStockApproval(notification, "approve")}>
-                                <CheckCircle2 className="size-3.5" />批准
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      </div>
+                      <Badge
+                        variant="outline"
+                        className={pending
+                          ? "w-fit shrink-0 border-amber-200 bg-amber-50 text-amber-700"
+                          : notification.resolution === "rejected"
+                            ? "w-fit shrink-0 border-red-200 bg-red-50 text-red-700"
+                            : "w-fit shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700"}
+                      >
+                        {notificationResultLabel(notification)}
+                      </Badge>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </ScrollArea>
-        </PopoverContent>
-      </Popover>
+                    <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                      {!notification.readAt && (
+                        <Button variant="ghost" size="sm" onClick={() => void markRead(notification)}>
+                          <Check className="size-3.5" />标为已读
+                        </Button>
+                      )}
+                      {notification.orderId && (
+                        <Button variant="outline" size="sm" onClick={() => openOrder(notification)}>
+                          <ExternalLink className="size-3.5" />查看订单
+                        </Button>
+                      )}
+                      {pending && notification.type === "credit_sale_confirmation" && (
+                        <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
+                          <HandCoins className="size-3.5" />确认赊销
+                        </Button>
+                      )}
+                      {pending && notification.type === "stock_approval" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => startStockApproval(notification, "reject")}
+                          >
+                            <XCircle className="size-3.5" />驳回
+                          </Button>
+                          <Button size="sm" onClick={() => startStockApproval(notification, "approve")}>
+                            <CheckCircle2 className="size-3.5" />批准
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {totalCount > notifications.length && (
+            <div className="border-t bg-muted/20 px-4 py-2 text-center text-xs text-muted-foreground">
+              当前显示最近 {notifications.length} 条，共 {totalCount} 条
+            </div>
+          )}
+        </div>
+      </div>
 
       <Dialog open={!!selected} onOpenChange={(nextOpen) => {
         if (!nextOpen && !confirming) setSelected(null);

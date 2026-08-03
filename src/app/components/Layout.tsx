@@ -27,14 +27,16 @@ import {
   CircleDollarSign,
   Settings,
   WalletCards,
+  Inbox,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
-import { NotificationCenter } from "./NotificationCenter";
+import { NotificationBell } from "./NotificationCenter";
 import { normalizePermissions } from "../utils/permissions";
 
 export type ViewKey =
   | "dashboard"
+  | "notifications"
   | "species"
   | "products"
   | "tankGroups"
@@ -102,7 +104,6 @@ type Props = {
   setView: (v: ViewKey) => void;
   children: ReactNode;
   saveStatus: "idle" | "saving" | "saved" | "error";
-  onOpenOrder: (orderId: string) => void;
 };
 
 function SaveStatus({ saveStatus }: { saveStatus: Props["saveStatus"] }) {
@@ -144,7 +145,7 @@ function Brand() {
   );
 }
 
-export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Props) {
+export function Layout({ view, setView, children, saveStatus }: Props) {
   const { state, activeSiteId, setActiveSiteId, setState } = useStore();
   const user = state.user!;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -174,6 +175,8 @@ export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Pro
   const currentLabel =
     view === "dashboard"
       ? "首页"
+      : view === "notifications"
+        ? "站内信中心"
       : view === "profile"
         ? "个人中心"
       : view === "permissions"
@@ -189,6 +192,8 @@ export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Pro
   const currentSection =
     view === "dashboard"
       ? null
+      : view === "notifications"
+        ? null
       : view === "profile"
         ? "个人中心"
       : view === "permissions" || view === "accounts"
@@ -224,6 +229,13 @@ export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Pro
         >
           <LayoutDashboard className="size-4 shrink-0" />
           <span>首页概览</span>
+        </button>
+        <button
+          onClick={() => navigate("notifications")}
+          className={navButtonClass(view === "notifications", "main")}
+        >
+          <Inbox className="size-4 shrink-0" />
+          <span>站内信中心</span>
         </button>
         {NAV.filter((section) => section.title !== "财务管理" || canSeeFinance).map((section) => {
           const Icon = section.icon;
@@ -412,7 +424,7 @@ export function Layout({ view, setView, children, saveStatus, onOpenOrder }: Pro
             </div>
           </div>
           <div className="flex min-w-0 shrink-0 items-center gap-2">
-            <NotificationCenter onOpenOrder={onOpenOrder} />
+            <NotificationBell onOpenCenter={() => navigate("notifications")} />
             <div className="lg:hidden"><SiteSelector compact /></div>
             <div className="hidden text-xs text-muted-foreground lg:block">当前：{activeSiteName}</div>
             <div className="hidden lg:block"><SiteSelector /></div>

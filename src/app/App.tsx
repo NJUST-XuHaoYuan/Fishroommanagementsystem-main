@@ -21,6 +21,7 @@ import { PermissionsView } from "./components/PermissionsView";
 import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
+import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
@@ -53,7 +54,7 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
 type PersistedStore = Omit<Store, "user">;
 type PersistedKey = keyof PersistedStore;
 type StateLoadOptions = { force?: boolean; showLoading?: boolean; liteSpecies?: boolean };
-type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily">;
+type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily" | "notifications">;
 type OpenOrderRequest = {
   orderId: string;
   requestId: number;
@@ -68,6 +69,7 @@ const PERSISTED_KEYS = AUDIT_COLLECTIONS
 
 const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   dashboard: ["sites", "systemSettings"],
+  notifications: [],
   species: ["species", "speciesCategories", "products"],
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
@@ -1334,6 +1336,7 @@ function AdminApp() {
   const renderView = () => {
     switch (view) {
       case "dashboard":  return <Dashboard />;
+      case "notifications": return <NotificationCenterView onOpenOrder={requestOpenOrder} />;
       case "species":    return <SpeciesView />;
       case "products":   return <ProductsView />;
       case "tankGroups": return <TankGroupsView />;
@@ -1360,7 +1363,7 @@ function AdminApp() {
 
   function requestOpenOrder(orderId: string) {
     const sourceView = viewRef.current;
-    const returnView = sourceView === "stockIn" || sourceView === "daily"
+    const returnView = sourceView === "stockIn" || sourceView === "daily" || sourceView === "notifications"
       ? sourceView
       : undefined;
     orderRequestSequence.current += 1;
@@ -1405,7 +1408,7 @@ function AdminApp() {
       ) : !state.user ? (
         <Login />
       ) : (
-        <Layout view={view} setView={handleSetView} saveStatus={saveStatus} onOpenOrder={requestOpenOrder}>
+        <Layout view={view} setView={handleSetView} saveStatus={saveStatus}>
           <div key={`${activeSiteId}:${view}`}>{viewContent}</div>
         </Layout>
       )}

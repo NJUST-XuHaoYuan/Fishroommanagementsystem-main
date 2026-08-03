@@ -4845,9 +4845,14 @@ async function handleApi(req, res, url) {
         currentStationNotifications(rows[0]?.data ?? {}),
         req.auth?.user?.username
       );
+      const requestedLimit = Number.parseInt(String(url.searchParams.get("limit") ?? "100"), 10);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.min(500, Math.max(1, requestedLimit))
+        : 100;
       sendJson(req, res, 200, {
         ok: true,
-        notifications: notifications.slice(0, 100),
+        notifications: notifications.slice(0, limit),
+        totalCount: notifications.length,
         unreadCount: notifications.filter((notification) => !notification?.readAt).length,
       });
     } catch (error) {
