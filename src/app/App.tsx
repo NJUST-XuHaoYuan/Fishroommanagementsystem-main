@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, normalizePaymentMethodSettings, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -20,6 +20,7 @@ import { PersonnelAdminView } from "./components/PersonnelAdminView";
 import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
+import { WaterQualitySettingsView } from "./components/WaterQualitySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
@@ -41,6 +42,7 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "stock", module: "库存明细" },
   { key: "lossRecords", module: "损耗记录" },
   { key: "logs", module: "日常管理" },
+  { key: "waterQualityRecords", module: "水质记录" },
   { key: "checks", module: "盘库管理" },
   { key: "bioRecords", module: "生物记录" },
   { key: "customers", module: "客户管理" },
@@ -74,12 +76,13 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   tankGroups: ["tankGroups", "stock", "shipments"],
   batches: ["batches", "stock", "orders", "shipments"],
   stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
-  daily: ["products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "bioRecords", "personnel"],
+  daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "bioRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
   orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
   finance: ["sites", "systemSettings"],
   paymentMethods: ["systemSettings"],
+  waterQualitySettings: ["systemSettings", "tankGroups"],
   profile: ["personnel", "orders", "customers", "shipments"],
   permissions: ["personnel"],
   operationLogs: ["operationLogs"],
@@ -96,6 +99,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
+    waterQualityParameters: DEFAULT_WATER_QUALITY_PARAMETERS.map((parameter) => ({ ...parameter })),
   },
   sites: DEFAULT_SITES.map((site) => ({ ...site })),
   personnel: [],
@@ -109,6 +113,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   stock: [],
   lossRecords: [],
   logs: [],
+  waterQualityRecords: [],
   checks: [],
   bioRecords: [],
   orders: [],
@@ -123,6 +128,7 @@ const SITE_SCOPED_KEYS = [
   "stock",
   "lossRecords",
   "logs",
+  "waterQualityRecords",
   "checks",
   "bioRecords",
   "orders",
@@ -180,6 +186,7 @@ function scopedStoreForSite(state: Store, siteId: string): Store {
     batches: state.batches.filter((item) => matchesSite(item, normalizedSiteId)),
     stock,
     logs: state.logs.filter((item) => matchesSite(item, normalizedSiteId) || subTankIds.has(item.subTankId ?? "")),
+    waterQualityRecords: state.waterQualityRecords.filter((item) => matchesSite(item, normalizedSiteId) || tankGroups.some((group) => group.id === item.tankGroupId)),
     checks: state.checks.filter((item) => matchesSite(item, normalizedSiteId) || subTankIds.has(item.subTankId)),
     lossRecords: state.lossRecords.filter((item) => matchesSite(item, normalizedSiteId) || stockIds.has(item.stockItemId)),
     bioRecords: state.bioRecords.filter((item) => matchesSite(item, normalizedSiteId) || stockIds.has(item.stockItemId)),
@@ -328,6 +335,27 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     ...(migratedData.systemSettings && typeof migratedData.systemSettings === "object" ? migratedData.systemSettings : {}),
   };
   migratedSystemSettings.paymentMethods = normalizePaymentMethodSettings(migratedSystemSettings);
+  migratedSystemSettings.waterQualityParameters = normalizeWaterQualityParameters(migratedSystemSettings);
+  const migratedTankGroups = Array.isArray(migratedData.tankGroups)
+    ? migratedData.tankGroups.map((group: TankGroup) => ({
+        ...group,
+        waterQualityParameterIds: waterQualityParameterIdsForGroup(
+          group,
+          migratedSystemSettings.waterQualityParameters
+        ),
+      }))
+    : [];
+  const migratedWaterQualityRecords = Array.isArray(migratedData.waterQualityRecords)
+    ? migratedData.waterQualityRecords.map((record: WaterQualityRecord) => ({
+        ...record,
+        id: String(record?.id ?? ""),
+        measuredAt: String(record?.measuredAt ?? ""),
+        tankGroupId: String(record?.tankGroupId ?? ""),
+        operator: String(record?.operator ?? ""),
+        notes: String(record?.notes ?? ""),
+        values: Array.isArray(record?.values) ? record.values : [],
+      }))
+    : [];
 
   return {
     ...initialState,
@@ -338,7 +366,9 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     operationLogs: Array.isArray(migratedData.operationLogs) ? migratedData.operationLogs : [],
     products: migratedProducts ?? migratedData.products,
     productOrigins: migratedProductOrigins,
+    tankGroups: migratedTankGroups,
     lossRecords: Array.isArray(migratedData.lossRecords) ? migratedData.lossRecords : [],
+    waterQualityRecords: migratedWaterQualityRecords,
     stock: migratedStock ?? migratedData.stock,
     shipments: migratedShipments ?? migratedData.shipments,
     user: normalizeUserWithSiteScope(currentUser, migratedPersonnel, migratedSites),
@@ -989,6 +1019,81 @@ function AdminApp() {
 			    }
 			  };
 
+  const saveWaterQualitySettings = async (change: {
+    parameters: WaterQualityParameterSetting[];
+    assignments: WaterQualityTankGroupAssignment[];
+  }): Promise<boolean> => {
+    setSaveStatus("saving");
+    try {
+      const response = await fetch(`${API}/water-quality/settings/save`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(change),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      setStateBase((current) => {
+        const next = {
+          ...current,
+          systemSettings: result.systemSettings && typeof result.systemSettings === "object"
+            ? { ...current.systemSettings, ...result.systemSettings }
+            : current.systemSettings,
+          tankGroups: Array.isArray(result.tankGroups) ? result.tankGroups : current.tankGroups,
+          operationLogs: result.operationLog
+            ? withServerOperationLog(result.operationLog, current.operationLogs)
+            : current.operationLogs,
+        };
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+      return true;
+    } catch (error) {
+      console.error("Failed to save water quality settings:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+      return false;
+    }
+  };
+
+  const saveWaterQualityRecord = async (change: {
+    record?: WaterQualityRecord;
+    deleteId?: string;
+  }): Promise<boolean> => {
+    setSaveStatus("saving");
+    try {
+      const response = await fetch(`${API}/water-quality-records/save`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(change),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      setStateBase((current) => {
+        const next = {
+          ...current,
+          waterQualityRecords: Array.isArray(result.waterQualityRecords)
+            ? result.waterQualityRecords
+            : current.waterQualityRecords,
+          operationLogs: result.operationLog
+            ? withServerOperationLog(result.operationLog, current.operationLogs)
+            : current.operationLogs,
+        };
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+      return true;
+    } catch (error) {
+      console.error("Failed to save water quality record:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+      return false;
+    }
+  };
+
   const saveShipmentOutbound = async (change: {
     orderId: string;
     selectedItemIds: string[];
@@ -1354,6 +1459,7 @@ function AdminApp() {
       );
       case "finance":    return <FinanceView />;
       case "paymentMethods": return <PaymentMethodsView />;
+      case "waterQualitySettings": return <WaterQualitySettingsView />;
       case "profile":    return <PersonalCenterView />;
       case "permissions": return <PersonnelAdminView />;
       case "operationLogs": return <OperationLogsView />;
@@ -1402,7 +1508,7 @@ function AdminApp() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
         <PublicCatalogPage />
       ) : !state.user ? (

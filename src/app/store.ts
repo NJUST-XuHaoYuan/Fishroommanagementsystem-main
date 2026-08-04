@@ -64,6 +64,8 @@ export type TankGroup = {
   location: string;
   rows?: number;
   cols?: number;
+  /** 该缸组日常测量时关注的水质参数。旧数据未设置时使用默认鱼缸参数。 */
+  waterQualityParameterIds?: string[];
   subTanks: SubTank[];
 };
 
@@ -147,6 +149,61 @@ export type DailyLog = {
   /** 已同步到哪些鱼的个体历史，避免后续移缸后旧日志跟着新鱼走。 */
   syncedStockItemIds?: string[];
   syncedAt?: string;
+};
+
+export type WaterQualityParameterSetting = {
+  id: string;
+  name: string;
+  unit: string;
+  /** 小数点后保留位数，范围 0-4。 */
+  precision: number;
+};
+
+export const DEFAULT_WATER_QUALITY_PARAMETERS: WaterQualityParameterSetting[] = [
+  { id: "temperature", name: "温度", unit: "°C", precision: 1 },
+  { id: "salinity", name: "盐度", unit: "ppt", precision: 1 },
+  { id: "ph", name: "pH", unit: "pH", precision: 2 },
+  { id: "ammonia", name: "氨氮", unit: "mg/L", precision: 3 },
+  { id: "nitrite", name: "亚硝酸盐", unit: "mg/L", precision: 3 },
+  { id: "nitrate", name: "硝酸盐", unit: "mg/L", precision: 1 },
+  { id: "phosphate", name: "磷酸盐", unit: "mg/L", precision: 3 },
+  { id: "alkalinity", name: "碱度", unit: "dKH", precision: 1 },
+  { id: "calcium", name: "钙", unit: "mg/L", precision: 0 },
+  { id: "magnesium", name: "镁", unit: "mg/L", precision: 0 },
+  { id: "dissolved-oxygen", name: "溶解氧", unit: "mg/L", precision: 1 },
+];
+
+export const DEFAULT_FISH_WATER_QUALITY_PARAMETER_IDS = [
+  "temperature",
+  "salinity",
+  "ph",
+  "ammonia",
+  "nitrite",
+  "nitrate",
+] as const;
+
+export type WaterQualityMeasurement = {
+  parameterId: string;
+  value: number;
+  /** 保存时固化配置快照，避免以后改名、单位或精度影响历史记录。 */
+  parameterName: string;
+  unit: string;
+  precision: number;
+};
+
+export type WaterQualityRecord = {
+  id: string;
+  siteId?: string;
+  measuredAt: string;
+  tankGroupId: string;
+  values: WaterQualityMeasurement[];
+  operator: string;
+  notes: string;
+};
+
+export type WaterQualityTankGroupAssignment = {
+  groupId: string;
+  parameterIds: string[];
 };
 
 export type InventoryCheck = {
@@ -455,7 +512,42 @@ export type SystemSettings = {
   financeDefaultCommissionRate?: number;
   /** 后台配置的可用付款方式及默认收款账户。 */
   paymentMethods?: PaymentMethodSetting[];
+  /** 后台统一维护的水质参数名称、单位和显示精度。 */
+  waterQualityParameters?: WaterQualityParameterSetting[];
 };
+
+export function normalizeWaterQualityParameters(settings?: SystemSettings | null): WaterQualityParameterSetting[] {
+  const source = Array.isArray(settings?.waterQualityParameters)
+    ? settings.waterQualityParameters
+    : DEFAULT_WATER_QUALITY_PARAMETERS;
+  const usedIds = new Set<string>();
+  return source.flatMap((parameter, index) => {
+    const name = String(parameter?.name ?? "").trim();
+    const unit = String(parameter?.unit ?? "").trim();
+    let id = String(parameter?.id ?? "").trim() || `water-parameter-${index + 1}`;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${id}-${suffix++}`;
+    if (!name || !unit) return [];
+    usedIds.add(id);
+    return [{
+      id,
+      name,
+      unit,
+      precision: Math.max(0, Math.min(4, Math.trunc(Number(parameter?.precision ?? 0)))),
+    }];
+  });
+}
+
+export function waterQualityParameterIdsForGroup(
+  group: Pick<TankGroup, "waterQualityParameterIds"> | null | undefined,
+  parameters: WaterQualityParameterSetting[]
+): string[] {
+  const validIds = new Set(parameters.map((parameter) => parameter.id));
+  const source = Array.isArray(group?.waterQualityParameterIds)
+    ? group.waterQualityParameterIds
+    : DEFAULT_FISH_WATER_QUALITY_PARAMETER_IDS;
+  return [...new Set(source.map(String))].filter((id) => validIds.has(id));
+}
 
 export function normalizePaymentMethodSettings(settings?: SystemSettings | null): PaymentMethodSetting[] {
   if (!Array.isArray(settings?.paymentMethods)) {
@@ -520,6 +612,7 @@ export type Store = {
   stock: StockItem[];
   lossRecords: StockLossRecord[];
   logs: DailyLog[];
+  waterQualityRecords: WaterQualityRecord[];
   checks: InventoryCheck[];
   bioRecords: BioRecord[];
   orders: Order[];
@@ -549,6 +642,11 @@ export type StoreContextType = {
     subTankId?: string;
   }) => Promise<boolean>;
   saveDailyLog: (change: { log?: DailyLog; deleteId?: string }) => Promise<boolean>;
+  saveWaterQualitySettings: (change: {
+    parameters: WaterQualityParameterSetting[];
+    assignments: WaterQualityTankGroupAssignment[];
+  }) => Promise<boolean>;
+  saveWaterQualityRecord: (change: { record?: WaterQualityRecord; deleteId?: string }) => Promise<boolean>;
   saveShipmentOutbound: (change: {
     orderId: string;
     selectedItemIds: string[];
@@ -610,6 +708,7 @@ export const initialState: Store = {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
+    waterQualityParameters: DEFAULT_WATER_QUALITY_PARAMETERS.map((parameter) => ({ ...parameter })),
   },
   sites: [
     { id: "jiangyin", name: "江阴" },
@@ -651,6 +750,7 @@ export const initialState: Store = {
       location: "前厅左侧",
       rows: 2,
       cols: 2,
+      waterQualityParameterIds: [...DEFAULT_FISH_WATER_QUALITY_PARAMETER_IDS],
       subTanks: [
         { id: "t1", name: "A-1", row: 0, col: 0 },
         { id: "t2", name: "A-2", row: 0, col: 1 },
@@ -665,6 +765,7 @@ export const initialState: Store = {
       location: "后厅",
       rows: 1,
       cols: 2,
+      waterQualityParameterIds: [...DEFAULT_FISH_WATER_QUALITY_PARAMETER_IDS],
       subTanks: [
         { id: "t5", name: "B-1", row: 0, col: 0 },
         { id: "t6", name: "B-2", row: 0, col: 1 },
@@ -688,6 +789,7 @@ export const initialState: Store = {
     { id: "l1", siteId: "nanjing", date: "2026-04-25", subTankId: "t1", action: "投喂", operator: "店员A", notes: "丰年虾" },
     { id: "l2", siteId: "nanjing", date: "2026-04-25", subTankId: "t2", action: "换水", operator: "店员A", notes: "20%" },
   ],
+  waterQualityRecords: [],
   checks: [
     { id: "c1", siteId: "nanjing", date: "2026-04-24", subTankId: "t1", systemCount: 2, actualCount: 2, diff: 0, operator: "管理员", notes: "" },
   ],
@@ -762,6 +864,8 @@ export const StoreContext = createContext<StoreContextType>({
   saveMaintenanceAction: async () => false,
   saveTankGroupChange: async () => false,
   saveDailyLog: async () => false,
+  saveWaterQualitySettings: async () => false,
+  saveWaterQualityRecord: async () => false,
   saveShipmentOutbound: async () => false,
   saveOrderPaymentChange: async () => false,
   savePersonnelAccount: async () => false,

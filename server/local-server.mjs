@@ -64,6 +64,13 @@ import {
   creditSaleEligibleApprovers,
   isCreditSaleOrderOwner,
 } from "./credit-sale-approval-rules.mjs";
+import {
+  formatWaterQualityMeasurements,
+  normalizeWaterQualityParameters,
+  normalizeWaterQualityRecord,
+  validateWaterQualityParameters,
+  waterQualityParameterIdsForGroup,
+} from "./water-quality-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -136,6 +143,7 @@ const STATE_PATCH_PERMISSION_MODULES = {
   batches: "batches",
   stock: "stockIn",
   logs: "daily",
+  waterQualityRecords: "daily",
   checks: "daily",
   bioRecords: "daily",
   lossRecords: "lossRecords",
@@ -197,6 +205,7 @@ const STATE_KEYS = [
   "stock",
   "lossRecords",
   "logs",
+  "waterQualityRecords",
   "checks",
   "bioRecords",
   "orders",
@@ -349,6 +358,9 @@ function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
     logs: (Array.isArray(state.logs) ? state.logs : []).filter((item) =>
       matchesSite(item, scope) || subTankIds.has(String(item?.subTankId ?? ""))
     ),
+    waterQualityRecords: (Array.isArray(state.waterQualityRecords) ? state.waterQualityRecords : []).filter((item) =>
+      matchesSite(item, scope) || tankGroups.some((group) => String(group?.id ?? "") === String(item?.tankGroupId ?? ""))
+    ),
     checks: (Array.isArray(state.checks) ? state.checks : []).filter((item) =>
       matchesSite(item, scope) || subTankIds.has(String(item?.subTankId ?? ""))
     ),
@@ -393,6 +405,9 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
     stock,
     logs: (Array.isArray(state.logs) ? state.logs : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || subTankIds.has(String(item?.subTankId ?? ""))
+    ),
+    waterQualityRecords: (Array.isArray(state.waterQualityRecords) ? state.waterQualityRecords : []).filter((item) =>
+      matchesAnyVisibleSite(item, visibleSiteIds) || tankGroups.some((group) => String(group?.id ?? "") === String(item?.tankGroupId ?? ""))
     ),
     checks: (Array.isArray(state.checks) ? state.checks : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || subTankIds.has(String(item?.subTankId ?? ""))
@@ -1500,9 +1515,9 @@ function requireFinanceAccessForAuth(req) {
   throw new Error("当前账户没有财务模块权限");
 }
 
-function requireAdminForAuth(req) {
+function requireAdminForAuth(req, errorMessage = "仅管理员可以处理库存审批") {
   if (req.auth?.account?.accessRole !== "admin") {
-    throw new Error("仅管理员可以处理库存审批");
+    throw new Error(errorMessage);
   }
 }
 
@@ -2548,6 +2563,9 @@ function normalizeTankGroup(group, existingSubTanks = []) {
     siteId: normalizeSiteId(group?.siteId),
     name: String(group?.name ?? "").trim(),
     location: String(group?.location ?? "").trim(),
+    waterQualityParameterIds: Array.isArray(group?.waterQualityParameterIds)
+      ? [...new Set(group.waterQualityParameterIds.map(String).filter(Boolean))]
+      : undefined,
     subTanks: existingSubTanks,
   };
   if (group?.rows !== undefined) normalized.rows = Number(group.rows);
@@ -8563,7 +8581,7 @@ async function handleApi(req, res, url) {
 	    return;
 	  }
 
-		  if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
+	  if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
 		    try {
 		      const body = await readBody(req);
 		      const rawChange = JSON.parse(body);
@@ -8670,6 +8688,175 @@ async function handleApi(req, res, url) {
 	    }
 	    return;
 	  }
+
+      if (url.pathname === "/api/water-quality/settings/save" && req.method === "POST") {
+        const client = await pool.connect();
+        try {
+          requireAdminForAuth(req, "仅管理员可以修改水质参数配置");
+          const body = JSON.parse(await readBody(req) || "{}");
+          const parameters = validateWaterQualityParameters(body.parameters);
+          const assignments = Array.isArray(body.assignments) ? body.assignments : [];
+          const assignmentByGroupId = new Map(assignments.map((assignment) => [
+            String(assignment?.groupId ?? "").trim(),
+            [...new Set((Array.isArray(assignment?.parameterIds) ? assignment.parameterIds : []).map(String).filter(Boolean))],
+          ]));
+          if ([...assignmentByGroupId.keys()].some((groupId) => !groupId)) {
+            throw new Error("缸组关注项配置缺少缸组编号");
+          }
+
+          await client.query("BEGIN");
+          const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+          const state = rows[0]?.data ?? {};
+          const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
+          const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+          const previousParameters = normalizeWaterQualityParameters(state.systemSettings?.waterQualityParameters);
+          const validParameterIds = new Set(parameters.map((parameter) => parameter.id));
+          for (const [groupId, parameterIds] of assignmentByGroupId) {
+            if (!tankGroups.some((group) => String(group?.id ?? "") === groupId)) {
+              throw new Error(`缸组不存在或已被删除：${groupId}`);
+            }
+            const invalidIds = parameterIds.filter((id) => !validParameterIds.has(id));
+            if (invalidIds.length > 0) throw new Error(`缸组关注项包含无效参数：${invalidIds.join("、")}`);
+          }
+
+          const nextTankGroups = tankGroups.map((group) => {
+            const groupId = String(group?.id ?? "");
+            const selectedIds = assignmentByGroupId.has(groupId)
+              ? assignmentByGroupId.get(groupId)
+              : waterQualityParameterIdsForGroup(group, previousParameters);
+            return {
+              ...group,
+              waterQualityParameterIds: selectedIds.filter((id) => validParameterIds.has(id)),
+            };
+          });
+          const nextSystemSettings = {
+            ...(state.systemSettings && typeof state.systemSettings === "object" ? state.systemSettings : {}),
+            waterQualityParameters: parameters,
+          };
+          const operationLog = {
+            id: uid("log"),
+            time: new Date().toISOString(),
+            operator: authenticatedOperator(req),
+            module: "后台管理",
+            action: "修改记录",
+            detail: `保存水质参数 ${parameters.length} 项，并更新 ${assignmentByGroupId.size} 个缸组的关注项`,
+          };
+          const nextState = {
+            ...state,
+            systemSettings: nextSystemSettings,
+            tankGroups: nextTankGroups,
+            operationLogs: pushOperationLog(operationLogs, operationLog),
+          };
+          await client.query(
+            "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+            [stateId, JSON.stringify(nextState)]
+          );
+          await client.query("COMMIT");
+          sendJson(req, res, 200, {
+            ok: true,
+            systemSettings: nextSystemSettings,
+            tankGroups: nextTankGroups,
+            operationLog,
+          });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          sendJson(req, res, 400, { error: `Failed to save water quality settings: ${error.message}` });
+        } finally {
+          client.release();
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/water-quality-records/save" && req.method === "POST") {
+        const client = await pool.connect();
+        try {
+          const body = JSON.parse(await readBody(req) || "{}");
+          const inputRecord = body.record && typeof body.record === "object" ? body.record : null;
+          const deleteId = String(body.deleteId ?? "").trim();
+          if (!inputRecord && !deleteId) throw new Error("No water quality record change provided");
+
+          await client.query("BEGIN");
+          const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+          const state = rows[0]?.data ?? {};
+          const records = Array.isArray(state.waterQualityRecords) ? state.waterQualityRecords : [];
+          const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
+          const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+          const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+          let nextRecords = records;
+          let operationLog;
+
+          if (deleteId) {
+            requireModulePermissionForAuth(req, "daily", "delete");
+            const target = records.find((record) => String(record?.id ?? "") === deleteId);
+            if (!target) throw new Error("水质记录不存在或已被删除");
+            const targetGroup = tankGroups.find((group) => String(group?.id ?? "") === String(target?.tankGroupId ?? ""));
+            const targetSiteId = normalizeSiteId(target?.siteId ?? targetGroup?.siteId);
+            if (!visibleSiteIds.includes(targetSiteId)) throw new Error("无权删除该场地的水质记录");
+            nextRecords = records.filter((record) => String(record?.id ?? "") !== deleteId);
+            operationLog = {
+              id: uid("log"),
+              time: new Date().toISOString(),
+              operator: authenticatedOperator(req),
+              module: "日常管理",
+              action: "删除记录",
+              detail: `删除水质记录（${target.measuredAt}，缸组：${targetGroup?.name ?? "已删除缸组"}/${target.tankGroupId}，${formatWaterQualityMeasurements(target.values)}）`,
+            };
+          } else {
+            const existingRecord = records.find((record) => String(record?.id ?? "") === String(inputRecord.id ?? "")) ?? null;
+            requireModulePermissionForAuth(req, "daily", existingRecord ? "update" : "create");
+            if (existingRecord) {
+              const existingGroup = tankGroups.find((group) => String(group?.id ?? "") === String(existingRecord.tankGroupId ?? ""));
+              const existingSiteId = normalizeSiteId(existingRecord.siteId ?? existingGroup?.siteId);
+              if (!visibleSiteIds.includes(existingSiteId)) throw new Error("无权修改该场地的水质记录");
+              if (String(inputRecord.tankGroupId ?? "") !== String(existingRecord.tankGroupId ?? "")) {
+                throw new Error("不能修改水质记录所属缸组");
+              }
+            }
+            const tankGroup = tankGroups.find((group) => String(group?.id ?? "") === String(inputRecord.tankGroupId ?? ""));
+            if (!tankGroup) throw new Error("缸组不存在或已被删除");
+            const siteId = normalizeSiteId(tankGroup.siteId);
+            if (!visibleSiteIds.includes(siteId)) throw new Error("无权记录该场地的水质数据");
+            const parameters = normalizeWaterQualityParameters(state.systemSettings?.waterQualityParameters);
+            const normalizedRecord = normalizeWaterQualityRecord(inputRecord, {
+              parameters,
+              group: tankGroup,
+              existingRecord,
+              operator: authenticatedOperator(req),
+              siteId,
+              createId: () => uid("water"),
+            });
+            nextRecords = existingRecord
+              ? records.map((record) => String(record?.id ?? "") === normalizedRecord.id ? normalizedRecord : record)
+              : [...records, normalizedRecord];
+            operationLog = {
+              id: uid("log"),
+              time: new Date().toISOString(),
+              operator: authenticatedOperator(req),
+              module: "日常管理",
+              action: existingRecord ? "修改记录" : "添加记录",
+              detail: `${existingRecord ? "修改" : "新增"}水质记录（${normalizedRecord.measuredAt}，缸组：${tankGroup.name}/${tankGroup.id}，${formatWaterQualityMeasurements(normalizedRecord.values)}）`,
+            };
+          }
+
+          const nextState = {
+            ...state,
+            waterQualityRecords: nextRecords,
+            operationLogs: pushOperationLog(operationLogs, operationLog),
+          };
+          await client.query(
+            "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+            [stateId, JSON.stringify(nextState)]
+          );
+          await client.query("COMMIT");
+          sendJson(req, res, 200, { ok: true, waterQualityRecords: nextRecords, operationLog });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          sendJson(req, res, 400, { error: `Failed to save water quality record: ${error.message}` });
+        } finally {
+          client.release();
+        }
+        return;
+      }
 
 	  if (url.pathname === "/api/products/upsert" && req.method === "POST") {
     try {

@@ -24,6 +24,7 @@ import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../ut
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
+import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
@@ -1065,9 +1066,10 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
               <TabsList className="h-8 w-full rounded-full sm:w-auto">
                 <TabsTrigger value="visual" className="flex-1 rounded-full px-3 text-sm sm:flex-none">缸位视图</TabsTrigger>
                 <TabsTrigger value="logs" className="flex-1 rounded-full px-3 text-sm sm:flex-none">养护日志</TabsTrigger>
+                <TabsTrigger value="water" className="flex-1 rounded-full px-3 text-sm sm:flex-none">水质记录</TabsTrigger>
               </TabsList>
             </div>
-            <p className="mt-1 text-sm text-muted-foreground">巡缸、查看生物详情、记录养护操作</p>
+            <p className="mt-1 text-sm text-muted-foreground">巡缸、生物维护与水质测量记录</p>
           </div>
         </div>
 
@@ -1666,6 +1668,10 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
               </>
             );
           })()}
+        </TabsContent>
+
+        <TabsContent value="water" className="flex flex-col gap-4">
+          <WaterQualityRecordsPanel />
         </TabsContent>
       </Tabs>
 

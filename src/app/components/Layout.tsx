@@ -28,6 +28,7 @@ import {
   Settings,
   WalletCards,
   Inbox,
+  FlaskConical,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
@@ -48,6 +49,7 @@ export type ViewKey =
   | "orders"
   | "finance"
   | "paymentMethods"
+  | "waterQualitySettings"
   | "permissions"
   | "profile"
   | "operationLogs";
@@ -185,6 +187,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? "操作日志"
       : view === "paymentMethods"
         ? "付款方式管理"
+      : view === "waterQualitySettings"
+        ? "水质参数管理"
       : NAV.flatMap((s) => s.items).find((i) => i.key === view)?.label ?? "";
 
   const currentSection =
@@ -199,6 +203,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : view === "operationLogs"
         ? "日志管理"
       : view === "paymentMethods"
+        ? "后台管理"
+      : view === "waterQualitySettings"
         ? "后台管理"
       : NAV.find((s) => s.items.some((i) => i.key === view))?.title;
 
@@ -283,6 +289,13 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               >
                 <span className="flex items-center gap-2"><WalletCards className="size-3.5" />付款方式管理</span>
                 {view === "paymentMethods" && <ChevronRight className="size-3.5 shrink-0" />}
+              </button>
+              <button
+                onClick={() => navigate("waterQualitySettings")}
+                className={navButtonClass(view === "waterQualitySettings")}
+              >
+                <span className="flex items-center gap-2"><FlaskConical className="size-3.5" />水质参数管理</span>
+                {view === "waterQualitySettings" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
             </div>
             <div className="fishroom-nav-section">
