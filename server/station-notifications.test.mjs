@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  addApprovalResultNotification,
   ensureApprovalNotifications,
   ensureCreditSaleNotification,
   ensureCreditSaleNotifications,
@@ -155,12 +154,13 @@ test("completed historical notifications no longer count as unread", () => {
   assert.equal(notifications.find((notification) => notification.id === "notice-pending")?.readAt, "");
 });
 
-test("stock approval notifications fan out once to every active admin", () => {
+test("stock approval notifications fan out once and keep one requester tracking thread", () => {
   const input = {
     approvalRequestId: "approval-1",
     approvalAction: "delete_stock",
     title: "库存删除待审批",
     message: "销售A申请删除2条库存。",
+    createdAt: "2026-08-04T12:00:00.000Z",
     createdBy: "sales-a",
     createdByName: "销售A",
     recipients: [
@@ -171,13 +171,46 @@ test("stock approval notifications fan out once to every active admin", () => {
   };
   const first = ensureApprovalNotifications([], input);
   const second = ensureApprovalNotifications(first.notifications, input);
-  assert.equal(first.notificationsCreated.length, 2);
+  assert.equal(first.notificationsCreated.length, 3);
   assert.equal(second.changed, false);
-  assert.equal(second.notifications.length, 2);
+  assert.equal(second.notifications.length, 3);
   assert.deepEqual(
-    second.notifications.map((notification) => notification.recipientUsername).sort(),
+    second.notifications
+      .filter((notification) => notification.notificationRole === "approver")
+      .map((notification) => notification.recipientUsername).sort(),
     ["admin", "finance-admin"]
   );
+  const requester = second.notifications.find((notification) => notification.notificationRole === "requester");
+  assert.equal(requester.recipientUsername, "sales-a");
+  assert.equal(requester.readAt, input.createdAt);
+});
+
+test("stock approval result updates the requester thread instead of creating another message", () => {
+  const pending = ensureApprovalNotifications([], {
+    approvalRequestId: "approval-thread",
+    title: "盘库调整待审批",
+    message: "调整两个缸位。",
+    createdAt: "2026-08-04T13:00:00.000Z",
+    createdBy: "sales-a",
+    createdByName: "销售A",
+    recipients: [{ username: "admin", name: "管理员" }],
+    requester: { username: "sales-a", name: "销售A" },
+    requesterNotificationId: "requester-thread",
+  });
+  const resolved = resolveApprovalNotifications(pending.notifications, "approval-thread", {
+    resolution: "approved",
+    resolvedAt: "2026-08-04T14:00:00.000Z",
+    resolvedBy: "admin",
+    resolvedByName: "管理员",
+    resultTitle: "盘库调整已批准",
+    resultMessage: "盘库调整申请已由管理员批准并执行。",
+  });
+  const requesterMessages = notificationsForRecipient(resolved.notifications, "sales-a");
+  assert.equal(requesterMessages.length, 1);
+  assert.equal(requesterMessages[0].id, "requester-thread");
+  assert.equal(requesterMessages[0].title, "盘库调整已批准");
+  assert.equal(requesterMessages[0].readAt, "");
+  assert.equal(requesterMessages[0].updatedAt, "2026-08-04T14:00:00.000Z");
 });
 
 test("one admin decision resolves every copy of an approval notification", () => {
@@ -194,18 +227,4 @@ test("one admin decision resolves every copy of an approval notification", () =>
   assert.equal(resolved.changed, true);
   assert.ok(resolved.notifications.every((notification) => notification.status === "completed"));
   assert.ok(resolved.notifications.every((notification) => notification.resolution === "approved"));
-});
-
-test("approval result is visible only to the requester", () => {
-  const result = addApprovalResultNotification([], {
-    id: "notice-result",
-    approvalRequestId: "approval-3",
-    resolution: "rejected",
-    recipientUsername: "sales-a",
-    recipientName: "销售A",
-    createdBy: "admin",
-    createdByName: "管理员",
-  });
-  assert.equal(notificationsForRecipient(result.notifications, "sales-a").length, 1);
-  assert.equal(notificationsForRecipient(result.notifications, "sales-b").length, 0);
 });

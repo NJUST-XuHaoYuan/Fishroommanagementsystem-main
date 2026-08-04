@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, normalizePaymentMethodSettings, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, isPersonnelResigned, normalizePaymentMethodSettings, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -748,14 +748,8 @@ function AdminApp() {
   };
 
 	  const saveStockChange = async (
-	    change: { upsert?: StockItem[]; deleteIds?: string[] }
-	  ): Promise<{
-	    ok: boolean;
-	    error?: string;
-	    pendingApproval?: boolean;
-	    approvalRequestId?: string;
-	    message?: string;
-	  }> => {
+	    change: StockChangeRequest
+	  ): Promise<StockChangeResult> => {
 	    clearTimeout(saveTimer.current);
 	    if (saveAbort.current) {
 	      saveAbort.current.abort();
@@ -776,6 +770,15 @@ function AdminApp() {
         }),
       });
       const result = await response.json();
+      if (result.duplicateConfirmationRequired === true) {
+        setSaveStatus("idle");
+        return {
+          ok: false,
+          error: String(result.error ?? "短时间内已提交过相同调整"),
+          duplicateConfirmationRequired: true,
+          duplicate: result.duplicate && typeof result.duplicate === "object" ? result.duplicate : undefined,
+        };
+      }
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }

@@ -2,11 +2,73 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   batchRequiresLateStockApproval,
+  buildStockChangeSnapshot,
   buildStockDeletionSnapshot,
   classifyStockMutationForApproval,
   preserveBatchCreationTimes,
+  stockChangeAdjustmentSignature,
   STOCK_BATCH_APPROVAL_DELAY_MS,
 } from "./stock-approval-rules.mjs";
+
+test("stock change approvals group exact deltas by tank, product and batch", () => {
+  const snapshot = buildStockChangeSnapshot({
+    stock: [{
+      id: "stock-remove",
+      productId: "product-1",
+      batchId: "batch-1",
+      subTankId: "tank-1",
+      status: "healthy",
+      inDate: "2026-07-30",
+      basePrice: 260,
+    }],
+    upsertItems: [
+      { id: "stock-add-1", productId: "product-1", batchId: "batch-1", subTankId: "tank-2", status: "healthy", inDate: "2026-07-30", basePrice: 260 },
+      { id: "stock-add-2", productId: "product-1", batchId: "batch-1", subTankId: "tank-2", status: "healthy", inDate: "2026-07-30", basePrice: 260 },
+    ],
+    deleteIds: ["stock-remove"],
+    products: [{ id: "product-1", speciesId: "species-1", name: "蓝吊", origin: "印尼", size: "7-8" }],
+    species: [{ id: "species-1", name: "蓝点吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-2026-030", arrivalDate: "2026-07-30", supplier: "供应商A" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }, { id: "tank-2", name: "D1-2" }] }],
+  });
+
+  assert.deepEqual(snapshot.totals, { addCount: 2, removeCount: 1, updateCount: 0 });
+  assert.equal(snapshot.tanks.length, 2);
+  assert.equal(snapshot.tanks.find((tank) => tank.subTankId === "tank-1")?.removeCount, 1);
+  assert.equal(snapshot.tanks.find((tank) => tank.subTankId === "tank-2")?.addCount, 2);
+  assert.deepEqual(snapshot.batches[0], {
+    batchId: "batch-1",
+    batchNo: "PO-2026-030",
+    batchDate: "2026-07-30",
+    supplier: "供应商A",
+    origins: ["印尼"],
+    addCount: 2,
+    removeCount: 1,
+    updateCount: 0,
+  });
+  assert.equal(snapshot.tanks[1].rows[0].origin, "印尼");
+});
+
+test("inventory adjustment signatures ignore generated stock ids", () => {
+  const input = {
+    stock: [{ id: "remove-a", productId: "product-1", batchId: "batch-1", subTankId: "tank-1" }],
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }, { id: "tank-2", name: "D1-2" }] }],
+  };
+  const first = buildStockChangeSnapshot({
+    ...input,
+    deleteIds: ["remove-a"],
+    upsertItems: [{ id: "generated-a", productId: "product-1", batchId: "batch-1", subTankId: "tank-2" }],
+  });
+  const second = buildStockChangeSnapshot({
+    ...input,
+    deleteIds: ["remove-a"],
+    upsertItems: [{ id: "generated-b", productId: "product-1", batchId: "batch-1", subTankId: "tank-2" }],
+  });
+
+  assert.deepEqual(stockChangeAdjustmentSignature(first), stockChangeAdjustmentSignature(second));
+});
 
 test("stock deletion approvals preserve complete inventory details", () => {
   const snapshot = buildStockDeletionSnapshot({

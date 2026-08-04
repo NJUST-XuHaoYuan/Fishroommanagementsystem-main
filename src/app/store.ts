@@ -161,6 +161,52 @@ export type InventoryCheck = {
   notes: string;
 };
 
+export type InventoryAdjustmentLine = {
+  id: string;
+  subTankId: string;
+  productId: string;
+  batchId: string;
+  direction: "add" | "remove";
+  quantity: number;
+};
+
+export type InventoryAdjustmentDraft = {
+  id: string;
+  siteId: string;
+  lines: InventoryAdjustmentLine[];
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  createdByName?: string;
+};
+
+export type StockChangeRequest = {
+  upsert?: StockItem[];
+  deleteIds?: string[];
+  adjustmentContext?: {
+    kind: "inventory_adjustment";
+    draftId?: string;
+    lines?: InventoryAdjustmentLine[];
+  };
+  confirmDuplicate?: boolean;
+};
+
+export type StockChangeResult = {
+  ok: boolean;
+  error?: string;
+  pendingApproval?: boolean;
+  approvalRequestId?: string;
+  message?: string;
+  duplicateConfirmationRequired?: boolean;
+  duplicate?: {
+    requestId?: string;
+    createdAt?: string;
+    status?: string;
+    title?: string;
+  };
+};
+
 export type StockLossRecord = {
   id: string;
   siteId?: string;
@@ -489,13 +535,7 @@ export type StoreContextType = {
   setState: React.Dispatch<React.SetStateAction<Store>>;
   savePatch: (patch: Partial<Omit<Store, "user">>) => Promise<boolean>;
   saveProduct: (product: Product) => Promise<boolean>;
-  saveStockChange: (change: { upsert?: StockItem[]; deleteIds?: string[] }) => Promise<{
-    ok: boolean;
-    error?: string;
-    pendingApproval?: boolean;
-    approvalRequestId?: string;
-    message?: string;
-  }>;
+  saveStockChange: (change: StockChangeRequest) => Promise<StockChangeResult>;
   saveMaintenanceAction: (change:
     | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
     | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }

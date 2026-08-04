@@ -28,6 +28,7 @@ import { Button } from "./ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -63,12 +64,59 @@ type StockApprovalItemDetail = {
   linkedOrders?: StockApprovalLinkedOrder[];
 };
 
-type StockApprovalDetails = {
+type StockDeletionApprovalDetails = {
   type: "stock_delete";
   requestedCount: number;
   availableCount: number;
   items: StockApprovalItemDetail[];
 };
+
+type StockChangeApprovalRow = {
+  productId: string;
+  productName: string;
+  speciesName?: string;
+  size?: string;
+  origin?: string;
+  batchId?: string;
+  batchNo: string;
+  batchDate?: string;
+  supplier?: string;
+  addCount: number;
+  removeCount: number;
+  updateCount: number;
+};
+
+type StockChangeApprovalDetails = {
+  type: "stock_change";
+  requestedCount: number;
+  totals: { addCount: number; removeCount: number; updateCount: number };
+  tanks: Array<{
+    subTankId: string;
+    tankName: string;
+    addCount: number;
+    removeCount: number;
+    updateCount: number;
+    rows: StockChangeApprovalRow[];
+  }>;
+  batches: Array<{
+    batchId?: string;
+    batchNo: string;
+    batchDate?: string;
+    supplier?: string;
+    origins?: string[];
+    addCount: number;
+    removeCount: number;
+    updateCount: number;
+  }>;
+  items: Array<{
+    operation: "add" | "remove" | "update";
+    stockItemId: string;
+    before?: StockApprovalItemDetail | null;
+    after?: StockApprovalItemDetail | null;
+  }>;
+};
+
+type StockApprovalDetails = StockDeletionApprovalDetails | StockChangeApprovalDetails;
 
 type StationNotification = {
   id: string;
@@ -91,6 +139,7 @@ type StationNotification = {
   canApprove?: boolean;
   approvalRequestId?: string;
   approvalAction?: string;
+  notificationRole?: "approver" | "requester";
   resolvedAt?: string;
   resolvedBy?: string;
   resolvedByName?: string;
@@ -247,7 +296,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [creditNote, setCreditNote] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [selectedApproval, setSelectedApproval] = useState<StationNotification | null>(null);
-  const [approvalDecision, setApprovalDecision] = useState<"approve" | "reject">("approve");
+  const [approvalDecision, setApprovalDecision] = useState<"approve" | "reject" | null>(null);
   const [approvalNote, setApprovalNote] = useState("");
   const [processingApproval, setProcessingApproval] = useState(false);
 
@@ -437,8 +486,15 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     setSelectedApproval(notification);
   };
 
+  const viewStockApproval = (notification: StationNotification) => {
+    setApprovalDecision(null);
+    setApprovalNote("");
+    setSelectedApproval(notification);
+    void markRead(notification);
+  };
+
   const processStockApproval = async () => {
-    if (!selectedApproval?.approvalRequestId || processingApproval) return;
+    if (!selectedApproval?.approvalRequestId || !approvalDecision || processingApproval) return;
     setProcessingApproval(true);
     try {
       const response = await fetch("/api/approvals/stock", {
@@ -515,6 +571,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     { value: "completed", label: "已处理", count: completedCount },
   ];
   const selectedStockDetails = selectedApproval?.stockDetails?.type === "stock_delete"
+    ? selectedApproval.stockDetails
+    : null;
+  const selectedStockChangeDetails = selectedApproval?.stockDetails?.type === "stock_change"
     ? selectedApproval.stockDetails
     : null;
 
@@ -645,12 +704,17 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <ExternalLink className="size-3.5" />查看订单
                         </Button>
                       )}
+                      {notification.type === "stock_approval" && notification.stockDetails && (
+                        <Button variant="outline" size="sm" onClick={() => viewStockApproval(notification)}>
+                          <Boxes className="size-3.5" />查看明细
+                        </Button>
+                      )}
                       {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                           <HandCoins className="size-3.5" />同意赊销
                         </Button>
                       )}
-                      {pending && notification.type === "stock_approval" && (
+                      {pending && notification.type === "stock_approval" && notification.canApprove === true && (
                         <>
                           <Button
                             variant="outline"
@@ -682,9 +746,12 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       <Dialog open={!!selected} onOpenChange={(nextOpen) => {
         if (!nextOpen && !confirming) setSelected(null);
       }}>
-        <DialogContent aria-describedby={undefined}>
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>审批赊销 · {selected?.orderNo}</DialogTitle>
+            <DialogDescription className="sr-only">
+              核对订单未核销金额并填写赊销审批说明。
+            </DialogDescription>
           </DialogHeader>
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
             同意后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。审批人、时间和说明会同步给其他被选审批人。
@@ -713,22 +780,114 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       <Dialog open={!!selectedApproval} onOpenChange={(nextOpen) => {
         if (!nextOpen && !processingApproval) setSelectedApproval(null);
       }}>
-        <DialogContent className="sm:max-w-5xl" aria-describedby={undefined}>
+        <DialogContent className="sm:max-w-5xl">
           <DialogHeader>
             <DialogTitle>
-              {approvalDecision === "approve" ? "批准库存操作" : "驳回库存操作"}
+              {approvalDecision === "approve"
+                ? "批准库存操作"
+                : approvalDecision === "reject"
+                  ? "驳回库存操作"
+                  : "库存操作明细"}
             </DialogTitle>
+            <DialogDescription className="sr-only">
+              核对库存操作涉及的批次、供应商、产地、商品和各缸位增减数量。
+            </DialogDescription>
           </DialogHeader>
           <div className={`rounded-md border px-3 py-2 text-sm leading-6 ${
             approvalDecision === "approve"
               ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-              : "border-red-200 bg-red-50 text-red-900"
+              : approvalDecision === "reject"
+                ? "border-red-200 bg-red-50 text-red-900"
+                : "border-sky-200 bg-sky-50 text-sky-900"
           }`}>
             <div>{selectedApproval?.message}</div>
             <div className="mt-1 text-xs opacity-80">
               发起人：{actorLabel(selectedApproval?.createdByName, selectedApproval?.createdBy)}
             </div>
           </div>
+          {selectedStockChangeDetails && (
+            <section className="grid gap-3" aria-label="库存变更明细">
+              <div className="grid grid-cols-3 divide-x rounded-md border bg-muted/30 text-center">
+                <div className="px-2 py-2">
+                  <div className="text-xs text-muted-foreground">涉及缸位</div>
+                  <div className="mt-0.5 font-semibold">{selectedStockChangeDetails.tanks.length}</div>
+                </div>
+                <div className="px-2 py-2">
+                  <div className="text-xs text-muted-foreground">增加</div>
+                  <div className="mt-0.5 font-semibold text-emerald-700">+{selectedStockChangeDetails.totals.addCount}</div>
+                </div>
+                <div className="px-2 py-2">
+                  <div className="text-xs text-muted-foreground">减少</div>
+                  <div className="mt-0.5 font-semibold text-red-700">-{selectedStockChangeDetails.totals.removeCount}</div>
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-md border">
+                <div className="border-b bg-muted/40 px-3 py-2 text-sm font-semibold">批次信息</div>
+                <div className="divide-y">
+                  {selectedStockChangeDetails.batches.map((batch) => (
+                    <div key={batch.batchId || batch.batchNo} className="grid gap-1 px-3 py-2.5 text-sm sm:grid-cols-[150px_120px_1fr_auto] sm:items-center sm:gap-3">
+                      <div className="font-semibold">{batch.batchNo}</div>
+                      <div className="text-muted-foreground">{batch.batchDate || "日期未记录"}</div>
+                      <div className="min-w-0">
+                        <div>{batch.supplier || "供应商未记录"}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                          产地：{batch.origins?.length ? batch.origins.join("、") : "未记录"}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 sm:justify-end">
+                        {batch.addCount > 0 && <Badge className="bg-emerald-100 text-emerald-800">增加 {batch.addCount}</Badge>}
+                        {batch.removeCount > 0 && <Badge className="bg-red-100 text-red-800">减少 {batch.removeCount}</Badge>}
+                        {batch.updateCount > 0 && <Badge variant="secondary">修改 {batch.updateCount}</Badge>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="max-h-[42vh] space-y-2 overflow-y-auto pr-1">
+                {selectedStockChangeDetails.tanks.map((tank) => (
+                  <div key={tank.subTankId || tank.tankName} className="overflow-hidden rounded-md border">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/35 px-3 py-2">
+                      <div className="inline-flex items-center gap-1.5 text-sm font-semibold">
+                        <MapPin className="size-3.5 text-sky-700" />{tank.tankName}
+                      </div>
+                      <div className="flex gap-1.5 text-xs">
+                        {tank.addCount > 0 && <span className="font-semibold text-emerald-700">+{tank.addCount}</span>}
+                        {tank.removeCount > 0 && <span className="font-semibold text-red-700">-{tank.removeCount}</span>}
+                        {tank.updateCount > 0 && <span className="font-semibold text-sky-700">修改 {tank.updateCount}</span>}
+                      </div>
+                    </div>
+                    <div className="divide-y">
+                      {tank.rows.map((row) => (
+                        <div key={`${row.productId}-${row.batchId}`} className="grid gap-2 px-3 py-2.5 text-sm md:grid-cols-[1.2fr_1fr_1.35fr_auto] md:items-center">
+                          <div>
+                            <div className="font-medium">{row.productName}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                              {[row.speciesName !== row.productName ? row.speciesName : "", row.size, row.origin].filter(Boolean).join(" · ") || "商品信息未完整记录"}
+                            </div>
+                          </div>
+                          <div className="text-xs">
+                            <div>{row.batchNo}</div>
+                            <div className="mt-0.5 text-muted-foreground">{row.batchDate || "日期未记录"}</div>
+                          </div>
+                          <div className="text-xs">
+                            <div>{row.supplier || "供应商未记录"}</div>
+                            <div className="mt-0.5 text-muted-foreground">产地：{row.origin || "未记录"}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 md:justify-end">
+                            {row.addCount > 0 && <Badge className="bg-emerald-100 text-emerald-800">增加 {row.addCount}</Badge>}
+                            {row.removeCount > 0 && <Badge className="bg-red-100 text-red-800">减少 {row.removeCount}</Badge>}
+                            {row.updateCount > 0 && <Badge variant="secondary">修改 {row.updateCount}</Badge>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
           {selectedStockDetails && (
             <section className="grid gap-2" aria-label="待删除库存明细">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -895,7 +1054,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               </div>
             </section>
           )}
-          <div className="grid gap-1.5">
+          {approvalDecision && <div className="grid gap-1.5">
             <label className="text-sm font-medium" htmlFor="stock-approval-note">审批说明</label>
             <Textarea
               id="stock-approval-note"
@@ -905,16 +1064,16 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               onChange={(event) => setApprovalNote(event.target.value)}
               placeholder={approvalDecision === "approve" ? "可填写批准说明" : "建议填写驳回原因"}
             />
-          </div>
+          </div>}
           <DialogFooter>
             <Button
               variant="outline"
               disabled={processingApproval}
               onClick={() => setSelectedApproval(null)}
             >
-              取消
+              {approvalDecision ? "取消" : "关闭"}
             </Button>
-            <Button
+            {approvalDecision && <Button
               variant={approvalDecision === "approve" ? "default" : "destructive"}
               disabled={processingApproval}
               onClick={() => void processStockApproval()}
@@ -929,7 +1088,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                 : approvalDecision === "approve"
                   ? "批准并执行"
                   : "确认驳回"}
-            </Button>
+            </Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

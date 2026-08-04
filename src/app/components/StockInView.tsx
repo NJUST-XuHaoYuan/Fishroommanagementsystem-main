@@ -25,6 +25,7 @@ import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
 import { orderSourceLabel } from "../utils/orderSources";
+import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
 
 type StockViewMode = "tank" | "species";
 type StockInViewProps = {
@@ -815,8 +816,9 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
           <h2>库存明细</h2>
           <p className="text-sm text-muted-foreground">按缸位或品种查看和管理在缸库存</p>
         </div>
-        <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
-          <ToggleGroup
+	        <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
+	          {(permission.canCreate || permission.canDelete) && <InventoryAdjustmentDialog />}
+	          <ToggleGroup
             type="single"
             value={viewMode}
             onValueChange={(value) => {
