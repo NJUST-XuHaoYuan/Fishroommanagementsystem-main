@@ -1643,38 +1643,81 @@ function currentStationNotifications(state = {}) {
   return Array.isArray(state.notifications) ? state.notifications : [];
 }
 
-function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100) {
+const stationNotificationStateProjection = `jsonb_build_object(
+  'notifications', COALESCE(data->'notifications', '[]'::jsonb),
+  'approvalRequests', COALESCE(data->'approvalRequests', '[]'::jsonb),
+  'orders', COALESCE(data->'orders', '[]'::jsonb),
+  'personnel', COALESCE(data->'personnel', '[]'::jsonb),
+  'sites', COALESCE(data->'sites', '[]'::jsonb)
+)`;
+
+async function readStationNotificationState(queryable = pool, { forUpdate = false } = {}) {
+  const lockClause = forUpdate ? " FOR UPDATE" : "";
+  const { rows } = await queryable.query(
+    `SELECT ${stationNotificationStateProjection} AS data FROM app_state WHERE id = $1${lockClause}`,
+    [stateId]
+  );
+  return rows[0]?.data ?? {};
+}
+
+function visibleOrdersForNotificationAuth(state = {}, account = {}) {
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  if (!account || account.accessRole === "admin") return orders;
+  const sites = getSitesFromState(state);
+  const visibleSiteIds = visibleSiteIdsForAccount(account, state);
+  if (visibleSiteIds.length === 0 || visibleSiteIds.length >= sites.length) return orders;
+  return orders.filter((order) => matchesAnyVisibleSite(order, visibleSiteIds));
+}
+
+function stationNotificationForAuth(state = {}, req, notification = {}, options = {}) {
+  const includeStockDetails = options.includeStockDetails === true;
+  if (notification?.type === "credit_sale_confirmation") {
+    const ordersById = options.ordersById instanceof Map
+      ? options.ordersById
+      : new Map(visibleOrdersForNotificationAuth(state, req.auth?.account)
+        .map((item) => [String(item?.id ?? ""), item]));
+    const order = ordersById.get(String(notification?.orderId ?? ""));
+    return {
+      ...notification,
+      canApprove: notification?.status === "pending" &&
+        Boolean(order) &&
+        canApproveCreditSale(state.personnel, order, String(req.auth?.user?.username ?? "")),
+    };
+  }
+  if (notification?.type === "stock_approval") {
+    const approvalRequestsById = options.approvalRequestsById instanceof Map
+      ? options.approvalRequestsById
+      : new Map(currentApprovalRequests(state)
+        .map((request) => [String(request?.id ?? ""), request])
+        .filter(([id]) => id));
+    const approvalRequest = approvalRequestsById.get(String(notification?.approvalRequestId ?? ""));
+    return {
+      ...notification,
+      canApprove: notification?.notificationRole !== "requester" &&
+        notification?.status === "pending" &&
+        approvalRequest?.status === "pending" &&
+        req.auth?.account?.accessRole === "admin",
+      ...(includeStockDetails ? { stockDetails: stockApprovalDetailsForRequest(state, approvalRequest) } : {}),
+    };
+  }
+  return notification;
+}
+
+function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100, options = {}) {
   const username = String(req.auth?.user?.username ?? "").trim();
   const allNotifications = notificationsForRecipient(currentStationNotifications(state), username);
   const limit = Math.min(500, Math.max(1, Number(requestedLimit) || 100));
-  const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
-  const ordersById = new Map(visibleOrders.map((order) => [String(order?.id ?? ""), order]));
+  const ordersById = new Map(visibleOrdersForNotificationAuth(state, req.auth?.account)
+    .map((order) => [String(order?.id ?? ""), order]));
   const approvalRequestsById = new Map(currentApprovalRequests(state)
     .map((request) => [String(request?.id ?? ""), request])
     .filter(([id]) => id));
-  const notifications = allNotifications.slice(0, limit).map((notification) => {
-    if (notification?.type === "credit_sale_confirmation") {
-      const order = ordersById.get(String(notification?.orderId ?? ""));
-      return {
-        ...notification,
-        canApprove: notification?.status === "pending" &&
-          Boolean(order) &&
-          canApproveCreditSale(state.personnel, order, username),
-      };
-    }
-    if (notification?.type === "stock_approval") {
-      const approvalRequest = approvalRequestsById.get(String(notification?.approvalRequestId ?? ""));
-      return {
-        ...notification,
-        canApprove: notification?.notificationRole !== "requester" &&
-          notification?.status === "pending" &&
-          approvalRequest?.status === "pending" &&
-          req.auth?.account?.accessRole === "admin",
-        stockDetails: stockApprovalDetailsForRequest(state, approvalRequest),
-      };
-    }
-    return notification;
-  });
+  const notifications = allNotifications.slice(0, limit)
+    .map((notification) => stationNotificationForAuth(state, req, notification, {
+      ...options,
+      ordersById,
+      approvalRequestsById,
+    }));
   return {
     notifications,
     totalCount: allNotifications.length,
@@ -2808,6 +2851,21 @@ function stockApprovalDetailsForRequest(state = {}, approvalRequest = {}) {
   const deleteIds = Array.isArray(approvalRequest?.payload?.deleteIds)
     ? approvalRequest.payload.deleteIds
     : [];
+  const upsertItems = Array.isArray(approvalRequest?.payload?.upsert)
+    ? approvalRequest.payload.upsert
+    : [];
+  if (upsertItems.length > 0) {
+    return buildStockChangeSnapshot({
+      upsertItems,
+      deleteIds,
+      stock: state.stock,
+      products: state.products,
+      species: state.species,
+      batches: state.batches,
+      tankGroups: state.tankGroups,
+      orders: state.orders,
+    });
+  }
   if (deleteIds.length === 0) return null;
   return buildStockDeletionSnapshot({
     deleteIds,
@@ -5194,17 +5252,52 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/notifications" && req.method === "GET") {
     try {
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = await readStationNotificationState();
       const requestedLimit = Number.parseInt(String(url.searchParams.get("limit") ?? "100"), 10);
       const limit = Number.isFinite(requestedLimit)
         ? Math.min(500, Math.max(1, requestedLimit))
         : 100;
       sendJson(req, res, 200, {
         ok: true,
-        ...stationNotificationPayloadForAuth(rows[0]?.data ?? {}, req, limit),
+        ...stationNotificationPayloadForAuth(state, req, limit),
       });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "站内信加载失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/notifications/detail" && req.method === "GET") {
+    try {
+      const notificationId = String(url.searchParams.get("id") ?? "").trim();
+      if (!notificationId) throw new Error("缺少站内信编号");
+      let state = await readStationNotificationState();
+      const notification = notificationsForRecipient(
+        currentStationNotifications(state),
+        req.auth?.user?.username
+      ).find((item) => String(item?.id ?? "") === notificationId);
+      if (!notification) {
+        sendJson(req, res, 404, { ok: false, error: "站内信不存在或无权查看" });
+        return;
+      }
+      if (notification.type === "stock_approval") {
+        const approvalRequest = currentApprovalRequests(state)
+          .find((request) => String(request?.id ?? "") === String(notification.approvalRequestId ?? ""));
+        const hasStoredDetails = ["stock_delete", "stock_change"].includes(approvalRequest?.stockDetails?.type) &&
+          Array.isArray(approvalRequest?.stockDetails?.items);
+        const hasLegacyPayload = (Array.isArray(approvalRequest?.payload?.deleteIds) && approvalRequest.payload.deleteIds.length > 0) ||
+          (Array.isArray(approvalRequest?.payload?.upsert) && approvalRequest.payload.upsert.length > 0);
+        if (!hasStoredDetails && hasLegacyPayload) {
+          const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+          state = rows[0]?.data ?? state;
+        }
+      }
+      sendJson(req, res, 200, {
+        ok: true,
+        notification: stationNotificationForAuth(state, req, notification, { includeStockDetails: true }),
+      });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "站内信明细加载失败" });
     }
     return;
   }
@@ -5222,23 +5315,23 @@ async function handleApi(req, res, url) {
             : [];
       if (body.all !== true && ids.length === 0) throw new Error("请选择要标记的站内信");
       await client.query("BEGIN");
-      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const state = rows[0]?.data ?? {};
+      const state = await readStationNotificationState(client, { forUpdate: true });
       const marked = markNotificationsRead(
         currentStationNotifications(state),
         req.auth?.user?.username,
         ids
       );
       if (marked.changed) {
-        await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        await client.query("UPDATE app_state SET data = jsonb_set(data, '{notifications}', $2::jsonb, true), updated_at = now() WHERE id = $1", [
           stateId,
-          JSON.stringify({ ...state, notifications: marked.notifications }),
+          JSON.stringify(marked.notifications),
         ]);
       }
       await client.query("COMMIT");
+      const visibleNotifications = notificationsForRecipient(marked.notifications, req.auth?.user?.username);
       sendJson(req, res, 200, {
         ok: true,
-        ...stationNotificationPayloadForAuth({ ...state, notifications: marked.notifications }, req, 100),
+        unreadCount: visibleNotifications.filter((notification) => !notification?.readAt).length,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);

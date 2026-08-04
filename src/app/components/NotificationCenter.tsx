@@ -5,6 +5,7 @@ import {
   CheckCheck,
   CheckCircle2,
   ExternalLink,
+  FilterX,
   HandCoins,
   Inbox,
   Loader2,
@@ -33,6 +34,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
+import { Input } from "./ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Textarea } from "./ui/textarea";
 
 type StockApprovalLinkedOrder = {
@@ -149,6 +152,11 @@ type StationNotification = {
 
 type NotificationFilter = "all" | "unread" | "pending" | "completed";
 
+type NotificationFacet = {
+  value: string;
+  label: string;
+};
+
 type NotificationRefreshDetail = {
   source?: "notification-center";
   unreadCount?: number;
@@ -202,10 +210,26 @@ function notificationResultLabel(notification: StationNotification): string {
   }[notification.resolution ?? ""] ?? "已处理";
 }
 
-function notificationTypeLabel(type: StationNotification["type"]): string {
-  if (type === "stock_approval") return "库存审批";
-  if (type === "approval_result") return "审批结果";
-  if (type === "credit_sale_confirmation") return "赊销确认";
+function notificationTypeKey(notification: StationNotification): string {
+  if (notification.type === "stock_approval") {
+    return `stock_approval:${notification.approvalAction || "stock_change"}`;
+  }
+  return notification.type || "system";
+}
+
+function notificationTypeLabel(notification: StationNotification): string {
+  if (notification.type === "stock_approval") {
+    return {
+      delete_stock: "库存删除",
+      update_stock: "库存修改",
+      add_stock_to_old_batch: "超时批次入库",
+      inventory_adjustment: "盘库调整",
+      mixed_stock_change: "库存综合变更",
+      stock_change: "库存变更",
+    }[notification.approvalAction ?? ""] ?? "库存审批";
+  }
+  if (notification.type === "approval_result") return "审批结果";
+  if (notification.type === "credit_sale_confirmation") return "赊销确认";
   return "系统消息";
 }
 
@@ -214,6 +238,22 @@ function actorLabel(name?: string, username?: string): string {
   const safeUsername = String(username ?? "").trim();
   if (safeName && safeUsername && safeName !== safeUsername) return `${safeName}（${safeUsername}）`;
   return safeName || safeUsername || "系统";
+}
+
+function notificationSenderKey(notification: StationNotification): string {
+  const username = String(notification.createdBy ?? "").trim();
+  const name = String(notification.createdByName ?? "").trim();
+  return username || (name ? `name:${name}` : "system");
+}
+
+function notificationDateKey(notification: StationNotification): string {
+  const value = notification.updatedAt || notification.createdAt;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value ?? "").slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function stockStatusLabel(status?: string): string {
@@ -292,6 +332,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [totalCount, setTotalCount] = useState(0);
   const [unreadCount, setUnreadCount] = useState(0);
   const [filter, setFilter] = useState<NotificationFilter>("all");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [senderFilter, setSenderFilter] = useState("all");
   const [selected, setSelected] = useState<StationNotification | null>(null);
   const [creditNote, setCreditNote] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -299,21 +343,53 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [approvalDecision, setApprovalDecision] = useState<"approve" | "reject" | null>(null);
   const [approvalNote, setApprovalNote] = useState("");
   const [processingApproval, setProcessingApproval] = useState(false);
+  const [loadingApprovalDetails, setLoadingApprovalDetails] = useState(false);
+  const [approvalDetailError, setApprovalDetailError] = useState("");
 
+  const typeOptions = useMemo<NotificationFacet[]>(() => {
+    const options = new Map<string, string>();
+    notifications.forEach((notification) => {
+      options.set(notificationTypeKey(notification), notificationTypeLabel(notification));
+    });
+    return [...options.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
+  }, [notifications]);
+  const senderOptions = useMemo<NotificationFacet[]>(() => {
+    const options = new Map<string, string>();
+    notifications.forEach((notification) => {
+      options.set(
+        notificationSenderKey(notification),
+        actorLabel(notification.createdByName, notification.createdBy)
+      );
+    });
+    return [...options.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
+  }, [notifications]);
+  const facetFilteredNotifications = useMemo(() => notifications.filter((notification) => {
+    const date = notificationDateKey(notification);
+    if (startDate && date < startDate) return false;
+    if (endDate && date > endDate) return false;
+    if (typeFilter !== "all" && notificationTypeKey(notification) !== typeFilter) return false;
+    if (senderFilter !== "all" && notificationSenderKey(notification) !== senderFilter) return false;
+    return true;
+  }), [endDate, notifications, senderFilter, startDate, typeFilter]);
   const pendingCount = useMemo(
-    () => notifications.filter((notification) => notification.status === "pending").length,
-    [notifications]
+    () => facetFilteredNotifications.filter((notification) => notification.status === "pending").length,
+    [facetFilteredNotifications]
   );
   const completedCount = useMemo(
-    () => notifications.filter((notification) => notification.status === "completed").length,
-    [notifications]
+    () => facetFilteredNotifications.filter((notification) => notification.status === "completed").length,
+    [facetFilteredNotifications]
   );
-  const filteredNotifications = useMemo(() => notifications.filter((notification) => {
+  const filteredNotifications = useMemo(() => facetFilteredNotifications.filter((notification) => {
     if (filter === "unread") return !notification.readAt;
     if (filter === "pending") return notification.status === "pending";
     if (filter === "completed") return notification.status === "completed";
     return true;
-  }), [filter, notifications]);
+  }), [facetFilteredNotifications, filter]);
+  const hasFacetFilters = Boolean(startDate || endDate || typeFilter !== "all" || senderFilter !== "all");
 
   const loadNotifications = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -477,24 +553,51 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     }
   };
 
-  const startStockApproval = (
+  const loadStockApprovalDetails = async (notification: StationNotification) => {
+    if (notification.stockDetails) {
+      setLoadingApprovalDetails(false);
+      setApprovalDetailError("");
+      return;
+    }
+    setLoadingApprovalDetails(true);
+    setApprovalDetailError("");
+    try {
+      const response = await fetch(`/api/notifications/detail?id=${encodeURIComponent(notification.id)}`, {
+        headers: authJsonHeaders(),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok || !result.notification) {
+        throw new Error(result.error || "库存审批明细加载失败");
+      }
+      setSelectedApproval((current) => current?.id === notification.id ? result.notification : current);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "库存审批明细加载失败";
+      setApprovalDetailError(message);
+      toast.error(message);
+    } finally {
+      setLoadingApprovalDetails(false);
+    }
+  };
+
+  const openStockApproval = (
     notification: StationNotification,
-    decision: "approve" | "reject"
+    decision: "approve" | "reject" | null
   ) => {
     setApprovalDecision(decision);
     setApprovalNote("");
     setSelectedApproval(notification);
-  };
-
-  const viewStockApproval = (notification: StationNotification) => {
-    setApprovalDecision(null);
-    setApprovalNote("");
-    setSelectedApproval(notification);
     void markRead(notification);
+    void loadStockApprovalDetails(notification);
   };
 
   const processStockApproval = async () => {
-    if (!selectedApproval?.approvalRequestId || !approvalDecision || processingApproval) return;
+    if (
+      !selectedApproval?.approvalRequestId ||
+      !approvalDecision ||
+      processingApproval ||
+      loadingApprovalDetails ||
+      approvalDetailError
+    ) return;
     setProcessingApproval(true);
     try {
       const response = await fetch("/api/approvals/stock", {
@@ -565,8 +668,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   };
 
   const filters: { value: NotificationFilter; label: string; count: number }[] = [
-    { value: "all", label: "全部", count: totalCount },
-    { value: "unread", label: "未读", count: unreadCount },
+    { value: "all", label: "全部", count: hasFacetFilters ? facetFilteredNotifications.length : totalCount },
+    { value: "unread", label: "未读", count: facetFilteredNotifications.filter((notification) => !notification.readAt).length },
     { value: "pending", label: "待处理", count: pendingCount },
     { value: "completed", label: "已处理", count: completedCount },
   ];
@@ -625,6 +728,71 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
           </Button>
         </div>
 
+        <div className="grid grid-cols-2 gap-3 border-b pb-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.2fr)_auto] lg:items-end">
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground" htmlFor="notification-start-date">
+              开始日期
+            </label>
+            <Input
+              id="notification-start-date"
+              type="date"
+              value={startDate}
+              max={endDate || undefined}
+              onChange={(event) => setStartDate(event.target.value)}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground" htmlFor="notification-end-date">
+              结束日期
+            </label>
+            <Input
+              id="notification-end-date"
+              type="date"
+              value={endDate}
+              min={startDate || undefined}
+              onChange={(event) => setEndDate(event.target.value)}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground">消息类型</label>
+            <Select value={typeFilter} onValueChange={setTypeFilter}>
+              <SelectTrigger className="w-full" aria-label="消息类型"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部类型</SelectItem>
+                {typeOptions.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground">发件人</label>
+            <Select value={senderFilter} onValueChange={setSenderFilter}>
+              <SelectTrigger className="w-full" aria-label="发件人"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部发件人</SelectItem>
+                {senderOptions.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            className="col-span-2 w-full lg:col-span-1 lg:w-auto"
+            disabled={!hasFacetFilters}
+            onClick={() => {
+              setStartDate("");
+              setEndDate("");
+              setTypeFilter("all");
+              setSenderFilter("all");
+            }}
+          >
+            <FilterX className="size-4" />清除筛选
+          </Button>
+        </div>
+
         <div className="overflow-hidden rounded-md border bg-card">
           <div className="flex min-h-11 items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
             <div className="text-sm font-semibold">
@@ -659,7 +827,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           {!notification.readAt && <span className="size-2 shrink-0 rounded-full bg-sky-500" />}
                           <div className="text-sm font-semibold text-foreground">{notification.title}</div>
                           <Badge variant="secondary" className="font-normal">
-                            {notificationTypeLabel(notification.type)}
+                            {notificationTypeLabel(notification)}
                           </Badge>
                         </div>
                         <div className="mt-1.5 text-sm leading-6 text-muted-foreground">{notification.message}</div>
@@ -704,8 +872,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <ExternalLink className="size-3.5" />查看订单
                         </Button>
                       )}
-                      {notification.type === "stock_approval" && notification.stockDetails && (
-                        <Button variant="outline" size="sm" onClick={() => viewStockApproval(notification)}>
+                      {notification.type === "stock_approval" && notification.approvalRequestId && (
+                        <Button variant="outline" size="sm" onClick={() => openStockApproval(notification, null)}>
                           <Boxes className="size-3.5" />查看明细
                         </Button>
                       )}
@@ -719,11 +887,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => startStockApproval(notification, "reject")}
+                            onClick={() => openStockApproval(notification, "reject")}
                           >
                             <XCircle className="size-3.5" />驳回
                           </Button>
-                          <Button size="sm" onClick={() => startStockApproval(notification, "approve")}>
+                          <Button size="sm" onClick={() => openStockApproval(notification, "approve")}>
                             <CheckCircle2 className="size-3.5" />批准
                           </Button>
                         </>
@@ -778,7 +946,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       </Dialog>
 
       <Dialog open={!!selectedApproval} onOpenChange={(nextOpen) => {
-        if (!nextOpen && !processingApproval) setSelectedApproval(null);
+        if (!nextOpen && !processingApproval) {
+          setSelectedApproval(null);
+          setApprovalDetailError("");
+          setLoadingApprovalDetails(false);
+        }
       }}>
         <DialogContent className="sm:max-w-5xl">
           <DialogHeader>
@@ -805,6 +977,26 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               发起人：{actorLabel(selectedApproval?.createdByName, selectedApproval?.createdBy)}
             </div>
           </div>
+          {loadingApprovalDetails && (
+            <div className="flex min-h-28 items-center justify-center rounded-md border bg-muted/20 text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />正在加载库存审批明细
+            </div>
+          )}
+          {approvalDetailError && (
+            <div className="flex flex-col items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800 sm:flex-row sm:items-center">
+              <span>{approvalDetailError}</span>
+              {selectedApproval && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadStockApprovalDetails(selectedApproval)}
+                >
+                  <RefreshCw className="size-3.5" />重试
+                </Button>
+              )}
+            </div>
+          )}
           {selectedStockChangeDetails && (
             <section className="grid gap-3" aria-label="库存变更明细">
               <div className="grid grid-cols-3 divide-x rounded-md border bg-muted/30 text-center">
@@ -1075,7 +1267,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             </Button>
             {approvalDecision && <Button
               variant={approvalDecision === "approve" ? "default" : "destructive"}
-              disabled={processingApproval}
+              disabled={processingApproval || loadingApprovalDetails || Boolean(approvalDetailError)}
               onClick={() => void processStockApproval()}
             >
               {processingApproval
