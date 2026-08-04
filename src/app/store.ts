@@ -227,10 +227,28 @@ export type InventoryAdjustmentLine = {
   quantity: number;
 };
 
+export type InventoryAdjustmentAddition = {
+  id: string;
+  subTankId: string;
+  productId: string;
+  batchId: string;
+  quantity: number;
+  status: StockStatus;
+  inDate: string;
+  basePrice: number;
+  code?: string;
+  notes?: string;
+};
+
 export type InventoryAdjustmentDraft = {
   id: string;
   siteId: string;
-  lines: InventoryAdjustmentLine[];
+  /** 精确记录待减少的库存，避免按数量自动选择错误个体。 */
+  removeStockIds: string[];
+  additions: InventoryAdjustmentAddition[];
+  activeSubTankId?: string;
+  /** 兼容旧版盘库草稿；新版保存后不再写入。 */
+  lines?: InventoryAdjustmentLine[];
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -244,6 +262,9 @@ export type StockChangeRequest = {
   adjustmentContext?: {
     kind: "inventory_adjustment";
     draftId?: string;
+    siteId?: string;
+    removeStockIds?: string[];
+    additionStockIds?: string[];
     lines?: InventoryAdjustmentLine[];
   };
   confirmDuplicate?: boolean;

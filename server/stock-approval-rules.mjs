@@ -353,7 +353,7 @@ function stableSignature(value) {
 }
 
 export function stockChangeAdjustmentSignature(stockDetails = {}) {
-  return (Array.isArray(stockDetails.tanks) ? stockDetails.tanks : [])
+  const rows = (Array.isArray(stockDetails.tanks) ? stockDetails.tanks : [])
     .flatMap((tank) => (Array.isArray(tank?.rows) ? tank.rows : []).map((row) => ({
       subTankId: normalizedText(tank?.subTankId),
       productId: normalizedText(row?.productId),
@@ -363,6 +363,10 @@ export function stockChangeAdjustmentSignature(stockDetails = {}) {
       updateCount: Number(row?.updateCount ?? 0),
     })))
     .sort((left, right) => stableSignature(left).localeCompare(stableSignature(right)));
+  const removeStockIds = Array.isArray(stockDetails?.signature?.removes)
+    ? stockDetails.signature.removes.map(normalizedText).filter(Boolean).sort()
+    : [];
+  return { rows, removeStockIds };
 }
 
 export function batchRequiresLateStockApproval(batch = {}, now = Date.now()) {

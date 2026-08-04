@@ -37,6 +37,10 @@ body {
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   }
 
+  .fishroom-content .water-settings-mobile-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
   .fishroom-content .items-end.justify-between,
   .fishroom-content .items-center.justify-between {
     align-items: flex-start;

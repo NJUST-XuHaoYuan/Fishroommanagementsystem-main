@@ -70,6 +70,22 @@ test("inventory adjustment signatures ignore generated stock ids", () => {
   assert.deepEqual(stockChangeAdjustmentSignature(first), stockChangeAdjustmentSignature(second));
 });
 
+test("inventory adjustment signatures distinguish exact removals", () => {
+  const input = {
+    stock: [
+      { id: "remove-a", productId: "product-1", batchId: "batch-1", subTankId: "tank-1" },
+      { id: "remove-b", productId: "product-1", batchId: "batch-1", subTankId: "tank-1" },
+    ],
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  };
+  const first = buildStockChangeSnapshot({ ...input, deleteIds: ["remove-a"] });
+  const second = buildStockChangeSnapshot({ ...input, deleteIds: ["remove-b"] });
+
+  assert.notDeepEqual(stockChangeAdjustmentSignature(first), stockChangeAdjustmentSignature(second));
+});
+
 test("stock deletion approvals preserve complete inventory details", () => {
   const snapshot = buildStockDeletionSnapshot({
     deleteIds: ["stock-1", "stock-missing", "stock-1"],

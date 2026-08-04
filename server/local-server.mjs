@@ -2799,42 +2799,106 @@ function normalizeInventoryAdjustmentDraft(state = {}, input = {}, req, existing
   if (!visibleSiteIds.includes(siteId)) throw new Error("无权盘点该场地库存");
   const productIds = new Set((Array.isArray(state.products) ? state.products : [])
     .map((product) => String(product?.id ?? "")).filter(Boolean));
-  const batchIds = new Set((Array.isArray(state.batches) ? state.batches : [])
-    .filter((batch) => matchesSite(batch, siteId))
-    .map((batch) => String(batch?.id ?? "")).filter(Boolean));
+  const siteBatches = (Array.isArray(state.batches) ? state.batches : [])
+    .filter((batch) => matchesSite(batch, siteId));
+  const batchById = new Map(siteBatches
+    .map((batch) => [String(batch?.id ?? ""), batch]).filter(([id]) => Boolean(id)));
+  const batchIds = new Set(batchById.keys());
   const tankIds = new Set((Array.isArray(state.tankGroups) ? state.tankGroups : [])
     .filter((group) => matchesSite(group, siteId))
     .flatMap((group) => (Array.isArray(group?.subTanks) ? group.subTanks : []))
     .map((tank) => String(tank?.id ?? "")).filter(Boolean));
-  const lines = (Array.isArray(input?.lines) ? input.lines : []).slice(0, 500).map((line) => {
-    const quantity = Number(line?.quantity ?? 0);
+  const hasExactDraftShape = Array.isArray(input?.removeStockIds) || Array.isArray(input?.additions);
+  const legacyLines = !hasExactDraftShape
+    ? (Array.isArray(input?.lines) ? input.lines : []).slice(0, 500).map((line) => {
+        const quantity = Number(line?.quantity ?? 0);
+        const normalized = {
+          id: String(line?.id || uid("adjust-line")),
+          subTankId: String(line?.subTankId ?? "").trim(),
+          productId: String(line?.productId ?? "").trim(),
+          batchId: String(line?.batchId ?? "").trim(),
+          direction: line?.direction === "remove" ? "remove" : "add",
+          quantity,
+        };
+        if (!tankIds.has(normalized.subTankId)) throw new Error("盘库草稿中存在无效缸位");
+        if (!productIds.has(normalized.productId)) throw new Error("盘库草稿中存在无效商品");
+        if (!batchIds.has(normalized.batchId)) throw new Error("盘库草稿中存在无效采购批次");
+        if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1000) {
+          throw new Error("盘库调整数量必须是 1 至 1000 的整数");
+        }
+        return normalized;
+      })
+    : [];
+
+  const rawRemoveStockIds = Array.isArray(input?.removeStockIds) ? input.removeStockIds : [];
+  if (rawRemoveStockIds.length > 5000) throw new Error("单张盘库草稿最多减少 5000 条库存");
+  const removeStockIds = [...new Set(rawRemoveStockIds
+    .map((id) => String(id ?? "").trim())
+    .filter(Boolean))];
+  const stockById = new Map((Array.isArray(state.stock) ? state.stock : [])
+    .map((item) => [String(item?.id ?? ""), item]).filter(([id]) => Boolean(id)));
+  for (const stockId of removeStockIds) {
+    const item = stockById.get(stockId);
+    if (!item || !matchesSite(item, siteId)) throw new Error("盘库草稿中的部分库存已不存在，请刷新后重试");
+    if (item?.lost) throw new Error("已损耗库存不能加入盘库减少项");
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const rawAdditions = Array.isArray(input?.additions) ? input.additions : [];
+  if (rawAdditions.length > 500) throw new Error("单张盘库草稿最多登记 500 组增加项");
+  const additions = rawAdditions.map((addition) => {
+    const quantity = Number(addition?.quantity ?? 0);
     const normalized = {
-      id: String(line?.id || uid("adjust-line")),
-      subTankId: String(line?.subTankId ?? "").trim(),
-      productId: String(line?.productId ?? "").trim(),
-      batchId: String(line?.batchId ?? "").trim(),
-      direction: line?.direction === "remove" ? "remove" : "add",
+      id: String(addition?.id || uid("adjust-add")),
+      subTankId: String(addition?.subTankId ?? "").trim(),
+      productId: String(addition?.productId ?? "").trim(),
+      batchId: String(addition?.batchId ?? "").trim(),
       quantity,
+      status: ["healthy", "feeding", "sick"].includes(addition?.status) ? addition.status : "healthy",
+      inDate: String(addition?.inDate ?? "").trim(),
+      basePrice: Number(addition?.basePrice ?? 0),
+      code: String(addition?.code ?? "").trim().slice(0, 100),
+      notes: String(addition?.notes ?? "").trim().slice(0, 500),
     };
     if (!tankIds.has(normalized.subTankId)) throw new Error("盘库草稿中存在无效缸位");
     if (!productIds.has(normalized.productId)) throw new Error("盘库草稿中存在无效商品");
     if (!batchIds.has(normalized.batchId)) throw new Error("盘库草稿中存在无效采购批次");
     if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1000) {
-      throw new Error("盘库调整数量必须是 1 至 1000 的整数");
+      throw new Error("盘库增加数量必须是 1 至 1000 的整数");
     }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized.inDate)) throw new Error("盘库增加项必须填写有效入库日期");
+    if (normalized.inDate > today) throw new Error("盘库增加项的入库日期不能晚于今天");
+    const batchArrivalDate = String(batchById.get(normalized.batchId)?.arrivalDate ?? "");
+    if (batchArrivalDate && normalized.inDate < batchArrivalDate) {
+      throw new Error("盘库增加项的入库日期不能早于采购批次到货日期");
+    }
+    if (!Number.isFinite(normalized.basePrice) || normalized.basePrice <= 0) {
+      throw new Error("盘库增加项的单条售价必须大于 0");
+    }
+    if (quantity > 1) normalized.code = "";
     return normalized;
   });
-  if (lines.some((line) => line.direction === "add")) {
+  if (new Set(additions.map((item) => item.id)).size !== additions.length) {
+    throw new Error("盘库增加项编号重复，请刷新后重试");
+  }
+  const totalAdditionCount = additions.reduce((sum, item) => sum + item.quantity, 0);
+  if (totalAdditionCount > 5000) throw new Error("单张盘库草稿最多增加 5000 条库存");
+
+  if (legacyLines.some((line) => line.direction === "add") || additions.length > 0) {
     requireModulePermissionForAuth(req, "stockIn", "create");
   }
-  if (lines.some((line) => line.direction === "remove")) {
+  if (legacyLines.some((line) => line.direction === "remove") || removeStockIds.length > 0) {
     requireModulePermissionForAuth(req, "stockIn", "delete");
   }
   const now = new Date().toISOString();
+  const activeSubTankId = String(input?.activeSubTankId ?? "").trim();
   return {
     id: String(existingDraft?.id ?? input?.id ?? uid("adjustment-draft")),
     siteId,
-    lines,
+    removeStockIds,
+    additions,
+    ...(tankIds.has(activeSubTankId) ? { activeSubTankId } : {}),
+    ...(!hasExactDraftShape && legacyLines.length > 0 ? { lines: legacyLines } : {}),
     notes: String(input?.notes ?? "").trim().slice(0, 1000),
     createdAt: String(existingDraft?.createdAt ?? now),
     updatedAt: now,
@@ -2978,7 +3042,7 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
     ? stockChangeAdjustmentSignature(stockDetails)
     : null;
   const requestKey = createHash("sha256")
-    .update(`${createdBy}\0${approvalAction}\0${stableJson(adjustmentSignature?.length ? adjustmentSignature : stockDetails.signature)}`)
+    .update(`${createdBy}\0${approvalAction}\0${stableJson(adjustmentSignature ?? stockDetails.signature)}`)
     .digest("hex");
   const firstItem = lateItems[0] ?? updatedItems[0] ?? stockById.get(mutation.deleteIds[0]);
   return {
@@ -7938,14 +8002,23 @@ async function handleApi(req, res, url) {
 			  if (url.pathname === "/api/stock/save" && req.method === "POST") {
 			    try {
 			      const rawChange = JSON.parse(await readBody(req) || "{}");
-			      const rawUpsert = Array.isArray(rawChange?.upsert) ? rawChange.upsert : [];
-			      const rawDeleteIds = Array.isArray(rawChange?.deleteIds) ? rawChange.deleteIds : [];
-		      const adjustmentContext = rawChange?.adjustmentContext?.kind === "inventory_adjustment"
-		        ? {
-		            kind: "inventory_adjustment",
-		            draftId: String(rawChange.adjustmentContext?.draftId ?? "").trim(),
-		            lines: (Array.isArray(rawChange.adjustmentContext?.lines) ? rawChange.adjustmentContext.lines : [])
-		              .slice(0, 500)
+		      const rawUpsert = Array.isArray(rawChange?.upsert) ? rawChange.upsert : [];
+		      const rawDeleteIds = Array.isArray(rawChange?.deleteIds) ? rawChange.deleteIds : [];
+	      const adjustmentContext = rawChange?.adjustmentContext?.kind === "inventory_adjustment"
+	        ? {
+	            kind: "inventory_adjustment",
+	            draftId: String(rawChange.adjustmentContext?.draftId ?? "").trim(),
+	            siteId: normalizeSiteId(rawChange.adjustmentContext?.siteId),
+	            hasExactSelection: Array.isArray(rawChange.adjustmentContext?.removeStockIds) ||
+	              Array.isArray(rawChange.adjustmentContext?.additionStockIds),
+	            removeStockIds: [...new Set((Array.isArray(rawChange.adjustmentContext?.removeStockIds)
+	              ? rawChange.adjustmentContext.removeStockIds
+	              : []).map((id) => String(id ?? "").trim()).filter(Boolean))],
+	            additionStockIds: [...new Set((Array.isArray(rawChange.adjustmentContext?.additionStockIds)
+	              ? rawChange.adjustmentContext.additionStockIds
+	              : []).map((id) => String(id ?? "").trim()).filter(Boolean))],
+	            lines: (Array.isArray(rawChange.adjustmentContext?.lines) ? rawChange.adjustmentContext.lines : [])
+	              .slice(0, 500)
 		              .map((line) => ({
 		                subTankId: String(line?.subTankId ?? "").trim(),
 		                productId: String(line?.productId ?? "").trim(),
@@ -7970,6 +8043,52 @@ async function handleApi(req, res, url) {
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
 	        const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
 	        const rawUpsertIds = rawUpsert.map((item) => String(item?.id ?? "")).filter(Boolean);
+	        if (adjustmentContext?.hasExactSelection) {
+	          if (!adjustmentContext.siteId || adjustmentContext.siteId === ALL_SITE_ID) {
+	            throw new Error("盘库调整必须选择具体场地");
+	          }
+	          if (!visibleSiteIdsForAccount(req.auth?.account, state).includes(adjustmentContext.siteId)) {
+	            throw new Error("无权调整该场地库存");
+	          }
+	          const rawRemovalIds = rawDeleteIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+	          if (rawRemovalIds.length !== new Set(rawRemovalIds).size) {
+	            throw new Error("盘库减少项存在重复库存，请刷新后重试");
+	          }
+	          const sameIds = (left, right) => stableJson([...left].sort()) === stableJson([...right].sort());
+	          if (!sameIds(rawRemovalIds, adjustmentContext.removeStockIds)) {
+	            throw new Error("盘库减少明细与提交内容不一致，请刷新后重试");
+	          }
+	          if (rawUpsertIds.length !== rawUpsert.length ||
+	              rawUpsertIds.length !== new Set(rawUpsertIds).size ||
+	              !sameIds(rawUpsertIds, adjustmentContext.additionStockIds)) {
+	            throw new Error("盘库增加明细与提交内容不一致，请刷新后重试");
+	          }
+	          if (rawUpsertIds.some((id) => existingIds.has(id))) {
+	            throw new Error("盘库增加项不能修改已有库存，请刷新后重试");
+	          }
+	          const stockById = new Map(stock.map((item) => [String(item?.id ?? ""), item]));
+	          const invalidRemoval = rawRemovalIds.find((id) => {
+	            const item = stockById.get(id);
+	            return !item || item?.lost || !matchesSite(item, adjustmentContext.siteId);
+	          });
+	          if (invalidRemoval) throw new Error("所选减少库存已变化，请重新打开盘库工作台核对");
+	          const productIds = new Set((Array.isArray(state.products) ? state.products : [])
+	            .map((product) => String(product?.id ?? "")).filter(Boolean));
+	          const batchIds = new Set((Array.isArray(state.batches) ? state.batches : [])
+	            .filter((batch) => matchesSite(batch, adjustmentContext.siteId))
+	            .map((batch) => String(batch?.id ?? "")).filter(Boolean));
+	          const tankIds = new Set((Array.isArray(state.tankGroups) ? state.tankGroups : [])
+	            .filter((group) => matchesSite(group, adjustmentContext.siteId))
+	            .flatMap((group) => Array.isArray(group?.subTanks) ? group.subTanks : [])
+	            .map((tank) => String(tank?.id ?? "")).filter(Boolean));
+	          const invalidAddition = rawUpsert.find((item) =>
+	            !matchesSite(item, adjustmentContext.siteId) ||
+	            !productIds.has(String(item?.productId ?? "")) ||
+	            !batchIds.has(String(item?.batchId ?? "")) ||
+	            !tankIds.has(String(item?.subTankId ?? ""))
+	          );
+	          if (invalidAddition) throw new Error("盘库增加项中的场地、缸位、商品或批次已变化，请重新核对");
+	        }
 	        const hasCreates = rawUpsert.some((item) => !existingIds.has(String(item?.id ?? "")));
 	        const hasUpdates = rawUpsertIds.some((id) => existingIds.has(id));
 	        if (rawDeleteIds.length > 0) requireModulePermissionForAuth(req, "stockIn", "delete");
