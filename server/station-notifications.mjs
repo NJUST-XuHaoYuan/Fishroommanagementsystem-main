@@ -15,11 +15,24 @@ function sortedNotifications(notifications) {
     .slice(0, MAX_STATION_NOTIFICATIONS);
 }
 
+function normalizeCompletedNotificationReadState(notification) {
+  if (
+    !notification ||
+    notification.status !== "completed" ||
+    notification.readAt ||
+    !["credit_sale_confirmation", "stock_approval"].includes(notification.type)
+  ) return notification;
+  return {
+    ...notification,
+    readAt: String(notification.resolvedAt ?? notification.updatedAt ?? notification.createdAt ?? "completed"),
+  };
+}
+
 export function notificationsForRecipient(notifications = [], username = "") {
   const recipient = String(username ?? "").trim();
   return sortedNotifications((Array.isArray(notifications) ? notifications : []).filter((notification) =>
     String(notification?.recipientUsername ?? "").trim() === recipient
-  ));
+  )).map(normalizeCompletedNotificationReadState);
 }
 
 export function ensureCreditSaleNotification(notifications = [], input = {}) {
@@ -70,6 +83,7 @@ export function ensureCreditSaleNotification(notifications = [], input = {}) {
           resolution: "reassigned",
           resolvedAt: createdAt,
           resolvedBy: String(input.createdBy ?? "system"),
+          readAt: notification.readAt || createdAt,
         }
       : notification
   );
@@ -156,6 +170,7 @@ export function ensureCreditSaleNotifications(notifications = [], input = {}) {
           resolvedBy: createdBy,
           resolvedByName: createdByName,
           resolutionNote: "审批人已重新选择",
+          readAt: notification.readAt || createdAt,
         }
       : notification
   );
@@ -337,9 +352,7 @@ export function resolveCreditSaleNotifications(
       resolvedBy,
       resolvedByName: String(resolvedByName ?? resolvedBy),
       resolutionNote: String(resolutionNote ?? ""),
-      ...(resolution === "credit_confirmed" && String(notification?.recipientUsername ?? "") === String(resolvedBy)
-        ? { readAt: notification.readAt || resolvedAt }
-        : {}),
+      readAt: notification.readAt || resolvedAt,
     };
   });
   return { notifications: next, changed };

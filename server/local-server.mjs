@@ -1640,14 +1640,16 @@ function currentStationNotifications(state = {}) {
   return Array.isArray(state.notifications) ? state.notifications : [];
 }
 
-function stationNotificationsForAuth(state = {}, req) {
+function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100) {
   const username = String(req.auth?.user?.username ?? "").trim();
+  const allNotifications = notificationsForRecipient(currentStationNotifications(state), username);
+  const limit = Math.min(500, Math.max(1, Number(requestedLimit) || 100));
   const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
   const ordersById = new Map(visibleOrders.map((order) => [String(order?.id ?? ""), order]));
   const approvalRequestsById = new Map(currentApprovalRequests(state)
     .map((request) => [String(request?.id ?? ""), request])
     .filter(([id]) => id));
-  return notificationsForRecipient(currentStationNotifications(state), username).map((notification) => {
+  const notifications = allNotifications.slice(0, limit).map((notification) => {
     if (notification?.type === "credit_sale_confirmation") {
       const order = ordersById.get(String(notification?.orderId ?? ""));
       return {
@@ -1666,6 +1668,11 @@ function stationNotificationsForAuth(state = {}, req) {
     }
     return notification;
   });
+  return {
+    notifications,
+    totalCount: allNotifications.length,
+    unreadCount: allNotifications.filter((notification) => !notification?.readAt).length,
+  };
 }
 
 function pendingCreditSaleRecipients(state = {}, orderId = "") {
@@ -2651,6 +2658,12 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   }
   const nextStock = setStockSoldForOrders({ ...state, stock: changedStock }, nextOrders);
   const nextBatches = refreshBatchStockCounts(batches, nextStock);
+  const upsertIdSet = new Set(upsertItems.map((item) => String(item?.id ?? "")));
+  const stockUpdates = nextStock.filter((item) => upsertIdSet.has(String(item?.id ?? "")));
+  const previousBatchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
+  const batchUpdates = nextBatches.filter((batch) =>
+    stableJson(batch) !== stableJson(previousBatchById.get(String(batch?.id ?? "")))
+  );
   const defaultAction = deleteIdSet.size > 0
     ? "删除记录"
     : upsertItems.some((item) => existingIds.has(item.id))
@@ -2685,6 +2698,8 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
     shipments: nextShipments,
     orderUpdates,
     shipmentUpdates,
+    stockUpdates,
+    batchUpdates,
     affectedOrderCount: affectedOrderIds.size,
     operationLog,
     upsertItems,
@@ -5028,16 +5043,13 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/notifications" && req.method === "GET") {
     try {
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-      const notifications = stationNotificationsForAuth(rows[0]?.data ?? {}, req);
       const requestedLimit = Number.parseInt(String(url.searchParams.get("limit") ?? "100"), 10);
       const limit = Number.isFinite(requestedLimit)
         ? Math.min(500, Math.max(1, requestedLimit))
         : 100;
       sendJson(req, res, 200, {
         ok: true,
-        notifications: notifications.slice(0, limit),
-        totalCount: notifications.length,
-        unreadCount: notifications.filter((notification) => !notification?.readAt).length,
+        ...stationNotificationPayloadForAuth(rows[0]?.data ?? {}, req, limit),
       });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "站内信加载失败" });
@@ -5072,11 +5084,9 @@ async function handleApi(req, res, url) {
         ]);
       }
       await client.query("COMMIT");
-      const notifications = stationNotificationsForAuth({ ...state, notifications: marked.notifications }, req);
       sendJson(req, res, 200, {
         ok: true,
-        notifications: notifications.slice(0, 100),
-        unreadCount: notifications.filter((notification) => !notification?.readAt).length,
+        ...stationNotificationPayloadForAuth({ ...state, notifications: marked.notifications }, req, 100),
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -6324,6 +6334,7 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = JSON.parse(await readBody(req) || "{}");
+      const compactResponse = body.responseMode === "compact";
       const orderId = String(body.orderId ?? "").trim();
       const note = String(body.note ?? "").trim().slice(0, 500);
       if (!orderId) throw new Error("缺少订单信息，请刷新后重试");
@@ -6353,10 +6364,13 @@ async function handleApi(req, res, url) {
           gate,
           operator
         );
+        const nextState = resolvedNotifications !== notifications
+          ? { ...state, notifications: resolvedNotifications }
+          : state;
         if (resolvedNotifications !== notifications) {
           await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
             stateId,
-            JSON.stringify({ ...state, notifications: resolvedNotifications }),
+            JSON.stringify(nextState),
           ]);
         }
         await client.query("COMMIT");
@@ -6365,7 +6379,8 @@ async function handleApi(req, res, url) {
           alreadyAllowed: true,
           allowance: gate.status,
           order: currentOrder,
-          orders,
+          ...(!compactResponse ? { orders } : {}),
+          ...stationNotificationPayloadForAuth(nextState, req, 500),
         });
         return;
       }
@@ -6387,14 +6402,21 @@ async function handleApi(req, res, url) {
           operator,
           new Date().toISOString()
         );
+        const nextState = resolved.changed ? { ...state, notifications: resolved.notifications } : state;
         if (resolved.changed) {
           await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
             stateId,
-            JSON.stringify({ ...state, notifications: resolved.notifications }),
+            JSON.stringify(nextState),
           ]);
         }
         await client.query("COMMIT");
-        sendJson(req, res, 200, { ok: true, alreadyVerified: true, order: currentOrder, orders });
+        sendJson(req, res, 200, {
+          ok: true,
+          alreadyVerified: true,
+          order: currentOrder,
+          ...(!compactResponse ? { orders } : {}),
+          ...stationNotificationPayloadForAuth(nextState, req, 500),
+        });
         return;
       }
       if (!pendingNotification) throw new Error("你不在本次赊销审批人名单中，或该申请已被其他审批人处理");
@@ -6408,7 +6430,8 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, {
         ok: true,
         order: approved.nextOrder,
-        orders: approved.nextOrders,
+        ...(!compactResponse ? { orders: approved.nextOrders } : {}),
+        ...stationNotificationPayloadForAuth(approved.nextState, req, 500),
         operationLog: approved.operationLog,
       });
     } catch (error) {
@@ -7511,6 +7534,7 @@ async function handleApi(req, res, url) {
     try {
       requireAdminForAuth(req);
       const body = JSON.parse(await readBody(req) || "{}");
+      const compactResponse = body.responseMode === "compact";
       const requestId = String(body.requestId ?? "").trim();
       const decision = body.decision === "approve" ? "approved" : body.decision === "reject" ? "rejected" : "";
       const note = String(body.note ?? "").trim().slice(0, 500);
@@ -7608,11 +7632,22 @@ async function handleApi(req, res, url) {
         [stateId, JSON.stringify(nextState)]
       );
       await client.query("COMMIT");
+      const mutationDelta = mutation
+        ? {
+            stockUpserts: mutation.stockUpdates,
+            stockDeleteIds: mutation.deleteIds,
+            batchUpdates: mutation.batchUpdates,
+            orderUpdates: mutation.orderUpdates,
+            shipmentUpdates: mutation.shipmentUpdates,
+          }
+        : null;
       sendJson(req, res, 200, {
         ok: true,
         decision,
         message: resultMessage,
-        ...(mutation ? {
+        mutation: mutationDelta,
+        ...stationNotificationPayloadForAuth(nextState, req, 500),
+        ...(!compactResponse && mutation ? {
           stock: mutation.stock,
           batches: mutation.batches,
           orders: mutation.orders,

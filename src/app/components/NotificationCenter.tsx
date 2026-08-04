@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bell,
   Boxes,
   Check,
   CheckCheck,
@@ -16,7 +15,13 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useStore } from "../store";
+import {
+  useStore,
+  type Order,
+  type PurchaseBatch,
+  type Shipment,
+  type StockItem,
+} from "../store";
 import { authJsonHeaders } from "../utils/authSession";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -95,6 +100,28 @@ type StationNotification = {
 
 type NotificationFilter = "all" | "unread" | "pending" | "completed";
 
+type NotificationRefreshDetail = {
+  source?: "notification-center";
+  unreadCount?: number;
+};
+
+function mergeEntityChanges<T extends { id: string }>(
+  current: T[],
+  updates: T[] = [],
+  deleteIds: string[] = []
+): T[] {
+  const deleted = new Set(deleteIds.map(String));
+  const updatesById = new Map(updates.map((item) => [String(item.id), item]));
+  const currentIds = new Set(current.map((item) => String(item.id)));
+  const merged = current
+    .filter((item) => !deleted.has(String(item.id)))
+    .map((item) => updatesById.get(String(item.id)) ?? item);
+  for (const update of updates) {
+    if (!currentIds.has(String(update.id)) && !deleted.has(String(update.id))) merged.push(update);
+  }
+  return merged;
+}
+
 function formatNotificationTime(value?: string): string {
   if (!value) return "";
   const date = new Date(value);
@@ -148,11 +175,16 @@ function stockStatusLabel(status?: string): string {
   }[String(status ?? "")] ?? "状态未知";
 }
 
-function notifyNotificationRefresh() {
-  window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
+function notifyNotificationRefresh(unreadCount?: number) {
+  window.dispatchEvent(new CustomEvent<NotificationRefreshDetail>("fishroom:notifications-refresh", {
+    detail: {
+      source: "notification-center",
+      ...(Number.isFinite(unreadCount) ? { unreadCount } : {}),
+    },
+  }));
 }
 
-export function NotificationBell({ onOpenCenter }: { onOpenCenter: () => void }) {
+export function useNotificationUnreadCount() {
   const [unreadCount, setUnreadCount] = useState(0);
 
   const loadUnreadCount = useCallback(async () => {
@@ -169,9 +201,16 @@ export function NotificationBell({ onOpenCenter }: { onOpenCenter: () => void })
   useEffect(() => {
     void loadUnreadCount();
     const timer = window.setInterval(() => void loadUnreadCount(), 30_000);
-    const refresh = () => void loadUnreadCount();
+    const refresh = (event: Event) => {
+      const nextUnreadCount = Number((event as CustomEvent<NotificationRefreshDetail>).detail?.unreadCount);
+      if (Number.isFinite(nextUnreadCount)) {
+        setUnreadCount(Math.max(0, nextUnreadCount));
+        return;
+      }
+      void loadUnreadCount();
+    };
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible") void loadUnreadCount();
     };
     window.addEventListener("fishroom:notifications-refresh", refresh);
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -182,22 +221,18 @@ export function NotificationBell({ onOpenCenter }: { onOpenCenter: () => void })
     };
   }, [loadUnreadCount]);
 
+  return unreadCount;
+}
+
+export function NotificationNavBadge({ unreadCount }: { unreadCount: number }) {
+  if (unreadCount <= 0) return null;
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="relative shrink-0"
-      onClick={onOpenCenter}
-      title={unreadCount > 0 ? `站内信中心，${unreadCount} 条未读` : "站内信中心"}
-      aria-label={unreadCount > 0 ? `站内信中心，${unreadCount} 条未读` : "站内信中心"}
+    <span
+      className="ml-auto flex min-w-5 shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[10px] font-semibold leading-5 text-white"
+      aria-label={`${unreadCount} 条未读站内信`}
     >
-      <Bell className="size-4.5" />
-      {unreadCount > 0 && (
-        <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-4 text-white">
-          {unreadCount > 99 ? "99+" : unreadCount}
-        </span>
-      )}
-    </Button>
+      {unreadCount > 99 ? "99+" : unreadCount}
+    </span>
   );
 }
 
@@ -251,9 +286,13 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   useEffect(() => {
     void loadNotifications();
     const timer = window.setInterval(() => void loadNotifications(true), 30_000);
-    const refresh = () => void loadNotifications(true);
+    const refresh = (event: Event) => {
+      const detail = (event as CustomEvent<NotificationRefreshDetail>).detail;
+      if (detail?.source === "notification-center") return;
+      void loadNotifications(true);
+    };
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible") void loadNotifications(true);
     };
     window.addEventListener("fishroom:notifications-refresh", refresh);
     document.addEventListener("visibilitychange", refreshWhenVisible);
@@ -263,6 +302,20 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [loadNotifications]);
+
+  const applyNotificationPayload = (result: {
+    notifications?: StationNotification[];
+    totalCount?: number;
+    unreadCount?: number;
+  }): boolean => {
+    if (!Array.isArray(result.notifications)) return false;
+    const nextUnreadCount = Math.max(0, Number(result.unreadCount ?? 0));
+    setNotifications(result.notifications);
+    setTotalCount(Math.max(result.notifications.length, Number(result.totalCount ?? result.notifications.length)));
+    setUnreadCount(nextUnreadCount);
+    notifyNotificationRefresh(nextUnreadCount);
+    return true;
+  };
 
   const markRead = async (notification: StationNotification) => {
     if (notification.readAt) return;
@@ -279,7 +332,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.ok === false) throw new Error(result.error || "标记失败");
-      notifyNotificationRefresh();
+      const nextUnreadCount = Math.max(0, Number(result.unreadCount ?? 0));
+      setUnreadCount(nextUnreadCount);
+      notifyNotificationRefresh(nextUnreadCount);
     } catch {
       toast.error("标记已读失败，请重试");
       void loadNotifications(true);
@@ -302,7 +357,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.ok === false) throw new Error(result.error || "标记失败");
-      notifyNotificationRefresh();
+      const nextUnreadCount = Math.max(0, Number(result.unreadCount ?? 0));
+      setUnreadCount(nextUnreadCount);
+      notifyNotificationRefresh(nextUnreadCount);
     } catch {
       toast.error("全部已读保存失败，请重试");
       void loadNotifications(true);
@@ -317,7 +374,6 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   };
 
   const startCreditConfirmation = (notification: StationNotification) => {
-    void markRead(notification);
     setCreditNote("");
     setSelected(notification);
   };
@@ -329,13 +385,21 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       const response = await fetch("/api/orders/credit-sale/confirm", {
         method: "POST",
         headers: authJsonHeaders(),
-        body: JSON.stringify({ orderId: selected.orderId, note: creditNote.trim() }),
+        body: JSON.stringify({
+          orderId: selected.orderId,
+          note: creditNote.trim(),
+          responseMode: "compact",
+        }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.ok) throw new Error(result.error || "确认赊销失败");
       setState((current) => ({
         ...current,
-        orders: Array.isArray(result.orders) ? result.orders : current.orders,
+        orders: Array.isArray(result.orders)
+          ? result.orders
+          : result.order
+            ? mergeEntityChanges<Order>(current.orders, [result.order])
+            : current.orders,
         operationLogs: result.operationLog
           ? [result.operationLog, ...(current.operationLogs ?? [])]
               .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
@@ -344,8 +408,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       }));
       setSelected(null);
       setCreditNote("");
-      await loadNotifications(true);
-      notifyNotificationRefresh();
+      if (!applyNotificationPayload(result)) {
+        notifyNotificationRefresh();
+        void loadNotifications(true);
+      }
       toast.success(
         result.alreadyVerified
           ? "财务已经核销，无需确认赊销"
@@ -366,7 +432,6 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     notification: StationNotification,
     decision: "approve" | "reject"
   ) => {
-    void markRead(notification);
     setApprovalDecision(decision);
     setApprovalNote("");
     setSelectedApproval(notification);
@@ -383,16 +448,46 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
           requestId: selectedApproval.approvalRequestId,
           decision: approvalDecision,
           note: approvalNote.trim(),
+          responseMode: "compact",
         }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.ok) throw new Error(result.error || "库存审批处理失败");
       setState((current) => ({
         ...current,
-        stock: Array.isArray(result.stock) ? result.stock : current.stock,
-        batches: Array.isArray(result.batches) ? result.batches : current.batches,
-        orders: Array.isArray(result.orders) ? result.orders : current.orders,
-        shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
+        stock: Array.isArray(result.stock)
+          ? result.stock
+          : result.mutation
+            ? mergeEntityChanges<StockItem>(
+                current.stock,
+                Array.isArray(result.mutation.stockUpserts) ? result.mutation.stockUpserts : [],
+                Array.isArray(result.mutation.stockDeleteIds) ? result.mutation.stockDeleteIds : []
+              )
+            : current.stock,
+        batches: Array.isArray(result.batches)
+          ? result.batches
+          : result.mutation
+            ? mergeEntityChanges<PurchaseBatch>(
+                current.batches,
+                Array.isArray(result.mutation.batchUpdates) ? result.mutation.batchUpdates : []
+              )
+            : current.batches,
+        orders: Array.isArray(result.orders)
+          ? result.orders
+          : result.mutation
+            ? mergeEntityChanges<Order>(
+                current.orders,
+                Array.isArray(result.mutation.orderUpdates) ? result.mutation.orderUpdates : []
+              )
+            : current.orders,
+        shipments: Array.isArray(result.shipments)
+          ? result.shipments
+          : result.mutation
+            ? mergeEntityChanges<Shipment>(
+                current.shipments,
+                Array.isArray(result.mutation.shipmentUpdates) ? result.mutation.shipmentUpdates : []
+              )
+            : current.shipments,
         operationLogs: result.operationLog
           ? [result.operationLog, ...(current.operationLogs ?? [])]
               .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
@@ -401,8 +496,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       }));
       setSelectedApproval(null);
       setApprovalNote("");
-      await loadNotifications(true);
-      notifyNotificationRefresh();
+      if (!applyNotificationPayload(result)) {
+        notifyNotificationRefresh();
+        void loadNotifications(true);
+      }
       toast.success(result.message || (approvalDecision === "approve" ? "已批准并执行" : "已驳回"));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "库存审批处理失败");

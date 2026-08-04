@@ -119,11 +119,40 @@ test("one selected administrator resolves every credit-sale approval copy", () =
   assert.ok(resolved.notifications.every((notification) => notification.status === "completed"));
   assert.ok(resolved.notifications.every((notification) => notification.resolvedByName === "管理员A"));
   assert.ok(resolved.notifications.every((notification) => notification.resolutionNote === "老客户约定后付"));
-  assert.ok(resolved.notifications.find((notification) => notification.recipientUsername === "admin-a")?.readAt);
-  assert.equal(
-    resolved.notifications.find((notification) => notification.recipientUsername === "admin-b")?.readAt,
-    ""
-  );
+  assert.ok(resolved.notifications.every((notification) => notification.readAt === "2026-08-04T10:00:00.000Z"));
+});
+
+test("completed historical notifications no longer count as unread", () => {
+  const notifications = notificationsForRecipient([
+    {
+      id: "notice-completed",
+      type: "stock_approval",
+      recipientUsername: "admin-a",
+      status: "completed",
+      createdAt: "2026-08-03T09:00:00.000Z",
+      resolvedAt: "2026-08-03T10:00:00.000Z",
+      readAt: "",
+    },
+    {
+      id: "notice-result",
+      type: "approval_result",
+      recipientUsername: "admin-a",
+      status: "completed",
+      createdAt: "2026-08-03T10:30:00.000Z",
+      readAt: "",
+    },
+    {
+      id: "notice-pending",
+      recipientUsername: "admin-a",
+      status: "pending",
+      createdAt: "2026-08-03T11:00:00.000Z",
+      readAt: "",
+    },
+  ], "admin-a");
+
+  assert.equal(notifications.find((notification) => notification.id === "notice-completed")?.readAt, "2026-08-03T10:00:00.000Z");
+  assert.equal(notifications.find((notification) => notification.id === "notice-result")?.readAt, "");
+  assert.equal(notifications.find((notification) => notification.id === "notice-pending")?.readAt, "");
 });
 
 test("stock approval notifications fan out once to every active admin", () => {

@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
-import { NotificationBell } from "./NotificationCenter";
+import { NotificationNavBadge, useNotificationUnreadCount } from "./NotificationCenter";
 import { normalizePermissions } from "../utils/permissions";
 
 export type ViewKey =
@@ -148,6 +148,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   const { state, activeSiteId, setActiveSiteId, setState } = useStore();
   const user = state.user!;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const notificationUnreadCount = useNotificationUnreadCount();
   const sites = visibleSitesForUser(user, state);
   const activeSiteName = sites.find((site) => site.id === normalizeSiteId(activeSiteId))?.name ?? siteName(state, activeSiteId);
   const currentAccount = (state.personnel ?? []).find((person) => person.username === user.username);
@@ -231,8 +232,11 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           onClick={() => navigate("notifications")}
           className={navButtonClass(view === "notifications", "main")}
         >
-          <Inbox className="size-4 shrink-0" />
-          <span>站内信中心</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <Inbox className="size-4 shrink-0" />
+            <span>站内信中心</span>
+          </span>
+          <NotificationNavBadge unreadCount={notificationUnreadCount} />
         </button>
         {NAV.filter((section) => section.title !== "财务管理" || canSeeFinance).map((section) => {
           const Icon = section.icon;
@@ -406,7 +410,6 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             </div>
           </div>
           <div className="flex min-w-0 shrink-0 items-center gap-2">
-            <NotificationBell onOpenCenter={() => navigate("notifications")} />
             <div className="lg:hidden"><SiteSelector compact /></div>
             <div className="hidden text-xs text-muted-foreground lg:block">当前：{activeSiteName}</div>
             <div className="hidden lg:block"><SiteSelector /></div>
