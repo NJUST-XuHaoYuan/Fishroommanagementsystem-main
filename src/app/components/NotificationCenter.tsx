@@ -44,6 +44,7 @@ type StationNotification = {
   orderNo?: string;
   siteId?: string;
   requiredOutstandingAmount?: number;
+  canApprove?: boolean;
   approvalRequestId?: string;
   approvalAction?: string;
   resolvedAt?: string;
@@ -496,7 +497,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <ExternalLink className="size-3.5" />查看订单
                         </Button>
                       )}
-                      {pending && notification.type === "credit_sale_confirmation" && (
+                      {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                           <HandCoins className="size-3.5" />同意赊销
                         </Button>
@@ -538,7 +539,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             <DialogTitle>审批赊销 · {selected?.orderNo}</DialogTitle>
           </DialogHeader>
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
-            同意后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。审批人、时间和说明会同步给其他被选管理员。
+            同意后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。审批人、时间和说明会同步给其他被选审批人。
           </div>
           <div className="grid gap-1.5">
             <label className="text-sm font-medium" htmlFor="credit-sale-note">赊销说明</label>

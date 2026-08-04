@@ -155,7 +155,7 @@ export function ensureCreditSaleNotifications(notifications = [], input = {}) {
           resolvedAt: createdAt,
           resolvedBy: createdBy,
           resolvedByName: createdByName,
-          resolutionNote: "审批管理员已重新选择",
+          resolutionNote: "审批人已重新选择",
         }
       : notification
   );

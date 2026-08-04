@@ -184,6 +184,8 @@ function splitFishCodeInput(value: string): string[] {
 type CreditSaleApprover = {
   username: string;
   name: string;
+  isAdmin?: boolean;
+  isOrderOwner?: boolean;
 };
 
 type CreditSaleRequiredPayload = {
@@ -193,6 +195,7 @@ type CreditSaleRequiredPayload = {
   outstandingAmount?: number;
   eligibleApprovers?: CreditSaleApprover[];
   selectedApproverUsernames?: string[];
+  requesterIsOrderOwner?: boolean;
 };
 
 type CreditSaleRequestDialogState = {
@@ -200,6 +203,7 @@ type CreditSaleRequestDialogState = {
   orderNo: string;
   outstandingAmount: number;
   eligibleApprovers: CreditSaleApprover[];
+  requesterIsOrderOwner: boolean;
 };
 
 class OrderApiError extends Error {
@@ -3907,22 +3911,45 @@ function OrderDetailDialog({
   const showCreditSaleRequest = (error: unknown): boolean => {
     if (!(error instanceof OrderApiError) || error.code !== "CREDIT_SALE_CONFIRMATION_REQUIRED") return false;
     const payload = error.payload;
-    const fallbackApprovers = personnel
-      .filter((person) =>
-        person.accessRole === "admin" &&
-        !isPersonnelResigned(person) &&
-        String(person.username ?? "").trim()
-      )
-      .map((person) => ({
-        username: String(person.username).trim(),
-        name: String(person.name ?? person.username).trim(),
-      }));
+    const fallbackOwner = personnel.find((person) =>
+      !isPersonnelResigned(person) &&
+      String(person.username ?? "").trim() &&
+      [person.name, person.username].some((value) => String(value ?? "").trim() === String(order?.contactPerson ?? "").trim())
+    );
+    const fallbackApproversByUsername = new Map<string, CreditSaleApprover>(
+      personnel
+        .filter((person) =>
+          person.accessRole === "admin" &&
+          !isPersonnelResigned(person) &&
+          String(person.username ?? "").trim()
+        )
+        .map((person) => ({
+          username: String(person.username).trim(),
+          name: String(person.name ?? person.username).trim(),
+          isAdmin: true,
+          isOrderOwner: String(person.username).trim() === String(fallbackOwner?.username ?? "").trim(),
+        }))
+        .map((person) => [person.username, person] as const)
+    );
+    if (fallbackOwner?.username) {
+      const username = String(fallbackOwner.username).trim();
+      const existing = fallbackApproversByUsername.get(username);
+      fallbackApproversByUsername.set(username, {
+        username,
+        name: String(fallbackOwner.name ?? fallbackOwner.username).trim(),
+        isAdmin: existing?.isAdmin === true,
+        isOrderOwner: true,
+      });
+    }
+    const fallbackApprovers = [...fallbackApproversByUsername.values()];
     const eligibleApprovers = (Array.isArray(payload.eligibleApprovers)
       ? payload.eligibleApprovers
       : fallbackApprovers)
       .map((person) => ({
         username: String(person?.username ?? "").trim(),
         name: String(person?.name ?? person?.username ?? "").trim(),
+        isAdmin: person?.isAdmin === true,
+        isOrderOwner: person?.isOrderOwner === true,
       }))
       .filter((person, index, all) =>
         person.username && all.findIndex((item) => item.username === person.username) === index
@@ -3940,6 +3967,8 @@ function OrderDetailDialog({
       orderNo: String(payload.orderNo ?? order?.orderNo ?? ""),
       outstandingAmount: Math.max(0, Number(payload.outstandingAmount ?? 0)),
       eligibleApprovers,
+      requesterIsOrderOwner: payload.requesterIsOrderOwner === true ||
+        String(fallbackOwner?.username ?? "").trim() === String(state.user?.username ?? "").trim(),
     });
     setSelectedCreditApprovers(existingSelection);
     setShipDialogOpen(false);
@@ -3949,8 +3978,8 @@ function OrderDetailDialog({
 
   const submitCreditSaleRequest = async () => {
     if (!creditSaleRequest || requestingCreditApproval) return;
-    if (selectedCreditApprovers.length === 0) {
-      toast.error("请至少选择一位管理员");
+    if (!creditSaleRequest.requesterIsOrderOwner && selectedCreditApprovers.length === 0) {
+      toast.error("请至少选择一位管理员或订单负责人");
       return;
     }
     setRequestingCreditApproval(true);
@@ -5004,75 +5033,85 @@ function OrderDetailDialog({
 
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950">
             该订单尚有 <strong>¥{Number(creditSaleRequest?.outstandingAmount ?? 0).toFixed(2)}</strong> 未经财务核销。
-            请选择接收审批的管理员，任一人同意后即可继续发货。
+            {creditSaleRequest?.requesterIsOrderOwner
+              ? " 你是订单负责人，提交申请后系统将直接审批通过并记录操作人。"
+              : " 请选择接收审批的管理员或订单负责人，任一人同意后即可继续发货。"}
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-medium">审批管理员（可多选）</div>
-            {Number(creditSaleRequest?.eligibleApprovers.length ?? 0) > 0 && (
-              <div className="flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  disabled={requestingCreditApproval}
-                  onClick={() => setSelectedCreditApprovers(
-                    creditSaleRequest?.eligibleApprovers.map((person) => person.username) ?? []
-                  )}
-                >
-                  全选
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  disabled={requestingCreditApproval || selectedCreditApprovers.length === 0}
-                  onClick={() => setSelectedCreditApprovers([])}
-                >
-                  清空
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {creditSaleRequest?.eligibleApprovers.length ? (
-            <div className="max-h-72 overflow-y-auto rounded-md border divide-y">
-              {creditSaleRequest.eligibleApprovers.map((person) => {
-                const checked = selectedCreditApprovers.includes(person.username);
-                return (
-                  <label
-                    key={person.username}
-                    className="flex min-h-12 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/45"
-                  >
-                    <Checkbox
-                      checked={checked}
+          {!creditSaleRequest?.requesterIsOrderOwner && (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium">审批人（可多选）</div>
+                {Number(creditSaleRequest?.eligibleApprovers.length ?? 0) > 0 && (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
                       disabled={requestingCreditApproval}
-                      onCheckedChange={(nextChecked) => setSelectedCreditApprovers((current) =>
-                        nextChecked
-                          ? [...current, person.username].filter((username, index, all) => all.indexOf(username) === index)
-                          : current.filter((username) => username !== person.username)
+                      onClick={() => setSelectedCreditApprovers(
+                        creditSaleRequest?.eligibleApprovers.map((person) => person.username) ?? []
                       )}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{person.name || person.username}</span>
-                      <span className="block truncate text-xs text-muted-foreground">{person.username}</span>
-                    </span>
-                    {checked && <Badge variant="secondary">已选择</Badge>}
-                  </label>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800">
-              当前没有可审批的在职管理员，请先在“人员与权限”中配置管理员账号。
-            </div>
-          )}
+                    >
+                      全选
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      disabled={requestingCreditApproval || selectedCreditApprovers.length === 0}
+                      onClick={() => setSelectedCreditApprovers([])}
+                    >
+                      清空
+                    </Button>
+                  </div>
+                )}
+              </div>
 
-          <div className="text-xs text-muted-foreground">
-            已选择 {selectedCreditApprovers.length} 人。审批结果会同步显示给本次选择的所有管理员。
-          </div>
+              {creditSaleRequest?.eligibleApprovers.length ? (
+                <div className="max-h-72 overflow-y-auto rounded-md border divide-y">
+                  {creditSaleRequest.eligibleApprovers.map((person) => {
+                    const checked = selectedCreditApprovers.includes(person.username);
+                    return (
+                      <label
+                        key={person.username}
+                        className="flex min-h-12 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/45"
+                      >
+                        <Checkbox
+                          checked={checked}
+                          disabled={requestingCreditApproval}
+                          onCheckedChange={(nextChecked) => setSelectedCreditApprovers((current) =>
+                            nextChecked
+                              ? [...current, person.username].filter((username, index, all) => all.indexOf(username) === index)
+                              : current.filter((username) => username !== person.username)
+                          )}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{person.name || person.username}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{person.username}</span>
+                        </span>
+                        <span className="flex shrink-0 flex-wrap justify-end gap-1">
+                          {person.isOrderOwner && <Badge variant="outline">订单负责人</Badge>}
+                          {person.isAdmin && <Badge variant="secondary">管理员</Badge>}
+                          {checked && <Badge>已选择</Badge>}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800">
+                  当前没有可审批的在职管理员或订单负责人，请先在“人员与权限”中维护账号。
+                </div>
+              )}
+
+              <div className="text-xs text-muted-foreground">
+                已选择 {selectedCreditApprovers.length} 人。审批结果会同步显示给本次选择的所有审批人。
+              </div>
+            </>
+          )}
 
           <DialogFooter>
             <Button
@@ -5088,11 +5127,21 @@ function OrderDetailDialog({
             </Button>
             <Button
               type="button"
-              disabled={requestingCreditApproval || selectedCreditApprovers.length === 0}
+              disabled={requestingCreditApproval || (
+                !creditSaleRequest?.requesterIsOrderOwner && selectedCreditApprovers.length === 0
+              )}
               onClick={() => void submitCreditSaleRequest()}
             >
-              {requestingCreditApproval ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              {requestingCreditApproval ? "发送中" : "发送审批"}
+              {requestingCreditApproval
+                ? <Loader2 className="size-4 animate-spin" />
+                : creditSaleRequest?.requesterIsOrderOwner
+                  ? <ShieldCheck className="size-4" />
+                  : <Send className="size-4" />}
+              {requestingCreditApproval
+                ? "处理中"
+                : creditSaleRequest?.requesterIsOrderOwner
+                  ? "确认并直接通过"
+                  : "发送审批"}
             </Button>
           </DialogFooter>
         </DialogContent>
