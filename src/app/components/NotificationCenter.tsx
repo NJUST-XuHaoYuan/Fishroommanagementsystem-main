@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
+  Boxes,
   Check,
   CheckCheck,
   CheckCircle2,
@@ -8,7 +9,9 @@ import {
   HandCoins,
   Inbox,
   Loader2,
+  MapPin,
   RefreshCw,
+  Trash2,
   UserRound,
   XCircle,
 } from "lucide-react";
@@ -25,6 +28,42 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Textarea } from "./ui/textarea";
+
+type StockApprovalLinkedOrder = {
+  id: string;
+  orderNo: string;
+  status: string;
+  source: string;
+};
+
+type StockApprovalItemDetail = {
+  stockItemId: string;
+  code: string;
+  productName?: string;
+  speciesName?: string;
+  size?: string;
+  origin?: string;
+  imageUrl?: string;
+  tankName?: string;
+  batchNo?: string;
+  supplier?: string;
+  inDate?: string;
+  status?: string;
+  sold?: boolean;
+  lost?: boolean;
+  basePrice?: number;
+  notes?: string;
+  siteId?: string;
+  missing?: boolean;
+  linkedOrders?: StockApprovalLinkedOrder[];
+};
+
+type StockApprovalDetails = {
+  type: "stock_delete";
+  requestedCount: number;
+  availableCount: number;
+  items: StockApprovalItemDetail[];
+};
 
 type StationNotification = {
   id: string;
@@ -51,6 +90,7 @@ type StationNotification = {
   resolvedBy?: string;
   resolvedByName?: string;
   resolutionNote?: string;
+  stockDetails?: StockApprovalDetails | null;
 };
 
 type NotificationFilter = "all" | "unread" | "pending" | "completed";
@@ -98,6 +138,14 @@ function actorLabel(name?: string, username?: string): string {
   const safeUsername = String(username ?? "").trim();
   if (safeName && safeUsername && safeName !== safeUsername) return `${safeName}（${safeUsername}）`;
   return safeName || safeUsername || "系统";
+}
+
+function stockStatusLabel(status?: string): string {
+  return {
+    healthy: "正常",
+    feeding: "开口",
+    sick: "疾病",
+  }[String(status ?? "")] ?? "状态未知";
 }
 
 function notifyNotificationRefresh() {
@@ -369,6 +417,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     { value: "pending", label: "待处理", count: pendingCount },
     { value: "completed", label: "已处理", count: completedCount },
   ];
+  const selectedStockDetails = selectedApproval?.stockDetails?.type === "stock_delete"
+    ? selectedApproval.stockDetails
+    : null;
 
   return (
     <>
@@ -565,7 +616,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       <Dialog open={!!selectedApproval} onOpenChange={(nextOpen) => {
         if (!nextOpen && !processingApproval) setSelectedApproval(null);
       }}>
-        <DialogContent aria-describedby={undefined}>
+        <DialogContent className="sm:max-w-5xl" aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>
               {approvalDecision === "approve" ? "批准库存操作" : "驳回库存操作"}
@@ -581,6 +632,172 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               发起人：{actorLabel(selectedApproval?.createdByName, selectedApproval?.createdBy)}
             </div>
           </div>
+          {selectedStockDetails && (
+            <section className="grid gap-2" aria-label="待删除库存明细">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <Trash2 className="size-4 text-red-600" />
+                  删除明细
+                </div>
+                <Badge variant="outline">
+                  共 {selectedStockDetails.requestedCount} 条
+                </Badge>
+              </div>
+              {selectedStockDetails.availableCount < selectedStockDetails.requestedCount && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                  有 {selectedStockDetails.requestedCount - selectedStockDetails.availableCount} 条库存已无法从当前数据中读取，仍保留申请时的库存 ID 供核对。
+                </div>
+              )}
+              <div className="max-h-[46vh] overflow-auto rounded-md border">
+                <div className="divide-y md:hidden">
+                  {selectedStockDetails.items.map((item) => (
+                    <div key={item.stockItemId} className="grid gap-3 p-3">
+                      <div className="flex min-w-0 items-start gap-3">
+                        {item.imageUrl ? (
+                          <img
+                            src={item.imageUrl}
+                            alt=""
+                            className="size-14 shrink-0 rounded-md border object-cover"
+                          />
+                        ) : (
+                          <div className="flex size-14 shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+                            <Boxes className="size-5" />
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="break-all text-sm font-semibold">{item.code}</div>
+                          <div className="mt-0.5 text-sm">{item.missing ? "原库存已不存在" : item.productName}</div>
+                          {!item.missing && (
+                            <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                              {item.speciesName && item.speciesName !== item.productName && <span>{item.speciesName}</span>}
+                              {item.size && <span>{item.size}</span>}
+                              {item.origin && <span>{item.origin}</span>}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {!item.missing && (
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                          <div>
+                            <div className="text-muted-foreground">缸位</div>
+                            <div className="mt-0.5 inline-flex items-start gap-1 font-medium">
+                              <MapPin className="mt-0.5 size-3 shrink-0" />{item.tankName || "未设置"}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground">批次 / 供应商</div>
+                            <div className="mt-0.5 font-medium">{item.batchNo || "未设置"}</div>
+                            {item.supplier && <div className="mt-0.5 text-muted-foreground">{item.supplier}</div>}
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground">库存状态</div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              <Badge variant="secondary" className="h-5 px-1.5 text-[11px]">{stockStatusLabel(item.status)}</Badge>
+                              {item.sold && <Badge className="h-5 bg-amber-100 px-1.5 text-[11px] text-amber-800">已售</Badge>}
+                              {item.lost && <Badge className="h-5 bg-red-100 px-1.5 text-[11px] text-red-800">已损耗</Badge>}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground">入库日期 / 底价</div>
+                            <div className="mt-0.5 font-medium">{item.inDate || "未记录"}</div>
+                            <div className="mt-0.5">¥{Number(item.basePrice ?? 0).toFixed(2)}</div>
+                          </div>
+                        </div>
+                      )}
+                      {!!item.linkedOrders?.length && (
+                        <div className="rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-900">
+                          关联订单：{item.linkedOrders.map((order) => order.orderNo || order.id).join("、")}
+                        </div>
+                      )}
+                      {item.notes && (
+                        <div className="text-xs leading-5 text-muted-foreground">备注：{item.notes}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <table className="hidden w-full min-w-[920px] table-fixed text-sm md:table">
+                  <thead className="sticky top-0 z-10 bg-muted/95 text-left text-xs text-muted-foreground backdrop-blur">
+                    <tr>
+                      <th className="w-[210px] px-3 py-2 font-medium">鱼只</th>
+                      <th className="w-[135px] px-3 py-2 font-medium">缸位</th>
+                      <th className="w-[150px] px-3 py-2 font-medium">批次 / 供应商</th>
+                      <th className="w-[110px] px-3 py-2 font-medium">状态</th>
+                      <th className="w-[120px] px-3 py-2 font-medium">入库 / 底价</th>
+                      <th className="w-[145px] px-3 py-2 font-medium">关联订单</th>
+                      <th className="px-3 py-2 font-medium">备注</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {selectedStockDetails.items.map((item) => (
+                      <tr key={item.stockItemId} className="align-top">
+                        <td className="px-3 py-3">
+                          <div className="flex min-w-0 gap-2.5">
+                            {item.imageUrl ? (
+                              <img src={item.imageUrl} alt="" className="size-10 shrink-0 rounded border object-cover" />
+                            ) : (
+                              <div className="flex size-10 shrink-0 items-center justify-center rounded border bg-muted text-muted-foreground">
+                                <Boxes className="size-4" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="break-all font-semibold">{item.code}</div>
+                              <div className="mt-0.5 break-words text-xs text-muted-foreground">
+                                {item.missing
+                                  ? "原库存已不存在"
+                                  : [item.productName, item.speciesName !== item.productName ? item.speciesName : "", item.size, item.origin]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="break-words px-3 py-3 text-xs">
+                          {item.missing ? "-" : item.tankName || "未设置"}
+                        </td>
+                        <td className="break-words px-3 py-3 text-xs">
+                          <div>{item.missing ? "-" : item.batchNo || "未设置"}</div>
+                          {item.supplier && <div className="mt-1 text-muted-foreground">{item.supplier}</div>}
+                        </td>
+                        <td className="px-3 py-3">
+                          {!item.missing && (
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant="secondary" className="h-5 px-1.5 text-[11px]">{stockStatusLabel(item.status)}</Badge>
+                              {item.sold && <Badge className="h-5 bg-amber-100 px-1.5 text-[11px] text-amber-800">已售</Badge>}
+                              {item.lost && <Badge className="h-5 bg-red-100 px-1.5 text-[11px] text-red-800">已损耗</Badge>}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-3 py-3 text-xs">
+                          {item.missing ? (
+                            "-"
+                          ) : (
+                            <>
+                              <div>{item.inDate || "未记录"}</div>
+                              <div className="mt-1 font-medium">¥{Number(item.basePrice ?? 0).toFixed(2)}</div>
+                            </>
+                          )}
+                        </td>
+                        <td className="break-words px-3 py-3 text-xs leading-5">
+                          {item.linkedOrders?.length
+                            ? item.linkedOrders.map((order) => (
+                                <div key={order.id || order.orderNo}>
+                                  {order.orderNo || order.id}
+                                  {order.source && <span className="text-muted-foreground"> · {order.source}</span>}
+                                </div>
+                              ))
+                            : "无"}
+                        </td>
+                        <td className="break-words px-3 py-3 text-xs leading-5 text-muted-foreground">
+                          {item.notes || "-"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
           <div className="grid gap-1.5">
             <label className="text-sm font-medium" htmlFor="stock-approval-note">审批说明</label>
             <Textarea

@@ -54,6 +54,7 @@ import {
   resolveCreditSaleNotifications,
 } from "./station-notifications.mjs";
 import {
+  buildStockDeletionSnapshot,
   classifyStockMutationForApproval,
   preserveBatchCreationTimes,
 } from "./stock-approval-rules.mjs";
@@ -1643,15 +1644,27 @@ function stationNotificationsForAuth(state = {}, req) {
   const username = String(req.auth?.user?.username ?? "").trim();
   const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
   const ordersById = new Map(visibleOrders.map((order) => [String(order?.id ?? ""), order]));
+  const approvalRequestsById = new Map(currentApprovalRequests(state)
+    .map((request) => [String(request?.id ?? ""), request])
+    .filter(([id]) => id));
   return notificationsForRecipient(currentStationNotifications(state), username).map((notification) => {
-    if (notification?.type !== "credit_sale_confirmation") return notification;
-    const order = ordersById.get(String(notification?.orderId ?? ""));
-    return {
-      ...notification,
-      canApprove: notification?.status === "pending" &&
-        Boolean(order) &&
-        canApproveCreditSale(state.personnel, order, username),
-    };
+    if (notification?.type === "credit_sale_confirmation") {
+      const order = ordersById.get(String(notification?.orderId ?? ""));
+      return {
+        ...notification,
+        canApprove: notification?.status === "pending" &&
+          Boolean(order) &&
+          canApproveCreditSale(state.personnel, order, username),
+      };
+    }
+    if (notification?.type === "stock_approval") {
+      const approvalRequest = approvalRequestsById.get(String(notification?.approvalRequestId ?? ""));
+      return {
+        ...notification,
+        stockDetails: stockApprovalDetailsForRequest(state, approvalRequest),
+      };
+    }
+    return notification;
   });
 }
 
@@ -2686,6 +2699,25 @@ function currentApprovalRequests(state = {}) {
   return Array.isArray(state.approvalRequests) ? state.approvalRequests : [];
 }
 
+function stockApprovalDetailsForRequest(state = {}, approvalRequest = {}) {
+  if (approvalRequest?.stockDetails?.type === "stock_delete" && Array.isArray(approvalRequest.stockDetails.items)) {
+    return approvalRequest.stockDetails;
+  }
+  const deleteIds = Array.isArray(approvalRequest?.payload?.deleteIds)
+    ? approvalRequest.payload.deleteIds
+    : [];
+  if (deleteIds.length === 0) return null;
+  return buildStockDeletionSnapshot({
+    deleteIds,
+    stock: state.stock,
+    products: state.products,
+    species: state.species,
+    batches: state.batches,
+    tankGroups: state.tankGroups,
+    orders: state.orders,
+  });
+}
+
 function stockApprovalPlan(state = {}, mutation = {}, req) {
   const batchById = new Map((Array.isArray(state.batches) ? state.batches : [])
     .map((batch) => [String(batch?.id ?? ""), batch]));
@@ -2739,6 +2771,17 @@ function stockApprovalPlan(state = {}, mutation = {}, req) {
     details.push(`申请向创建已超过 48 小时的批次「${lateBatchLabels.join("、")}」补录 ${lateItems.length} 条库存`);
   }
   const payload = { upsert: mutation.upsertItems, deleteIds: mutation.deleteIds };
+  const stockDetails = hasDeletes
+    ? buildStockDeletionSnapshot({
+        deleteIds: mutation.deleteIds,
+        stock: state.stock,
+        products: state.products,
+        species: state.species,
+        batches: state.batches,
+        tankGroups: state.tankGroups,
+        orders: state.orders,
+      })
+    : null;
   const createdBy = authenticatedOperator(req);
   const requestKey = createHash("sha256")
     .update(`${createdBy}\0${approvalAction}\0${stableJson(payload)}`)
@@ -2756,6 +2799,7 @@ function stockApprovalPlan(state = {}, mutation = {}, req) {
           ? "该批次创建已超过 48 小时，入库申请已提交管理员审批"
           : "库存变更已提交管理员审批，批准前不会执行",
     payload,
+    stockDetails,
     requestKey,
     siteId: normalizeSiteId(firstItem?.siteId),
   };
@@ -7623,20 +7667,26 @@ async function handleApi(req, res, url) {
 	            String(request?.createdBy ?? "") === operator
 	          );
 	          const createdAt = new Date().toISOString();
-	          const approvalRequest = existingRequest ?? {
-	            id: uid("approval"),
-	            type: "stock_change",
-	            status: "pending",
-	            approvalAction: approvalPlan.approvalAction,
-	            title: approvalPlan.title,
-	            message: approvalPlan.message,
-	            siteId: approvalPlan.siteId,
-	            requestKey: approvalPlan.requestKey,
-	            payload: approvalPlan.payload,
-	            createdAt,
-	            createdBy: operator,
-	            createdByName: authenticatedOperatorName(req),
-	          };
+	          const approvalRequest = existingRequest
+	            ? {
+	                ...existingRequest,
+	                stockDetails: existingRequest.stockDetails ?? approvalPlan.stockDetails,
+	              }
+	            : {
+	                id: uid("approval"),
+	                type: "stock_change",
+	                status: "pending",
+	                approvalAction: approvalPlan.approvalAction,
+	                title: approvalPlan.title,
+	                message: approvalPlan.message,
+	                siteId: approvalPlan.siteId,
+	                requestKey: approvalPlan.requestKey,
+	                payload: approvalPlan.payload,
+	                stockDetails: approvalPlan.stockDetails,
+	                createdAt,
+	                createdBy: operator,
+	                createdByName: authenticatedOperatorName(req),
+	              };
 	          const ensured = ensureApprovalNotifications(currentStationNotifications(state), {
 	            approvalRequestId: approvalRequest.id,
 	            approvalAction: approvalRequest.approvalAction,
@@ -7660,7 +7710,7 @@ async function handleApi(req, res, url) {
 	                detail: approvalPlan.message,
 	              };
 	          const nextRequests = existingRequest
-	            ? requests
+	            ? requests.map((request) => request === existingRequest ? approvalRequest : request)
 	            : [approvalRequest, ...requests].slice(0, 2000);
 	          const nextState = {
 	            ...state,
