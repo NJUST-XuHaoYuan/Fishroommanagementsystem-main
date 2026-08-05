@@ -71,6 +71,7 @@ import {
   validateWaterQualityParameters,
   waterQualityParameterIdsForGroup,
 } from "./water-quality-rules.mjs";
+import { productDeleteDisposition } from "./product-delete-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -8976,6 +8977,74 @@ async function handleApi(req, res, url) {
         }
         return;
       }
+
+	  if (url.pathname === "/api/products/delete" && req.method === "POST") {
+	    const client = await pool.connect();
+	    try {
+	      const body = JSON.parse(await readBody(req) || "{}");
+	      const productId = String(body.productId ?? "").trim();
+	      if (!productId) throw new Error("请选择要删除的商品");
+	      requireModulePermissionForAuth(req, "products", "delete");
+
+	      await client.query("BEGIN");
+	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+	      const state = rows[0]?.data ?? {};
+	      const products = Array.isArray(state.products) ? state.products : [];
+	      const product = products.find((item) => String(item?.id ?? "") === productId);
+	      if (!product) {
+	        await client.query("ROLLBACK");
+	        sendJson(req, res, 404, { ok: false, error: "商品不存在或已被删除，请刷新后重试" });
+	        return;
+	      }
+
+	      const operator = authenticatedOperator(req);
+	      const disposition = productDeleteDisposition(state, productId, product.name);
+	      const archivedAt = new Date().toISOString();
+	      const nextProducts = disposition.mode === "archived"
+	        ? products.map((item) => String(item?.id ?? "") === productId
+	          ? { ...item, publicVisible: false, archivedAt, archivedBy: operator }
+	          : item)
+	        : products.filter((item) => String(item?.id ?? "") !== productId);
+	      const nextOrigins = mergeProductOrigins(state.productOrigins, nextProducts);
+	      const operationLog = {
+	        id: uid("log"),
+	        time: archivedAt,
+	        operator,
+	        module: "商品管理",
+	        action: disposition.mode === "archived" ? "修改记录" : "删除记录",
+	        detail: disposition.mode === "archived"
+	          ? `停用商品「${String(product.name ?? productId)}」（关联库存 ${disposition.references.stockCount} 条，订单 ${disposition.references.orderCount} 个）`
+	          : `删除商品「${String(product.name ?? productId)}」`,
+	      };
+	      const nextState = {
+	        ...state,
+	        products: nextProducts,
+	        productOrigins: nextOrigins,
+	        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+	      };
+
+	      await client.query(
+	        "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+	        [stateId, JSON.stringify(nextState)]
+	      );
+	      await client.query("COMMIT");
+	      sendJson(req, res, 200, {
+	        ok: true,
+	        products: nextProducts,
+	        productOrigins: nextOrigins,
+	        operationLog,
+	        mode: disposition.mode,
+	        message: disposition.message,
+	        references: disposition.references,
+	      });
+	    } catch (error) {
+	      await client.query("ROLLBACK").catch(() => undefined);
+	      sendJson(req, res, 400, { ok: false, error: error.message || "删除商品失败" });
+	    } finally {
+	      client.release();
+	    }
+	    return;
+	  }
 
 	  if (url.pathname === "/api/products/upsert" && req.method === "POST") {
     try {

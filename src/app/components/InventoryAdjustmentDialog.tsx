@@ -23,6 +23,7 @@ import {
   StockChangeRequest,
   StockItem,
   StockStatus,
+  isProductArchived,
   uid,
   useStore,
 } from "../store";
@@ -272,6 +273,10 @@ export function InventoryAdjustmentDialog() {
     () => [...state.products].sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
     [state.products],
   );
+  const activeProducts = useMemo(
+    () => products.filter((product) => !isProductArchived(product)),
+    [products],
+  );
   const productById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
   const batchById = useMemo(() => new Map(siteBatches.map((batch) => [batch.id, batch])), [siteBatches]);
   const visibleStock = useMemo(
@@ -308,7 +313,7 @@ export function InventoryAdjustmentDialog() {
     const availableBatches = state.batches
       .filter((batch) => !targetSiteId || matchesSite(batch, targetSiteId))
       .sort((left, right) => right.arrivalDate.localeCompare(left.arrivalDate) || right.batchNo.localeCompare(left.batchNo));
-    const product = products[0];
+    const product = activeProducts[0];
     const batch = availableBatches[0];
     return {
       id: uid("adjust-add"),
@@ -741,12 +746,12 @@ export function InventoryAdjustmentDialog() {
         .localeCompare(productById.get(right.productId)?.name ?? "", "zh-CN"));
   }, [batchById, productById, selectedSubTankId, stockQuery, visibleStock]);
 
-  const productOptions = useMemo<SearchOption[]>(() => products.map((product) => ({
+  const productOptions = useMemo<SearchOption[]>(() => activeProducts.map((product) => ({
     value: product.id,
     label: product.name,
     description: [product.size, product.origin].filter(Boolean).join(" · "),
     imageUrl: product.imageUrl,
-  })), [products]);
+  })), [activeProducts]);
   const batchOptions = useMemo<SearchOption[]>(() => siteBatches.map((batch) => ({
     value: batch.id,
     label: batch.batchNo,

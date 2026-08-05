@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from "react";
-import { useStore, Product, Species, uid } from "../store";
+import { useStore, Product, Species, isProductArchived, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -26,7 +26,7 @@ import { Textarea } from "./ui/textarea";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { ImageUpload } from "./ImageUpload";
 import { toast } from "sonner";
-import { ChevronDown, Plus, Check, Settings2, Pencil, Trash2, Search } from "lucide-react";
+import { ChevronDown, Plus, Check, Settings2, Pencil, Trash2, Search, RotateCcw } from "lucide-react";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 
@@ -503,7 +503,7 @@ type ProductRow = Product & {
 };
 
 export function ProductsView() {
-  const { state, saveProduct, saveStateTransform } = useStore();
+  const { state, saveProduct, deleteProduct, saveStateTransform } = useStore();
   const [editing, setEditing] = useState<Product | null>(null);
   const [deleting, setDeleting] = useState<Product | null>(null);
   const [open, setOpen] = useState(false);
@@ -513,6 +513,10 @@ export function ProductsView() {
   const [priceStr, setPriceStr] = useState<string>("");
   const [minReturnPriceStr, setMinReturnPriceStr] = useState<string>("");
   const [savingProduct, setSavingProduct] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [productStatus, setProductStatus] = useState<"active" | "archived">("active");
+  const [restoringProductId, setRestoringProductId] = useState("");
   const permission = usePermission("products");
   const isAdmin = state.user?.role === "admin";
 
@@ -525,7 +529,7 @@ export function ProductsView() {
   const speciesName = (id: string) => state.species.find((s) => s.id === id)?.name ?? "—";
   const speciesImage = (id: string) => state.species.find((s) => s.id === id)?.imageUrl ?? "";
   const speciesById = (id: string) => state.species.find((s) => s.id === id);
-  const productRows = useMemo<ProductRow[]>(
+  const allProductRows = useMemo<ProductRow[]>(
     () => state.products.map((product) => {
       const species = speciesById(product.speciesId);
       const speciesSearch = species
@@ -540,6 +544,11 @@ export function ProductsView() {
       return { ...product, speciesSearch };
     }),
     [state.products, state.species]
+  );
+  const activeProductCount = allProductRows.filter((product) => !isProductArchived(product)).length;
+  const archivedProductCount = allProductRows.length - activeProductCount;
+  const productRows = allProductRows.filter((product) =>
+    productStatus === "archived" ? isProductArchived(product) : !isProductArchived(product)
   );
 
   const empty = (): Product => ({
@@ -593,18 +602,32 @@ export function ProductsView() {
   const confirmDelete = async () => {
     if (!deleting) return;
     if (!permission.requirePermission("delete")) return;
-    if (!confirmWrite("删除", `将删除商品「${deleting.name}」。`)) return;
-    const deleteId = deleting.id;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      products: latest.products.filter((x) => x.id !== deleteId),
-    }));
-    if (!ok) {
-      toast.error("删除失败，请重试");
+    setDeletingProduct(true);
+    setDeleteError("");
+    const result = await deleteProduct(deleting.id);
+    setDeletingProduct(false);
+    if (!result.ok) {
+      const message = result.error || "删除商品失败，请重试";
+      setDeleteError(message);
+      toast.error(message);
       return;
     }
     setDeleting(null);
-    toast.success("已删除");
+    toast.success(result.message || (result.mode === "archived" ? "商品已停用" : "商品已删除"));
+  };
+
+  const restoreProduct = async (row: ProductRow) => {
+    if (!permission.requirePermission("update")) return;
+    if (!confirmWrite("恢复", `将恢复商品「${row.name}」，允许继续用于新增业务。`)) return;
+    const { speciesSearch, archivedAt, archivedBy, ...product } = row;
+    void speciesSearch;
+    void archivedAt;
+    void archivedBy;
+    setRestoringProductId(row.id);
+    const ok = await saveProduct({ ...product, archivedAt: "", archivedBy: "" });
+    setRestoringProductId("");
+    if (!ok) return toast.error("恢复失败，请重试");
+    toast.success("商品已恢复使用");
   };
 
   return (
@@ -617,6 +640,23 @@ export function ProductsView() {
         {(permission.canCreate || permission.canUpdate || permission.canDelete) && <Button variant="outline" size="sm" onClick={() => setManageOpen(true)}>
           <Settings2 className="size-3.5 mr-1.5" />管理产地
         </Button>}
+      </div>
+
+      <div className="inline-flex w-fit rounded-md border bg-muted/40 p-1">
+        <button
+          type="button"
+          className={`rounded px-3 py-1.5 text-sm font-medium ${productStatus === "active" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+          onClick={() => setProductStatus("active")}
+        >
+          使用中 {activeProductCount}
+        </button>
+        <button
+          type="button"
+          className={`rounded px-3 py-1.5 text-sm font-medium ${productStatus === "archived" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+          onClick={() => setProductStatus("archived")}
+        >
+          已停用 {archivedProductCount}
+        </button>
       </div>
 
       <DataTable
@@ -697,7 +737,16 @@ export function ProductsView() {
               setMinReturnPriceStr(String(row.minReturnPrice ?? 0));
               setOpen(true);
             }}>编辑</Button>}
-            {permission.canDelete && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDeleting(row)}>删除</Button>}
+            {permission.canUpdate && isProductArchived(row) && (
+              <Button size="sm" variant="outline" disabled={restoringProductId === row.id} onClick={() => void restoreProduct(row)}>
+                <RotateCcw className="mr-1 size-3.5" />
+                {restoringProductId === row.id ? "恢复中" : "恢复使用"}
+              </Button>
+            )}
+            {permission.canDelete && !isProductArchived(row) && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => {
+              setDeleteError("");
+              setDeleting(row);
+            }}>删除</Button>}
           </div>
         )}
       />
@@ -796,15 +845,29 @@ export function ProductsView() {
       </Dialog>
 
       {/* 删除确认 */}
-      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+      <AlertDialog open={!!deleting} onOpenChange={(o) => {
+        if (!o && !deletingProduct) {
+          setDeleting(null);
+          setDeleteError("");
+        }
+      }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>删除商品</AlertDialogTitle>
-            <AlertDialogDescription>确认删除「{deleting?.name}」？</AlertDialogDescription>
+            <AlertDialogDescription>
+              确认处理「{deleting?.name}」？未使用的商品会直接删除；已有库存或订单引用的商品会停用并从使用中列表移除，历史记录继续保留。
+            </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-5 text-amber-900">
+              {deleteError}
+            </div>
+          )}
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDelete}>确认删除</AlertDialogAction>
+            <AlertDialogCancel disabled={deletingProduct}>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete} disabled={deletingProduct}>
+              {deletingProduct ? "处理中..." : "删除或停用"}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

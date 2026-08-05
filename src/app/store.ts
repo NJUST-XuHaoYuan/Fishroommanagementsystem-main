@@ -47,7 +47,25 @@ export type Product = {
   publicVisible?: boolean;
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
+  /** 停用商品继续保留供历史库存和订单展示，但不能用于新增业务。 */
+  archivedAt?: string;
+  archivedBy?: string;
   notes: string;
+};
+
+export function isProductArchived(product: Product | undefined | null): boolean {
+  return Boolean(product?.archivedAt);
+}
+
+export type ProductDeleteResult = {
+  ok: boolean;
+  error?: string;
+  mode?: "deleted" | "archived";
+  message?: string;
+  references?: {
+    stockCount: number;
+    orderCount: number;
+  };
 };
 
 export type SubTank = {
@@ -649,6 +667,7 @@ export type StoreContextType = {
   setState: React.Dispatch<React.SetStateAction<Store>>;
   savePatch: (patch: Partial<Omit<Store, "user">>) => Promise<boolean>;
   saveProduct: (product: Product) => Promise<boolean>;
+  deleteProduct: (productId: string) => Promise<ProductDeleteResult>;
   saveStockChange: (change: StockChangeRequest) => Promise<StockChangeResult>;
   saveMaintenanceAction: (change:
     | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
@@ -881,6 +900,7 @@ export const StoreContext = createContext<StoreContextType>({
   setState: () => {},
   savePatch: async () => false,
   saveProduct: async () => false,
+  deleteProduct: async () => ({ ok: false, error: "删除商品功能尚未初始化" }),
   saveStockChange: async () => ({ ok: false }),
   saveMaintenanceAction: async () => false,
   saveTankGroupChange: async () => false,

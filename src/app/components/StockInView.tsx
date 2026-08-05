@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import { useStore, PurchaseBatch, StockItem, StockStatus, uid } from "../store";
+import { useStore, isProductArchived, PurchaseBatch, StockItem, StockStatus, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -308,6 +308,10 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     () => new Map(state.products.map((p) => [p.id, p])),
     [state.products],
   );
+  const activeProducts = useMemo(
+    () => state.products.filter((item) => !isProductArchived(item)),
+    [state.products],
+  );
   const speciesById = useMemo(
     () => new Map(state.species.map((s) => [s.id, s])),
     [state.species],
@@ -387,7 +391,7 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     state.tankGroups.find((g) => g.subTanks.some((t) => t.id === subTankId))?.id ?? "";
 
   const empty = (subTankId = ""): StockItem => {
-    const defaultProduct = state.products[0];
+    const defaultProduct = activeProducts[0];
     return {
       id: "",
       productId: defaultProduct?.id ?? "",
@@ -1325,7 +1329,7 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
               <div className="grid gap-2">
                 <Label><span className="text-red-500">*</span> 商品</Label>
 	                <ProductCombobox
-	                  products={state.products}
+	                  products={state.products.filter((item) => !isProductArchived(item) || item.id === editing.productId)}
 	                  value={editing.productId}
 	                  onChange={changeProduct}
 	                />

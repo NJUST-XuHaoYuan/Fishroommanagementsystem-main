@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -777,6 +777,56 @@ function AdminApp() {
     }
   };
 
+	  const deleteProduct = async (productId: string): Promise<ProductDeleteResult> => {
+	    clearTimeout(saveTimer.current);
+	    setSaveStatus("saving");
+	    try {
+	      const response = await fetch(`${API}/products/delete`, {
+	        method: "POST",
+	        headers: authJsonHeaders(),
+	        body: JSON.stringify({ productId }),
+	      });
+	      const result = await response.json().catch(() => ({}));
+	      if (!response.ok || !result.ok) {
+	        setSaveStatus("error");
+	        setTimeout(() => setSaveStatus("idle"), 3000);
+	        return {
+	          ok: false,
+	          error: result.error || `HTTP ${response.status}`,
+	          references: result.references,
+	        };
+	      }
+
+	      setStateBase((current) => {
+	        const next = {
+	          ...current,
+	          products: Array.isArray(result.products) ? result.products : current.products,
+	          productOrigins: Array.isArray(result.productOrigins) ? result.productOrigins : current.productOrigins,
+	          operationLogs: result.operationLog
+	            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
+	                arr.findIndex((item) => item.id === log.id) === idx
+	              ).slice(0, MAX_OPERATION_LOGS)
+	            : current.operationLogs,
+	        };
+	        lastSavedState.current = withoutUser(next);
+	        return next;
+	      });
+	      setSaveStatus("saved");
+	      setTimeout(() => setSaveStatus("idle"), 2000);
+	      return {
+	        ok: true,
+	        mode: result.mode,
+	        message: result.message,
+	        references: result.references,
+	      };
+	    } catch (error) {
+	      console.error("Failed to delete product:", error);
+	      setSaveStatus("error");
+	      setTimeout(() => setSaveStatus("idle"), 3000);
+	      return { ok: false, error: error instanceof Error ? error.message : "删除商品失败，请重试" };
+	    }
+	  };
+
 	  const saveStockChange = async (
 	    change: StockChangeRequest
 	  ): Promise<StockChangeResult> => {
@@ -1508,7 +1558,7 @@ function AdminApp() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, deleteProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
         <PublicCatalogPage />
       ) : !state.user ? (
