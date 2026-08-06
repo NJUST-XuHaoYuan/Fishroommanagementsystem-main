@@ -32,7 +32,7 @@ import {
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
   ChevronLeft, ChevronRight, Loader2, Send, ShieldCheck, Tag, Gavel,
-  CircleDollarSign,
+  CircleDollarSign, UploadCloud,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -3001,11 +3001,13 @@ function StockPickerBioDialog({
     videos: [],
   });
   const {
+    dropZoneProps: recordMediaDropZoneProps,
+    isDragging: recordMediaDragging,
     isUploading: recordMediaUploading,
     pasteFiles: pasteRecordMedia,
     uploadImages: uploadRecordPhotos,
     uploadVideos: uploadRecordVideos,
-  } = useRecordMediaUpload(setNewRecord);
+  } = useRecordMediaUpload(setNewRecord, permission.canCreate);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const [targetGroupId, setTargetGroupId] = useState("");
@@ -3311,8 +3313,17 @@ function StockPickerBioDialog({
       <DialogContent
         aria-describedby={undefined}
         className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden"
+        {...recordMediaDropZoneProps}
         onPaste={permission.canCreate ? pasteRecordMedia : undefined}
       >
+        {recordMediaDragging && (
+          <div className="pointer-events-none absolute inset-2 z-[60] flex items-center justify-center rounded-lg border-2 border-dashed border-sky-600 bg-background/95">
+            <div className="flex items-center gap-2 text-base font-semibold text-sky-700">
+              <UploadCloud className="size-6" />
+              松开即可上传照片或视频
+            </div>
+          </div>
+        )}
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {product?.imageUrl && (

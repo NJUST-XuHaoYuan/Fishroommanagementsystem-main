@@ -16,7 +16,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2, Loader2 } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2, Loader2, UploadCloud } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -76,11 +76,13 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     videos: [],
   });
   const {
+    dropZoneProps: recordMediaDropZoneProps,
+    isDragging: recordMediaDragging,
     isUploading: recordMediaUploading,
     pasteFiles: pasteRecordMedia,
     uploadImages: uploadRecordPhotos,
     uploadVideos: uploadRecordVideos,
-  } = useRecordMediaUpload(setNewRecord);
+  } = useRecordMediaUpload(setNewRecord, permission.canCreate);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const [confirmTimeChangeOpen, setConfirmTimeChangeOpen] = useState(false);
@@ -1690,8 +1692,17 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
         <DialogContent
           aria-describedby={undefined}
           className="w-[min(96vw,56rem)] max-w-[96vw] sm:max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden"
+          {...recordMediaDropZoneProps}
           onPaste={permission.canCreate ? pasteRecordMedia : undefined}
         >
+          {recordMediaDragging && (
+            <div className="pointer-events-none absolute inset-2 z-[60] flex items-center justify-center rounded-lg border-2 border-dashed border-sky-600 bg-background/95">
+              <div className="flex items-center gap-2 text-base font-semibold text-sky-700">
+                <UploadCloud className="size-6" />
+                松开即可上传照片或视频
+              </div>
+            </div>
+          )}
           <DialogHeader>
             <DialogTitle className="flex flex-wrap items-center gap-2 pr-6 text-left">
               {bioProduct?.imageUrl && (
