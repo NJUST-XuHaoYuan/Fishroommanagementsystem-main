@@ -1,7 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { snapshotDamageReplacements } from "./shipment-damage-utils.mjs";
+import {
+  normalizeDamageReplacementSelection,
+  snapshotDamageReplacements,
+} from "./shipment-damage-utils.mjs";
+
+test("accepts replacement mappings for only the selected damaged fish", () => {
+  assert.deepEqual(normalizeDamageReplacementSelection([
+    { originalStockItemId: "stock-b", replacementStockItemId: "stock-new" },
+  ], ["stock-a", "stock-b"]), [
+    { originalStockItemId: "stock-b", replacementStockItemId: "stock-new" },
+  ]);
+});
+
+test("rejects duplicate replacement fish", () => {
+  assert.throws(() => normalizeDamageReplacementSelection([
+    { originalStockItemId: "stock-a", replacementStockItemId: "stock-new" },
+    { originalStockItemId: "stock-b", replacementStockItemId: "stock-new" },
+  ], ["stock-a", "stock-b"]), /同一条库存鱼不能重复补发/);
+});
+
+test("rejects original fish outside the shipment", () => {
+  assert.throws(() => normalizeDamageReplacementSelection([
+    { originalStockItemId: "stock-c", replacementStockItemId: "stock-new" },
+  ], ["stock-a", "stock-b"]), /不属于当前发货单/);
+});
 
 test("snapshots the original and replacement fish for later shipment display", () => {
   const result = snapshotDamageReplacements({

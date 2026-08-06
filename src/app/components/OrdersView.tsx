@@ -270,8 +270,12 @@ function applyOrderApiResult(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function countsAsActiveShipment(shipment: Shipment): boolean {
+function countsAsBillableShipment(shipment: Shipment): boolean {
   return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
+}
+
+function countsAsFulfillmentShipment(shipment: Shipment): boolean {
+  return shipment.status !== "preparing";
 }
 
 function shipmentHasActuallyShipped(shipment: Shipment): boolean {
@@ -282,7 +286,7 @@ function shipmentHasActuallyShipped(shipment: Shipment): boolean {
 
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
   const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipment(shipment)
+    shipment.orderId === order.id && countsAsBillableShipment(shipment)
   );
   if (activeShipments.length === 0) return order.shippingFee ?? 0;
   return activeShipments.reduce((sum, shipment) => sum + (shipment.actualShippingFee ?? 0), 0);
@@ -290,7 +294,7 @@ function getBillableShippingFee(order: Order, shipments: Shipment[] = []): numbe
 
 function hasActualShippingFee(order: Order, shipments: Shipment[] = []): boolean {
   return shipments.some((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipment(shipment)
+    shipment.orderId === order.id && countsAsBillableShipment(shipment)
   );
 }
 
@@ -408,7 +412,7 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
     tags.push({ label: "已报损", className: ORDER_STATUS_TAG_STYLE.damaged });
   }
 
-  const activeShipments = orderShipments.filter(countsAsActiveShipment);
+  const activeShipments = orderShipments.filter(countsAsFulfillmentShipment);
   const activeShippedItemIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
   const inventoryActiveItems = order.items.filter((item) => !item.inventoryRemovedAt);
   const removedInventoryCount = order.items.length - inventoryActiveItems.length;
@@ -422,8 +426,7 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
     (shipment.shipMethod ?? "express") !== "pickup" && !!String(shipment.trackingNo ?? "").trim()
   );
   const allResolved = activeShipments.length > 0 && activeShipments.every((shipment) =>
-    shipment.status === "delivered" ||
-    (shipment.status === "damaged" && shipment.damageResolution === "refund")
+    shipment.status === "delivered" || shipment.status === "damaged"
   );
 
   if (removedInventoryCount > 0) {
@@ -646,7 +649,7 @@ function effectiveItemPlannedShipDate(order: Order, _item: OrderItem): string {
 function activeShippedItemIds(orderId: string, shipments: Shipment[]): Set<string> {
   return new Set(
     shipments
-      .filter((shipment) => shipment.orderId === orderId && countsAsActiveShipment(shipment))
+      .filter((shipment) => shipment.orderId === orderId && countsAsFulfillmentShipment(shipment))
       .flatMap((shipment) => shipment.itemStockIds ?? [])
   );
 }
@@ -1132,7 +1135,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
   const productRows = orders.flatMap((order) => {
     const orderCustomer = customer(order.customerId);
     const orderShipments = shipmentsForOrder(order.id);
-    const activeShipments = orderShipments.filter(countsAsActiveShipment);
+    const activeShipments = orderShipments.filter(countsAsFulfillmentShipment);
     const shippedItemIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
     return order.items.map((orderItem, index) => {
       const stock = stockItem(orderItem.stockItemId);
@@ -2196,10 +2199,10 @@ function ReportDamageDialog({
   onSubmit: (shipment: Shipment, result: DamageResult) => boolean | Promise<boolean>;
 }) {
   const { state } = useStore();
-  const [resolution, setResolution] = useState<"refund" | "reship">("refund");
-  const [refundItemIds, setRefundItemIds] = useState<string[]>([]);
+  const [resolution, setResolution] = useState<"refund" | "reship" | null>(null);
+  const [damagedItemIds, setDamagedItemIds] = useState<string[]>([]);
   const [refundAmountByStockId, setRefundAmountByStockId] = useState<Record<string, number>>({});
-  const [notes, setNotes] = useState("物流报损，待退款");
+  const [notes, setNotes] = useState("");
   const [proof, setProof] = useState<string[]>([]);
   const [replacementByOriginal, setReplacementByOriginal] = useState<Record<string, string>>({});
   const [replacementGroupByOriginal, setReplacementGroupByOriginal] = useState<Record<string, string>>({});
@@ -2209,13 +2212,12 @@ function ReportDamageDialog({
     if (open) {
       const shippedIds = new Set(shipment?.itemStockIds ?? []);
       const shipmentItems = (order?.items ?? []).filter((item) => shippedIds.has(item.stockItemId));
-      const defaultRefundIds = shipmentItems.map((item) => item.stockItemId);
-      setResolution("refund");
-      setRefundItemIds(defaultRefundIds);
+      setResolution(null);
+      setDamagedItemIds([]);
       setRefundAmountByStockId(Object.fromEntries(
         shipmentItems.map((item) => [item.stockItemId, Number(item.price.toFixed(2))])
       ));
-      setNotes("物流报损，待退款");
+      setNotes("");
       setProof([]);
       setReplacementByOriginal({});
       setReplacementGroupByOriginal({});
@@ -2226,15 +2228,18 @@ function ReportDamageDialog({
   if (!shipment || !order) return null;
 
   const damagedItems = order.items.filter((item) => (shipment.itemStockIds ?? []).includes(item.stockItemId));
-  const refundItemIdSet = new Set(refundItemIds);
-  const selectedRefundItems = damagedItems.filter((item) => refundItemIdSet.has(item.stockItemId));
-  const selectedRefundSubtotal = selectedRefundItems.reduce((sum, item) => sum + item.price, 0);
-  const selectedRefundAmount = selectedRefundItems.reduce(
+  const damagedItemIdSet = new Set(damagedItemIds);
+  const selectedDamagedItems = damagedItems.filter((item) => damagedItemIdSet.has(item.stockItemId));
+  const selectedRefundSubtotal = selectedDamagedItems.reduce((sum, item) => sum + item.price, 0);
+  const selectedRefundAmount = selectedDamagedItems.reduce(
     (sum, item) => sum + (refundAmountByStockId[item.stockItemId] ?? 0),
     0
   );
   const maxRefundForSelection = selectedRefundSubtotal;
   const selectedReplacementIds = new Set(Object.values(replacementByOriginal).filter(Boolean));
+  const reshipSelectionComplete = selectedDamagedItems.length > 0 && selectedDamagedItems.every(
+    (item) => Boolean(replacementByOriginal[item.stockItemId])
+  );
 
   const getProduct = (id: string) => state.products.find((product) => product.id === id);
   const getStockItem = (id: string) => state.stock.find((stock) => stock.id === id);
@@ -2311,9 +2316,9 @@ function ReportDamageDialog({
     return [...map.entries()].map(([id, info]) => ({ id, ...info }));
   };
 
-  const setRefundItemChecked = (stockItemId: string, checked: boolean) => {
+  const setDamagedItemChecked = (stockItemId: string, checked: boolean) => {
     const targetItem = damagedItems.find((item) => item.stockItemId === stockItemId);
-    setRefundItemIds((current) => {
+    setDamagedItemIds((current) => {
       const next = checked
         ? Array.from(new Set([...current, stockItemId]))
         : current.filter((id) => id !== stockItemId);
@@ -2325,6 +2330,23 @@ function ReportDamageDialog({
       else delete next[stockItemId];
       return next;
     });
+    if (!checked) {
+      setReplacementByOriginal((current) => {
+        const next = { ...current };
+        delete next[stockItemId];
+        return next;
+      });
+      setReplacementGroupByOriginal((current) => {
+        const next = { ...current };
+        delete next[stockItemId];
+        return next;
+      });
+      setReplacementSubTankByOriginal((current) => {
+        const next = { ...current };
+        delete next[stockItemId];
+        return next;
+      });
+    }
   };
 
   const setRefundItemAmount = (stockItemId: string, value: string) => {
@@ -2335,11 +2357,12 @@ function ReportDamageDialog({
   };
 
   const submit = async () => {
+    if (selectedDamagedItems.length === 0) return toast.error("请先选择本次报损的鱼");
+    if (!resolution) return toast.error("请选择退款或补发处理方式");
     let result: DamageResult;
     if (resolution === "refund") {
-      if (selectedRefundItems.length === 0) return toast.error("请选择实际需要退款的商品");
       if (!selectedRefundAmount || selectedRefundAmount <= 0) return toast.error("请输入有效待退款金额");
-      const invalidRefundItem = selectedRefundItems.find((item) => {
+      const invalidRefundItem = selectedDamagedItems.find((item) => {
         const itemAmount = refundAmountByStockId[item.stockItemId] ?? 0;
         return itemAmount < 0 || itemAmount > item.price + 0.005;
       });
@@ -2349,7 +2372,7 @@ function ReportDamageDialog({
       }
       if (selectedRefundAmount > maxRefundForSelection + 0.005)
         return toast.error(`退款金额不能超过已选商品可退金额 ¥${maxRefundForSelection.toFixed(2)}`);
-      const refundItemText = selectedRefundItems.map((item) => {
+      const refundItemText = selectedDamagedItems.map((item) => {
         const product = getProduct(item.productId);
         const stock = getStockItem(item.stockItemId);
         const itemRefundAmount = refundAmountByStockId[item.stockItemId] ?? 0;
@@ -2357,14 +2380,13 @@ function ReportDamageDialog({
       }).join("、");
       result = {
         resolution: "refund",
-        damagedItemStockIds: selectedRefundItems.map((item) => item.stockItemId),
+        damagedItemStockIds: selectedDamagedItems.map((item) => item.stockItemId),
         refundAmount: Number(selectedRefundAmount.toFixed(2)),
         proof,
         notes: `${notes.trim() || "物流报损，待退款"}；退款商品：${refundItemText}`,
       };
     } else {
-      if (damagedItems.length === 0) return toast.error("该发货单没有可补发的商品");
-      const replacements = damagedItems.map((item) => ({
+      const replacements = selectedDamagedItems.map((item) => ({
         originalStockItemId: item.stockItemId,
         replacementStockItemId: replacementByOriginal[item.stockItemId] ?? "",
       }));
@@ -2394,58 +2416,118 @@ function ReportDamageDialog({
         </DialogHeader>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 py-1 pr-1">
           <div className="rounded-lg border border-red-100 bg-red-50/60 p-3 text-sm text-red-800">
-            该发货单会标记为「已报损」。选择退款时只勾选实际报损并退款的鱼，金额可按协商结果填写；选择补发需要从未售库存里选择替换鱼。
+            先选择本次实际报损的鱼，再选择退款或补发。未勾选的鱼保持原发货记录，不受本次操作影响。
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => { setResolution("refund"); setNotes("物流报损，待退款"); }}
-              className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${
-                resolution === "refund"
-                  ? "border-red-500 bg-red-50 text-red-700"
-                  : "hover:bg-muted text-muted-foreground"
-              }`}
-            >
-              退款
-            </button>
-            <button
-              type="button"
-              onClick={() => { setResolution("reship"); setNotes("物流报损，安排补发"); }}
-              className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${
-                resolution === "reship"
-                  ? "border-sky-500 bg-sky-50 text-sky-700"
-                  : "hover:bg-muted text-muted-foreground"
-              }`}
-            >
-              补发
-            </button>
+          <div className="grid gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Label className="flex items-center gap-2 text-sm font-semibold">
+                <span className="flex size-6 items-center justify-center rounded-full bg-foreground text-xs text-background">1</span>
+                选择本次报损的鱼<span className="text-red-500">*</span>
+              </Label>
+              <span className={`rounded-full px-2 py-1 text-xs font-medium ${
+                selectedDamagedItems.length > 0 ? "bg-red-100 text-red-700" : "bg-muted text-muted-foreground"
+              }`}>
+                已选 {selectedDamagedItems.length} / {damagedItems.length} 条
+              </span>
+            </div>
+            <div className="max-h-64 overflow-y-auto rounded-lg border p-2">
+              <div className="grid gap-2 sm:grid-cols-2">
+                {damagedItems.map((item) => {
+                  const product = getProduct(item.productId);
+                  const stock = getStockItem(item.stockItemId);
+                  const checked = damagedItemIdSet.has(item.stockItemId);
+                  const iconUrl = stock ? getReplacementIcon(stock) : product?.imageUrl ?? "";
+                  return (
+                    <label
+                      key={item.stockItemId}
+                      htmlFor={`damage-item-${item.stockItemId}`}
+                      className={`grid cursor-pointer grid-cols-[auto_48px_minmax(0,1fr)] items-center gap-2 rounded-lg border p-2.5 transition-colors ${
+                        checked ? "border-red-400 bg-red-50 ring-1 ring-red-200" : "bg-background hover:bg-muted/50"
+                      }`}
+                    >
+                      <Checkbox
+                        id={`damage-item-${item.stockItemId}`}
+                        checked={checked}
+                        onCheckedChange={(value) => setDamagedItemChecked(item.stockItemId, value === true)}
+                      />
+                      <div className="size-12 overflow-hidden rounded-md border bg-muted">
+                        {iconUrl
+                          ? <ImageWithFallback src={iconUrl} alt="" className="size-full object-cover" />
+                          : <div className="flex size-full items-center justify-center"><Fish className="size-4 text-muted-foreground" /></div>}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <span className="truncate text-sm font-semibold">{product?.name ?? item.productId}</span>
+                          <span className="shrink-0 text-xs font-medium">¥{item.price.toFixed(2)}</span>
+                        </div>
+                        <div className="mt-0.5 truncate text-xs font-medium text-foreground">
+                          鱼码：{stock?.code || "无编号"}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {tankName(stock?.subTankId)}{productSummary(product) ? ` · ${productSummary(product)}` : ""}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+                {damagedItems.length === 0 && (
+                  <div className="p-4 text-center text-sm text-muted-foreground sm:col-span-2">该发货单没有可报损的鱼</div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <Label className="flex items-center gap-2 text-sm font-semibold">
+              <span className="flex size-6 items-center justify-center rounded-full bg-foreground text-xs text-background">2</span>
+              选择处理方式<span className="text-red-500">*</span>
+            </Label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={selectedDamagedItems.length === 0}
+                onClick={() => { setResolution("refund"); setNotes("物流报损，待退款"); }}
+                className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                  resolution === "refund"
+                    ? "border-red-500 bg-red-50 text-red-700"
+                    : "hover:bg-muted text-muted-foreground"
+                }`}
+              >
+                退款
+              </button>
+              <button
+                type="button"
+                disabled={selectedDamagedItems.length === 0}
+                onClick={() => { setResolution("reship"); setNotes("物流报损，安排补发"); }}
+                className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                  resolution === "reship"
+                    ? "border-sky-500 bg-sky-50 text-sky-700"
+                    : "hover:bg-muted text-muted-foreground"
+                }`}
+              >
+                补发
+              </button>
+            </div>
           </div>
           {resolution === "refund" && (
             <div className="grid gap-3">
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-3">
-                  <Label>选择实际退款商品<span className="text-red-500">*</span></Label>
+                  <Label>填写已选报损鱼的退款金额</Label>
                   <span className="text-xs text-muted-foreground">
-                    已选 {selectedRefundItems.length} 件 / 售价 ¥{selectedRefundSubtotal.toFixed(2)} / 退款 ¥{selectedRefundAmount.toFixed(2)}
+                    {selectedDamagedItems.length} 条 / 售价 ¥{selectedRefundSubtotal.toFixed(2)} / 退款 ¥{selectedRefundAmount.toFixed(2)}
                   </span>
                 </div>
                 <div className="max-h-56 overflow-y-auto rounded-lg border divide-y">
-                  {damagedItems.map((item) => {
+                  {selectedDamagedItems.map((item) => {
                     const product = getProduct(item.productId);
                     const stock = getStockItem(item.stockItemId);
-                    const checked = refundItemIdSet.has(item.stockItemId);
                     const itemRefundAmount = refundAmountByStockId[item.stockItemId] ?? 0;
                     return (
-                      <div key={item.stockItemId} className="grid grid-cols-[auto_minmax(0,1fr)_96px_132px] items-start gap-3 px-3 py-2.5 hover:bg-muted/40">
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(value) => setRefundItemChecked(item.stockItemId, value === true)}
-                          className="mt-0.5"
-                        />
+                      <div key={item.stockItemId} className="grid gap-2 px-3 py-2.5 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_88px_132px] sm:items-start sm:gap-3">
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium">{product?.name ?? item.productId}</div>
+                          <div className="truncate text-sm font-medium">{product?.name ?? item.productId} · {stock?.code || "无编号"}</div>
                           <div className="text-xs text-muted-foreground">
-                            {stock?.code ? `编号 ${stock.code} · ` : ""}{tankName(stock?.subTankId)}
+                            {tankName(stock?.subTankId)}
                             {product?.size ? ` · ${product.size}` : ""}
                             {product?.origin ? ` · ${product.origin}` : ""}
                           </div>
@@ -2461,9 +2543,8 @@ function ReportDamageDialog({
                             min={0}
                             max={item.price}
                             step={0.01}
-                            value={checked ? (itemRefundAmount || "") : ""}
+                            value={itemRefundAmount || ""}
                             onChange={(event) => setRefundItemAmount(item.stockItemId, event.target.value)}
-                            disabled={!checked}
                             className="h-8 text-right"
                             placeholder="0.00"
                           />
@@ -2471,15 +2552,12 @@ function ReportDamageDialog({
                       </div>
                     );
                   })}
-                  {damagedItems.length === 0 && (
-                    <div className="p-4 text-center text-sm text-muted-foreground">该发货单没有商品</div>
-                  )}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  只勾选实际要退款的鱼；每条鱼的应收调减金额可手动修改，但不能超过该鱼售价和已选商品总售价。
+                  每条鱼的应收调减金额可按协商结果修改，但不能超过该鱼售价和已选商品总售价。
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label>退款金额合计</Label>
                   <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-base font-semibold text-red-600">
@@ -2497,9 +2575,9 @@ function ReportDamageDialog({
           )}
           {resolution === "reship" && (
             <div className="grid gap-2">
-              <Label>选择补发库存鱼<span className="text-red-500 ml-0.5">*</span></Label>
-              <div className="rounded-lg border divide-y max-h-64 overflow-y-auto">
-                {damagedItems.map((item) => {
+              <Label>为已选报损鱼指定补发鱼<span className="text-red-500 ml-0.5">*</span></Label>
+              <div className="rounded-lg border divide-y">
+                {selectedDamagedItems.map((item) => {
                   const product = getProduct(item.productId);
                   const originalStock = getStockItem(item.stockItemId);
                   const groupOptions = availableReplacementGroups(item);
@@ -2509,22 +2587,26 @@ function ReportDamageDialog({
                   const options = selectedTankId ? availableReplacementOptions(item, selectedTankId) : [];
                   const selected = replacementByOriginal[item.stockItemId] ?? "";
                   return (
-                    <div key={item.stockItemId} className="p-3 grid gap-2">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium truncate">{product?.name ?? item.productId}</div>
-                          <div className="text-xs text-muted-foreground">
-                            原报损鱼：{tankName(originalStock?.subTankId)}
-                            {productSummary(product) ? ` · ${productSummary(product)}` : ""}
-                            {originalStock?.code ? ` · 鱼编号 ${originalStock.code}` : ""}
-                            {originalStock?.notes ? ` · 库存备注 ${originalStock.notes}` : ""}
+                    <div key={item.stockItemId} className="grid gap-3 p-3">
+                      <div className="sticky top-0 z-10 rounded-lg border border-red-200 bg-red-50 p-3 shadow-sm">
+                        <div className="mb-1 text-[11px] font-semibold text-red-700">当前补发对应的报损鱼</div>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="break-words text-sm font-semibold text-red-800">
+                              {product?.name ?? item.productId} · 鱼码 {originalStock?.code || "无编号"}
+                            </div>
+                            <div className="break-words text-xs text-muted-foreground">
+                              {tankName(originalStock?.subTankId)}
+                              {productSummary(product) ? ` · ${productSummary(product)}` : ""}
+                              {originalStock?.notes ? ` · 库存备注 ${originalStock.notes}` : ""}
+                            </div>
                           </div>
+                          <span className="shrink-0 text-xs font-medium text-red-700">原售价 ¥{item.price.toFixed(2)}</span>
                         </div>
-                        <span className="text-xs text-muted-foreground shrink-0">原售价 ¥{item.price.toFixed(2)}</span>
                       </div>
                       <div className="grid gap-3 rounded-lg border bg-muted/10 p-3">
                         <div className="grid gap-2">
-                          <div className="text-xs font-medium text-muted-foreground">① 选择缸组</div>
+                          <div className="text-xs font-medium text-muted-foreground">A. 选择补发鱼所在缸组</div>
                           {groupOptions.length === 0 ? (
                             <div className="rounded-md border border-dashed px-3 py-4 text-center text-sm text-muted-foreground">
                               暂无可补发库存
@@ -2568,7 +2650,7 @@ function ReportDamageDialog({
 
                         {selectedGroupId && (
                           <div className="grid gap-2">
-                            <div className="text-xs font-medium text-muted-foreground">② 选择子缸</div>
+                            <div className="text-xs font-medium text-muted-foreground">B. 选择子缸</div>
                             <div className="flex flex-wrap gap-2">
                               {tankOptions.map((tank) => (
                                 <button
@@ -2603,7 +2685,7 @@ function ReportDamageDialog({
                         {selectedTankId && (
                           <div className="grid gap-2">
                             <div className="flex items-center justify-between">
-                              <div className="text-xs font-medium text-muted-foreground">③ 选择具体库存鱼</div>
+                              <div className="text-xs font-medium text-muted-foreground">C. 选择具体补发鱼</div>
                               {selected && <span className="text-xs font-medium text-emerald-600">已选择</span>}
                             </div>
                             {options.length === 0 ? (
@@ -2666,14 +2748,14 @@ function ReportDamageDialog({
                     </div>
                   );
                 })}
-                {damagedItems.length === 0 && (
-                  <div className="p-4 text-sm text-center text-muted-foreground">该发货单没有可补发的商品</div>
+                {selectedDamagedItems.length === 0 && (
+                  <div className="p-4 text-sm text-center text-muted-foreground">请先选择本次报损的鱼</div>
                 )}
               </div>
               {Object.values(replacementByOriginal).some(Boolean) && (
                 <div className="grid gap-2 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3">
                   <div className="text-xs font-semibold text-emerald-800">本次补发关系</div>
-                  {damagedItems.map((item) => {
+                  {selectedDamagedItems.map((item) => {
                     const replacementStockItemId = replacementByOriginal[item.stockItemId];
                     if (!replacementStockItemId) return null;
                     const originalStock = getStockItem(item.stockItemId);
@@ -2701,16 +2783,18 @@ function ReportDamageDialog({
               </p>
             </div>
           )}
-          <div className="grid gap-2">
-            <Label>{resolution === "refund" ? "报损 / 待退款备注" : "报损 / 补发备注"}</Label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={3}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder={resolution === "refund" ? "填写报损原因、应退金额说明或沟通记录…" : "填写报损原因、补发说明或沟通记录…"}
-            />
-          </div>
+          {resolution && (
+            <div className="grid gap-2">
+              <Label>{resolution === "refund" ? "报损 / 待退款备注" : "报损 / 补发备注"}</Label>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={3}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder={resolution === "refund" ? "填写报损原因、应退金额说明或沟通记录…" : "填写报损原因、补发说明或沟通记录…"}
+              />
+            </div>
+          )}
           {resolution === "refund" && (
             <div className="grid gap-2">
               <Label>报损凭证</Label>
@@ -2721,9 +2805,13 @@ function ReportDamageDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button variant="destructive" onClick={submit}>
+          <Button
+            variant="destructive"
+            onClick={submit}
+            disabled={!resolution || selectedDamagedItems.length === 0 || (resolution === "reship" && !reshipSelectionComplete)}
+          >
             <XCircle className="size-4 mr-1" />
-            {resolution === "refund" ? "确认报损退款" : "确认报损补发"}
+            {!resolution ? "请先选择处理方式" : resolution === "refund" ? "确认报损退款" : "确认报损补发"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -4261,7 +4349,7 @@ function OrderDetailDialog({
   const shippingAdjustment = order ? calcShippingAdjustment(order, state.shipments) : 0;
   const displayAmountDue = editMode && editForm ? draftAmountDue : amountDue;
 
-  const activeOrderShipments = orderShipments.filter(countsAsActiveShipment);
+  const activeOrderShipments = orderShipments.filter(countsAsFulfillmentShipment);
   const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
   const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
@@ -4273,7 +4361,7 @@ function OrderDetailDialog({
   });
   const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
-    s.status === "delivered" || (s.status === "damaged" && s.damageResolution === "refund")
+    s.status === "delivered" || s.status === "damaged"
   );
   const canCompleteOrder = !!order &&
     order.status !== "cancelled" &&
@@ -6937,7 +7025,7 @@ export function OrdersView({
     const due = calcAmountDue(order, state.shipments);
     const commission = orderCommissionTotalWithProducts(order, (productId) => mobileProductById.get(productId));
     const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
-    const activeShipments = orderShipments.filter(countsAsActiveShipment);
+    const activeShipments = orderShipments.filter(countsAsFulfillmentShipment);
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
     const inventoryActiveItems = order.items.filter((item) => !item.inventoryRemovedAt);
     const unshippedCount = inventoryActiveItems.filter((item) => !shippedIds.has(item.stockItemId)).length;

@@ -89,7 +89,7 @@ function applyShipmentApiResult(
 }
 
 function countsAsActiveShipment(shipment: Shipment): boolean {
-  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
+  return shipment.status !== "preparing";
 }
 
 function isPickupOrderSource(source?: string): boolean {

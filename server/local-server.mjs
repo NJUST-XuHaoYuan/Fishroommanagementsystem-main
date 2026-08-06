@@ -77,7 +77,14 @@ import {
 } from "./water-quality-rules.mjs";
 import { productDeleteDisposition } from "./product-delete-rules.mjs";
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
-import { snapshotDamageReplacements } from "./shipment-damage-utils.mjs";
+import {
+  normalizeDamageReplacementSelection,
+  snapshotDamageReplacements,
+} from "./shipment-damage-utils.mjs";
+import {
+  countsAsCompletionShipment,
+  shipmentIsResolvedForCompletion,
+} from "./shipment-completion-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -4299,10 +4306,6 @@ function paymentChangeAction(currentPayments = [], nextPayments = []) {
   return null;
 }
 
-function countsAsCompletionShipment(shipment = {}) {
-  return shipment?.status !== "preparing" && !(shipment?.status === "damaged" && shipment?.damageResolution === "reship");
-}
-
 function validateOrderCanComplete(order = {}, shipments = []) {
   const activeShipments = shipments.filter((shipment) =>
     String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
@@ -4314,10 +4317,7 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   if (orderItems.length === 0 || !orderItems.every((item) => shippedIds.has(String(item?.stockItemId ?? "")))) {
     throw new Error("订单尚有商品未发货，不能标记完成");
   }
-  const allShipmentsResolved = activeShipments.length > 0 && activeShipments.every((shipment) =>
-    shipment?.status === "delivered" ||
-    (shipment?.status === "damaged" && shipment?.damageResolution === "refund")
-  );
+  const allShipmentsResolved = activeShipments.length > 0 && activeShipments.every(shipmentIsResolvedForCompletion);
   if (!allShipmentsResolved) {
     throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
   }
@@ -4394,10 +4394,7 @@ function applyAutomaticOrderTransitions(state = {}) {
       String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
     );
     if (orderShipments.length === 0) return order;
-    const deliveredShipments = orderShipments.filter((shipment) =>
-      shipment?.status === "delivered" ||
-      (shipment?.status === "damaged" && shipment?.damageResolution === "refund")
-    );
+    const deliveredShipments = orderShipments.filter(shipmentIsResolvedForCompletion);
     if (deliveredShipments.length !== orderShipments.length) return order;
     const latestDeliveredDate = deliveredShipments
       .map((shipment) => datePart(shipment.deliveredAt || shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt))
@@ -8486,19 +8483,12 @@ async function handleApi(req, res, url) {
         };
         nextOrder = { ...order, status: "damaged" };
       } else {
-        const replacements = Array.isArray(body.replacements) ? body.replacements : [];
-        if (replacements.length === 0) throw new Error("请选择补发库存鱼");
-        const replacementMap = new Map();
-        for (const item of replacements) {
-          const originalStockItemId = String(item?.originalStockItemId ?? "").trim();
-          const replacementStockItemId = String(item?.replacementStockItemId ?? "").trim();
-          if (!originalStockItemId || !replacementStockItemId) throw new Error("请选择补发库存鱼");
-          if (!shippedItemIdSet.has(originalStockItemId)) throw new Error("补发原商品不属于当前发货单，请刷新后重试");
-          replacementMap.set(originalStockItemId, replacementStockItemId);
-        }
-        if (replacementMap.size !== shippedItemIds.length) throw new Error("请为发货单内每条商品选择补发库存鱼");
+        const replacements = normalizeDamageReplacementSelection(body.replacements, shippedItemIds);
+        const replacementMap = new Map(replacements.map((item) => [
+          item.originalStockItemId,
+          item.replacementStockItemId,
+        ]));
         const replacementIds = [...replacementMap.values()];
-        if (new Set(replacementIds).size !== replacementIds.length) throw new Error("同一条库存鱼不能重复补发");
         const blockedShipmentIds = shipmentActiveStockIds(state, shipment.id);
         const shippedIds = shippedOutStockIds(state);
         for (const replacementStockItemId of replacementIds) {
@@ -8521,6 +8511,7 @@ async function handleApi(req, res, url) {
         });
         nextShipment = {
           ...nextShipment,
+          damageItemStockIds: [...replacementMap.keys()],
           damageReplacements,
         };
         nextStock = nextStock.map((stockItem) =>
