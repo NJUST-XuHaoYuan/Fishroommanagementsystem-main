@@ -15,6 +15,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { uploadOriginalMedia, resolveMediaUrl } from "../utils/media";
 import {
   isPlatformOrderSource,
+  isPlatformPaymentChannel,
   orderSourceBadgeClass,
   orderSourceLabel,
   platformOrderNoLabel,
@@ -197,6 +198,62 @@ type FinanceTransfer = {
   verifiedBy: string;
 };
 
+type PaymentStatementCandidate = {
+  orderId: string;
+  orderNo: string;
+  customerName: string;
+  contactPerson: string;
+  receivable: number;
+  outstanding: number;
+  score: number;
+  reason: string;
+};
+
+type FinanceStatement = {
+  id: string;
+  siteId: string;
+  batchId: string;
+  paymentMethodId: string;
+  paymentMethodName: string;
+  channel: PaymentChannel | "";
+  account: string;
+  externalTransactionNo: string;
+  occurredAt: string;
+  amount: number;
+  direction: "income" | "expense";
+  payerName: string;
+  notes: string;
+  candidates: PaymentStatementCandidate[];
+  matchStatus: "unmatched" | "matched" | "verified";
+  matchReason: string;
+  matchedOrderId: string;
+  matchedOrderNo: string;
+  matchedCustomerName: string;
+  matchedContactPerson: string;
+  matchMethod: "auto" | "owner" | "finance" | "";
+  matchedAt: string;
+  matchedBy: string;
+  verifiedAt: string;
+  verifiedBy: string;
+};
+
+type StatementImportBatch = {
+  id: string;
+  siteId: string;
+  paymentMethodId: string;
+  paymentMethodName: string;
+  channel: PaymentChannel | "";
+  account: string;
+  fileName: string;
+  importedAt: string;
+  importedBy: string;
+  rowCount: number;
+  matchedCount: number;
+  unmatchedCount: number;
+  duplicateCount: number;
+  totals: { income?: number; expense?: number };
+};
+
 type FinanceOverview = {
   settings: { defaultCommissionRate: number };
   summary: {
@@ -208,12 +265,38 @@ type FinanceOverview = {
     unreconciledOrders: number;
     commissionTotal: number;
     unmatchedSettlementCount: number;
+    unmatchedStatementCount: number;
   };
   orders: FinanceOrderRow[];
   transactions: FinanceTransaction[];
   reconciliations: ReconciliationRow[];
   importBatches: ImportBatch[];
   transfers: FinanceTransfer[];
+  statements: FinanceStatement[];
+  statementImportBatches: StatementImportBatch[];
+};
+
+type StatementPreview = {
+  rowCount: number;
+  matchedCount: number;
+  unmatchedCount: number;
+  duplicateCount: number;
+  totals: { income: number; expense: number };
+  errors: { rowNumber: number; message: string }[];
+  rows: Array<{
+    rowNumber: number;
+    externalTransactionNo: string;
+    occurredAt: string;
+    amount: number;
+    direction: "income" | "expense";
+    payerName: string;
+    notes: string;
+    duplicate: boolean;
+    matchedOrderId: string;
+    matchedOrderNo: string;
+    matchReason: string;
+    candidateCount: number;
+  }>;
 };
 
 type PreviewRow = {
@@ -329,6 +412,18 @@ function reconciliationStatusClass(status: ReconciliationRow["status"]) {
   return "border-rose-200 bg-rose-50 text-rose-700";
 }
 
+function statementStatusLabel(status: FinanceStatement["matchStatus"]) {
+  if (status === "verified") return "已核销";
+  if (status === "matched") return "待核销";
+  return "待认领";
+}
+
+function statementStatusClass(status: FinanceStatement["matchStatus"]) {
+  if (status === "verified") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (status === "matched") return "border-sky-200 bg-sky-50 text-sky-700";
+  return "border-amber-200 bg-amber-50 text-amber-700";
+}
+
 async function requestJson(path: string, init?: RequestInit) {
   const response = await fetch(path, {
     ...init,
@@ -342,6 +437,19 @@ async function requestJson(path: string, init?: RequestInit) {
     throw new Error(result.error || `HTTP ${response.status}`);
   }
   return result;
+}
+
+async function readCsvFileText(file: File) {
+  const buffer = await file.arrayBuffer();
+  const utf8 = new TextDecoder("utf-8").decode(buffer);
+  const replacementCount = (utf8.match(/\uFFFD/g) ?? []).length;
+  if (replacementCount === 0) return utf8;
+  try {
+    const gb18030 = new TextDecoder("gb18030").decode(buffer);
+    return (gb18030.match(/\uFFFD/g) ?? []).length < replacementCount ? gb18030 : utf8;
+  } catch {
+    return utf8;
+  }
 }
 
 async function openProofImage(source: string) {
@@ -592,7 +700,7 @@ function OrderFinanceDialog({
       });
       resetPaymentForm();
       await onRefresh();
-      toast.success("资金流水已保存");
+      toast.success("资金流水已保存，等待财务核销");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "资金流水保存失败");
     } finally {
@@ -637,6 +745,21 @@ function OrderFinanceDialog({
       toast.error(error instanceof Error ? error.message : "资金记录核销失败");
     } finally {
       setVerifyingPaymentId("");
+    }
+  };
+
+  const unlinkStatementPayment = async (payment: FinancePayment) => {
+    if (!payment.statementId || payment.verificationStatus !== "pending" || !permission.requirePermission("update")) return;
+    if (!confirmWrite("解除关联", `解除流水 ${payment.externalTransactionNo || payment.statementId} 与订单 ${order?.orderNo ?? ""} 的关联。`)) return;
+    try {
+      await requestJson("/api/finance/statements/link", {
+        method: "POST",
+        body: JSON.stringify({ action: "unlink", statementId: payment.statementId }),
+      });
+      await onRefresh();
+      toast.success("已解除流水关联，可重新匹配订单");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "解除流水关联失败");
     }
   };
 
@@ -883,11 +1006,11 @@ function OrderFinanceDialog({
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-semibold">资金流水</h3>
-                      <p className="mt-1 text-xs text-muted-foreground">私域和线下资金由财务专员补录。</p>
+                      <p className="mt-1 text-xs text-muted-foreground">优先从收款账单自动带入；这里只补录现金或特殊资金记录。</p>
                     </div>
                     {!paymentFormOpen && permission.canCreate && (
                       <Button size="sm" variant="outline" onClick={startAddPayment}>
-                        <Plus className="size-4" /> 新增流水
+                        <Plus className="size-4" /> 补录流水
                       </Button>
                     )}
                   </div>
@@ -963,7 +1086,7 @@ function OrderFinanceDialog({
                         <Input
                           value={draft.externalTransactionNo}
                           onChange={(event) => setDraft((current) => ({ ...current, externalTransactionNo: event.target.value }))}
-                          placeholder="选填"
+                          placeholder="账单无法导入时由财务补填"
                         />
                       </div>
                       <div className="grid gap-1.5 sm:col-span-2 lg:col-span-1 xl:col-span-2">
@@ -1017,6 +1140,7 @@ function OrderFinanceDialog({
                                 >
                                   {payment.verificationStatus === "pending" ? "待核销" : "已核销"}
                                 </Badge>
+                                {payment.recordSource === "statement" && <Badge variant="outline">账单导入</Badge>}
                                 <span className="text-xs text-muted-foreground">{displayDatetime(payment.time)}</span>
                               </div>
                               {(payment.channel || payment.account || payment.externalTransactionNo || payment.notes) && (
@@ -1057,15 +1181,18 @@ function OrderFinanceDialog({
                                   核销
                                 </Button>
                               )}
-                              {permission.canUpdate && (
+                              {permission.canUpdate && payment.recordSource !== "statement" && !payment.statementId && (
                                 <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
                                   <Pencil className="size-3.5" />
                                 </Button>
                               )}
-                              {permission.canDelete && (
+                              {permission.canDelete && payment.recordSource !== "statement" && !payment.statementId && (
                                 <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => deletePayment(payment)} title="删除流水">
                                   <Trash2 className="size-3.5" />
                                 </Button>
+                              )}
+                              {permission.canUpdate && payment.statementId && payment.verificationStatus === "pending" && (
+                                <Button size="sm" variant="ghost" className="h-8 text-rose-700" onClick={() => void unlinkStatementPayment(payment)}>解除关联</Button>
                               )}
                             </div>
                           </div>
@@ -1211,6 +1338,255 @@ function ReconciliationLinkDialog({
             确认关联
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StatementImportDialog({
+  open,
+  siteId,
+  paymentMethods,
+  onOpenChange,
+  onImported,
+}: {
+  open: boolean;
+  siteId: string;
+  paymentMethods: PaymentMethodSetting[];
+  onOpenChange: (open: boolean) => void;
+  onImported: () => Promise<void>;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [paymentMethodId, setPaymentMethodId] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState<StatementPreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setPaymentMethodId(paymentMethods[0]?.id ?? "");
+    setFile(null);
+    setCsvText("");
+    setPreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }, [open, paymentMethods]);
+
+  const selectedMethod = paymentMethods.find((method) => method.id === paymentMethodId) ?? null;
+  const chooseFile = async (nextFile: File) => {
+    if (!nextFile.name.toLowerCase().endsWith(".csv")) return toast.error("请选择 CSV 格式的收款账单");
+    if (nextFile.size > 12 * 1024 * 1024) return toast.error("CSV 文件不能超过 12MB");
+    setFile(nextFile);
+    setCsvText(await readCsvFileText(nextFile));
+    setPreview(null);
+  };
+  const previewFile = async () => {
+    if (!paymentMethodId || !file || !csvText || previewing) return;
+    setPreviewing(true);
+    try {
+      const result = await requestJson("/api/finance/statements/preview", {
+        method: "POST",
+        body: JSON.stringify({ siteId, paymentMethodId, csvText }),
+      });
+      setPreview(result as StatementPreview);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "收款账单解析失败");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+  const importFile = async () => {
+    if (!paymentMethodId || !file || !csvText || !preview || importing) return;
+    if (!confirmWrite("导入", `导入「${file.name}」的 ${preview.rowCount} 条账单流水。`)) return;
+    setImporting(true);
+    try {
+      const result = await requestJson("/api/finance/statements/import", {
+        method: "POST",
+        body: JSON.stringify({ siteId, paymentMethodId, fileName: file.name, csvText }),
+      });
+      await onImported();
+      onOpenChange(false);
+      toast.success(result.duplicateFile
+        ? "该账单文件已经导入，本次未重复写入"
+        : `导入完成：自动匹配 ${result.matchedCount} 条，待认领 ${result.unmatchedCount} 条`
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "收款账单导入失败");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="flex max-h-[92dvh] max-w-5xl flex-col overflow-hidden p-0">
+        <DialogHeader className="border-b px-4 py-4 pr-12 sm:px-6">
+          <DialogTitle>导入收款账单</DialogTitle>
+          <p className="text-sm text-muted-foreground">支付流水号由账单带入；系统自动匹配明确订单，冲突记录交给订单负责人或财务确认。</p>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+            <div className="grid gap-1.5">
+              <Label>账单对应收款账户</Label>
+              <Select value={paymentMethodId} onValueChange={(value) => { setPaymentMethodId(value); setPreview(null); }}>
+                <SelectTrigger><SelectValue placeholder="请选择收款账户" /></SelectTrigger>
+                <SelectContent>
+                  {paymentMethods.map((method) => (
+                    <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)} · {method.account}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>CSV 文件</Label>
+              <Button type="button" variant="outline" className="justify-start font-normal" onClick={() => fileRef.current?.click()}>
+                <Upload className="size-4" />
+                <span className="truncate">{file?.name ?? "选择微信、支付宝或银行卡账单"}</span>
+              </Button>
+              <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => event.target.files?.[0] && void chooseFile(event.target.files[0])} />
+            </div>
+            <Button onClick={() => void previewFile()} disabled={!selectedMethod || !file || previewing}>
+              {previewing ? <Loader2 className="size-4 animate-spin" /> : <FileSpreadsheet className="size-4" />}
+              解析预览
+            </Button>
+          </div>
+
+          {preview && (
+            <div className="mt-5 overflow-hidden rounded-md border">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b bg-muted/30 px-3 py-3 text-sm">
+                <span>记录 <strong>{preview.rowCount}</strong></span>
+                <span className="text-emerald-700">自动匹配 <strong>{preview.matchedCount}</strong></span>
+                <span className="text-amber-700">待认领 <strong>{preview.unmatchedCount}</strong></span>
+                <span className="text-muted-foreground">重复 <strong>{preview.duplicateCount}</strong></span>
+                <span>收入 <strong>{money(preview.totals.income)}</strong></span>
+                <span>支出 <strong>{money(preview.totals.expense)}</strong></span>
+              </div>
+              <div className="max-h-[46dvh] overflow-auto">
+                <table className="w-full min-w-[880px] text-sm">
+                  <thead className="sticky top-0 bg-muted text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">交易时间</th>
+                      <th className="px-3 py-2 text-left font-medium">付款方</th>
+                      <th className="px-3 py-2 text-left font-medium">支付流水号</th>
+                      <th className="px-3 py-2 text-right font-medium">金额</th>
+                      <th className="px-3 py-2 text-left font-medium">匹配结果</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {preview.rows.map((row) => (
+                      <tr key={`${row.rowNumber}-${row.externalTransactionNo}`} className={row.duplicate ? "text-muted-foreground" : ""}>
+                        <td className="px-3 py-2">{displayDatetime(row.occurredAt)}</td>
+                        <td className="px-3 py-2">{row.payerName || "—"}</td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.externalTransactionNo || "—"}</td>
+                        <td className={`px-3 py-2 text-right font-medium ${row.direction === "expense" ? "text-rose-700" : "text-emerald-700"}`}>
+                          {row.direction === "expense" ? "−" : "+"}{money(row.amount)}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{row.duplicate ? "重复流水" : row.matchedOrderNo || (row.candidateCount > 0 ? `待认领 · ${row.candidateCount} 个候选` : "待财务处理")}</div>
+                          <div className="mt-0.5 text-xs text-muted-foreground">{row.matchReason}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+        <DialogFooter className="border-t px-4 py-3 sm:px-6">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => void importFile()} disabled={!preview || importing}>
+            {importing && <Loader2 className="size-4 animate-spin" />}
+            确认导入
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StatementLinkDialog({
+  statement,
+  orders,
+  open,
+  onOpenChange,
+  onLinked,
+}: {
+  statement: FinanceStatement | null;
+  orders: FinanceOrderRow[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onLinked: () => Promise<void>;
+}) {
+  const [search, setSearch] = useState("");
+  const [selectedOrderId, setSelectedOrderId] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    setSelectedOrderId(statement?.candidates[0]?.orderId ?? "");
+  }, [open, statement?.id]);
+  const candidates = useMemo(() => {
+    if (!statement) return [];
+    const candidateScores = new Map(statement.candidates.map((candidate) => [candidate.orderId, candidate.score]));
+    const refundCandidateIds = new Set(statement.candidates.map((candidate) => candidate.orderId));
+    const normalized = search.trim().toLowerCase();
+    return orders
+      .filter((order) => !isPlatformOrderSource(order.source))
+      .filter((order) => order.paymentChannel === statement.channel && order.paymentAccount === statement.account)
+      .filter((order) => statement.direction !== "expense" || refundCandidateIds.has(order.id))
+      .filter((order) => !normalized || [order.orderNo, order.customerName, order.contactPerson]
+        .some((value) => String(value ?? "").toLowerCase().includes(normalized)))
+      .sort((left, right) => (candidateScores.get(right.id) ?? 0) - (candidateScores.get(left.id) ?? 0) || Math.abs(left.balance - statement.amount) - Math.abs(right.balance - statement.amount))
+      .slice(0, 80);
+  }, [orders, search, statement]);
+  const link = async () => {
+    if (!statement || !selectedOrderId || saving) return;
+    const order = orders.find((item) => item.id === selectedOrderId);
+    if (!order || !confirmWrite("关联", `将流水 ${statement.externalTransactionNo || statement.id} 关联到订单 ${order.orderNo}，关联后仍需财务核销。`)) return;
+    setSaving(true);
+    try {
+      await requestJson("/api/finance/statements/link", {
+        method: "POST",
+        body: JSON.stringify({ action: "link", statementId: statement.id, orderId: selectedOrderId }),
+      });
+      await onLinked();
+      onOpenChange(false);
+      toast.success("收款流水已关联，等待财务核销");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "收款流水关联失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="flex max-h-[92dvh] max-w-3xl flex-col overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>关联收款流水</DialogTitle>
+          {statement && <p className="text-sm text-muted-foreground">{statement.payerName || "付款方未知"} · {money(statement.amount)} · {displayDatetime(statement.occurredAt)}</p>}
+        </DialogHeader>
+        <label className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索订单号、客户或订单负责人" className="pl-9" />
+        </label>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border">
+          {candidates.length === 0 ? <div className="px-4 py-12 text-center text-sm text-muted-foreground">没有同渠道、同收款账户的可关联订单</div> : (
+            <div className="divide-y">
+              {candidates.map((order) => {
+                const candidate = statement?.candidates.find((item) => item.orderId === order.id);
+                return (
+                  <button key={order.id} type="button" onClick={() => setSelectedOrderId(order.id)} className={`flex w-full items-center justify-between gap-3 px-3 py-3 text-left ${selectedOrderId === order.id ? "bg-sky-50 ring-1 ring-inset ring-sky-300" : "hover:bg-muted/30"}`}>
+                    <span className="min-w-0"><span className="block font-medium">{order.orderNo} · {order.customerName}</span><span className="mt-1 block text-xs text-muted-foreground">{order.contactPerson || "未指定负责人"}{candidate ? ` · ${candidate.reason}` : ""}</span></span>
+                    <span className="shrink-0 text-right"><span className="block font-medium">余额 {money(order.balance)}</span><span className="text-xs text-muted-foreground">应收 {money(order.receivable)}</span></span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button onClick={() => void link()} disabled={!selectedOrderId || saving}>{saving && <Loader2 className="size-4 animate-spin" />}确认关联</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -1448,7 +1824,7 @@ function EmptyState({ children }: { children: string }) {
 }
 
 export function FinanceView() {
-  const { activeSiteId } = useStore();
+  const { activeSiteId, state } = useStore();
   const permission = usePermission("finance");
   const canAccess = permission.isAdmin || permission.canCreate || permission.canUpdate || permission.canDelete;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1458,9 +1834,11 @@ export function FinanceView() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [financeFilter, setFinanceFilter] = useState("all");
-  const [ledgerMode, setLedgerMode] = useState<"orders" | "transactions" | "transfers">("orders");
+  const [ledgerMode, setLedgerMode] = useState<"orders" | "statements" | "transactions" | "transfers">("orders");
   const [selectedOrderId, setSelectedOrderId] = useState("");
   const [selectedReconciliationNo, setSelectedReconciliationNo] = useState("");
+  const [selectedStatementId, setSelectedStatementId] = useState("");
+  const [statementImportOpen, setStatementImportOpen] = useState(false);
   const [selectedTransferId, setSelectedTransferId] = useState("");
   const [transferDialogOpen, setTransferDialogOpen] = useState(false);
   const [verifyingTransferId, setVerifyingTransferId] = useState("");
@@ -1510,7 +1888,14 @@ export function FinanceView() {
 
   const selectedOrder = data?.orders.find((order) => order.id === selectedOrderId) ?? null;
   const selectedReconciliation = data?.reconciliations.find((row) => row.externalOrderNo === selectedReconciliationNo) ?? null;
+  const selectedStatement = data?.statements.find((statement) => statement.id === selectedStatementId) ?? null;
   const selectedTransfer = data?.transfers.find((transfer) => transfer.id === selectedTransferId) ?? null;
+  const statementPaymentMethods = useMemo(
+    () => configuredPaymentMethods(state.systemSettings).filter((method) =>
+      !isPlatformPaymentChannel(method.channel) && method.channel !== "cash"
+    ),
+    [state.systemSettings],
+  );
   const normalizedSearch = search.trim().toLowerCase();
   const filteredOrders = useMemo(() => (data?.orders ?? []).filter((order) => {
     if (financeFilter !== "all" && order.financeStatus !== financeFilter) return false;
@@ -1535,6 +1920,18 @@ export function FinanceView() {
       transaction.notes,
     ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch));
   }), [data?.transactions, normalizedSearch]);
+  const filteredStatements = useMemo(() => (data?.statements ?? []).filter((statement) => {
+    if (!normalizedSearch) return true;
+    return [
+      statement.externalTransactionNo,
+      statement.payerName,
+      statement.account,
+      statement.matchedOrderNo,
+      statement.matchedCustomerName,
+      statement.matchedContactPerson,
+      statement.notes,
+    ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch));
+  }), [data?.statements, normalizedSearch]);
   const filteredTransfers = useMemo(() => (data?.transfers ?? []).filter((transfer) => {
     if (!normalizedSearch) return true;
     return [
@@ -1583,7 +1980,7 @@ export function FinanceView() {
     }
     setCsvFile(file);
     setPreview(null);
-    setCsvText(await file.text());
+    setCsvText(await readCsvFileText(file));
   };
 
   const previewCsv = async () => {
@@ -1700,6 +2097,19 @@ export function FinanceView() {
         <div className="flex flex-wrap items-center gap-2">
           {permission.canCreate && (
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (activeSiteId === "all") return toast.error("请先选择具体场地再导入收款账单");
+                if (statementPaymentMethods.length === 0) return toast.error("请先在付款方式管理中配置微信、支付宝或银行卡收款账户");
+                setStatementImportOpen(true);
+              }}
+            >
+              <Upload className="size-4" /> 导入收款账单
+            </Button>
+          )}
+          {permission.canCreate && (
+            <Button
               variant={csvPanelOpen ? "secondary" : "outline"}
               size="sm"
               onClick={() => setCsvPanelOpen((open) => !open)}
@@ -1727,7 +2137,7 @@ export function FinanceView() {
 
       <section className="order-2 flex flex-col gap-3">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-center gap-1 rounded-md border bg-muted/20 p-1">
+            <div className="flex flex-wrap items-center gap-1 rounded-md border bg-muted/20 p-1">
               <Button
                 size="sm"
                 variant={ledgerMode === "orders" ? "default" : "ghost"}
@@ -1735,6 +2145,17 @@ export function FinanceView() {
                 className="h-8"
               >
                 <ReceiptText className="size-4" /> 按订单
+              </Button>
+              <Button
+                size="sm"
+                variant={ledgerMode === "statements" ? "default" : "ghost"}
+                onClick={() => setLedgerMode("statements")}
+                className="h-8"
+              >
+                <FileSpreadsheet className="size-4" /> 收款账单
+                {(data?.summary.unmatchedStatementCount ?? 0) > 0 && (
+                  <span className="ml-1 rounded-full bg-amber-100 px-1.5 text-[11px] text-amber-800">{data?.summary.unmatchedStatementCount}</span>
+                )}
               </Button>
               <Button
                 size="sm"
@@ -1759,7 +2180,11 @@ export function FinanceView() {
                 <Input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder={ledgerMode === "transfers" ? "账户、银行流水号或备注" : "订单号、客户或订单负责人"}
+                  placeholder={ledgerMode === "transfers"
+                    ? "账户、银行流水号或备注"
+                    : ledgerMode === "statements"
+                      ? "支付流水号、付款方、订单或账户"
+                      : "订单号、客户或订单负责人"}
                   className="pl-9"
                 />
               </label>
@@ -1903,6 +2328,62 @@ export function FinanceView() {
                         <div><div className="text-muted-foreground">提成</div><div className="mt-0.5 font-medium">{money(order.commissionAmount)}</div></div>
                       </div>
                     </button>
+                  ))}
+                </div>
+              </>
+            )
+          ) : ledgerMode === "statements" ? (
+            filteredStatements.length === 0 ? (
+              <EmptyState>暂无收款账单流水</EmptyState>
+            ) : (
+              <>
+                <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
+                  <table className="w-full min-w-[1080px] text-sm">
+                    <thead className="bg-muted/40 text-xs text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2.5 text-left font-medium">交易时间</th>
+                        <th className="px-3 py-2.5 text-left font-medium">付款方</th>
+                        <th className="px-3 py-2.5 text-left font-medium">支付流水号</th>
+                        <th className="px-3 py-2.5 text-left font-medium">渠道 / 账户</th>
+                        <th className="px-3 py-2.5 text-right font-medium">金额</th>
+                        <th className="px-3 py-2.5 text-left font-medium">关联订单</th>
+                        <th className="px-3 py-2.5 text-left font-medium">状态</th>
+                        <th className="px-3 py-2.5 text-right font-medium">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {filteredStatements.map((statement) => (
+                        <tr key={statement.id}>
+                          <td className="whitespace-nowrap px-3 py-2.5 text-muted-foreground">{displayDatetime(statement.occurredAt)}</td>
+                          <td className="px-3 py-2.5"><div className="font-medium">{statement.payerName || "—"}</div>{statement.notes && <div className="max-w-48 truncate text-xs text-muted-foreground">{statement.notes}</div>}</td>
+                          <td className="max-w-52 truncate px-3 py-2.5 font-mono text-xs" title={statement.externalTransactionNo}>{statement.externalTransactionNo || "—"}</td>
+                          <td className="px-3 py-2.5"><div>{statement.paymentMethodName || paymentChannelLabel(statement.channel)}</div><div className="max-w-44 truncate text-xs text-muted-foreground">{statement.account}</div></td>
+                          <td className={`whitespace-nowrap px-3 py-2.5 text-right font-semibold tabular-nums ${statement.direction === "expense" ? "text-rose-700" : "text-emerald-700"}`}>{statement.direction === "expense" ? "−" : "+"}{money(statement.amount)}</td>
+                          <td className="px-3 py-2.5">
+                            {statement.matchedOrderId ? <button type="button" className="text-left hover:underline" onClick={() => setSelectedOrderId(statement.matchedOrderId)}><span className="block font-medium">{statement.matchedOrderNo}</span><span className="text-xs text-muted-foreground">{statement.matchedCustomerName} · {statement.matchedContactPerson || "未指定负责人"}</span></button> : <div><span className="text-amber-700">未关联</span><div className="text-xs text-muted-foreground">{statement.candidates.length > 0 ? `${statement.candidates.length} 个候选订单` : statement.matchReason}</div></div>}
+                          </td>
+                          <td className="px-3 py-2.5"><Badge variant="outline" className={statementStatusClass(statement.matchStatus)}>{statementStatusLabel(statement.matchStatus)}</Badge></td>
+                          <td className="px-3 py-2.5 text-right">
+                            {statement.matchStatus === "unmatched" && statement.candidates.length > 0 && permission.canUpdate ? <Button size="sm" variant="outline" onClick={() => setSelectedStatementId(statement.id)}><Link2 className="size-3.5" />关联订单</Button> : statement.matchedOrderId ? <Button size="sm" variant="ghost" onClick={() => setSelectedOrderId(statement.matchedOrderId)}>查看订单</Button> : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="divide-y rounded-lg border bg-card md:hidden">
+                  {filteredStatements.map((statement) => (
+                    <div key={statement.id} className="px-3 py-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0"><div className="font-medium">{statement.payerName || statement.paymentMethodName || "账单流水"}</div><div className="mt-1 truncate font-mono text-xs text-muted-foreground">{statement.externalTransactionNo || "无外部流水号"}</div></div>
+                        <div className={`shrink-0 font-semibold ${statement.direction === "expense" ? "text-rose-700" : "text-emerald-700"}`}>{statement.direction === "expense" ? "−" : "+"}{money(statement.amount)}</div>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{displayDatetime(statement.occurredAt)}</span><span>{statement.paymentMethodName || paymentChannelLabel(statement.channel)}</span><Badge variant="outline" className={statementStatusClass(statement.matchStatus)}>{statementStatusLabel(statement.matchStatus)}</Badge></div>
+                      <div className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-sm">{statement.matchedOrderId ? `${statement.matchedOrderNo} · ${statement.matchedCustomerName}` : statement.candidates.length > 0 ? `${statement.candidates.length} 个候选订单待确认` : statement.matchReason}</div>
+                      <div className="mt-3 flex justify-end">
+                        {statement.matchStatus === "unmatched" && statement.candidates.length > 0 && permission.canUpdate ? <Button size="sm" variant="outline" onClick={() => setSelectedStatementId(statement.id)}><Link2 className="size-3.5" />关联订单</Button> : statement.matchedOrderId ? <Button size="sm" variant="ghost" onClick={() => setSelectedOrderId(statement.matchedOrderId)}>查看订单</Button> : null}
+                      </div>
+                    </div>
                   ))}
                 </div>
               </>
@@ -2345,6 +2826,24 @@ export function FinanceView() {
         open={!!selectedReconciliation}
         onOpenChange={(open) => {
           if (!open) setSelectedReconciliationNo("");
+        }}
+        onLinked={() => loadOverview(true)}
+      />
+
+      <StatementImportDialog
+        open={statementImportOpen}
+        siteId={activeSiteId}
+        paymentMethods={statementPaymentMethods}
+        onOpenChange={setStatementImportOpen}
+        onImported={() => loadOverview(true)}
+      />
+
+      <StatementLinkDialog
+        statement={selectedStatement}
+        orders={data?.orders ?? []}
+        open={!!selectedStatement}
+        onOpenChange={(open) => {
+          if (!open) setSelectedStatementId("");
         }}
         onLinked={() => loadOverview(true)}
       />

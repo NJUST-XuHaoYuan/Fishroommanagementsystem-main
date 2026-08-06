@@ -29,6 +29,10 @@ import {
   parseDouyinSettlementCsv,
 } from "./finance-utils.mjs";
 import {
+  matchPaymentStatement,
+  parsePaymentStatementCsv,
+} from "./payment-statement-utils.mjs";
+import {
   configuredPaymentMethod,
   isPaymentVerified,
   normalizePaymentChannel,
@@ -3242,7 +3246,7 @@ function normalizePaymentRecord(record = {}) {
   const channel = normalizePaymentChannel(record.channel);
   if (record.channel && !channel) throw new Error("Invalid payment channel");
   const verificationStatus = paymentVerificationStatus(record);
-  const recordSource = ["order", "finance", "platform"].includes(String(record.recordSource ?? ""))
+  const recordSource = ["order", "finance", "platform", "statement"].includes(String(record.recordSource ?? ""))
     ? String(record.recordSource)
     : "finance";
   const refundMethod = type === "refund"
@@ -3260,6 +3264,20 @@ function normalizePaymentRecord(record = {}) {
     ...(channel ? { channel } : {}),
     account: String(record.account ?? "").trim(),
     externalTransactionNo: String(record.externalTransactionNo ?? "").trim(),
+    statementId: String(record.statementId ?? "").trim(),
+    ...(record.statementOriginal && typeof record.statementOriginal === "object"
+      ? {
+        statementOriginal: {
+          time: String(record.statementOriginal.time ?? ""),
+          externalTransactionNo: String(record.statementOriginal.externalTransactionNo ?? ""),
+          recordSource: String(record.statementOriginal.recordSource ?? "order"),
+          notes: String(record.statementOriginal.notes ?? ""),
+        },
+      }
+      : {}),
+    matchMethod: ["auto", "owner", "finance"].includes(String(record.matchMethod ?? ""))
+      ? String(record.matchMethod)
+      : "",
     verificationStatus,
     recordSource,
     ...(refundMethod ? { refundMethod } : {}),
@@ -3459,6 +3477,187 @@ function financeTransferFromRow(row = {}) {
   };
 }
 
+function paymentStatementFromRow(row = {}) {
+  return {
+    id: String(row?.id ?? ""),
+    siteId: String(row?.site_id ?? ""),
+    batchId: String(row?.batch_id ?? ""),
+    paymentMethodId: String(row?.payment_method_id ?? ""),
+    paymentMethodName: String(row?.payment_method_name ?? ""),
+    channel: normalizePaymentChannel(row?.channel),
+    account: String(row?.account ?? ""),
+    externalTransactionNo: String(row?.external_transaction_no ?? ""),
+    occurredAt: String(row?.occurred_at ?? ""),
+    amount: roundFinance(row?.amount),
+    direction: row?.direction === "expense" ? "expense" : "income",
+    payerName: String(row?.payer_name ?? ""),
+    notes: String(row?.notes ?? ""),
+    rawData: row?.raw_data && typeof row.raw_data === "object" ? row.raw_data : {},
+    candidates: Array.isArray(row?.candidate_orders) ? row.candidate_orders : [],
+    matchStatus: ["matched", "verified"].includes(String(row?.match_status ?? ""))
+      ? String(row.match_status)
+      : "unmatched",
+    matchReason: String(row?.match_reason ?? ""),
+    matchedOrderId: String(row?.matched_order_id ?? ""),
+    matchedPaymentId: String(row?.matched_payment_id ?? ""),
+    matchMethod: ["auto", "owner", "finance"].includes(String(row?.match_method ?? ""))
+      ? String(row.match_method)
+      : "",
+    matchedAt: row?.matched_at ? new Date(row.matched_at).toISOString() : "",
+    matchedBy: String(row?.matched_by ?? ""),
+    verifiedAt: row?.verified_at ? new Date(row.verified_at).toISOString() : "",
+    verifiedBy: String(row?.verified_by ?? ""),
+    createdAt: row?.created_at ? new Date(row.created_at).toISOString() : "",
+  };
+}
+
+function statementImportBatchFromRow(row = {}) {
+  return {
+    id: String(row?.id ?? ""),
+    siteId: String(row?.site_id ?? ""),
+    paymentMethodId: String(row?.payment_method_id ?? ""),
+    paymentMethodName: String(row?.payment_method_name ?? ""),
+    channel: normalizePaymentChannel(row?.channel),
+    account: String(row?.account ?? ""),
+    fileName: String(row?.file_name ?? ""),
+    importedAt: row?.imported_at ? new Date(row.imported_at).toISOString() : "",
+    importedBy: String(row?.imported_by ?? ""),
+    rowCount: Number(row?.row_count ?? 0),
+    matchedCount: Number(row?.matched_count ?? 0),
+    unmatchedCount: Number(row?.unmatched_count ?? 0),
+    duplicateCount: Number(row?.duplicate_count ?? 0),
+    totals: row?.totals && typeof row.totals === "object" ? row.totals : {},
+  };
+}
+
+function financeMatchingOrderProfiles(state = {}) {
+  const customers = new Map((Array.isArray(state.customers) ? state.customers : [])
+    .map((customer) => [String(customer?.id ?? ""), customer]));
+  const shipments = Array.isArray(state.shipments) ? state.shipments : [];
+  return (Array.isArray(state.orders) ? state.orders : [])
+    .filter((order) => !isPlatformOrderSource(order?.source))
+    .map((order) => {
+      const receivable = order?.status === "cancelled" ? 0 : calcAmountDueForOrder(order, shipments);
+      const totals = financePaymentTotals(order);
+      const matchingOutstanding = roundFinance(
+        receivable - totals.received + totals.refunded - totals.pendingReceived + totals.pendingRefunded
+      );
+      return {
+        id: String(order?.id ?? ""),
+        orderNo: String(order?.orderNo ?? ""),
+        customerName: String(customers.get(String(order?.customerId ?? ""))?.name ?? ""),
+        contactPerson: String(order?.contactPerson ?? ""),
+        paymentChannel: normalizePaymentChannel(order?.paymentChannel),
+        paymentAccount: String(order?.paymentAccount ?? ""),
+        receivable: roundFinance(receivable),
+        matchingOutstanding,
+        date: String(order?.date ?? ""),
+        createdAt: String(order?.createdAt ?? ""),
+        status: String(order?.status ?? ""),
+        pendingRefunds: (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
+          payment?.type === "refund" &&
+          paymentVerificationStatus(payment) === "pending" &&
+          !String(payment?.statementId ?? "").trim() &&
+          normalizePaymentChannel(payment?.channel ?? order?.paymentChannel) === normalizePaymentChannel(order?.paymentChannel) &&
+          String(payment?.account ?? order?.paymentAccount ?? "").trim() === String(order?.paymentAccount ?? "").trim()
+        ).map((payment) => ({ id: String(payment?.id ?? ""), amount: roundFinance(payment?.amount) })),
+      };
+    });
+}
+
+function statementPaymentRecord(statement = {}, order = {}, method = "finance", actor = "system") {
+  return normalizePaymentRecord({
+    id: uid("pay"),
+    time: String(statement?.occurredAt ?? nowDatetimeInChina()),
+    type: "balance",
+    amount: statement?.amount,
+    paymentMethodId: String(statement?.paymentMethodId ?? order?.paymentMethodId ?? ""),
+    paymentMethodName: String(statement?.paymentMethodName ?? order?.paymentMethodName ?? ""),
+    channel: statement?.channel,
+    account: statement?.account,
+    externalTransactionNo: statement?.externalTransactionNo,
+    statementId: String(statement?.id ?? ""),
+    matchMethod: method,
+    verificationStatus: "pending",
+    recordSource: "statement",
+    recordedBy: actor,
+    notes: [
+      statement?.payerName ? `付款方：${statement.payerName}` : "",
+      statement?.notes,
+      method === "auto" ? "账单自动匹配" : method === "owner" ? "订单负责人认领" : "财务关联",
+    ].filter(Boolean).join("；"),
+    proof: [],
+  });
+}
+
+function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", method = "finance", actor = "system") {
+  if (!['income', 'expense'].includes(String(statement?.direction ?? ""))) throw new Error("无法识别账单流水方向");
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const currentOrder = orders.find((order) => String(order?.id ?? "") === String(orderId ?? ""));
+  if (!currentOrder) throw new Error("系统订单不存在，请刷新后重试");
+  if (currentOrder.status === "cancelled") throw new Error("已取消订单不能认领收款");
+  if (isPlatformOrderSource(currentOrder.source)) throw new Error("平台订单应通过平台订单编号对账");
+  if (normalizePaymentChannel(currentOrder.paymentChannel) !== normalizePaymentChannel(statement.channel) ||
+      String(currentOrder.paymentAccount ?? "").trim() !== String(statement.account ?? "").trim()) {
+    throw new Error("该流水与订单付款渠道或收款账户不一致");
+  }
+  const duplicate = orders.some((order) => (Array.isArray(order?.payments) ? order.payments : [])
+    .some((payment) => String(payment?.statementId ?? "") === String(statement?.id ?? "")));
+  if (duplicate) throw new Error("该账单流水已经关联订单");
+  if (statement.direction === "expense") {
+    const refund = (Array.isArray(currentOrder.payments) ? currentOrder.payments : []).find((payment) =>
+      payment?.type === "refund" &&
+      paymentVerificationStatus(payment) === "pending" &&
+      !String(payment?.statementId ?? "").trim() &&
+      Math.abs(Number(payment?.amount ?? 0) - Number(statement?.amount ?? 0)) <= 0.01 &&
+      normalizePaymentChannel(payment?.channel ?? currentOrder.paymentChannel) === normalizePaymentChannel(statement.channel) &&
+      String(payment?.account ?? currentOrder.paymentAccount ?? "").trim() === String(statement.account ?? "").trim()
+    );
+    if (!refund) throw new Error("该订单没有同渠道、同账户、同金额的待核销退款");
+    const payment = normalizePaymentRecord({
+      ...refund,
+      statementOriginal: {
+        time: refund.time,
+        externalTransactionNo: refund.externalTransactionNo,
+        recordSource: refund.recordSource,
+        notes: refund.notes,
+      },
+      time: String(statement?.occurredAt ?? refund.time),
+      externalTransactionNo: String(statement?.externalTransactionNo ?? ""),
+      statementId: String(statement?.id ?? ""),
+      matchMethod: method,
+      recordSource: "statement",
+      notes: [refund.notes, statement?.notes, method === "auto" ? "退款账单自动匹配" : "财务关联退款流水"].filter(Boolean).join("；"),
+    });
+    const nextOrder = {
+      ...currentOrder,
+      payments: (Array.isArray(currentOrder.payments) ? currentOrder.payments : [])
+        .map((item) => String(item?.id ?? "") === payment.id ? payment : item),
+    };
+    return {
+      order: nextOrder,
+      payment,
+      state: {
+        ...state,
+        orders: orders.map((order) => String(order?.id ?? "") === String(orderId ?? "") ? nextOrder : order),
+      },
+    };
+  }
+  const payment = statementPaymentRecord(statement, currentOrder, method, actor);
+  const nextOrder = {
+    ...currentOrder,
+    payments: [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), payment],
+  };
+  return {
+    order: nextOrder,
+    payment,
+    state: {
+      ...state,
+      orders: orders.map((order) => String(order?.id ?? "") === String(orderId ?? "") ? nextOrder : order),
+    },
+  };
+}
+
 function financeOrderLookup(orders = []) {
   const lookup = new Map();
   for (const order of orders) {
@@ -3497,7 +3696,34 @@ async function refreshFinanceBatchMatchCounts(client, state = {}, siteId = DEFAU
   }
 }
 
-function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], transferRows = []) {
+async function refreshStatementBatchMatchCounts(client, batchId = "") {
+  const id = String(batchId ?? "").trim();
+  if (!id) return;
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE match_status IN ('matched', 'verified'))::int AS matched
+     FROM finance_payment_statements
+     WHERE state_id = $1 AND batch_id = $2`,
+    [stateId, id]
+  );
+  const total = Number(rows[0]?.total ?? 0);
+  const matched = Number(rows[0]?.matched ?? 0);
+  await client.query(
+    `UPDATE finance_statement_import_batches
+     SET matched_count = $3, unmatched_count = $4
+     WHERE id = $1 AND state_id = $2`,
+    [id, stateId, matched, Math.max(0, total - matched)]
+  );
+}
+
+function buildFinanceOverview(
+  state = {},
+  settlementRows = [],
+  batchRows = [],
+  transferRows = [],
+  statementRows = [],
+  statementBatchRows = [],
+) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const shipments = Array.isArray(state.shipments) ? state.shipments : [];
   const customers = new Map((Array.isArray(state.customers) ? state.customers : [])
@@ -3617,8 +3843,12 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
         channel: normalizePaymentChannel(payment?.channel),
         account: String(payment?.account ?? ""),
         externalTransactionNo: String(payment?.externalTransactionNo ?? ""),
+        statementId: String(payment?.statementId ?? ""),
+        matchMethod: ["auto", "owner", "finance"].includes(String(payment?.matchMethod ?? ""))
+          ? String(payment.matchMethod)
+          : "",
         verificationStatus: paymentVerificationStatus(payment),
-        recordSource: ["order", "finance", "platform"].includes(String(payment?.recordSource ?? ""))
+        recordSource: ["order", "finance", "platform", "statement"].includes(String(payment?.recordSource ?? ""))
           ? String(payment.recordSource)
           : "finance",
         refundMethod: payment?.type === "refund"
@@ -3690,6 +3920,25 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
       source: order.source,
     }))
   ).sort((left, right) => String(right.time).localeCompare(String(left.time)));
+  const orderRowsById = new Map(orderRows.map((order) => [order.id, order]));
+  const statements = statementRows.map(paymentStatementFromRow).map((statement) => {
+    const matchedOrder = orderRowsById.get(statement.matchedOrderId);
+    return {
+      ...statement,
+      matchedOrderNo: matchedOrder?.orderNo ?? "",
+      matchedCustomerName: matchedOrder?.customerName ?? "",
+      matchedContactPerson: matchedOrder?.contactPerson ?? "",
+      candidates: statement.candidates.map((candidate) => {
+        const order = orderRowsById.get(String(candidate?.orderId ?? ""));
+        return {
+          ...candidate,
+          orderNo: order?.orderNo ?? String(candidate?.orderNo ?? ""),
+          customerName: order?.customerName ?? String(candidate?.customerName ?? ""),
+          contactPerson: order?.contactPerson ?? String(candidate?.contactPerson ?? ""),
+        };
+      }),
+    };
+  });
 
   const settlementTotal = roundFinance(settlements.reduce(
     (sum, settlement) => sum + Number(settlement?.settlementAmount ?? 0),
@@ -3720,6 +3969,7 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
     ).length,
     commissionTotal: roundFinance(orderRows.reduce((sum, order) => sum + order.commissionAmount, 0)),
     unmatchedSettlementCount,
+    unmatchedStatementCount: statements.filter((statement) => statement.matchStatus === "unmatched").length,
   };
 
   return {
@@ -3744,6 +3994,8 @@ function buildFinanceOverview(state = {}, settlementRows = [], batchRows = [], t
       totals: row?.totals && typeof row.totals === "object" ? row.totals : {},
     })),
     transfers: transferRows.map(financeTransferFromRow),
+    statements,
+    statementImportBatches: statementBatchRows.map(statementImportBatchFromRow),
   };
 }
 
@@ -5055,6 +5307,67 @@ async function ensureSchema() {
       CREATE INDEX IF NOT EXISTS finance_account_transfers_site_idx
       ON finance_account_transfers (state_id, site_id, transferred_at DESC)
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS finance_statement_import_batches (
+        id TEXT PRIMARY KEY,
+        state_id TEXT NOT NULL,
+        site_id TEXT NOT NULL,
+        payment_method_id TEXT NOT NULL,
+        payment_method_name TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        account TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        imported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        imported_by TEXT NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        matched_count INTEGER NOT NULL DEFAULT 0,
+        unmatched_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        totals JSONB NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (state_id, site_id, payment_method_id, file_hash)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS finance_payment_statements (
+        id TEXT PRIMARY KEY,
+        state_id TEXT NOT NULL,
+        site_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        payment_method_id TEXT NOT NULL,
+        payment_method_name TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        account TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        external_transaction_no TEXT NOT NULL DEFAULT '',
+        occurred_at TEXT NOT NULL,
+        amount NUMERIC(14, 2) NOT NULL,
+        direction TEXT NOT NULL,
+        payer_name TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        candidate_orders JSONB NOT NULL DEFAULT '[]'::jsonb,
+        match_status TEXT NOT NULL DEFAULT 'unmatched',
+        match_reason TEXT NOT NULL DEFAULT '',
+        matched_order_id TEXT NOT NULL DEFAULT '',
+        matched_payment_id TEXT NOT NULL DEFAULT '',
+        match_method TEXT NOT NULL DEFAULT '',
+        matched_at TIMESTAMPTZ,
+        matched_by TEXT NOT NULL DEFAULT '',
+        verified_at TIMESTAMPTZ,
+        verified_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (state_id, site_id, payment_method_id, fingerprint)
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS finance_payment_statements_site_idx
+      ON finance_payment_statements (state_id, site_id, occurred_at DESC)
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS finance_payment_statements_match_idx
+      ON finance_payment_statements (state_id, matched_order_id, match_status)
+    `);
     await importLegacyStateIfPresent();
     await backfillDefaultSites();
     await rehashPlaintextPersonnelPasswords();
@@ -5435,7 +5748,7 @@ async function handleApi(req, res, url) {
         req.auth?.account,
         url.searchParams.get("siteId") ?? ALL_SITE_ID
       );
-      const [settlementResult, batchResult, transferResult] = await Promise.all([
+      const [settlementResult, batchResult, transferResult, statementResult, statementBatchResult] = await Promise.all([
         pool.query(
           `SELECT data, batch_id, created_at
            FROM finance_platform_settlements
@@ -5463,14 +5776,356 @@ async function handleApi(req, res, url) {
            LIMIT 300`,
           [stateId, scope.siteIds]
         ),
+        pool.query(
+          `SELECT *
+           FROM finance_payment_statements
+           WHERE state_id = $1 AND site_id = ANY($2::text[])
+           ORDER BY occurred_at DESC, created_at DESC
+           LIMIT 1000`,
+          [stateId, scope.siteIds]
+        ),
+        pool.query(
+          `SELECT *
+           FROM finance_statement_import_batches
+           WHERE state_id = $1 AND site_id = ANY($2::text[])
+           ORDER BY imported_at DESC
+           LIMIT 100`,
+          [stateId, scope.siteIds]
+        ),
       ]);
       sendJson(req, res, 200, {
         ok: true,
         siteId: scope.requested,
-        ...buildFinanceOverview(scope.state, settlementResult.rows, batchResult.rows, transferResult.rows),
+        ...buildFinanceOverview(
+          scope.state,
+          settlementResult.rows,
+          batchResult.rows,
+          transferResult.rows,
+          statementResult.rows,
+          statementBatchResult.rows,
+        ),
       });
     } catch (error) {
       sendJson(req, res, 403, { ok: false, error: error.message || "财务数据加载失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/statements/preview" && req.method === "POST") {
+    try {
+      requireModulePermissionForAuth(req, "finance", "create");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
+      if (scope.requested === ALL_SITE_ID) throw new Error("导入收款账单前请选择具体场地");
+      const paymentMethod = configuredPaymentMethod(state.systemSettings, body.paymentMethodId);
+      if (!paymentMethod) throw new Error("所选付款方式未启用或未配置收款账户");
+      if (isPlatformPaymentChannel(paymentMethod.channel) || paymentMethod.channel === "cash") {
+        throw new Error("平台和现金不通过收款账单导入；平台使用平台结算，现金由订单负责人登记");
+      }
+      const parsed = parsePaymentStatementCsv(body.csvText, paymentMethod);
+      const existing = await pool.query(
+        `SELECT fingerprint FROM finance_payment_statements
+         WHERE state_id = $1 AND site_id = $2 AND payment_method_id = $3`,
+        [stateId, scope.requested, paymentMethod.id]
+      );
+      const existingFingerprints = new Set(existing.rows.map((row) => String(row?.fingerprint ?? "")));
+      const profiles = financeMatchingOrderProfiles(scope.state);
+      const previewRows = parsed.records.map((record) => {
+        const duplicate = existingFingerprints.has(record.fingerprint);
+        const match = duplicate ? { matchedOrderId: "", candidates: [], reason: "该流水已经导入" }
+          : matchPaymentStatement(record, profiles);
+        const matched = profiles.find((order) => order.id === match.matchedOrderId);
+        return {
+          rowNumber: record.rowNumber,
+          externalTransactionNo: record.externalTransactionNo,
+          occurredAt: record.occurredAt,
+          amount: record.amount,
+          direction: record.direction,
+          payerName: record.payerName,
+          notes: record.notes,
+          duplicate,
+          matchedOrderId: match.matchedOrderId,
+          matchedOrderNo: matched?.orderNo ?? "",
+          matchReason: match.reason,
+          candidateCount: match.candidates.length,
+        };
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        rowCount: parsed.records.length,
+        matchedCount: previewRows.filter((row) => row.matchedOrderId).length,
+        unmatchedCount: previewRows.filter((row) => !row.duplicate && !row.matchedOrderId).length,
+        duplicateCount: previewRows.filter((row) => row.duplicate).length,
+        errors: parsed.errors,
+        totals: parsed.totals,
+        rows: previewRows.slice(0, 200),
+      });
+    } catch (error) {
+      sendJson(req, res, 400, { ok: false, error: error.message || "收款账单解析失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/statements/import" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireModulePermissionForAuth(req, "finance", "create");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const operator = authenticatedOperator(req);
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
+      if (scope.requested === ALL_SITE_ID) throw new Error("导入收款账单前请选择具体场地");
+      const paymentMethod = configuredPaymentMethod(state.systemSettings, body.paymentMethodId);
+      if (!paymentMethod) throw new Error("所选付款方式未启用或未配置收款账户");
+      if (isPlatformPaymentChannel(paymentMethod.channel) || paymentMethod.channel === "cash") {
+        throw new Error("平台和现金不通过收款账单导入");
+      }
+      const parsed = parsePaymentStatementCsv(body.csvText, paymentMethod);
+      const duplicateBatch = await client.query(
+        `SELECT id, row_count, matched_count, unmatched_count, duplicate_count
+         FROM finance_statement_import_batches
+         WHERE state_id = $1 AND site_id = $2 AND payment_method_id = $3 AND file_hash = $4`,
+        [stateId, scope.requested, paymentMethod.id, parsed.fileHash]
+      );
+      if (duplicateBatch.rowCount > 0) {
+        await client.query("ROLLBACK");
+        const batch = duplicateBatch.rows[0];
+        sendJson(req, res, 200, {
+          ok: true,
+          duplicateFile: true,
+          batchId: String(batch.id),
+          rowCount: Number(batch.row_count),
+          matchedCount: Number(batch.matched_count),
+          unmatchedCount: Number(batch.unmatched_count),
+          duplicateCount: Number(batch.duplicate_count),
+        });
+        return;
+      }
+
+      const existing = await client.query(
+        `SELECT fingerprint FROM finance_payment_statements
+         WHERE state_id = $1 AND site_id = $2 AND payment_method_id = $3`,
+        [stateId, scope.requested, paymentMethod.id]
+      );
+      const existingFingerprints = new Set(existing.rows.map((row) => String(row?.fingerprint ?? "")));
+      const batchId = uid("statement-batch");
+      let nextState = state;
+      let matchedCount = 0;
+      let unmatchedCount = 0;
+      let duplicateCount = 0;
+
+      for (const record of parsed.records) {
+        if (existingFingerprints.has(record.fingerprint)) {
+          duplicateCount += 1;
+          continue;
+        }
+        existingFingerprints.add(record.fingerprint);
+        const profiles = financeMatchingOrderProfiles(siteFilteredState(nextState, scope.requested));
+        const match = matchPaymentStatement(record, profiles);
+        const statementId = uid("statement");
+        const statement = { ...record, id: statementId, siteId: scope.requested };
+        let matchedPaymentId = "";
+        if (match.matchedOrderId) {
+          const linked = linkStatementToStateOrder(nextState, statement, match.matchedOrderId, "auto", "system");
+          nextState = linked.state;
+          matchedPaymentId = linked.payment.id;
+          matchedCount += 1;
+        } else {
+          unmatchedCount += 1;
+        }
+        await client.query(
+          `INSERT INTO finance_payment_statements (
+             id, state_id, site_id, batch_id, payment_method_id, payment_method_name,
+             channel, account, fingerprint, external_transaction_no, occurred_at,
+             amount, direction, payer_name, notes, raw_data, candidate_orders,
+             match_status, match_reason, matched_order_id, matched_payment_id,
+             match_method, matched_at, matched_by
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+             $12, $13, $14, $15, $16::jsonb, $17::jsonb,
+             $18, $19, $20, $21, $22, $23::timestamptz, $24
+           )`,
+          [
+            statementId, stateId, scope.requested, batchId, paymentMethod.id, paymentMethod.name,
+            paymentMethod.channel, paymentMethod.account, record.fingerprint, record.externalTransactionNo,
+            record.occurredAt, record.amount, record.direction, record.payerName, record.notes,
+            JSON.stringify(record.rawData), JSON.stringify(match.candidates),
+            match.matchedOrderId ? "matched" : "unmatched", match.reason, match.matchedOrderId,
+            matchedPaymentId, match.matchedOrderId ? "auto" : "",
+            match.matchedOrderId ? new Date().toISOString() : null,
+            match.matchedOrderId ? "system" : "",
+          ]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO finance_statement_import_batches (
+           id, state_id, site_id, payment_method_id, payment_method_name, channel,
+           account, file_name, file_hash, imported_by, row_count, matched_count,
+           unmatched_count, duplicate_count, totals
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)`,
+        [
+          batchId, stateId, scope.requested, paymentMethod.id, paymentMethod.name, paymentMethod.channel,
+          paymentMethod.account, String(body.fileName ?? "收款账单.csv"), parsed.fileHash, operator,
+          parsed.records.length, matchedCount, unmatchedCount, duplicateCount, JSON.stringify(parsed.totals),
+        ]
+      );
+      const operationLog = createOperationLog(
+        req,
+        "财务管理",
+        "导入收款账单",
+        `${paymentMethod.name}「${paymentMethod.account}」导入 ${parsed.records.length} 条，自动匹配 ${matchedCount} 条，待认领 ${unmatchedCount} 条，重复 ${duplicateCount} 条`
+      );
+      nextState = {
+        ...nextState,
+        operationLogs: pushOperationLog(nextState.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        duplicateFile: false,
+        batchId,
+        rowCount: parsed.records.length,
+        matchedCount,
+        unmatchedCount,
+        duplicateCount,
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "收款账单导入失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/finance/statements/link" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const action = String(body.action ?? "link");
+      if (!['link', 'unlink'].includes(action)) throw new Error("不支持的账单关联操作");
+      const operator = authenticatedOperator(req);
+      const financeActor = hasModulePermission(req.auth?.account, "finance", "update");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const statementResult = await client.query(
+        `SELECT * FROM finance_payment_statements WHERE id = $1 AND state_id = $2 FOR UPDATE`,
+        [String(body.statementId ?? ""), stateId]
+      );
+      if (statementResult.rowCount === 0) throw new Error("账单流水不存在，请刷新后重试");
+      const statementRow = statementResult.rows[0];
+      const statement = paymentStatementFromRow(statementRow);
+      if (!visibleSiteIdsForAccount(req.auth?.account, state).includes(statement.siteId)) {
+        throw new Error("当前账户无权查看该场地账单");
+      }
+
+      let nextState = state;
+      let detail = "";
+      let linkedOrder = null;
+      if (action === "unlink") {
+        if (!financeActor) throw new Error("只有财务可以解除账单关联");
+        if (statement.matchStatus === "verified") throw new Error("已核销流水不能解除关联");
+        const currentOrder = (Array.isArray(state.orders) ? state.orders : [])
+          .find((order) => String(order?.id ?? "") === statement.matchedOrderId);
+        if (!currentOrder) throw new Error("已关联订单不存在，请刷新后重试");
+        const payment = (Array.isArray(currentOrder.payments) ? currentOrder.payments : [])
+          .find((item) => String(item?.id ?? "") === statement.matchedPaymentId);
+        if (payment && isPaymentVerified(payment)) throw new Error("已核销资金记录不能解除关联");
+        const nextPayments = statement.direction === "expense" && payment
+          ? (Array.isArray(currentOrder.payments) ? currentOrder.payments : []).map((item) => {
+            if (String(item?.id ?? "") !== statement.matchedPaymentId) return item;
+            const original = item?.statementOriginal && typeof item.statementOriginal === "object"
+              ? item.statementOriginal
+              : {};
+            return normalizePaymentRecord({
+              ...item,
+              time: original.time || item.time,
+              externalTransactionNo: original.externalTransactionNo || "",
+              recordSource: original.recordSource || "order",
+              notes: original.notes || item.notes,
+              statementId: "",
+              matchMethod: "",
+              statementOriginal: null,
+            });
+          })
+          : (Array.isArray(currentOrder.payments) ? currentOrder.payments : [])
+            .filter((item) => String(item?.id ?? "") !== statement.matchedPaymentId);
+        linkedOrder = { ...currentOrder, payments: nextPayments };
+        nextState = {
+          ...state,
+          orders: (Array.isArray(state.orders) ? state.orders : []).map((order) =>
+            String(order?.id ?? "") === linkedOrder.id ? linkedOrder : order
+          ),
+        };
+        await client.query(
+          `UPDATE finance_payment_statements
+           SET match_status = 'unmatched', matched_order_id = '', matched_payment_id = '',
+               match_method = '', matched_at = NULL, matched_by = '', verified_at = NULL, verified_by = ''
+           WHERE id = $1 AND state_id = $2`,
+          [statement.id, stateId]
+        );
+        detail = `流水「${statement.externalTransactionNo || statement.id}」解除与订单「${currentOrder.orderNo}」的关联`;
+      } else {
+        if (statement.matchStatus !== "unmatched") throw new Error("该流水已经关联订单");
+        const orderId = String(body.orderId ?? "").trim();
+        const currentOrder = (Array.isArray(state.orders) ? state.orders : [])
+          .find((order) => String(order?.id ?? "") === orderId);
+        if (!currentOrder) throw new Error("系统订单不存在，请刷新后重试");
+        if (!financeActor) {
+          requireOrderPermissionForAuth(req, "update");
+          if (!isCreditSaleOrderOwner(state.personnel, currentOrder, operator)) {
+            throw new Error("只有该订单负责人可以认领这笔流水");
+          }
+          const candidateIds = new Set(statement.candidates.map((candidate) => String(candidate?.orderId ?? "")));
+          if (!candidateIds.has(orderId)) throw new Error("该流水不是此订单的候选收款，请联系财务处理");
+        }
+        const method = financeActor ? "finance" : "owner";
+        const linked = linkStatementToStateOrder(state, statement, orderId, method, operator);
+        nextState = linked.state;
+        linkedOrder = linked.order;
+        await client.query(
+          `UPDATE finance_payment_statements
+           SET match_status = 'matched', matched_order_id = $3, matched_payment_id = $4,
+               match_method = $5, matched_at = now(), matched_by = $6
+           WHERE id = $1 AND state_id = $2`,
+          [statement.id, stateId, orderId, linked.payment.id, method, operator]
+        );
+        detail = `流水「${statement.externalTransactionNo || statement.id}」关联订单「${linked.order.orderNo}」，待财务核销`;
+      }
+
+      const operationLog = createOperationLog(
+        req,
+        financeActor ? "财务管理" : "订单管理",
+        action === "unlink" ? "解除收款关联" : financeActor ? "关联收款流水" : "认领收款流水",
+        detail
+      );
+      nextState = {
+        ...nextState,
+        operationLogs: pushOperationLog(nextState.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await refreshStatementBatchMatchCounts(client, statement.batchId);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: linkedOrder, orders: nextState.orders, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "账单关联失败" });
+    } finally {
+      client.release();
     }
     return;
   }
@@ -6897,6 +7552,143 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/payment-candidates" && req.method === "GET") {
+    try {
+      requireOrderPermissionForAuth(req, "update");
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const visibleState = siteVisibilityFilteredState(state, req.auth?.account);
+      const requestedSiteId = normalizeSiteScope(url.searchParams.get("siteId") ?? ALL_SITE_ID);
+      const visibleOrders = requestedSiteId === ALL_SITE_ID
+        ? (visibleState.orders ?? [])
+        : (siteFilteredState(visibleState, requestedSiteId).orders ?? []);
+      const operator = authenticatedOperator(req);
+      const admin = req.auth?.account?.accessRole === "admin";
+      const ownedOrders = visibleOrders.filter((order) => admin || isCreditSaleOrderOwner(state.personnel, order, operator));
+      const ownedById = new Map(ownedOrders.map((order) => [String(order?.id ?? ""), order]));
+      const siteIds = requestedSiteId === ALL_SITE_ID
+        ? visibleSiteIdsForAccount(req.auth?.account, state)
+        : [requestedSiteId];
+      const statementResult = await pool.query(
+        `SELECT * FROM finance_payment_statements
+         WHERE state_id = $1 AND site_id = ANY($2::text[]) AND match_status = 'unmatched' AND direction = 'income'
+         ORDER BY occurred_at DESC, created_at DESC
+         LIMIT 300`,
+        [stateId, siteIds]
+      );
+      const candidates = statementResult.rows.flatMap((row) => {
+        const statement = paymentStatementFromRow(row);
+        const relevantCandidates = statement.candidates.filter((candidate) => ownedById.has(String(candidate?.orderId ?? "")));
+        if (relevantCandidates.length === 0) return [];
+        return [{
+          id: statement.id,
+          siteId: statement.siteId,
+          paymentMethodName: statement.paymentMethodName,
+          channel: statement.channel,
+          account: statement.account,
+          externalTransactionNo: statement.externalTransactionNo,
+          occurredAt: statement.occurredAt,
+          amount: statement.amount,
+          payerName: statement.payerName,
+          notes: statement.notes,
+          matchReason: statement.matchReason,
+          candidates: relevantCandidates.map((candidate) => {
+            const order = ownedById.get(String(candidate?.orderId ?? ""));
+            return {
+              ...candidate,
+              orderNo: String(order?.orderNo ?? candidate?.orderNo ?? ""),
+              contactPerson: String(order?.contactPerson ?? candidate?.contactPerson ?? ""),
+            };
+          }),
+        }];
+      });
+      const cashOrders = ownedOrders.flatMap((order) => {
+        if (normalizePaymentChannel(order?.paymentChannel) !== "cash" || order?.status === "cancelled") return [];
+        const profile = financeMatchingOrderProfiles({ ...visibleState, orders: [order] })[0];
+        if (!profile || profile.matchingOutstanding <= 0.005) return [];
+        return [{
+          orderId: profile.id,
+          orderNo: profile.orderNo,
+          contactPerson: profile.contactPerson,
+          outstanding: profile.matchingOutstanding,
+        }];
+      });
+      sendJson(req, res, 200, { ok: true, candidates, cashOrders });
+    } catch (error) {
+      sendJson(req, res, 403, { ok: false, error: error.message || "待认领收款加载失败" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/payment-claim" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const operator = authenticatedOperator(req);
+      requireOrderPermissionForAuth(req, "update");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const currentOrder = orders.find((order) => String(order?.id ?? "") === String(body.orderId ?? ""));
+      if (!currentOrder || !(siteVisibilityFilteredState(state, req.auth?.account).orders ?? []).some((order) => order.id === currentOrder.id)) {
+        throw new Error("订单不存在或当前账户不可见");
+      }
+      if (req.auth?.account?.accessRole !== "admin" && !isCreditSaleOrderOwner(state.personnel, currentOrder, operator)) {
+        throw new Error("只有订单负责人可以登记本单现金收款");
+      }
+      if (normalizePaymentChannel(currentOrder.paymentChannel) !== "cash") throw new Error("只有现金订单需要人工登记收款");
+      const profile = financeMatchingOrderProfiles({ ...state, orders: [currentOrder] })[0];
+      const amount = normalizeMoney(body.amount, "Cash payment amount");
+      if (amount <= 0) throw new Error("现金收款金额必须大于 0");
+      if (!profile || amount - profile.matchingOutstanding > 0.01) {
+        throw new Error(`登记金额不能超过待收余额 ¥${Number(profile?.matchingOutstanding ?? 0).toFixed(2)}`);
+      }
+      const payment = normalizePaymentRecord({
+        id: uid("pay"),
+        time: body.time || nowDatetimeInChina(),
+        type: "balance",
+        amount,
+        paymentMethodId: currentOrder.paymentMethodId,
+        paymentMethodName: currentOrder.paymentMethodName || paymentChannelLabel("cash"),
+        channel: "cash",
+        account: currentOrder.paymentAccount || "现金",
+        verificationStatus: "pending",
+        recordSource: "order",
+        recordedBy: operator,
+        notes: String(body.notes ?? "").trim() || "订单负责人登记现金收款",
+        proof: [],
+      });
+      const nextOrder = {
+        ...currentOrder,
+        payments: [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), payment],
+      };
+      const operationLog = createOperationLog(
+        req,
+        "订单管理",
+        "登记现金收款",
+        `订单「${currentOrder.orderNo}」登记现金收款 ¥${amount.toFixed(2)}，待财务核销`
+      );
+      const nextState = {
+        ...state,
+        orders: orders.map((order) => order.id === currentOrder.id ? nextOrder : order),
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextState.orders, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "现金收款登记失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/orders/payment" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -6930,11 +7722,11 @@ async function handleApi(req, res, url) {
       if (action === "add") {
         const incomingPayment = normalizePaymentRecord({
           ...(body.payment ?? {}),
-          verificationStatus: "verified",
+          verificationStatus: "pending",
           recordSource: "finance",
           recordedBy: operator,
-          verifiedAt: nowDatetimeInChina(),
-          verifiedBy: operator,
+          verifiedAt: "",
+          verifiedBy: "",
         });
         const paymentMethodSnapshot = resolvePaymentMethodSnapshot(state.systemSettings, incomingPayment, {
           paymentMethodId: currentOrder.paymentMethodId,
@@ -6950,12 +7742,15 @@ async function handleApi(req, res, url) {
           throw new Error("资金记录已存在，请刷新后重试");
         }
         nextPayments = [...currentPayments, payment];
-        detail = `订单「${currentOrder.orderNo}」新增${paymentTypeLabel(payment.type)} ¥${payment.amount.toFixed(2)}`;
+        detail = `订单「${currentOrder.orderNo}」补录${paymentTypeLabel(payment.type)} ¥${payment.amount.toFixed(2)}，待核销`;
       } else if (action === "update") {
         const incomingId = String(body.payment?.id ?? "");
         const currentPayment = currentPayments.find((item) => String(item?.id ?? "") === incomingId);
         if (!currentPayment) {
           throw new Error("资金记录不存在，请刷新后重试");
+        }
+        if (currentPayment?.recordSource === "statement" || currentPayment?.statementId) {
+          throw new Error("账单导入的资金记录不能手工修改，请先解除流水关联");
         }
         const incomingPayment = normalizePaymentRecord({
           ...currentPayment,
@@ -6990,6 +7785,9 @@ async function handleApi(req, res, url) {
         const paymentId = String(body.paymentId ?? body.payment?.id ?? "");
         const deletingPayment = currentPayments.find((item) => String(item?.id ?? "") === paymentId);
         if (!deletingPayment) throw new Error("资金记录不存在，请刷新后重试");
+        if (deletingPayment?.recordSource === "statement" || deletingPayment?.statementId) {
+          throw new Error("账单导入的资金记录不能直接删除，请使用解除流水关联");
+        }
         nextPayments = currentPayments.filter((item) => String(item?.id ?? "") !== paymentId);
         detail = `订单「${currentOrder.orderNo}」删除${paymentTypeLabel(deletingPayment.type)}记录 ¥${Number(deletingPayment.amount ?? 0).toFixed(2)}`;
       }
@@ -7023,6 +7821,20 @@ async function handleApi(req, res, url) {
       };
 
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      if (action === "verify") {
+        const verifiedPayment = nextPayments.find((payment) => String(payment?.id ?? "") === String(body.paymentId ?? body.payment?.id ?? ""));
+        if (verifiedPayment?.statementId) {
+          const updatedStatement = await client.query(
+            `UPDATE finance_payment_statements
+             SET match_status = 'verified', verified_at = now(), verified_by = $3
+             WHERE id = $1 AND state_id = $2 AND matched_payment_id = $4
+             RETURNING batch_id`,
+            [verifiedPayment.statementId, stateId, operator, verifiedPayment.id]
+          );
+          if (updatedStatement.rowCount === 0) throw new Error("关联账单流水不存在，不能完成核销");
+          await refreshStatementBatchMatchCounts(client, updatedStatement.rows[0]?.batch_id);
+        }
+      }
       await client.query("COMMIT");
       sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
     } catch (error) {

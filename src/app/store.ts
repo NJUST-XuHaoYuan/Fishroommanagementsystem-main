@@ -369,7 +369,7 @@ export const DEFAULT_PAYMENT_METHOD_SETTINGS: PaymentMethodSetting[] = [
   { id: "pm-cash", name: "现金", channel: "cash", account: "现金", enabled: true },
 ];
 export type PaymentVerificationStatus = "pending" | "verified";
-export type PaymentRecordSource = "order" | "finance" | "platform";
+export type PaymentRecordSource = "order" | "finance" | "platform" | "statement";
 export type RefundMethod = "platform" | "account";
 
 export function paymentChannelLabel(channel?: string): string {
@@ -391,6 +391,17 @@ export type PaymentRecord = {
   channel?: PaymentChannel;
   account?: string;
   externalTransactionNo?: string;
+  /** 导入收款账单的原始流水记录，用于防止重复认领和核销。 */
+  statementId?: string;
+  /** 账单与订单的关联方式。 */
+  matchMethod?: "auto" | "owner" | "finance";
+  /** 退款流水关联前的原记录，用于解除关联时恢复退款申请。 */
+  statementOriginal?: {
+    time?: string;
+    externalTransactionNo?: string;
+    recordSource?: PaymentRecordSource;
+    notes?: string;
+  };
   verificationStatus?: PaymentVerificationStatus;
   recordSource?: PaymentRecordSource;
   refundMethod?: RefundMethod;

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
   Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
@@ -31,6 +31,7 @@ import {
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
   ChevronLeft, ChevronRight, Loader2, Send, ShieldCheck, Tag, Gavel,
+  CircleDollarSign,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -6388,11 +6389,157 @@ type OrdersViewProps = {
   onOpenOrderRequestHandled?: () => void;
 };
 
+type OwnerPaymentCandidate = {
+  id: string;
+  paymentMethodName: string;
+  channel: PaymentChannel;
+  account: string;
+  externalTransactionNo: string;
+  occurredAt: string;
+  amount: number;
+  payerName: string;
+  notes: string;
+  matchReason: string;
+  candidates: Array<{
+    orderId: string;
+    orderNo: string;
+    contactPerson: string;
+    outstanding: number;
+    reason: string;
+  }>;
+};
+
+type OwnerPaymentClaimData = {
+  candidates: OwnerPaymentCandidate[];
+  cashOrders: Array<{
+    orderId: string;
+    orderNo: string;
+    contactPerson: string;
+    outstanding: number;
+  }>;
+};
+
+function PaymentClaimDialog({
+  open,
+  data,
+  loading,
+  onOpenChange,
+  onRefresh,
+}: {
+  open: boolean;
+  data: OwnerPaymentClaimData;
+  loading: boolean;
+  onOpenChange: (open: boolean) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const { setState } = useStore();
+  const [savingKey, setSavingKey] = useState("");
+  const [cashAmounts, setCashAmounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!open) return;
+    setCashAmounts(Object.fromEntries(data.cashOrders.map((order) => [order.orderId, order.outstanding])));
+  }, [data.cashOrders, open]);
+
+  const claimStatement = async (statement: OwnerPaymentCandidate, orderId: string) => {
+    const order = statement.candidates.find((candidate) => candidate.orderId === orderId);
+    if (!order || !confirmWrite("认领", `确认流水 ${statement.externalTransactionNo || "无编号"} 的 ¥${statement.amount.toFixed(2)} 属于订单 ${order.orderNo}。`)) return;
+    const key = `${statement.id}-${orderId}`;
+    setSavingKey(key);
+    try {
+      const result = await postOrderApi("finance/statements/link", { action: "link", statementId: statement.id, orderId });
+      applyOrderApiResult(setState, result);
+      await onRefresh();
+      toast.success("已认领收款，等待财务核销");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "收款认领失败");
+    } finally {
+      setSavingKey("");
+    }
+  };
+
+  const recordCash = async (order: OwnerPaymentClaimData["cashOrders"][number]) => {
+    const amount = Number(cashAmounts[order.orderId] ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0) return toast.error("请输入现金收款金额");
+    if (!confirmWrite("登记", `登记订单 ${order.orderNo} 的现金收款 ¥${amount.toFixed(2)}，后续由财务核销。`)) return;
+    const key = `cash-${order.orderId}`;
+    setSavingKey(key);
+    try {
+      const result = await postOrderApi("orders/payment-claim", { orderId: order.orderId, amount });
+      applyOrderApiResult(setState, result);
+      await onRefresh();
+      toast.success("现金收款已登记，等待财务核销");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "现金收款登记失败");
+    } finally {
+      setSavingKey("");
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby={undefined} className="flex max-h-[92dvh] max-w-3xl flex-col overflow-hidden p-0">
+        <DialogHeader className="border-b px-4 py-4 pr-12 sm:px-6">
+          <DialogTitle>待认领收款</DialogTitle>
+          <p className="text-sm text-muted-foreground">只处理系统无法唯一匹配的流水；支付号已经从账单带入，无需手工填写。</p>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 px-4 py-16 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />加载待认领收款</div>
+          ) : data.candidates.length === 0 && data.cashOrders.length === 0 ? (
+            <div className="px-4 py-16 text-center text-sm text-muted-foreground">当前没有需要你处理的收款</div>
+          ) : (
+            <>
+              {data.candidates.length > 0 && (
+                <section>
+                  <div className="border-b bg-muted/30 px-4 py-2 text-sm font-semibold sm:px-6">账单匹配冲突</div>
+                  <div className="divide-y">
+                    {data.candidates.map((statement) => (
+                      <div key={statement.id} className="px-4 py-4 sm:px-6">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0"><div className="font-medium">{statement.payerName || "付款方未知"} · {statement.paymentMethodName || paymentChannelLabel(statement.channel)}</div><div className="mt-1 truncate font-mono text-xs text-muted-foreground">流水 {statement.externalTransactionNo || "无编号"} · {statement.occurredAt.replace("T", " ").slice(0, 16)}</div></div>
+                          <div className="text-lg font-semibold text-emerald-700">¥{statement.amount.toFixed(2)}</div>
+                        </div>
+                        <div className="mt-3 divide-y overflow-hidden rounded-md border">
+                          {statement.candidates.map((order) => (
+                            <div key={order.orderId} className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                              <div><div className="font-medium">{order.orderNo}</div><div className="mt-1 text-xs text-muted-foreground">待收 ¥{order.outstanding.toFixed(2)} · {order.reason}</div></div>
+                              <Button size="sm" variant="outline" onClick={() => void claimStatement(statement, order.orderId)} disabled={Boolean(savingKey)}>{savingKey === `${statement.id}-${order.orderId}` && <Loader2 className="size-3.5 animate-spin" />}认领到本单</Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {data.cashOrders.length > 0 && (
+                <section>
+                  <div className="border-y bg-muted/30 px-4 py-2 text-sm font-semibold sm:px-6">现金收款</div>
+                  <div className="divide-y">
+                    {data.cashOrders.map((order) => (
+                      <div key={order.orderId} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-end sm:justify-between sm:px-6">
+                        <div><div className="font-medium">{order.orderNo}</div><div className="mt-1 text-xs text-muted-foreground">待收余额 ¥{order.outstanding.toFixed(2)}</div></div>
+                        <div className="flex items-end gap-2"><label className="grid gap-1 text-xs text-muted-foreground">本次收到<Input type="number" min={0} step={0.01} className="w-32" value={cashAmounts[order.orderId] ?? ""} onChange={(event) => setCashAmounts((current) => ({ ...current, [order.orderId]: Number(event.target.value) }))} /></label><Button size="sm" onClick={() => void recordCash(order)} disabled={Boolean(savingKey)}>{savingKey === `cash-${order.orderId}` && <Loader2 className="size-3.5 animate-spin" />}登记现金</Button></div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </>
+          )}
+        </div>
+        <DialogFooter className="border-t px-4 py-3 sm:px-6"><Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function OrdersView({
   openOrderRequest,
   onOpenOrderRequestHandled,
 }: OrdersViewProps = {}) {
-  const { state, setState, saveStateTransform } = useStore();
+  const { state, setState, saveStateTransform, activeSiteId } = useStore();
   const permission = usePermission("orders");
 
   const [newOpen, setNewOpen] = useState(false);
@@ -6404,6 +6551,9 @@ export function OrdersView({
   const [mobileSearch, setMobileSearch] = useState("");
   const [mobilePage, setMobilePage] = useState(1);
   const mobileListRef = useRef<HTMLDivElement>(null);
+  const [paymentClaimOpen, setPaymentClaimOpen] = useState(false);
+  const [paymentClaimsLoading, setPaymentClaimsLoading] = useState(false);
+  const [paymentClaimData, setPaymentClaimData] = useState<OwnerPaymentClaimData>({ candidates: [], cashOrders: [] });
 
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
   const [dateFrom, setDateFrom] = useState("");
@@ -6412,6 +6562,35 @@ export function OrdersView({
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
   const [myActiveOnly, setMyActiveOnly] = useState(false);
   const today = todayDateString();
+
+  const loadPaymentClaims = useCallback(async (showLoading = false) => {
+    if (!permission.canUpdate) {
+      setPaymentClaimData({ candidates: [], cashOrders: [] });
+      return;
+    }
+    if (showLoading) setPaymentClaimsLoading(true);
+    try {
+      const response = await fetch(`/api/orders/payment-candidates?siteId=${encodeURIComponent(activeSiteId)}`, {
+        headers: authJsonHeaders(),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      setPaymentClaimData({
+        candidates: Array.isArray(result.candidates) ? result.candidates : [],
+        cashOrders: Array.isArray(result.cashOrders) ? result.cashOrders : [],
+      });
+    } catch (error) {
+      if (showLoading) toast.error(error instanceof Error ? error.message : "待认领收款加载失败");
+    } finally {
+      if (showLoading) setPaymentClaimsLoading(false);
+    }
+  }, [activeSiteId, permission.canUpdate]);
+
+  useEffect(() => {
+    void loadPaymentClaims(false);
+  }, [loadPaymentClaims, state.orders]);
+
+  const pendingPaymentClaimCount = paymentClaimData.candidates.length + paymentClaimData.cashOrders.length;
 
   const customers = state.customers ?? [];
   const getCustomer = (customerId: string) => customers.find((c) => c.id === customerId);
@@ -6933,6 +7112,18 @@ export function OrdersView({
               <UserRound className="size-3.5 mr-1" />
               我的 {myActiveOrderCount}
             </Button>
+            {permission.canUpdate && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className={pendingPaymentClaimCount > 0 ? "h-10 border-amber-300 bg-amber-50 text-amber-800" : "h-10"}
+                onClick={() => { setPaymentClaimOpen(true); void loadPaymentClaims(true); }}
+              >
+                <CircleDollarSign className="mr-1 size-3.5" />
+                待认领 {pendingPaymentClaimCount}
+              </Button>
+            )}
             <Button
               type="button"
               size="sm"
@@ -7157,6 +7348,18 @@ export function OrdersView({
             <UserRound className="size-3.5 mr-1" />
             我的未完成{myActiveOrderCount > 0 ? ` ${myActiveOrderCount}` : ""}
           </Button>
+          {permission.canUpdate && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className={pendingPaymentClaimCount > 0 ? "h-7 border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : "h-7"}
+              onClick={() => { setPaymentClaimOpen(true); void loadPaymentClaims(true); }}
+            >
+              <CircleDollarSign className="mr-1 size-3.5" />
+              待认领收款{pendingPaymentClaimCount > 0 ? ` ${pendingPaymentClaimCount}` : ""}
+            </Button>
+          )}
           <span className="text-xs text-muted-foreground shrink-0">日期</span>
           <Input
             type="date"
@@ -7487,6 +7690,14 @@ export function OrdersView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PaymentClaimDialog
+        open={paymentClaimOpen}
+        data={paymentClaimData}
+        loading={paymentClaimsLoading}
+        onOpenChange={setPaymentClaimOpen}
+        onRefresh={() => loadPaymentClaims(true)}
+      />
 
       <NewOrderDialog open={newOpen} onOpenChange={setNewOpen} />
 
