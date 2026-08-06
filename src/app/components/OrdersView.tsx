@@ -30,7 +30,7 @@ import {
   ChevronDown, Check, Truck, X, MapPin, AlertTriangle,
   Camera, Clock, PackageCheck, Download, Video, ArrowRightLeft,
   Phone, MessageCircle, UserRound, RotateCcw, Search,
-  Loader2, Send, ShieldCheck, Tag, Gavel,
+  ChevronLeft, ChevronRight, Loader2, Send, ShieldCheck, Tag, Gavel,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -70,6 +70,7 @@ const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }
   { value: "C", label: "C端（零售）" },
 ];
 const ORDER_FORM_SCHEMA_VERSION = 2;
+const MOBILE_ORDER_PAGE_SIZE = 12;
 const NEW_ORDER_SOURCE_CHOICES = [
   {
     value: "平台下单",
@@ -6401,7 +6402,8 @@ export function OrdersView({
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
   const [exportFormatOpen, setExportFormatOpen] = useState(false);
   const [mobileSearch, setMobileSearch] = useState("");
-  const [mobileVisibleCount, setMobileVisibleCount] = useState(12);
+  const [mobilePage, setMobilePage] = useState(1);
+  const mobileListRef = useRef<HTMLDivElement>(null);
 
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
   const [dateFrom, setDateFrom] = useState("");
@@ -6574,11 +6576,29 @@ export function OrdersView({
   }, [filteredOrders, mobileSearch]);
 
   useEffect(() => {
-    setMobileVisibleCount(12);
+    setMobilePage(1);
   }, [mobileSearch, statusFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
 
-  const mobileVisibleOrders = mobileFilteredOrders.slice(0, mobileVisibleCount);
-  const hasMoreMobileOrders = mobileVisibleOrders.length < mobileFilteredOrders.length;
+  const mobileTotalPages = Math.max(1, Math.ceil(mobileFilteredOrders.length / MOBILE_ORDER_PAGE_SIZE));
+  const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
+  const mobileVisibleOrders = mobileFilteredOrders.slice(
+    (currentMobilePage - 1) * MOBILE_ORDER_PAGE_SIZE,
+    currentMobilePage * MOBILE_ORDER_PAGE_SIZE
+  );
+
+  const changeMobilePage = (nextPage: number) => {
+    const normalized = Math.max(1, Math.min(mobileTotalPages, nextPage));
+    setMobilePage(normalized);
+    window.requestAnimationFrame(() => {
+      const list = mobileListRef.current;
+      const scrollContainer = list?.closest(".fishroom-content") as HTMLElement | null;
+      if (!list || !scrollContainer) return;
+      const listRect = list.getBoundingClientRect();
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const listTop = scrollContainer.scrollTop + listRect.top - containerRect.top - 12;
+      scrollContainer.scrollTo({ top: Math.max(0, listTop), left: 0, behavior: "auto" });
+    });
+  };
 
   useEffect(() => {
     setSelectedOrderIds((prev) => {
@@ -7040,7 +7060,7 @@ export function OrdersView({
           </div>
         </section>
 
-        <div className="flex flex-col gap-3">
+        <div ref={mobileListRef} className="flex flex-col gap-3">
           {mobileVisibleOrders.length === 0 ? (
             <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
               没有符合条件的订单
@@ -7050,15 +7070,46 @@ export function OrdersView({
           )}
         </div>
 
-        {hasMoreMobileOrders && (
-          <Button
-            type="button"
-            variant="outline"
-            className="h-10"
-            onClick={() => setMobileVisibleCount((count) => count + 12)}
-          >
-            加载更多（{mobileVisibleOrders.length}/{mobileFilteredOrders.length}）
-          </Button>
+        {mobileFilteredOrders.length > 0 && mobileTotalPages > 1 && (
+          <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 rounded-lg border bg-card p-2">
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              disabled={currentMobilePage <= 1}
+              onClick={() => changeMobilePage(currentMobilePage - 1)}
+              aria-label="上一页"
+              title="上一页"
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            <label className="fishroom-control flex h-10 min-w-0 items-center rounded-md border px-3">
+              <span className="sr-only">选择订单页码</span>
+              <select
+                value={currentMobilePage}
+                onChange={(event) => changeMobilePage(Number(event.target.value))}
+                className="size-full min-w-0 bg-transparent text-center text-sm font-medium text-foreground outline-none"
+                aria-label="选择订单页码"
+              >
+                {Array.from({ length: mobileTotalPages }, (_, index) => index + 1).map((pageNumber) => (
+                  <option key={pageNumber} value={pageNumber}>
+                    第 {pageNumber} / {mobileTotalPages} 页
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              disabled={currentMobilePage >= mobileTotalPages}
+              onClick={() => changeMobilePage(currentMobilePage + 1)}
+              aria-label="下一页"
+              title="下一页"
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
         )}
       </div>
 

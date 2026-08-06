@@ -10,7 +10,7 @@ import {
   PaginationPrevious,
   PaginationEllipsis,
 } from "../../app/components/ui/pagination";
-import { Search, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Search, Plus } from "lucide-react";
 
 type Column<T> = {
   key: string;
@@ -228,48 +228,91 @@ export function DataTable<T extends { id: string }>({
         <span>
           共 {filtered.length} 条 · 第 {current}/{totalPages} 页
         </span>
-        <Pagination className="mx-0 w-auto">
-          <PaginationContent>
-            <PaginationItem>
-              <PaginationPrevious
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  changePage(current - 1);
-                }}
-              />
-            </PaginationItem>
-            {visiblePageTokens.map((token) => (
-              token === "start-ellipsis" || token === "end-ellipsis" ? (
-                <PaginationItem key={token}>
-                  <PaginationEllipsis />
-                </PaginationItem>
-              ) : (
-                <PaginationItem key={token}>
-                  <PaginationLink
-                    href="#"
-                    isActive={current === token}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      changePage(token);
-                    }}
-                  >
-                    {token}
-                  </PaginationLink>
-                </PaginationItem>
-              )
-            ))}
-            <PaginationItem>
-              <PaginationNext
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  changePage(current + 1);
-                }}
-              />
-            </PaginationItem>
-          </PaginationContent>
-        </Pagination>
+        {totalPages > 1 && (
+          <div className="grid w-full grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 sm:hidden">
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              disabled={current <= 1}
+              onClick={() => changePage(current - 1)}
+              aria-label="上一页"
+              title="上一页"
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            <label className="fishroom-control flex h-10 min-w-0 items-center rounded-md border px-3">
+              <span className="sr-only">选择页码</span>
+              <select
+                value={current}
+                onChange={(event) => changePage(Number(event.target.value))}
+                className="size-full min-w-0 bg-transparent text-center text-sm font-medium text-foreground outline-none"
+                aria-label="选择页码"
+              >
+                {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
+                  <option key={pageNumber} value={pageNumber}>
+                    第 {pageNumber} / {totalPages} 页
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              disabled={current >= totalPages}
+              onClick={() => changePage(current + 1)}
+              aria-label="下一页"
+              title="下一页"
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+        )}
+        <div className="hidden sm:block">
+          <Pagination className="mx-0 w-auto">
+            <PaginationContent>
+              <PaginationItem>
+                <PaginationPrevious
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    changePage(current - 1);
+                  }}
+                />
+              </PaginationItem>
+              {visiblePageTokens.map((token) => (
+                token === "start-ellipsis" || token === "end-ellipsis" ? (
+                  <PaginationItem key={token}>
+                    <PaginationEllipsis />
+                  </PaginationItem>
+                ) : (
+                  <PaginationItem key={token}>
+                    <PaginationLink
+                      href="#"
+                      isActive={current === token}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        changePage(token);
+                      }}
+                    >
+                      {token}
+                    </PaginationLink>
+                  </PaginationItem>
+                )
+              ))}
+              <PaginationItem>
+                <PaginationNext
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    changePage(current + 1);
+                  }}
+                />
+              </PaginationItem>
+            </PaginationContent>
+          </Pagination>
+        </div>
       </div>
     </div>
   );
