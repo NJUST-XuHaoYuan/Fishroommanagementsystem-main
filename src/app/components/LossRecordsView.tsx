@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
-import { Check, ChevronDown, Eye, Image as ImageIcon, Search, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, Eye, Image as ImageIcon, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { resolveMediaUrl } from "../utils/media";
 
@@ -182,7 +182,12 @@ export function LossRecordsView() {
   const [productId, setProductId] = useState("all");
   const [subTankId, setSubTankId] = useState("all");
   const [proofStatus, setProofStatus] = useState("all");
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("-");
 
   const product = (id: string) => state.products.find((p) => p.id === id);
   const species = (id: string) => state.species.find((s) => s.id === id);
@@ -331,9 +336,6 @@ export function LossRecordsView() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [state.lossRecords, state.stock, state.products, state.species, state.batches, state.tankGroups]);
 
-  const monthPrefix = new Date().toISOString().slice(0, 7);
-  const thisMonthCount = rows.filter((row) => row.date.startsWith(monthPrefix)).length;
-  const noProofCount = rows.filter((row) => row.photos.length === 0).length;
   const productOptions = useMemo(() => {
     const products = state.products.filter((p) => speciesId === "all" || p.speciesId === speciesId);
     return [
@@ -435,34 +437,28 @@ export function LossRecordsView() {
         <p className="text-sm text-muted-foreground">追溯每条损耗鱼的来源、缸位、原因和照片凭证</p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border bg-card p-4">
-          <div className="text-xs text-muted-foreground">累计损耗</div>
-          <div className="mt-1 text-2xl font-semibold">{rows.length}</div>
-        </div>
-        <div className="rounded-lg border bg-card p-4">
-          <div className="text-xs text-muted-foreground">当前筛选</div>
-          <div className="mt-1 text-2xl font-semibold">{filteredRows.length}</div>
-        </div>
-        <div className="rounded-lg border bg-card p-4">
-          <div className="text-xs text-muted-foreground">本月损耗</div>
-          <div className="mt-1 text-2xl font-semibold">{thisMonthCount}</div>
-        </div>
-        <div className="rounded-lg border bg-card p-4">
-          <div className="text-xs text-muted-foreground">缺少凭证</div>
-          <div className="mt-1 text-2xl font-semibold">{noProofCount}</div>
-        </div>
-      </div>
-
       <div className="rounded-lg border bg-card p-4">
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="font-medium">采购损耗筛选</div>
-          {hasFilters && (
-            <Button variant="ghost" size="sm" onClick={resetFilters}>
-              <X className="size-3.5 mr-1" />
-              清除筛选
+          <div className="flex items-center gap-2">
+            <Button
+              variant={startDate === today && endDate === today ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setStartDate(today);
+                setEndDate(today);
+              }}
+            >
+              <CalendarDays className="mr-1 size-3.5" />
+              查看今日
             </Button>
-          )}
+            {hasFilters && (
+              <Button variant="ghost" size="sm" onClick={resetFilters}>
+                <X className="mr-1 size-3.5" />
+                清除筛选
+              </Button>
+            )}
+          </div>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="grid gap-2">
