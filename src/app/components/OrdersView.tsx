@@ -22,6 +22,7 @@ import { Checkbox } from "./ui/checkbox";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "./ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { statusRingClass } from "./StatusIcon";
 import { toast } from "sonner";
@@ -2202,7 +2203,8 @@ function ReportDamageDialog({
   const [resolution, setResolution] = useState<"refund" | "reship" | null>(null);
   const [damagedItemIds, setDamagedItemIds] = useState<string[]>([]);
   const [refundAmountByStockId, setRefundAmountByStockId] = useState<Record<string, number>>({});
-  const [notes, setNotes] = useState("");
+  const [refundNotes, setRefundNotes] = useState("物流报损，待退款");
+  const [reshipNotes, setReshipNotes] = useState("物流报损，安排补发");
   const [proof, setProof] = useState<string[]>([]);
   const [replacementByOriginal, setReplacementByOriginal] = useState<Record<string, string>>({});
   const [replacementGroupByOriginal, setReplacementGroupByOriginal] = useState<Record<string, string>>({});
@@ -2217,7 +2219,8 @@ function ReportDamageDialog({
       setRefundAmountByStockId(Object.fromEntries(
         shipmentItems.map((item) => [item.stockItemId, Number(item.price.toFixed(2))])
       ));
-      setNotes("");
+      setRefundNotes("物流报损，待退款");
+      setReshipNotes("物流报损，安排补发");
       setProof([]);
       setReplacementByOriginal({});
       setReplacementGroupByOriginal({});
@@ -2383,7 +2386,7 @@ function ReportDamageDialog({
         damagedItemStockIds: selectedDamagedItems.map((item) => item.stockItemId),
         refundAmount: Number(selectedRefundAmount.toFixed(2)),
         proof,
-        notes: `${notes.trim() || "物流报损，待退款"}；退款商品：${refundItemText}`,
+        notes: `${refundNotes.trim() || "物流报损，待退款"}；退款商品：${refundItemText}`,
       };
     } else {
       const replacements = selectedDamagedItems.map((item) => ({
@@ -2396,7 +2399,7 @@ function ReportDamageDialog({
         return toast.error("同一条库存鱼不能重复补发");
       result = {
         resolution: "reship",
-        notes: notes.trim() || "物流报损，安排补发",
+        notes: reshipNotes.trim() || "物流报损，安排补发",
         replacements,
       };
     }
@@ -2409,7 +2412,7 @@ function ReportDamageDialog({
       <DialogContent
         aria-describedby={undefined}
         className="max-w-none sm:max-w-none max-h-[90vh] flex flex-col"
-        style={{ width: "min(92vw, 980px)", maxWidth: "min(92vw, 980px)" }}
+        style={{ width: "min(94vw, 1180px)", maxWidth: "min(94vw, 1180px)" }}
       >
         <DialogHeader>
           <DialogTitle>物流报损处理</DialogTitle>
@@ -2430,8 +2433,8 @@ function ReportDamageDialog({
                 已选 {selectedDamagedItems.length} / {damagedItems.length} 条
               </span>
             </div>
-            <div className="max-h-64 overflow-y-auto rounded-lg border p-2">
-              <div className="grid gap-2 sm:grid-cols-2">
+            <div className="max-h-72 overflow-y-auto rounded-lg border p-2">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {damagedItems.map((item) => {
                   const product = getProduct(item.productId);
                   const stock = getStockItem(item.stockItemId);
@@ -2441,7 +2444,7 @@ function ReportDamageDialog({
                     <label
                       key={item.stockItemId}
                       htmlFor={`damage-item-${item.stockItemId}`}
-                      className={`grid cursor-pointer grid-cols-[auto_48px_minmax(0,1fr)] items-center gap-2 rounded-lg border p-2.5 transition-colors ${
+                      className={`grid min-h-[68px] cursor-pointer grid-cols-[auto_44px_minmax(0,1fr)] items-center gap-2 rounded-md border p-2 transition-colors ${
                         checked ? "border-red-400 bg-red-50 ring-1 ring-red-200" : "bg-background hover:bg-muted/50"
                       }`}
                     >
@@ -2450,7 +2453,7 @@ function ReportDamageDialog({
                         checked={checked}
                         onCheckedChange={(value) => setDamagedItemChecked(item.stockItemId, value === true)}
                       />
-                      <div className="size-12 overflow-hidden rounded-md border bg-muted">
+                      <div className="size-11 overflow-hidden rounded border bg-muted">
                         {iconUrl
                           ? <ImageWithFallback src={iconUrl} alt="" className="size-full object-cover" />
                           : <div className="flex size-full items-center justify-center"><Fish className="size-4 text-muted-foreground" /></div>}
@@ -2471,7 +2474,7 @@ function ReportDamageDialog({
                   );
                 })}
                 {damagedItems.length === 0 && (
-                  <div className="p-4 text-center text-sm text-muted-foreground sm:col-span-2">该发货单没有可报损的鱼</div>
+                  <div className="p-4 text-center text-sm text-muted-foreground sm:col-span-2 lg:col-span-3 xl:col-span-4">该发货单没有可报损的鱼</div>
                 )}
               </div>
             </div>
@@ -2481,35 +2484,31 @@ function ReportDamageDialog({
               <span className="flex size-6 items-center justify-center rounded-full bg-foreground text-xs text-background">2</span>
               选择处理方式<span className="text-red-500">*</span>
             </Label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                disabled={selectedDamagedItems.length === 0}
-                onClick={() => { setResolution("refund"); setNotes("物流报损，待退款"); }}
-                className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
-                  resolution === "refund"
-                    ? "border-red-500 bg-red-50 text-red-700"
-                    : "hover:bg-muted text-muted-foreground"
-                }`}
-              >
-                退款
-              </button>
-              <button
-                type="button"
-                disabled={selectedDamagedItems.length === 0}
-                onClick={() => { setResolution("reship"); setNotes("物流报损，安排补发"); }}
-                className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
-                  resolution === "reship"
-                    ? "border-sky-500 bg-sky-50 text-sky-700"
-                    : "hover:bg-muted text-muted-foreground"
-                }`}
-              >
-                补发
-              </button>
-            </div>
-          </div>
-          {resolution === "refund" && (
-            <div className="grid gap-3">
+            <Tabs
+              value={resolution ?? ""}
+              onValueChange={(value) => setResolution(value as "refund" | "reship")}
+              className="gap-3"
+            >
+              <TabsList className="grid h-11 w-full grid-cols-2 rounded-md border bg-muted/40 p-1">
+                <TabsTrigger
+                  value="refund"
+                  disabled={selectedDamagedItems.length === 0}
+                  className="rounded data-[state=active]:text-red-700"
+                >
+                  <CircleDollarSign className="size-4" />
+                  退款处理
+                </TabsTrigger>
+                <TabsTrigger
+                  value="reship"
+                  disabled={selectedDamagedItems.length === 0}
+                  className="rounded data-[state=active]:text-sky-700"
+                >
+                  <ArrowRightLeft className="size-4" />
+                  补发处理
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="refund" className="mt-0 grid gap-4 rounded-md border bg-background p-3 sm:p-4">
+                <div className="grid gap-3">
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-3">
                   <Label>填写已选报损鱼的退款金额</Label>
@@ -2571,10 +2570,25 @@ function ReportDamageDialog({
                   确认后会登记报损退款并调减订单应收；如已收款，财务台账会据此显示待退款并由财务核销。
                 </div>
               </div>
-            </div>
-          )}
-          {resolution === "reship" && (
-            <div className="grid gap-2">
+                </div>
+                <div className="grid gap-2">
+                  <Label>报损 / 待退款备注</Label>
+                  <textarea
+                    value={refundNotes}
+                    onChange={(event) => setRefundNotes(event.target.value)}
+                    rows={3}
+                    className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder="填写报损原因、应退金额说明或沟通记录…"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>报损凭证</Label>
+                  <ProofUploader images={proof} onChange={setProof} />
+                  <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录或退款凭证，记录会随报损退款保留。</p>
+                </div>
+              </TabsContent>
+              <TabsContent value="reship" className="mt-0 grid gap-4 rounded-md border bg-background p-3 sm:p-4">
+                <div className="grid gap-2">
               <Label>为已选报损鱼指定补发鱼<span className="text-red-500 ml-0.5">*</span></Label>
               <div className="rounded-lg border divide-y">
                 {selectedDamagedItems.map((item) => {
@@ -2781,27 +2795,20 @@ function ReportDamageDialog({
               <p className="text-xs text-muted-foreground">
                 补发可以从当前所有未售且还在有效缸位里的库存鱼中选择；按缸组、子缸、具体鱼逐级选择，避免选错。
               </p>
-            </div>
-          )}
-          {resolution && (
-            <div className="grid gap-2">
-              <Label>{resolution === "refund" ? "报损 / 待退款备注" : "报损 / 补发备注"}</Label>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={3}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-                placeholder={resolution === "refund" ? "填写报损原因、应退金额说明或沟通记录…" : "填写报损原因、补发说明或沟通记录…"}
-              />
-            </div>
-          )}
-          {resolution === "refund" && (
-            <div className="grid gap-2">
-              <Label>报损凭证</Label>
-              <ProofUploader images={proof} onChange={setProof} />
-              <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录或退款凭证，记录会随报损退款保留。</p>
-            </div>
-          )}
+                </div>
+                <div className="grid gap-2">
+                  <Label>报损 / 补发备注</Label>
+                  <textarea
+                    value={reshipNotes}
+                    onChange={(event) => setReshipNotes(event.target.value)}
+                    rows={3}
+                    className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder="填写报损原因、补发说明或沟通记录…"
+                  />
+                </div>
+              </TabsContent>
+            </Tabs>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
