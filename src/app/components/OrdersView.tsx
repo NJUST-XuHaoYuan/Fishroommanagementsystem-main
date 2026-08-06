@@ -60,6 +60,7 @@ import {
   nowDatetimeLocal,
 } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -2999,6 +3000,12 @@ function StockPickerBioDialog({
     photos: [],
     videos: [],
   });
+  const {
+    isUploading: recordMediaUploading,
+    pasteFiles: pasteRecordMedia,
+    uploadImages: uploadRecordPhotos,
+    uploadVideos: uploadRecordVideos,
+  } = useRecordMediaUpload(setNewRecord);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const [targetGroupId, setTargetGroupId] = useState("");
@@ -3119,6 +3126,7 @@ function StockPickerBioDialog({
   const saveBio = async () => {
     if (!item) return;
     if (!permission.requirePermission("update")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!confirmWrite("修改", "将保存鱼的状态、编号和备注。")) return;
     const ok = await saveStateTransform((latest) => ({
       ...latest,
@@ -3133,6 +3141,7 @@ function StockPickerBioDialog({
   const addBioRecord = async () => {
     if (!item) return;
     if (!permission.requirePermission("create")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!newRecord.date) return toast.error("请选择记录时间");
     const recordTime = normalizeBioRecordTime(newRecord.date);
     if (recordTime > nowForRecord) return toast.error("记录时间不能晚于当前时间");
@@ -3199,39 +3208,10 @@ function StockPickerBioDialog({
     toast.success("记录已删除");
   };
 
-  const handlePhotoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("image/")) return toast.error("请选择图片文件");
-      try {
-        toast.info("照片原图上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-        toast.success("照片已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
-      }
-    });
-  };
-
-  const handleVideoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("video/")) return toast.error("请选择视频文件");
-      try {
-        toast.info("视频原文件上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
-      }
-    });
-  };
-
   const openMoveDialog = () => {
     if (!item) return;
     if (!permission.requirePermission("update")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("该鱼已不在当前库存中，不能移缸");
     const currentGroupId = groupIdBySubTank(item.subTankId);
     const defaultGroup = state.tankGroups.find((group) => group.id !== currentGroupId) ?? state.tankGroups[0];
@@ -3264,6 +3244,7 @@ function StockPickerBioDialog({
   const openLossDialog = () => {
     if (!item) return;
     if (!permission.requirePermission("delete")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("该鱼已不在当前库存中，不能登记损耗");
     setLossDate(today);
     setLossReason("");
@@ -3320,8 +3301,18 @@ function StockPickerBioDialog({
 
   return (
     <>
-    <Dialog open={open && actionMode === "detail"} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+    <Dialog
+      open={open && actionMode === "detail"}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+        onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent
+        aria-describedby={undefined}
+        className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden"
+        onPaste={permission.canCreate ? pasteRecordMedia : undefined}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {product?.imageUrl && (
@@ -3512,16 +3503,16 @@ function StockPickerBioDialog({
                   </div>
                   <div className="grid gap-2">
                     <Label className="text-xs">照片</Label>
-                    <input ref={photoRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { handlePhotoUpload(event.target.files); event.target.value = ""; }} />
-                    <Button type="button" variant="outline" size="sm" onClick={() => photoRef.current?.click()}>
+                    <input ref={photoRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { void uploadRecordPhotos(event.target.files); event.target.value = ""; }} />
+                    <Button type="button" variant="outline" size="sm" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的图片" onClick={() => photoRef.current?.click()}>
                       <Camera className="size-4" /> 上传照片
                     </Button>
 	                  </div>
 	                  <div className="grid gap-2">
 	                    <Label className="text-xs">视频</Label>
 	                    <div className="flex items-center gap-2">
-	                      <input ref={videoRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} multiple className="hidden" onChange={(event) => { handleVideoUpload(event.target.files); event.target.value = ""; }} />
-	                      <Button type="button" variant="outline" size="sm" className="flex-1" onClick={() => videoRef.current?.click()}>
+	                      <input ref={videoRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} multiple className="hidden" onChange={(event) => { void uploadRecordVideos(event.target.files); event.target.value = ""; }} />
+	                      <Button type="button" variant="outline" size="sm" className="flex-1" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的视频" onClick={() => videoRef.current?.click()}>
 	                        <Video className="size-4" /> 上传视频
 	                      </Button>
 	                    </div>
@@ -3551,8 +3542,9 @@ function StockPickerBioDialog({
                   <Label className="text-xs">记录内容</Label>
                   <Textarea rows={2} placeholder="填写观察内容、用药记录等..." value={newRecord.text} onChange={(event) => setNewRecord((prev) => ({ ...prev, text: event.target.value }))} />
                 </div>
-                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} className="self-end">
-                  <Plus className="size-4" /> 添加此记录
+                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading} className="self-end">
+                  {recordMediaUploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {recordMediaUploading ? "媒体上传中…" : "添加此记录"}
                 </Button>
               </div>
             )}
@@ -3564,7 +3556,7 @@ function StockPickerBioDialog({
         <DialogFooter className="shrink-0 border-t pt-2">
           <div className="mr-auto flex items-center gap-2">
             {permission.canUpdate && item && (
-              <Button variant="outline" onClick={openMoveDialog}>
+              <Button variant="outline" disabled={recordMediaUploading} onClick={openMoveDialog}>
                 <ArrowRightLeft className="mr-1 size-4" />
                 移缸
               </Button>
@@ -3573,6 +3565,7 @@ function StockPickerBioDialog({
               <Button
                 variant="outline"
                 className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                disabled={recordMediaUploading}
                 onClick={openLossDialog}
               >
                 <AlertTriangle className="mr-1 size-4" />
@@ -3580,8 +3573,8 @@ function StockPickerBioDialog({
               </Button>
             )}
           </div>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
-          {permission.canUpdate && item && <Button onClick={saveBio}>保存状态</Button>}
+          <Button variant="outline" disabled={recordMediaUploading} onClick={() => onOpenChange(false)}>关闭</Button>
+          {permission.canUpdate && item && <Button disabled={recordMediaUploading} onClick={saveBio}>保存状态</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

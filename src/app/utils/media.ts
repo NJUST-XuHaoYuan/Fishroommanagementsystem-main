@@ -31,6 +31,13 @@ function mediaMimeFromFile(file: File): string {
   return "";
 }
 
+export function originalMediaKind(file: File): "image" | "video" | null {
+  const mime = mediaMimeFromFile(file);
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  return null;
+}
+
 type ResolveMediaOptions = {
   thumbnailWidth?: number;
 };

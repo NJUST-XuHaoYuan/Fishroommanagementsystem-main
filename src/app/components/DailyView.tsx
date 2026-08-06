@@ -16,7 +16,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2 } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2, Loader2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -30,6 +30,7 @@ import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPri
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import {
   formatBioRecordTime,
   minDatetimeForDate,
@@ -74,6 +75,12 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     photos: [],
     videos: [],
   });
+  const {
+    isUploading: recordMediaUploading,
+    pasteFiles: pasteRecordMedia,
+    uploadImages: uploadRecordPhotos,
+    uploadVideos: uploadRecordVideos,
+  } = useRecordMediaUpload(setNewRecord);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const [confirmTimeChangeOpen, setConfirmTimeChangeOpen] = useState(false);
@@ -857,6 +864,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const saveBio = async () => {
     if (!bioItemId) return;
     if (!permission.requirePermission("update")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     const price = Number(bioBasePrice);
     if (!bioBasePrice.trim() || Number.isNaN(price) || price <= 0) {
       return toast.error("请填写大于 0 的销售默认价");
@@ -887,6 +895,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const addBioRecord = async () => {
     if (!bioItemId) return;
     if (!permission.requirePermission("create")) return;
+    if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!newRecord.date) return toast.error("请选择记录时间");
     const currentItem = stockItem(bioItemId);
     const recordTime = normalizeBioRecordTime(newRecord.date);
@@ -977,38 +986,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     }
     setDeletingRecordId(null);
     toast.success("记录已删除");
-  };
-
-  // Handle photo upload for new record
-  const handlePhotoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
-      try {
-        toast.info("照片原图上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
-        toast.success("照片已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
-      }
-    });
-  };
-
-  // Handle video upload for new record
-  const handleVideoUpload = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
-      try {
-        toast.info("视频原文件上传中…");
-        const url = await uploadOriginalMedia(file);
-        setNewRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
-        toast.success("视频已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
-      }
-    });
   };
 
   // Log dialog
@@ -1703,8 +1680,18 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
       </Tabs>
 
       {/* ── 生物详情 Dialog ── */}
-      <Dialog open={bioOpen} onOpenChange={setBioOpen}>
-        <DialogContent aria-describedby={undefined} className="w-[min(96vw,56rem)] max-w-[96vw] sm:max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden">
+      <Dialog
+        open={bioOpen}
+        onOpenChange={(open) => {
+          if (!open && recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+          setBioOpen(open);
+        }}
+      >
+        <DialogContent
+          aria-describedby={undefined}
+          className="w-[min(96vw,56rem)] max-w-[96vw] sm:max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden"
+          onPaste={permission.canCreate ? pasteRecordMedia : undefined}
+        >
           <DialogHeader>
             <DialogTitle className="flex flex-wrap items-center gap-2 pr-6 text-left">
               {bioProduct?.imageUrl && (
@@ -2027,13 +2014,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                       accept="image/*"
                       multiple
                       className="hidden"
-                      onChange={(e) => { handlePhotoUpload(e.target.files); e.target.value = ""; }}
+                      onChange={(e) => { void uploadRecordPhotos(e.target.files); e.target.value = ""; }}
                     />
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="flex-1"
+                      disabled={recordMediaUploading}
+                      title="也可直接粘贴剪贴板中的图片"
                       onClick={() => photoRef.current?.click()}
                     >
                       <Camera className="size-4" /> 上传照片
@@ -2049,13 +2038,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	                      accept={ORIGINAL_VIDEO_ACCEPT}
 	                      multiple
 	                      className="hidden"
-	                      onChange={(e) => { handleVideoUpload(e.target.files); e.target.value = ""; }}
+	                      onChange={(e) => { void uploadRecordVideos(e.target.files); e.target.value = ""; }}
 	                    />
 	                    <Button
 	                      type="button"
 	                      variant="outline"
 	                      size="sm"
 	                      className="flex-1"
+	                      disabled={recordMediaUploading}
+	                      title="也可直接粘贴剪贴板中的视频"
 	                      onClick={() => videoRef.current?.click()}
 	                    >
 	                      <Video className="size-4" /> 上传视频
@@ -2098,8 +2089,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   onChange={(e) => setNewRecord((p) => ({ ...p, text: e.target.value }))}
                 />
               </div>
-              <Button variant="outline" size="sm" onClick={addBioRecord} className="w-full self-end sm:w-auto">
-                <Plus className="size-4" /> 添加观察/治疗记录
+              <Button variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading} className="w-full self-end sm:w-auto">
+                {recordMediaUploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                {recordMediaUploading ? "媒体上传中…" : "添加观察/治疗记录"}
               </Button>
 	            </div>
 	            )}
@@ -2108,7 +2100,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		          <DialogFooter className="flex-col pt-3 border-t shrink-0 gap-2 sm:flex-row sm:flex-wrap sm:items-center">
 		            <div className="flex w-full flex-wrap items-center gap-2 sm:mr-auto sm:w-auto">
 		              {permission.canUpdate && bioItem && (
-		                <Button variant="outline" onClick={() => openMoveDialog([bioItem.id])}>
+		                <Button variant="outline" disabled={recordMediaUploading} onClick={() => openMoveDialog([bioItem.id])}>
 		                  <ArrowRightLeft className="size-4 mr-1" />
 		                  移缸
 		                </Button>
@@ -2117,6 +2109,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		                <Button
 		                  variant="outline"
 		                  className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+		                  disabled={recordMediaUploading}
 		                  onClick={() => openLossDialog(bioItem.id)}
 		                >
 		                  <AlertTriangle className="size-4 mr-1" />
@@ -2124,8 +2117,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		                </Button>
 		              )}
 		            </div>
-		            <Button variant="outline" onClick={() => setBioOpen(false)}>关闭</Button>
-		            {permission.canUpdate && <Button onClick={saveBio}>保存信息</Button>}
+		            <Button variant="outline" disabled={recordMediaUploading} onClick={() => setBioOpen(false)}>关闭</Button>
+		            {permission.canUpdate && <Button disabled={recordMediaUploading} onClick={saveBio}>保存信息</Button>}
 		          </DialogFooter>
         </DialogContent>
 	      </Dialog>
