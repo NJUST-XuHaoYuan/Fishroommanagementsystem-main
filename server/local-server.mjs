@@ -77,6 +77,7 @@ import {
 } from "./water-quality-rules.mjs";
 import { productDeleteDisposition } from "./product-delete-rules.mjs";
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
+import { snapshotDamageReplacements } from "./shipment-damage-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -8509,6 +8510,19 @@ async function handleApi(req, res, url) {
           if (!isPhysicallyInTank(stockItem, shippedIds)) throw new Error("补发库存已不在缸内，不能补发");
           if (stockSiteId(state, stockItem) !== normalizeSiteId(order.siteId)) throw new Error("不能跨场地选择补发库存鱼");
         }
+        const damageReplacements = snapshotDamageReplacements({
+          replacements: [...replacementMap.entries()].map(([originalStockItemId, replacementStockItemId]) => ({
+            originalStockItemId,
+            replacementStockItemId,
+          })),
+          stock: nextStock,
+          products: state.products,
+          tankGroups: state.tankGroups,
+        });
+        nextShipment = {
+          ...nextShipment,
+          damageReplacements,
+        };
         nextStock = nextStock.map((stockItem) =>
           replacementIds.includes(String(stockItem?.id ?? ""))
             ? { ...stockItem, sold: true }
@@ -8525,6 +8539,7 @@ async function handleApi(req, res, url) {
               ...orderItem,
               stockItemId: replacementStockItemId,
               productId: replacementStock?.productId ?? orderItem.productId,
+              fishCode: String(replacementStock?.code ?? "").trim() || undefined,
             };
           }),
         };
@@ -8541,7 +8556,10 @@ async function handleApi(req, res, url) {
         action: "修改记录",
         detail: resolution === "refund"
           ? `订单「${order.orderNo}」登记发货报损退款，订单应收调减 ¥${Number(nextShipment.damageRefundAmount ?? 0).toFixed(2)}，待财务核销`
-          : `订单「${order.orderNo}」发货报损，已选择补发商品`,
+          : `订单「${order.orderNo}」发货报损，补发关系：${(nextShipment.damageReplacements ?? []).map((item) =>
+              `${item.originalProductName || "原鱼"}${item.originalFishCode ? `(${item.originalFishCode})` : ""}` +
+              ` → ${item.replacementProductName || "补发鱼"}${item.replacementFishCode ? `(${item.replacementFishCode})` : ""}`
+            ).join("、")}`,
       };
       const nextState = {
         ...state,

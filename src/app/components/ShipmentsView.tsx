@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useStore, Order, Shipment, Store } from "../store";
+import { useStore, Order, Shipment, ShipmentDamageReplacement, Store } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -14,7 +14,7 @@ import {
 import { toast } from "sonner";
 import {
   Truck, CheckCircle2, Package, PackageCheck, CalendarClock, MapPin, ArrowUpDown,
-  ChevronDown, ChevronUp, Pencil, XCircle,
+  ChevronDown, ChevronUp, Pencil, XCircle, ArrowRightLeft,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import React from "react";
@@ -272,6 +272,21 @@ export function ShipmentsView() {
     return "—";
   };
 
+  const replacementSide = (replacement: ShipmentDamageReplacement, side: "original" | "replacement") => {
+    const stockItemId = side === "original" ? replacement.originalStockItemId : replacement.replacementStockItemId;
+    const stock = state.stock.find((item) => item.id === stockItemId);
+    const snapshotProductId = side === "original" ? replacement.originalProductId : replacement.replacementProductId;
+    const product = state.products.find((item) => item.id === (stock?.productId || snapshotProductId));
+    const productName = side === "original" ? replacement.originalProductName : replacement.replacementProductName;
+    const fishCode = side === "original" ? replacement.originalFishCode : replacement.replacementFishCode;
+    const tankName = side === "original" ? replacement.originalTankName : replacement.replacementTankName;
+    return {
+      productName: productName || product?.name || "未知商品",
+      fishCode: fishCode || stock?.code || "无编号",
+      tankName: tankName || getTankName(stockItemId),
+    };
+  };
+
   // 根据 itemStockIds 查出商品名列表
   const getShipmentItemNames = (sh: Shipment): string[] => {
     if (!sh.itemStockIds?.length) return [];
@@ -279,7 +294,9 @@ export function ShipmentsView() {
     if (!order) return [];
     return sh.itemStockIds.map((sid) => {
       const oi = order.items.find(i => i.stockItemId === sid);
-      return oi ? getProductName(oi.productId) : "—";
+      if (oi) return getProductName(oi.productId);
+      const replacement = (sh.damageReplacements ?? []).find((item) => item.originalStockItemId === sid);
+      return replacement ? replacementSide(replacement, "original").productName : "—";
     });
   };
 
@@ -542,13 +559,15 @@ export function ShipmentsView() {
                   const feeDiff = actual - preCollected;
                   const isExpanded = expandedShipIds.has(sh.id);
                   const itemNames = getShipmentItemNames(sh);
+                  const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
+                  const canExpand = itemNames.length > 0 || damageReplacements.length > 0;
 
                   return (
                     <React.Fragment key={sh.id}>
                       <tr className="border-t hover:bg-muted/20 transition-colors">
                         {/* 展开按钮 */}
                         <td className="px-2 py-3 text-center">
-                          {itemNames.length > 0 && (
+                          {canExpand && (
                             <button
                               onClick={() => toggleExpand(sh.id)}
                               className="text-muted-foreground hover:text-foreground transition-colors"
@@ -642,31 +661,59 @@ export function ShipmentsView() {
                       </tr>
 
                       {/* 展开行：已发货商品列表 */}
-                      {isExpanded && itemNames.length > 0 && (
+                      {isExpanded && canExpand && (
                         <tr className="border-t bg-muted/10">
                           <td />
                           <td colSpan={9} className="px-4 py-2">
-                            <div className="text-xs text-muted-foreground mb-1.5 font-medium">
-                              本次发货商品（{itemNames.length} 条）
-                            </div>
-                            <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
-                              {(sh.itemStockIds ?? []).map((sid, idx) => {
-                                const order2 = getOrder(sh.orderId);
-                                const oi = order2?.items.find(i => i.stockItemId === sid);
-                                return (
-                                  <div
-                                    key={sid}
-                                    className="flex items-center justify-between text-sm px-2 py-1.5 rounded bg-white border"
-                                  >
-                                    <span className="font-medium">{itemNames[idx] ?? "—"}</span>
-                                    <span className="text-muted-foreground text-xs">{getTankName(sid)}</span>
-                                    {oi && (
-                                      <span className="text-xs text-sky-700 font-mono">¥{oi.price.toFixed(2)}</span>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
+                            {damageReplacements.length > 0 && (
+                              <div className="mb-3">
+                                <div className="mb-1.5 text-xs font-semibold text-sky-800">补发对应关系（{damageReplacements.length} 条）</div>
+                                <div className="grid gap-1.5">
+                                  {damageReplacements.map((replacement) => {
+                                    const original = replacementSide(replacement, "original");
+                                    const reship = replacementSide(replacement, "replacement");
+                                    return (
+                                      <div key={`${replacement.originalStockItemId}-${replacement.replacementStockItemId}`} className="grid items-center gap-2 rounded border border-sky-100 bg-sky-50/50 px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+                                        <div className="min-w-0">
+                                          <div className="truncate font-medium text-red-700">原报损：{original.productName} · {original.fishCode}</div>
+                                          <div className="truncate text-xs text-muted-foreground">{original.tankName}</div>
+                                        </div>
+                                        <ArrowRightLeft className="size-4 text-sky-600" />
+                                        <div className="min-w-0">
+                                          <div className="truncate font-medium text-emerald-700">补发：{reship.productName} · {reship.fishCode}</div>
+                                          <div className="truncate text-xs text-muted-foreground">{reship.tankName}</div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                            {itemNames.length > 0 && (
+                              <>
+                                <div className="text-xs text-muted-foreground mb-1.5 font-medium">
+                                  本次发货商品（{itemNames.length} 条）
+                                </div>
+                                <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+                                  {(sh.itemStockIds ?? []).map((sid, idx) => {
+                                    const order2 = getOrder(sh.orderId);
+                                    const oi = order2?.items.find(i => i.stockItemId === sid);
+                                    return (
+                                      <div
+                                        key={sid}
+                                        className="flex items-center justify-between text-sm px-2 py-1.5 rounded bg-white border"
+                                      >
+                                        <span className="font-medium">{itemNames[idx] ?? "—"}</span>
+                                        <span className="text-muted-foreground text-xs">{getTankName(sid)}</span>
+                                        {oi && (
+                                          <span className="text-xs text-sky-700 font-mono">¥{oi.price.toFixed(2)}</span>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </>
+                            )}
                           </td>
                         </tr>
                       )}

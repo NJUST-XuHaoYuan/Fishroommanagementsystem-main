@@ -465,6 +465,19 @@ export type Order = {
 
 export type ShipmentStatus = "preparing" | "outbound" | "shipped" | "delivered" | "damaged";
 
+export type ShipmentDamageReplacement = {
+  originalStockItemId: string;
+  replacementStockItemId: string;
+  originalFishCode?: string;
+  replacementFishCode?: string;
+  originalProductId?: string;
+  replacementProductId?: string;
+  originalProductName?: string;
+  replacementProductName?: string;
+  originalTankName?: string;
+  replacementTankName?: string;
+};
+
 export type Shipment = {
   id: string;
   siteId?: string;
@@ -483,6 +496,8 @@ export type Shipment = {
   actualShippingFee?: number;
   itemStockIds?: string[]; // stock item IDs included in this shipment
   damageResolution?: "refund" | "reship";
+  /** 报损补发时的原鱼与补发鱼对应关系及业务快照。 */
+  damageReplacements?: ShipmentDamageReplacement[];
   /** 物流报损退款实际涉及的鱼，可小于本发货单商品数。 */
   damageItemStockIds?: string[];
   /** 物流报损造成的应收调整金额，和资金记录里的退款金额对应。 */

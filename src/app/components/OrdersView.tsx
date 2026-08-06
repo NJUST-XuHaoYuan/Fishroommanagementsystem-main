@@ -1,6 +1,6 @@
 import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
-  useStore, Order, OrderItem, OrderStatus, Shipment, Product, StockItem,
+  useStore, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
   Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
@@ -2670,6 +2670,32 @@ function ReportDamageDialog({
                   <div className="p-4 text-sm text-center text-muted-foreground">该发货单没有可补发的商品</div>
                 )}
               </div>
+              {Object.values(replacementByOriginal).some(Boolean) && (
+                <div className="grid gap-2 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3">
+                  <div className="text-xs font-semibold text-emerald-800">本次补发关系</div>
+                  {damagedItems.map((item) => {
+                    const replacementStockItemId = replacementByOriginal[item.stockItemId];
+                    if (!replacementStockItemId) return null;
+                    const originalStock = getStockItem(item.stockItemId);
+                    const originalProduct = getProduct(item.productId);
+                    const replacementStock = getStockItem(replacementStockItemId);
+                    const replacementProduct = replacementStock ? getProduct(replacementStock.productId) : undefined;
+                    return (
+                      <div key={item.stockItemId} className="grid items-center gap-2 rounded-md border border-emerald-100 bg-white px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+                        <div className="min-w-0">
+                          <div className="break-words font-medium text-red-700">原报损：{originalProduct?.name ?? "未知商品"} · {originalStock?.code || "无编号"}</div>
+                          <div className="break-words text-xs text-muted-foreground">{tankName(originalStock?.subTankId)}</div>
+                        </div>
+                        <ArrowRightLeft className="size-4 shrink-0 text-emerald-600" />
+                        <div className="min-w-0">
+                          <div className="break-words font-medium text-emerald-700">补发：{replacementProduct?.name ?? "未知商品"} · {replacementStock?.code || "无编号"}</div>
+                          <div className="break-words text-xs text-muted-foreground">{tankName(replacementStock?.subTankId)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">
                 补发可以从当前所有未售且还在有效缸位里的库存鱼中选择；按缸组、子缸、具体鱼逐级选择，避免选错。
               </p>
@@ -3632,6 +3658,22 @@ function ItemsWithShipments({
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
 
+  const replacementSide = (replacement: ShipmentDamageReplacement, side: "original" | "replacement") => {
+    const stockItemId = side === "original" ? replacement.originalStockItemId : replacement.replacementStockItemId;
+    const stock = getStockItem(stockItemId);
+    const snapshotProductId = side === "original" ? replacement.originalProductId : replacement.replacementProductId;
+    const product = getProduct(stock?.productId || snapshotProductId || "");
+    const productName = side === "original" ? replacement.originalProductName : replacement.replacementProductName;
+    const fishCode = side === "original" ? replacement.originalFishCode : replacement.replacementFishCode;
+    const tankName = side === "original" ? replacement.originalTankName : replacement.replacementTankName;
+    return {
+      stockItemId,
+      productName: productName || product?.name || "未知商品",
+      fishCode: fishCode || stock?.code || "无编号",
+      tankName: tankName || (stock ? subTankName(stock.subTankId) : "未知缸位"),
+    };
+  };
+
   const renderItemRow = (item: OrderItem, idx: number, options?: { damageRefunded?: boolean }) => {
     const p = getProduct(item.productId);
     const s = getStockItem(item.stockItemId);
@@ -3720,6 +3762,7 @@ function ItemsWithShipments({
     <>
       {orderShipments.map((sh, si) => {
         const shItems = order.items.filter((i) => (sh.itemStockIds ?? []).includes(i.stockItemId));
+        const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
         const shipmentHeaderTone = sh.status === "delivered"
           ? "bg-emerald-50/60 text-emerald-800"
           : sh.status === "damaged"
@@ -3747,20 +3790,50 @@ function ItemsWithShipments({
                   : undefined}
               />
             </div>
-            <table className="w-full">
-              {colHeader}
-              <tbody>
-                {shItems.map((item, idx) => {
-                  const damagedIds = new Set(
-                    sh.damageItemStockIds ?? (sh.status === "damaged" && sh.damageResolution === "refund" ? (sh.itemStockIds ?? []) : [])
-                  );
-                  return renderItemRow(item, idx, { damageRefunded: damagedIds.has(item.stockItemId) });
-                })}
-                {shItems.length === 0 && (
-                  <tr className="border-t"><td colSpan={6} className="px-4 py-3 text-center text-xs text-muted-foreground">—</td></tr>
-                )}
-              </tbody>
-            </table>
+            {damageReplacements.length > 0 && (
+              <div className="border-t border-sky-100 bg-sky-50/40 px-4 py-3">
+                <div className="mb-2 text-xs font-semibold text-sky-800">补发对应关系（{damageReplacements.length} 条）</div>
+                <div className="grid gap-2">
+                  {damageReplacements.map((replacement) => {
+                    const original = replacementSide(replacement, "original");
+                    const reship = replacementSide(replacement, "replacement");
+                    return (
+                      <div key={`${original.stockItemId}-${reship.stockItemId}`} className="grid items-center gap-2 rounded-md border border-sky-100 bg-white px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-red-700">原报损：{original.productName} · {original.fishCode}</div>
+                          <div className="truncate text-xs text-muted-foreground">{original.tankName}</div>
+                        </div>
+                        <ArrowRightLeft className="size-4 shrink-0 text-sky-600" />
+                        <button
+                          type="button"
+                          className="min-w-0 text-left hover:text-sky-700"
+                          onClick={() => setDetailId(reship.stockItemId)}
+                        >
+                          <div className="truncate font-medium text-emerald-700">补发：{reship.productName} · {reship.fishCode}</div>
+                          <div className="truncate text-xs text-muted-foreground">{reship.tankName} · 点击查看详情</div>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {(shItems.length > 0 || damageReplacements.length === 0) && (
+              <table className="w-full">
+                {colHeader}
+                <tbody>
+                  {shItems.map((item, idx) => {
+                    const damagedIds = new Set(
+                      sh.damageItemStockIds ?? (sh.status === "damaged" && sh.damageResolution === "refund" ? (sh.itemStockIds ?? []) : [])
+                    );
+                    return renderItemRow(item, idx, { damageRefunded: damagedIds.has(item.stockItemId) });
+                  })}
+                  {shItems.length === 0 && (
+                    <tr className="border-t"><td colSpan={6} className="px-4 py-3 text-center text-xs text-muted-foreground">—</td></tr>
+                  )}
+                </tbody>
+              </table>
+            )}
           </div>
         );
       })}
