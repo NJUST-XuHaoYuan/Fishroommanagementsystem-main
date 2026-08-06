@@ -879,7 +879,7 @@ export function InventoryAdjustmentDialog() {
         }
         setOpen(nextOpen);
       }}>
-        <DialogContent className="h-[100dvh] max-h-[100dvh] gap-0 overflow-hidden rounded-none p-0 sm:h-[94dvh] sm:max-h-[94dvh] sm:max-w-[calc(100vw-2rem)] sm:rounded-lg xl:max-w-[94rem]">
+        <DialogContent className="fishroom-fullscreen-dialog h-[100dvh] max-h-[100dvh] gap-0 overflow-hidden rounded-none p-0 sm:h-[94dvh] sm:max-h-[94dvh] sm:max-w-[calc(100vw-2rem)] sm:rounded-lg xl:max-w-[94rem]">
           <DialogHeader className="shrink-0 gap-1 border-b px-4 py-3 pr-12 sm:px-5 sm:py-4 sm:pr-12">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <DialogTitle>盘库工作台</DialogTitle>

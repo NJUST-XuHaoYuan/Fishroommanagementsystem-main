@@ -5974,7 +5974,7 @@ function NewOrderDialog({
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
           aria-describedby={undefined}
-          className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[90vh] sm:w-[min(92vw,1080px)] sm:max-w-[min(92vw,1080px)] sm:rounded-lg sm:border sm:p-0"
+          className="fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[90vh] sm:w-[min(92vw,1080px)] sm:max-w-[min(92vw,1080px)] sm:rounded-lg sm:border sm:p-0"
         >
           <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left sm:px-6">
             <DialogTitle className="text-base sm:text-lg">新建销售订单</DialogTitle>

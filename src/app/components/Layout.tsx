@@ -164,11 +164,41 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   useEffect(() => {
     const scrollX = window.scrollX;
     const scrollY = window.scrollY;
+    const root = document.documentElement;
+    const visualViewport = window.visualViewport;
+    let viewportFrame = 0;
+
+    const updateViewportMetrics = () => {
+      window.cancelAnimationFrame(viewportFrame);
+      viewportFrame = window.requestAnimationFrame(() => {
+        const viewportHeight = Math.max(1, visualViewport?.height ?? window.innerHeight);
+        const viewportTop = Math.max(0, visualViewport?.offsetTop ?? 0);
+        const viewportBottomGap = Math.max(0, window.innerHeight - viewportTop - viewportHeight);
+        root.style.setProperty("--fishroom-viewport-height", `${Math.round(viewportHeight)}px`);
+        root.style.setProperty("--fishroom-viewport-top", `${Math.round(viewportTop)}px`);
+        root.style.setProperty("--fishroom-viewport-bottom-gap", `${Math.round(viewportBottomGap)}px`);
+      });
+    };
+
     window.scrollTo(0, 0);
-    document.documentElement.classList.add("fishroom-admin-shell");
+    root.classList.add("fishroom-admin-shell");
     document.body.classList.add("fishroom-admin-shell");
+    updateViewportMetrics();
+    window.addEventListener("resize", updateViewportMetrics);
+    window.addEventListener("orientationchange", updateViewportMetrics);
+    visualViewport?.addEventListener("resize", updateViewportMetrics);
+    visualViewport?.addEventListener("scroll", updateViewportMetrics);
+
     return () => {
-      document.documentElement.classList.remove("fishroom-admin-shell");
+      window.cancelAnimationFrame(viewportFrame);
+      window.removeEventListener("resize", updateViewportMetrics);
+      window.removeEventListener("orientationchange", updateViewportMetrics);
+      visualViewport?.removeEventListener("resize", updateViewportMetrics);
+      visualViewport?.removeEventListener("scroll", updateViewportMetrics);
+      root.classList.remove("fishroom-admin-shell");
+      root.style.removeProperty("--fishroom-viewport-height");
+      root.style.removeProperty("--fishroom-viewport-top");
+      root.style.removeProperty("--fishroom-viewport-bottom-gap");
       document.body.classList.remove("fishroom-admin-shell");
       window.scrollTo(scrollX, scrollY);
     };
@@ -377,7 +407,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   );
 
   return (
-    <div className="fishroom-app size-full min-h-screen flex overflow-hidden">
+    <div className="fishroom-app flex size-full min-h-0 overflow-hidden">
       <aside className="fishroom-sidebar hidden w-64 shrink-0 lg:flex lg:flex-col">
         <NavContent />
       </aside>
@@ -432,7 +462,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           </div>
         </header>
 
-        <div className="fishroom-content min-h-0 flex-1 overflow-auto p-3 sm:p-4 lg:p-5">
+        <div
+          className="fishroom-content min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-3 sm:p-4 lg:p-5"
+          data-testid="app-scroll-region"
+        >
           {children}
         </div>
       </main>

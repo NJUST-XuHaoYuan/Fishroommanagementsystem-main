@@ -58,9 +58,16 @@ body {
   [data-slot="alert-dialog-content"] {
     left: 0 !important;
     right: 0 !important;
+    bottom: var(--fishroom-viewport-bottom-gap, 0px) !important;
     width: 100% !important;
     max-width: 100% !important;
+    max-height: calc(var(--fishroom-viewport-height, 100dvh) - 0.75rem) !important;
     padding-bottom: max(1rem, env(safe-area-inset-bottom)) !important;
+  }
+
+  [data-slot="dialog-content"].fishroom-fullscreen-dialog {
+    height: var(--fishroom-viewport-height, 100dvh) !important;
+    max-height: var(--fishroom-viewport-height, 100dvh) !important;
   }
 
   [data-slot="dialog-footer"] > *,
