@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, DailyLog, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
+import { useStore, DailyLog, Order, Shipment, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -9,10 +9,14 @@ import { Badge } from "./ui/badge";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "./ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -41,10 +45,12 @@ function todayDateString(): string {
 
 type DailyViewProps = {
   allTankGroups?: TankGroup[];
+  allOrders?: Order[];
+  allShipments?: Shipment[];
   onOpenOrder?: (orderId: string) => void;
 };
 
-export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
+export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder }: DailyViewProps = {}) {
   const { state, setState, saveStateTransform, saveDailyLog, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
   const [q, setQ] = useState("");
@@ -70,6 +76,9 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
   });
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
+  const [confirmTimeChangeOpen, setConfirmTimeChangeOpen] = useState(false);
+  const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
+  const [recordActionSaving, setRecordActionSaving] = useState(false);
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
 
@@ -138,8 +147,10 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
   const batch = (id: string) => state.batches.find((b) => b.id === id);
   const stockItem = (id: string) => state.stock.find((s) => s.id === id);
+  const timelineOrders = allOrders ?? state.orders;
+  const timelineShipments = allShipments ?? state.shipments;
   const relatedOrderForStock = (stockItemId: string) =>
-    state.orders.find((order) =>
+    timelineOrders.find((order) =>
       order.status !== "cancelled" && order.items.some((item) => item.stockItemId === stockItemId)
     );
 
@@ -794,16 +805,16 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
     }
 
     // timeline: 只要有关联的有效订单，就显示销售记录（不依赖 sold 字段）
-    const order = state.orders.find((o) =>
+    const order = timelineOrders.find((o) =>
       o.items.some((i) => i.stockItemId === item.id) && o.status !== "cancelled"
     );
     if (order) {
       events.push({ type: "sold", date: order.date, orderId: order.id, orderNo: order.orderNo });
     }
-    for (const shipment of state.shipments.filter((shipment) =>
+    for (const shipment of timelineShipments.filter((shipment) =>
       Array.isArray(shipment.itemStockIds) && shipment.itemStockIds.includes(item.id)
     )) {
-      const shipmentOrder = state.orders.find((order) => order.id === shipment.orderId);
+      const shipmentOrder = timelineOrders.find((order) => order.id === shipment.orderId);
       events.push({
         type: "shipment",
         date: shipment.shipDate,
@@ -822,6 +833,12 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
   const bioItem = bioItemId ? state.stock.find((s) => s.id === bioItemId) : null;
   const bioProduct = bioItem ? product(bioItem.productId) : null;
   const timeline = bioItem ? buildTimeline(bioItem) : [];
+  const editingRecord = editingRecordId
+    ? state.bioRecords.find((record) => record.id === editingRecordId) ?? null
+    : null;
+  const deletingRecord = deletingRecordId
+    ? state.bioRecords.find((record) => record.id === deletingRecordId) ?? null
+    : null;
   const changeBioRecordDate = (value: string) => {
     const normalized = normalizeBioRecordTime(value);
     if (normalized && normalized > nowForRecord) {
@@ -906,7 +923,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
     setEditingRecordTime(normalizeBioRecordTime(date));
   };
 
-  const saveBioRecordTime = async () => {
+  const requestBioRecordTimeChange = () => {
     if (!editingRecordId || !bioItemId) return;
     if (!permission.requirePermission("update")) return;
     const recordTime = normalizeBioRecordTime(editingRecordTime);
@@ -915,28 +932,50 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
     const currentItem = stockItem(bioItemId);
     const minTime = minDatetimeForDate(currentItem?.inDate);
     if (currentItem && minTime && recordTime < minTime) return toast.error("记录时间不能早于入库日期");
-    if (!confirmWrite("修改", "将修改这条观察/治疗记录的记录时间。")) return;
+    if (recordTime === normalizeBioRecordTime(editingRecord?.date ?? "")) {
+      return toast.info("记录时间没有变化");
+    }
+    setConfirmTimeChangeOpen(true);
+  };
+
+  const confirmBioRecordTimeChange = async () => {
+    if (!editingRecordId || !bioItemId) return;
+    const recordTime = normalizeBioRecordTime(editingRecordTime);
+    if (!recordTime) return;
+    setRecordActionSaving(true);
     const ok = await saveStateTransform((latest) => ({
       ...latest,
       bioRecords: latest.bioRecords.map((record) =>
         record.id === editingRecordId ? { ...record, date: recordTime } : record
       ),
     }));
+    setRecordActionSaving(false);
     if (!ok) return toast.error("保存失败，请重试");
+    setConfirmTimeChangeOpen(false);
     setEditingRecordId(null);
     setEditingRecordTime("");
     toast.success("记录时间已更新");
   };
 
-  // Delete bio record
-  const deleteBioRecord = async (recordId: string) => {
+  const requestDeleteBioRecord = (recordId: string) => {
     if (!permission.requirePermission("delete")) return;
-    if (!confirmWrite("删除", "将删除这条观察/治疗记录。")) return;
+    setDeletingRecordId(recordId);
+  };
+
+  const confirmDeleteBioRecord = async () => {
+    if (!deletingRecordId) return;
+    setRecordActionSaving(true);
     const ok = await saveStateTransform((latest) => ({
       ...latest,
-      bioRecords: latest.bioRecords.filter((r) => r.id !== recordId),
+      bioRecords: latest.bioRecords.filter((record) => record.id !== deletingRecordId),
     }));
+    setRecordActionSaving(false);
     if (!ok) return toast.error("删除失败，请重试");
+    if (editingRecordId === deletingRecordId) {
+      setEditingRecordId(null);
+      setEditingRecordTime("");
+    }
+    setDeletingRecordId(null);
     toast.success("记录已删除");
   };
 
@@ -1788,43 +1827,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                                     : "观察/治疗记录"}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {ev.type === "record" && ev.sourceType !== "dailyLog" && editingRecordId === ev.id ? (
-                            <div className="flex flex-wrap items-center gap-1">
-                              <PreciseDateTimeInput
-                                min={minDatetimeForDate(bioItem?.inDate)}
-                                max={nowForRecord}
-                                value={editingRecordTime}
-                                onChange={setEditingRecordTime}
-                                className="w-full sm:w-72 [&_input]:h-7 [&_input]:text-xs"
-                              />
-                              <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
-                              <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
-                          )}
-                          {ev.type === "record" && ev.sourceType !== "dailyLog" && permission.canUpdate && editingRecordId !== ev.id && (
-                            <button
-                              type="button"
-                              onClick={() => startEditBioRecordTime(ev.id, ev.date)}
-                              className="text-xs text-sky-500 hover:text-sky-700"
-                              title="修改记录时间"
-                            >
-                              改时间
-                            </button>
-                          )}
-	                          {ev.type === "record" && ev.sourceType !== "dailyLog" && permission.canDelete && (
-	                            <button
-                              type="button"
-                              onClick={() => deleteBioRecord(ev.id)}
-                              className="text-xs text-red-400 hover:text-red-600"
-                              title="删除记录"
-                            >
-                              <X className="size-3" />
-                            </button>
-                          )}
-                        </div>
+                        <span className="text-xs tabular-nums text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
                       </div>
 
                       {ev.type === "stock_in" && (
@@ -1926,6 +1929,65 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                                 </div>
                               ))}
                             </div>
+                          )}
+                          {ev.sourceType !== "dailyLog" && (permission.canUpdate || permission.canDelete) && (
+                            editingRecordId === ev.id ? (
+                              <div className="mt-3 grid gap-3 border-t pt-3">
+                                <div className="grid gap-1.5">
+                                  <Label className="text-xs">修改记录时间</Label>
+                                  <PreciseDateTimeInput
+                                    min={minDatetimeForDate(bioItem?.inDate)}
+                                    max={nowForRecord}
+                                    value={editingRecordTime}
+                                    onChange={setEditingRecordTime}
+                                    className="w-full sm:max-w-80"
+                                  />
+                                </div>
+                                <div className="grid grid-cols-2 gap-3 sm:flex sm:justify-end">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    className="min-h-11"
+                                    onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }}
+                                  >
+                                    取消
+                                  </Button>
+                                  <Button type="button" className="min-h-11" onClick={requestBioRecordTimeChange}>
+                                    <Check className="size-4" />
+                                    继续修改
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="mt-3 grid grid-cols-2 gap-3 border-t pt-3 sm:flex sm:justify-end">
+                                {permission.canUpdate && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="min-h-11 gap-1.5 sm:min-h-9"
+                                    disabled={Boolean(editingRecordId)}
+                                    onClick={() => startEditBioRecordTime(ev.id, ev.date)}
+                                  >
+                                    <Pencil className="size-4" />
+                                    修改时间
+                                  </Button>
+                                )}
+                                {permission.canDelete && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="min-h-11 gap-1.5 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 sm:min-h-9"
+                                    disabled={Boolean(editingRecordId)}
+                                    onClick={() => requestDeleteBioRecord(ev.id)}
+                                  >
+                                    <Trash2 className="size-4" />
+                                    删除记录
+                                  </Button>
+                                )}
+                              </div>
+                            )
                           )}
                         </>
                       )}
@@ -2067,6 +2129,82 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
 		          </DialogFooter>
         </DialogContent>
 	      </Dialog>
+
+      <AlertDialog
+        open={confirmTimeChangeOpen}
+        onOpenChange={(open) => {
+          if (!open && !recordActionSaving) setConfirmTimeChangeOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认修改记录时间</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="grid gap-3 text-left">
+                <p>请核对修改前后的时间，确认后将立即更新这条观察/治疗记录。</p>
+                <div className="grid gap-2 rounded-md border bg-muted/40 p-3 text-sm tabular-nums text-foreground">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-muted-foreground">原时间</span>
+                    <span>{formatBioRecordTime(editingRecord?.date ?? "")}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 font-medium">
+                    <span className="text-muted-foreground">修改为</span>
+                    <span>{formatBioRecordTime(editingRecordTime)}</span>
+                  </div>
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="grid grid-cols-2 gap-3 sm:flex sm:justify-end">
+            <AlertDialogCancel disabled={recordActionSaving} className="mt-0 min-h-11">返回检查</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={recordActionSaving}
+              className="min-h-11"
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmBioRecordTimeChange();
+              }}
+            >
+              {recordActionSaving ? "修改中…" : "确认修改"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(deletingRecordId)}
+        onOpenChange={(open) => {
+          if (!open && !recordActionSaving) setDeletingRecordId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除观察/治疗记录</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="grid gap-3 text-left">
+                <p>删除后无法在页面中恢复，请确认你要删除的是下面这条记录。</p>
+                <div className="grid gap-1 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-foreground">
+                  <span className="font-medium tabular-nums">{formatBioRecordTime(deletingRecord?.date ?? "")}</span>
+                  <span className="whitespace-pre-wrap text-muted-foreground">{deletingRecord?.text || "无文字内容"}</span>
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="grid grid-cols-2 gap-3 sm:flex sm:justify-end">
+            <AlertDialogCancel disabled={recordActionSaving} className="mt-0 min-h-11">取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={recordActionSaving}
+              className="min-h-11 bg-red-600 hover:bg-red-700"
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmDeleteBioRecord();
+              }}
+            >
+              {recordActionSaving ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
 	      {/* ── 批量观察/治疗 Dialog ── */}
 	      <Dialog open={batchRecordOpen} onOpenChange={setBatchRecordOpen}>

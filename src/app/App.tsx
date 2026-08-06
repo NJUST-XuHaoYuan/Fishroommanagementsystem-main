@@ -61,6 +61,7 @@ type OpenOrderRequest = {
   orderId: string;
   requestId: number;
   returnView?: LinkedOrderSourceView;
+  returnSiteId?: string;
 };
 
 const PERSISTED_KEYS = AUDIT_COLLECTIONS
@@ -1501,8 +1502,15 @@ function AdminApp() {
       case "products":   return <ProductsView />;
       case "tankGroups": return <TankGroupsView />;
       case "batches":    return <BatchesView />;
-      case "stockIn":    return <StockInView onOpenOrder={requestOpenOrder} />;
-      case "daily":      return <DailyView allTankGroups={state.tankGroups} onOpenOrder={requestOpenOrder} />;
+      case "stockIn":    return <StockInView allOrders={state.orders} onOpenOrder={requestOpenOrder} />;
+      case "daily":      return (
+        <DailyView
+          allTankGroups={state.tankGroups}
+          allOrders={state.orders}
+          allShipments={state.shipments}
+          onOpenOrder={requestOpenOrder}
+        />
+      );
       case "lossRecords": return <LossRecordsView />;
       case "customers":  return <CustomersView />;
       case "orders":     return (
@@ -1527,14 +1535,26 @@ function AdminApp() {
     const returnView = sourceView === "stockIn" || sourceView === "daily" || sourceView === "notifications"
       ? sourceView
       : undefined;
+    const returnSiteId = activeSiteId;
+    const targetOrder = stateRef.current.orders.find((order) => order.id === orderId);
+    const targetSiteId = targetOrder ? normalizeSiteId(targetOrder.siteId) : activeSiteId;
+    if (
+      targetOrder &&
+      targetSiteId !== activeSiteId &&
+      canUserAccessSite(stateRef.current.user, stateRef.current, targetSiteId)
+    ) {
+      setActiveSiteId(targetSiteId);
+    }
     orderRequestSequence.current += 1;
-    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current, returnView });
+    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current, returnView, returnSiteId });
     setView("orders");
   }
 
   function finishOpenOrderRequest() {
     const returnView = openOrderRequest?.returnView;
+    const returnSiteId = openOrderRequest?.returnSiteId;
     setOpenOrderRequest(null);
+    if (returnSiteId && returnSiteId !== activeSiteId) setActiveSiteId(returnSiteId);
     if (returnView) setView(returnView);
   }
 

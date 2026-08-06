@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import { useStore, isProductArchived, PurchaseBatch, StockItem, StockStatus, uid } from "../store";
+import { useStore, isProductArchived, Order, PurchaseBatch, StockItem, StockStatus, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -29,6 +29,7 @@ import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
 
 type StockViewMode = "tank" | "species";
 type StockInViewProps = {
+  allOrders?: Order[];
   onOpenOrder?: (orderId: string) => void;
 };
 
@@ -279,7 +280,7 @@ function BatchCombobox({
   );
 }
 
-export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
+export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
   const { state, saveStockChange } = useStore();
   const permission = usePermission("stockIn");
   const [q, setQ] = useState("");
@@ -351,9 +352,10 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     return isStockSpecialPrice(item, product(item.productId), priceBaselineByProduct);
   };
   const priceBadgeText = (item: StockItem) => `¥${Number(item.basePrice ?? 0).toFixed(0)}`;
+  const orderRelations = allOrders ?? state.orders;
   const pendingOrdersForStockIds = (ids: Iterable<string>) => {
     const idSet = new Set(ids);
-    return state.orders.filter((order) =>
+    return orderRelations.filter((order) =>
       (order.status === "pending" || order.status === "confirmed") &&
       order.items.some((item) =>
         idSet.has(item.stockItemId) && orderItemKeepsInventory(item)
@@ -361,11 +363,11 @@ export function StockInView({ onOpenOrder }: StockInViewProps = {}) {
     );
   };
   const linkedOrders = useMemo(
-    () => linkedStockItem ? linkedOrdersForStock(state.orders, linkedStockItem.id) : [],
-    [linkedStockItem, state.orders],
+    () => linkedStockItem ? linkedOrdersForStock(orderRelations, linkedStockItem.id) : [],
+    [linkedStockItem, orderRelations],
   );
   const stockLockedByProtectedOrder = (id: string) =>
-    state.orders.some((order) =>
+    orderRelations.some((order) =>
       order.status !== "cancelled" &&
       order.status !== "pending" &&
       order.status !== "confirmed" &&
