@@ -2489,11 +2489,11 @@ function ReportDamageDialog({
               onValueChange={(value) => setResolution(value as "refund" | "reship")}
               className="gap-0"
             >
-              <TabsList className="grid h-11 w-full grid-cols-2 rounded-none border-b-2 border-neutral-500 bg-transparent p-0">
+              <TabsList className="grid h-11 w-full grid-cols-2 rounded-none bg-transparent p-0">
                 <TabsTrigger
                   value="refund"
                   disabled={selectedDamagedItems.length === 0}
-                  className="h-11 rounded-b-none rounded-t-md border-2 border-transparent bg-background text-foreground data-[state=active]:relative data-[state=active]:z-10 data-[state=active]:-mb-0.5 data-[state=active]:border-neutral-500 data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-none"
+                  className="h-11 rounded-b-none rounded-t-md border-[3px] border-transparent border-b-neutral-600 border-l-neutral-600 bg-background text-foreground data-[state=active]:relative data-[state=active]:z-10 data-[state=active]:-mb-[3px] data-[state=active]:border-neutral-600 data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-none"
                 >
                   <CircleDollarSign className="size-4" />
                   退款处理
@@ -2501,13 +2501,13 @@ function ReportDamageDialog({
                 <TabsTrigger
                   value="reship"
                   disabled={selectedDamagedItems.length === 0}
-                  className="h-11 rounded-b-none rounded-t-md border-2 border-transparent bg-background text-foreground data-[state=active]:relative data-[state=active]:z-10 data-[state=active]:-mb-0.5 data-[state=active]:border-neutral-500 data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-none"
+                  className="h-11 rounded-b-none rounded-t-md border-[3px] border-transparent border-b-neutral-600 border-r-neutral-600 bg-background text-foreground data-[state=active]:relative data-[state=active]:z-10 data-[state=active]:-mb-[3px] data-[state=active]:border-neutral-600 data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-none"
                 >
                   <ArrowRightLeft className="size-4" />
                   补发处理
                 </TabsTrigger>
               </TabsList>
-              <TabsContent value="refund" className="mt-0 grid gap-4 rounded-b-md border-2 border-t-0 border-neutral-500 bg-background p-3 sm:p-4">
+              <TabsContent value="refund" className="mt-0 grid gap-4 rounded-b-md border-[3px] border-t-0 border-neutral-600 bg-background p-3 sm:p-4">
                 <div className="grid gap-3">
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-3">
@@ -2587,7 +2587,7 @@ function ReportDamageDialog({
                   <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录或退款凭证，记录会随报损退款保留。</p>
                 </div>
               </TabsContent>
-              <TabsContent value="reship" className="mt-0 grid gap-4 rounded-b-md border-2 border-t-0 border-neutral-500 bg-background p-3 sm:p-4">
+              <TabsContent value="reship" className="mt-0 grid gap-4 rounded-b-md border-[3px] border-t-0 border-neutral-600 bg-background p-3 sm:p-4">
                 <div className="grid gap-2">
               <Label>为已选报损鱼指定补发鱼<span className="text-red-500 ml-0.5">*</span></Label>
               <div className="rounded-lg border divide-y">
