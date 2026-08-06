@@ -3,6 +3,7 @@ import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, 
 import { initialState, Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
+import { formatBioRecordTime as formatLocalDateTime } from "../utils/localDateTime";
 
 type PublicCatalogData = {
   speciesCategories: string[];
@@ -407,17 +408,8 @@ function stockLocation(stock?: PublicStockItem) {
   return String(stock?.tankLocation ?? "").trim() || "到店确认";
 }
 
-function normalizeBioRecordTime(value?: string) {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00`;
-  return trimmed.slice(0, 16);
-}
-
 function formatBioRecordTime(value?: string) {
-  const normalized = normalizeBioRecordTime(value);
-  if (!normalized) return "待确认";
-  return normalized.includes("T") ? normalized.replace("T", " ") : normalized;
+  return formatLocalDateTime(value, "待确认");
 }
 
 function isDailyLogRecord(record?: PublicBioRecord) {

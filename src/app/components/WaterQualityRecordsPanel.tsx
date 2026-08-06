@@ -24,6 +24,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Textarea } from "./ui/textarea";
 import { FlaskConical, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { isoToDatetimeLocal, nowDatetimeLocal } from "../utils/localDateTime";
+import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 
 type WaterRecordDraft = {
   id: string;
@@ -33,23 +35,12 @@ type WaterRecordDraft = {
   notes: string;
 };
 
-function nowDatetimeLocal() {
-  const now = new Date();
-  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
-
-function toDatetimeLocal(value: string) {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "";
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
-
 function localDate(value: string) {
-  return toDatetimeLocal(value).slice(0, 10);
+  return isoToDatetimeLocal(value).slice(0, 10);
 }
 
 function formatMeasuredAt(value: string) {
-  const local = toDatetimeLocal(value);
+  const local = isoToDatetimeLocal(value);
   return local ? local.replace("T", " ") : "—";
 }
 
@@ -134,7 +125,7 @@ export function WaterQualityRecordsPanel() {
     setDraft({
       id: record.id,
       tankGroupId: record.tankGroupId,
-      measuredAt: toDatetimeLocal(record.measuredAt),
+      measuredAt: isoToDatetimeLocal(record.measuredAt),
       values: Object.fromEntries(record.values.map((measurement) => [
         measurement.parameterId,
         String(measurement.value),
@@ -388,11 +379,10 @@ export function WaterQualityRecordsPanel() {
                 </div>
                 <div className="grid gap-2">
                   <Label>测量时间<span className="ml-0.5 text-red-500">*</span></Label>
-                  <Input
-                    type="datetime-local"
+                  <PreciseDateTimeInput
                     max={now}
                     value={draft.measuredAt}
-                    onChange={(event) => setDraft({ ...draft, measuredAt: event.target.value })}
+                    onChange={(measuredAt) => setDraft({ ...draft, measuredAt })}
                   />
                 </div>
               </div>

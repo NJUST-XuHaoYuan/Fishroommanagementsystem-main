@@ -76,6 +76,7 @@ import {
   waterQualityParameterIdsForGroup,
 } from "./water-quality-rules.mjs";
 import { productDeleteDisposition } from "./product-delete-rules.mjs";
+import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -921,7 +922,7 @@ function todayInChina() {
 }
 
 function nowDatetimeInChina() {
-  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 19);
 }
 
 function addDaysToDateString(dateString, days) {
@@ -2594,7 +2595,7 @@ function normalizeDailyLog(log) {
   const normalized = {
     id: String(log?.id || uid("daily")),
     siteId: normalizeSiteId(log?.siteId),
-    date: String(log?.date ?? "").trim(),
+    date: normalizeLocalDateTime(log?.date),
     tankGroupId: String(log?.tankGroupId ?? "").trim(),
     action: String(log?.action ?? "").trim(),
     operator: String(log?.operator ?? "").trim(),
@@ -2603,6 +2604,7 @@ function normalizeDailyLog(log) {
   if (!normalized.date || !normalized.tankGroupId || !normalized.action || !normalized.operator) {
     throw new Error("Daily log date, tankGroupId, action and operator are required");
   }
+  if (normalized.date > nowDatetimeInChina()) throw new Error("养护日志时间不能晚于当前时间");
   return normalized;
 }
 
@@ -9130,7 +9132,7 @@ async function handleApi(req, res, url) {
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能添加维护记录");
-	          const date = String(recordDate ?? "").trim();
+	          const date = normalizeLocalDateTime(recordDate);
 	          if (!date) throw new Error("请选择记录时间");
 	          if (date > nowDatetimeInChina()) throw new Error("记录时间不能晚于当前时间");
 	          const invalidDateItem = targetItems.find((item) => item.inDate && date < `${item.inDate}T00:00`);

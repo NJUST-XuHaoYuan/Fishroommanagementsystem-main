@@ -52,6 +52,13 @@ import {
   platformOrderNoLabel,
   platformPaymentChannelForOrderSource,
 } from "../utils/orderSources";
+import {
+  formatBioRecordTime,
+  minDatetimeForDate,
+  normalizeBioRecordTime,
+  nowDatetimeLocal,
+} from "../utils/localDateTime";
+import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -476,33 +483,10 @@ function hasPaymentRecords(order: Order): boolean {
   return (order.payments ?? []).length > 0;
 }
 
-function nowDatetimeLocal(): string {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
 function todayDateString(): string {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
-}
-
-function minDatetimeForDate(date?: string): string | undefined {
-  return date ? `${date.slice(0, 10)}T00:00` : undefined;
-}
-
-function normalizeBioRecordTime(value: string): string {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00`;
-  return trimmed.slice(0, 16);
-}
-
-function formatBioRecordTime(value: string): string {
-  const normalized = normalizeBioRecordTime(value);
-  if (!normalized) return "—";
-  return normalized.includes("T") ? normalized.replace("T", " ") : normalized;
 }
 
 function orderNoSequence(orderNo: string): number {
@@ -1962,10 +1946,9 @@ function OrderRefundDialog({
           </div>
           <div className="grid gap-1.5">
             <Label>退款时间<span className="ml-0.5 text-red-500">*</span></Label>
-            <Input
-              type="datetime-local"
+            <PreciseDateTimeInput
               value={draft.time}
-              onChange={(event) => setDraft((current) => ({ ...current, time: event.target.value }))}
+              onChange={(time) => setDraft((current) => ({ ...current, time }))}
             />
           </div>
           <div className="grid gap-1.5">
@@ -3299,13 +3282,12 @@ function StockPickerBioDialog({
                         <div className="flex items-center gap-2">
                           {event.type === "record" && editingRecordId === event.id ? (
                             <div className="flex items-center gap-1">
-                              <Input
-                                type="datetime-local"
+                              <PreciseDateTimeInput
                                 min={minDatetimeForDate(item.inDate)}
                                 max={nowForRecord}
                                 value={editingRecordTime}
-                                onChange={(inputEvent) => setEditingRecordTime(inputEvent.target.value)}
-                                className="h-7 w-40 text-xs"
+                                onChange={setEditingRecordTime}
+                                className="w-full sm:w-72 [&_input]:h-7 [&_input]:text-xs"
                               />
                               <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
                               <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
@@ -3400,12 +3382,11 @@ function StockPickerBioDialog({
                 <div className="grid gap-3 md:grid-cols-3">
                   <div className="grid gap-2">
                     <Label className="text-xs">记录时间</Label>
-                    <Input
-                      type="datetime-local"
+                    <PreciseDateTimeInput
                       min={minDatetimeForDate(item.inDate)}
                       max={nowForRecord}
                       value={newRecord.date}
-                      onChange={(event) => changeBioRecordDate(event.target.value)}
+                      onChange={changeBioRecordDate}
                     />
                   </div>
                   <div className="grid gap-2">

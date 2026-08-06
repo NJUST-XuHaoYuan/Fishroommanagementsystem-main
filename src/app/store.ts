@@ -157,6 +157,7 @@ export type BioRecord = {
 export type DailyLog = {
   id: string;
   siteId?: string;
+  /** 本地记录时间，精确到秒；兼容历史 YYYY-MM-DD 日期值。 */
   date: string;
   tankGroupId?: string;
   /** 旧数据兼容：历史日志曾挂在子缸上。 */

@@ -25,34 +25,18 @@ import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
+import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import {
+  formatBioRecordTime,
+  minDatetimeForDate,
+  normalizeBioRecordTime,
+  nowDatetimeLocal,
+} from "../utils/localDateTime";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
 
-function nowDatetimeLocal(): string {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
 function todayDateString(): string {
   return nowDatetimeLocal().slice(0, 10);
-}
-
-function minDatetimeForDate(date?: string): string | undefined {
-  return date ? `${date.slice(0, 10)}T00:00` : undefined;
-}
-
-function normalizeBioRecordTime(value: string): string {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00`;
-  return trimmed.slice(0, 16);
-}
-
-function formatBioRecordTime(value: string): string {
-  const normalized = normalizeBioRecordTime(value);
-  if (!normalized) return "—";
-  return normalized.includes("T") ? normalized.replace("T", " ") : normalized;
 }
 
 type DailyViewProps = {
@@ -205,8 +189,9 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
       .filter((log) => {
         const gid = logGroupId(log);
         if (logGroupFilter !== "all" && gid !== logGroupFilter) return false;
-        if (logStartDate && log.date < logStartDate) return false;
-        if (logEndDate && log.date > logEndDate) return false;
+        const logDate = String(log.date ?? "").slice(0, 10);
+        if (logStartDate && logDate < logStartDate) return false;
+        if (logEndDate && logDate > logEndDate) return false;
         return true;
       })
       .sort((a, b) => b.date.localeCompare(a.date)),
@@ -991,14 +976,16 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
   const saveLog = async () => {
     if (!editingLog) return;
     if (!permission.requirePermission(editingLog.id ? "update" : "create")) return;
-    if (!editingLog.date) return toast.error("请选择日期");
-    if (editingLog.date > today) return toast.error("日志日期不能晚于今天");
+    if (!editingLog.date) return toast.error("请选择记录时间");
+    const logTime = normalizeBioRecordTime(editingLog.date);
+    if (logTime > nowForRecord) return toast.error("养护日志时间不能晚于当前时间");
     const tankGroupId = logGroupId(editingLog);
     if (!tankGroupId) return toast.error("请选择缸组");
     if (!editingLog.action.trim()) return toast.error("请填写操作内容");
     if (!editingLog.operator) return toast.error("请选择操作员");
     const logToSave: DailyLog = {
       ...editingLog,
+      date: logTime,
       id: editingLog.id || uid(),
       tankGroupId,
       subTankId: undefined,
@@ -1016,6 +1003,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
     if (!permission.requirePermission("update")) return;
     setEditingLog({
       ...log,
+      date: normalizeBioRecordTime(log.date),
       tankGroupId: logGroupId(log),
       subTankId: undefined,
     });
@@ -1024,7 +1012,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
 
   const deleteLog = async (log: DailyLog) => {
     if (!permission.requirePermission("delete")) return;
-    if (!confirmWrite("删除", `将删除 ${log.date} 的养护日志，并同步删除鱼历史记录中由这条日志生成的记录。`)) return;
+    if (!confirmWrite("删除", `将删除 ${formatBioRecordTime(log.date)} 的养护日志，并同步删除鱼历史记录中由这条日志生成的记录。`)) return;
     setLogSaving(true);
     const ok = await saveDailyLog({ deleteId: log.id });
     setLogSaving(false);
@@ -1038,7 +1026,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
 
   const openNewLogForGroup = (groupId: string) => {
     if (!permission.requirePermission("create")) return;
-    setEditingLog({ id: "", date: today, tankGroupId: groupId, action: "", operator: currentOperator, notes: "" });
+    setEditingLog({ id: "", date: nowDatetimeLocal(), tankGroupId: groupId, action: "", operator: currentOperator, notes: "" });
     setLogOpen(true);
   };
 
@@ -1558,7 +1546,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                   toast.error("请先选择缸组，或从缸组卡片新增日志");
                   return;
                 }
-                setEditingLog({ id: "", date: today, tankGroupId: logGroupFilter, action: "", operator: currentOperator, notes: "" });
+                setEditingLog({ id: "", date: nowDatetimeLocal(), tankGroupId: logGroupFilter, action: "", operator: currentOperator, notes: "" });
                 setLogOpen(true);
               }}>新增日志</Button>
             )}
@@ -1567,7 +1555,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
             <table className="w-full">
               <thead className="bg-muted/50">
                 <tr>
-                  <th className="text-left px-4 py-3 text-sm">日期</th>
+                  <th className="text-left px-4 py-3 text-sm">记录时间</th>
                   <th className="text-left px-4 py-3 text-sm">缸组</th>
                   <th className="text-left px-4 py-3 text-sm">操作</th>
                   <th className="text-left px-4 py-3 text-sm">操作员</th>
@@ -1580,7 +1568,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                   <tr><td colSpan={canManageLogs ? 6 : 5} className="px-4 py-12 text-center text-muted-foreground text-sm">暂无日志</td></tr>
                 ) : filteredLogs.map((l) => (
                   <tr key={l.id} className="border-t">
-                    <td className="px-4 py-3 text-sm">{l.date}</td>
+                    <td className="px-4 py-3 text-sm tabular-nums">{formatBioRecordTime(l.date)}</td>
                     <td className="px-4 py-3 text-sm">{groupName(logGroupId(l))}</td>
                     <td className="px-4 py-3 text-sm">{l.action}</td>
                     <td className="px-4 py-3 text-sm">{l.operator}</td>
@@ -1627,7 +1615,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
             ) : filteredLogs.map((l) => (
               <div key={l.id} className="rounded-lg border bg-card p-4">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-semibold">{l.date}</span>
+                  <span className="text-sm font-semibold tabular-nums">{formatBioRecordTime(l.date)}</span>
                   <Badge variant="secondary">{groupName(logGroupId(l))}</Badge>
                   {l.operator && <span className="text-xs text-muted-foreground">{l.operator}</span>}
                 </div>
@@ -1803,13 +1791,12 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                         <div className="flex items-center gap-2">
                           {ev.type === "record" && ev.sourceType !== "dailyLog" && editingRecordId === ev.id ? (
                             <div className="flex flex-wrap items-center gap-1">
-                              <Input
-                                type="datetime-local"
+                              <PreciseDateTimeInput
                                 min={minDatetimeForDate(bioItem?.inDate)}
                                 max={nowForRecord}
                                 value={editingRecordTime}
-                                onChange={(event) => setEditingRecordTime(event.target.value)}
-                                className="h-7 w-full text-xs sm:w-40"
+                                onChange={setEditingRecordTime}
+                                className="w-full sm:w-72 [&_input]:h-7 [&_input]:text-xs"
                               />
                               <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
                               <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
@@ -1962,12 +1949,11 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label className="text-xs">记录时间</Label>
-	                  <Input
-	                    type="datetime-local"
+	                  <PreciseDateTimeInput
                       min={minDatetimeForDate(bioItem?.inDate)}
 	                    max={nowForRecord}
 	                    value={newRecord.date}
-	                    onChange={(e) => changeBioRecordDate(e.target.value)}
+	                    onChange={changeBioRecordDate}
 	                  />
                 </div>
                 <div className="grid gap-2">
@@ -2108,12 +2094,11 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
 	            <div className="grid gap-3 sm:grid-cols-2">
 	              <div className="grid gap-2">
 	                <Label>记录时间<span className="text-red-500 ml-0.5">*</span></Label>
-	                <Input
-	                  type="datetime-local"
+	                <PreciseDateTimeInput
 	                  min={minDatetimeForDate(batchRecordMinDate)}
 	                  max={nowForRecord}
 	                  value={batchRecord.date}
-	                  onChange={(e) => changeBatchRecordDate(e.target.value)}
+	                  onChange={changeBatchRecordDate}
 	                />
 	              </div>
 	              <div className="grid gap-2">
@@ -2423,7 +2408,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
           <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium">{viewLogGroup?.location || "—"}</div>
-              <div className="text-xs text-muted-foreground">共 {viewGroupLogs.length} 条记录，按日期从新到旧排列</div>
+              <div className="text-xs text-muted-foreground">共 {viewGroupLogs.length} 条记录，按时间从新到旧排列</div>
             </div>
             {permission.canCreate && viewLogGroupId && (
               <Button
@@ -2446,7 +2431,7 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-semibold">{log.date}</span>
+                          <span className="text-sm font-semibold tabular-nums">{formatBioRecordTime(log.date)}</span>
                           <Badge variant="secondary">{log.operator || "—"}</Badge>
                           {log.syncedStockItemIds && log.syncedStockItemIds.length > 0 && (
                             <span className="text-xs text-muted-foreground">
@@ -2507,15 +2492,14 @@ export function DailyView({ allTankGroups, onOpenOrder }: DailyViewProps = {}) {
             <div className="grid gap-4 py-2">
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
-	                  <Label>日期</Label>
-	                  <Input
-	                    type="date"
-	                    max={today}
+	                  <Label>记录时间</Label>
+	                  <PreciseDateTimeInput
+	                    max={nowForRecord}
 	                    value={editingLog.date}
-	                    onChange={(e) => {
-	                      const value = e.target.value;
-	                      if (value && value > today) {
-	                        toast.error("日志日期不能晚于今天");
+	                    onChange={(inputValue) => {
+	                      const value = normalizeBioRecordTime(inputValue);
+	                      if (value && value > nowForRecord) {
+	                        toast.error("养护日志时间不能晚于当前时间");
 	                        return;
 	                      }
 	                      setEditingLog({ ...editingLog, date: value });
