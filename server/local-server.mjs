@@ -85,6 +85,10 @@ import {
   countsAsCompletionShipment,
   shipmentIsResolvedForCompletion,
 } from "./shipment-completion-rules.mjs";
+import {
+  resolveShippingCarrier,
+  validateShippingCarrierSettings,
+} from "./shipping-carrier-utils.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -4676,6 +4680,15 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
       throw new Error("已完成或已取消订单不能修改发货状态");
     }
+    if (String(nextShipment.shipMethod ?? "express") === "express") {
+      const nextCarrier = String(nextShipment.carrier ?? "").trim();
+      const resolvedCarrier = resolveShippingCarrier(
+        next.systemSettings,
+        nextCarrier,
+        currentShipment.carrier
+      );
+      if (resolvedCarrier !== nextCarrier) throw new Error("快递公司必须从后台启用项中选择");
+    }
     validateShipmentPatchTransition(currentShipment, nextShipment);
     if (
       String(currentShipment.status ?? "") === "outbound" &&
@@ -8177,8 +8190,9 @@ async function handleApi(req, res, url) {
       if (requiredShipMethod === "express" && shipMethod !== "express") {
         throw new Error("只有线下自提订单可以使用上门自取，当前订单只能物流发货");
       }
-      const carrier = String(body.carrier ?? "").trim();
-      if (shipMethod === "express" && !carrier) throw new Error("请选择快递公司");
+      const carrier = shipMethod === "express"
+        ? resolveShippingCarrier(state.systemSettings, body.carrier)
+        : "上门自取";
       const shipDate = String(body.shipDate ?? "").trim();
       if (!shipDate) throw new Error("请选择出库日期");
       const isPickup = shipMethod === "pickup";
@@ -8190,7 +8204,7 @@ async function handleApi(req, res, url) {
         createdAt,
         outboundDate: shipDate,
         shipDate,
-        carrier: isPickup ? "上门自取" : carrier,
+        carrier,
         trackingNo: "",
         status: isPickup ? "delivered" : "outbound",
         notes: String(body.notes ?? ""),
@@ -8647,6 +8661,16 @@ async function handleApi(req, res, url) {
 	      const parsed = JSON.parse(body);
 	      const rawPatch = parsed?.patch && typeof parsed.patch === "object" ? parsed.patch : {};
 	      validateStatePatchAuthorization(req, rawPatch);
+	      if (
+	        rawPatch.systemSettings &&
+	        typeof rawPatch.systemSettings === "object" &&
+	        Object.prototype.hasOwnProperty.call(rawPatch.systemSettings, "shippingCarriers")
+	      ) {
+	        rawPatch.systemSettings = {
+	          ...rawPatch.systemSettings,
+	          shippingCarriers: validateShippingCarrierSettings(rawPatch.systemSettings.shippingCarriers),
+	        };
+	      }
 	      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
 	      const incomingLogs = sanitizeOperationLogsForAuth(parsed?.operationLogs, req);
 	      await client.query("BEGIN");

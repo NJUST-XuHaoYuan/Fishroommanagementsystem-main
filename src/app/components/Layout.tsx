@@ -29,6 +29,7 @@ import {
   WalletCards,
   Inbox,
   FlaskConical,
+  Truck,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
@@ -49,6 +50,7 @@ export type ViewKey =
   | "orders"
   | "finance"
   | "paymentMethods"
+  | "shippingCarriers"
   | "waterQualitySettings"
   | "permissions"
   | "profile"
@@ -217,6 +219,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? "操作日志"
       : view === "paymentMethods"
         ? "付款方式管理"
+      : view === "shippingCarriers"
+        ? "快递公司管理"
       : view === "waterQualitySettings"
         ? "水质参数管理"
       : NAV.flatMap((s) => s.items).find((i) => i.key === view)?.label ?? "";
@@ -233,6 +237,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : view === "operationLogs"
         ? "日志管理"
       : view === "paymentMethods"
+        ? "后台管理"
+      : view === "shippingCarriers"
         ? "后台管理"
       : view === "waterQualitySettings"
         ? "后台管理"
@@ -319,6 +325,13 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               >
                 <span className="flex items-center gap-2"><WalletCards className="size-3.5" />付款方式管理</span>
                 {view === "paymentMethods" && <ChevronRight className="size-3.5 shrink-0" />}
+              </button>
+              <button
+                onClick={() => navigate("shippingCarriers")}
+                className={navButtonClass(view === "shippingCarriers")}
+              >
+                <span className="flex items-center gap-2"><Truck className="size-3.5" />快递公司管理</span>
+                {view === "shippingCarriers" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
               <button
                 onClick={() => navigate("waterQualitySettings")}

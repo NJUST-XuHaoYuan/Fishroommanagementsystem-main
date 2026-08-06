@@ -1,9 +1,10 @@
 import { useState, useMemo, useEffect } from "react";
-import { useStore, Order, Shipment, ShipmentDamageReplacement, Store } from "../store";
+import { configuredShippingCarriers, useStore, Order, Shipment, ShipmentDamageReplacement, Store } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -128,6 +129,7 @@ function EditShipmentDialog({
   onOpenChange: (v: boolean) => void;
   onSave: (updated: Partial<Shipment>) => void;
 }) {
+  const { state } = useStore();
   const [carrier, setCarrier] = useState("");
   const [trackingNo, setTrackingNo] = useState("");
   const [actualFee, setActualFee] = useState(0);
@@ -149,9 +151,13 @@ function EditShipmentDialog({
   if (!shipment) return null;
 
   const isExpress = (shipment.shipMethod ?? "express") === "express";
+  const configuredCarriers = configuredShippingCarriers(state.systemSettings);
+  const carrierOptions = carrier && !configuredCarriers.some((item) => item.name === carrier)
+    ? [{ id: "legacy-carrier", name: carrier, enabled: false }, ...configuredCarriers]
+    : configuredCarriers;
 
   const handleSave = () => {
-    if (isExpress && !carrier.trim()) return toast.error("请填写快递公司");
+    if (isExpress && !carrier.trim()) return toast.error("请选择快递公司");
     if (!shipDate) return toast.error("请填写发货日期");
     if (minShipDate && shipDate < minShipDate) return toast.error("发货日期不能早于下单日期");
     if (shipDate > today) return toast.error("发货日期不能晚于今天");
@@ -213,7 +219,18 @@ function EditShipmentDialog({
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
                 <Label className="text-sm">快递公司<span className="text-red-500 ml-0.5">*</span></Label>
-                <Input value={carrier} onChange={(e) => setCarrier(e.target.value)} placeholder="如：顺丰速运" />
+                <Select value={carrier} onValueChange={setCarrier}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="请选择快递公司" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {carrierOptions.map((item) => (
+                      <SelectItem key={item.id} value={item.name}>
+                        {item.name}{item.enabled ? "" : "（历史记录）"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="grid gap-1.5">
                 <Label className="text-sm">运单号</Label>

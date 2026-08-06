@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -20,6 +20,7 @@ import { PersonnelAdminView } from "./components/PersonnelAdminView";
 import { OperationLogsView } from "./components/OperationLogsView";
 import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
+import { ShippingCarriersView } from "./components/ShippingCarriersView";
 import { WaterQualitySettingsView } from "./components/WaterQualitySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
@@ -82,6 +83,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
   finance: ["sites", "systemSettings"],
   paymentMethods: ["systemSettings"],
+  shippingCarriers: ["systemSettings"],
   waterQualitySettings: ["systemSettings", "tankGroups"],
   profile: ["personnel", "orders", "customers", "shipments"],
   permissions: ["personnel"],
@@ -99,6 +101,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
+    shippingCarriers: DEFAULT_SHIPPING_CARRIER_SETTINGS.map((carrier) => ({ ...carrier })),
     waterQualityParameters: DEFAULT_WATER_QUALITY_PARAMETERS.map((parameter) => ({ ...parameter })),
   },
   sites: DEFAULT_SITES.map((site) => ({ ...site })),
@@ -335,6 +338,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     ...(migratedData.systemSettings && typeof migratedData.systemSettings === "object" ? migratedData.systemSettings : {}),
   };
   migratedSystemSettings.paymentMethods = normalizePaymentMethodSettings(migratedSystemSettings);
+  migratedSystemSettings.shippingCarriers = normalizeShippingCarrierSettings(migratedSystemSettings);
   migratedSystemSettings.waterQualityParameters = normalizeWaterQualityParameters(migratedSystemSettings);
   const migratedTankGroups = Array.isArray(migratedData.tankGroups)
     ? migratedData.tankGroups.map((group: TankGroup) => ({
@@ -1509,6 +1513,7 @@ function AdminApp() {
       );
       case "finance":    return <FinanceView />;
       case "paymentMethods": return <PaymentMethodsView />;
+      case "shippingCarriers": return <ShippingCarriersView />;
       case "waterQualitySettings": return <WaterQualitySettingsView />;
       case "profile":    return <PersonalCenterView />;
       case "permissions": return <PersonnelAdminView />;

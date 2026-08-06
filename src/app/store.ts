@@ -360,6 +360,16 @@ export type PaymentMethodSetting = {
   account: string;
   enabled: boolean;
 };
+export type ShippingCarrierSetting = {
+  id: string;
+  name: string;
+  enabled: boolean;
+};
+export const DEFAULT_SHIPPING_CARRIER_SETTINGS: ShippingCarrierSetting[] = [
+  { id: "carrier-high-speed-rail", name: "高铁", enabled: true },
+  { id: "carrier-sf", name: "顺丰", enabled: true },
+  { id: "carrier-jd", name: "京东", enabled: true },
+];
 export const DEFAULT_PAYMENT_METHOD_SETTINGS: PaymentMethodSetting[] = [
   { id: "pm-wechat", name: "微信", channel: "wechat", account: "", enabled: false },
   { id: "pm-alipay", name: "支付宝", channel: "alipay", account: "", enabled: false },
@@ -578,9 +588,32 @@ export type SystemSettings = {
   financeDefaultCommissionRate?: number;
   /** 后台配置的可用付款方式及默认收款账户。 */
   paymentMethods?: PaymentMethodSetting[];
+  /** 后台配置的发货承运方；发货时只能选择启用项。 */
+  shippingCarriers?: ShippingCarrierSetting[];
   /** 后台统一维护的水质参数名称、单位和显示精度。 */
   waterQualityParameters?: WaterQualityParameterSetting[];
 };
+
+export function normalizeShippingCarrierSettings(settings?: SystemSettings | null): ShippingCarrierSetting[] {
+  const source = Array.isArray(settings?.shippingCarriers)
+    ? settings.shippingCarriers
+    : DEFAULT_SHIPPING_CARRIER_SETTINGS;
+  const usedIds = new Set<string>();
+  return source.flatMap((carrier, index) => {
+    const name = String(carrier?.name ?? "").trim();
+    if (!name) return [];
+    const fallbackId = `carrier-${index + 1}`;
+    let id = String(carrier?.id ?? "").trim() || fallbackId;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${fallbackId}-${suffix++}`;
+    usedIds.add(id);
+    return [{ id, name, enabled: carrier?.enabled === true }];
+  });
+}
+
+export function configuredShippingCarriers(settings?: SystemSettings | null): ShippingCarrierSetting[] {
+  return normalizeShippingCarrierSettings(settings).filter((carrier) => carrier.enabled);
+}
 
 export function normalizeWaterQualityParameters(settings?: SystemSettings | null): WaterQualityParameterSetting[] {
   const source = Array.isArray(settings?.waterQualityParameters)
@@ -775,6 +808,7 @@ export const initialState: Store = {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
     financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
+    shippingCarriers: DEFAULT_SHIPPING_CARRIER_SETTINGS.map((carrier) => ({ ...carrier })),
     waterQualityParameters: DEFAULT_WATER_QUALITY_PARAMETERS.map((parameter) => ({ ...parameter })),
   },
   sites: [

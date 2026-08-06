@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
-import { Order, OrderItem } from "../store";
+import { configuredShippingCarriers, Order, OrderItem, useStore } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
@@ -53,7 +54,9 @@ export function ShipDialog({
   getTankName: (stockItemId: string) => string;
   pickupOnly?: boolean;
 }) {
+  const { state } = useStore();
   const todayStr = todayDateString();
+  const shippingCarriers = configuredShippingCarriers(state.systemSettings);
 
   const [shipDate, setShipDate] = useState(todayStr);
   const [carrier, setCarrier] = useState("");
@@ -104,7 +107,7 @@ export function ShipDialog({
     if (!shipDate) return toast.error("请填写出库日期");
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
-    if (shipMethod === "express" && !carrier.trim()) return toast.error("请填写快递公司");
+    if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
     setSaving(true);
     const ok = await onShip({ shipDate, shipMethod, carrier, trackingNo, actualShippingFee, notes, selectedItemIds: [...selectedIds] });
@@ -194,7 +197,16 @@ export function ShipDialog({
             <div className="grid gap-3">
               <div className="grid gap-1.5">
                 <Label className="text-sm">快递公司<span className="text-red-500 ml-0.5">*</span></Label>
-                <Input value={carrier} onChange={(e) => setCarrier(e.target.value)} placeholder="如：顺丰速运" />
+                <Select value={carrier} onValueChange={setCarrier}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="请选择快递公司" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {shippingCarriers.map((item) => (
+                      <SelectItem key={item.id} value={item.name}>{item.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
