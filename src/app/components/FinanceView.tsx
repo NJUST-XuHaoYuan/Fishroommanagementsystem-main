@@ -85,6 +85,7 @@ type FinanceOrderItem = {
   origin: string;
   price: number;
   minReturnPrice: number;
+  minReturnPriceExempt: boolean;
   inventoryRemoved: boolean;
 };
 
@@ -862,7 +863,14 @@ function OrderFinanceDialog({
                               </div>
                             </td>
                             <td className="px-3 py-2.5 text-right font-medium tabular-nums">{money(item.price)}</td>
-                            <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{money(item.minReturnPrice)}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
+                              {item.minReturnPriceExempt ? (
+                                <div>
+                                  <div className="font-medium text-rose-700">疾病价豁免</div>
+                                  <div className="text-xs">原 {money(item.minReturnPrice)}</div>
+                                </div>
+                              ) : money(item.minReturnPrice)}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -881,7 +889,11 @@ function OrderFinanceDialog({
                           </div>
                           <div className="shrink-0 text-right">
                             <div className="text-sm font-semibold tabular-nums">{money(item.price)}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">回厂价 {money(item.minReturnPrice)}</div>
+                            <div className={`mt-1 text-xs ${item.minReturnPriceExempt ? "text-rose-700" : "text-muted-foreground"}`}>
+                              {item.minReturnPriceExempt
+                                ? `疾病价豁免（原 ${money(item.minReturnPrice)}）`
+                                : `回厂价 ${money(item.minReturnPrice)}`}
+                            </div>
                           </div>
                         </div>
                       </div>

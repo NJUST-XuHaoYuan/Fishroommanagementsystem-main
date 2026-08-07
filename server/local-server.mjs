@@ -89,6 +89,10 @@ import {
   resolveShippingCarrier,
   validateShippingCarrierSettings,
 } from "./shipping-carrier-utils.mjs";
+import {
+  orderMinimumReturnFloorTotal,
+  sickMinimumReturnExemption,
+} from "./order-pricing-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -3811,6 +3815,7 @@ function buildFinanceOverview(
         origin: String(product?.origin ?? ""),
         price: roundFinance(item?.price),
         minReturnPrice: roundFinance(item?.minReturnPrice),
+        minReturnPriceExempt: item?.minReturnPriceExempt === true,
         inventoryRemoved: Boolean(item?.inventoryRemovedAt) || !stockItem,
       };
     });
@@ -4101,12 +4106,17 @@ function normalizeOrderItemInput(state = {}, input = {}, options = {}) {
   const productId = String(stockItem.productId ?? input.productId ?? "").trim();
   const product = findProductById(state, productId);
   const price = normalizeMoney(input.price ?? stockItem.basePrice, "Order item price");
+  const minReturnPriceExempt = sickMinimumReturnExemption(stockItem);
   return {
     stockItemId: stockId,
     fishCode: String(stockItem?.code ?? "").trim(),
     productId,
     price,
     minReturnPrice: normalizeMinReturnPrice(input.minReturnPrice ?? product?.minReturnPrice ?? 0),
+    ...(minReturnPriceExempt ? {
+      minReturnPriceExempt: true,
+      minReturnPriceExemptReason: "sick",
+    } : {}),
     commissionRate: 0,
   };
 }
@@ -4219,12 +4229,17 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? "").trim();
     const inventoryRemovedBy = String(existingItem?.inventoryRemovedBy ?? "").trim();
     const fishCode = String(stockItem?.code ?? existingItem?.fishCode ?? item?.fishCode ?? "").trim();
+    const minReturnPriceExempt = sickMinimumReturnExemption(stockItem, existingItem);
     return {
       stockItemId: stockId,
       ...(fishCode ? { fishCode } : {}),
       productId,
       price: normalizeMoney(item.price ?? existingItem?.price, "Order item price"),
       minReturnPrice: normalizeMinReturnPrice(item.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
+      ...(minReturnPriceExempt ? {
+        minReturnPriceExempt: true,
+        minReturnPriceExemptReason: "sick",
+      } : {}),
       commissionRate: 0,
       ...(inventoryRemovedAt ? { inventoryRemovedAt } : {}),
       ...(inventoryRemovedBy ? { inventoryRemovedBy } : {}),
@@ -4240,7 +4255,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
   const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
   const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
-  const minimumReturnTotal = items.reduce((sum, item) => sum + normalizeMinReturnPrice(item.minReturnPrice), 0);
+  const minimumReturnTotal = orderMinimumReturnFloorTotal(items);
   const goodsNetTotal = Number((itemsTotal - discount).toFixed(2));
   if (itemsTotal + shippingFee + packagingFee - discount < -0.005) {
     throw new Error("折扣过大，应付金额不能为负数");
@@ -4503,12 +4518,17 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
       const stockItem = (Array.isArray(state.stock) ? state.stock : [])
         .find((stock) => String(stock?.id ?? "") === stockItemId);
       const fishCode = String(stockItem?.code ?? existingItem?.fishCode ?? item?.fishCode ?? "").trim();
+      const minReturnPriceExempt = sickMinimumReturnExemption(stockItem, existingItem);
       return {
         stockItemId,
         ...(fishCode ? { fishCode } : {}),
         productId,
         price: normalizeMoney(item?.price, "Order item price"),
         minReturnPrice: normalizeMinReturnPrice(item?.minReturnPrice ?? existingItem?.minReturnPrice ?? product?.minReturnPrice ?? 0),
+        ...(minReturnPriceExempt ? {
+          minReturnPriceExempt: true,
+          minReturnPriceExemptReason: "sick",
+        } : {}),
         commissionRate: 0,
         ...(inventoryRemovedAt ? { inventoryRemovedAt } : {}),
         ...(inventoryRemovedBy ? { inventoryRemovedBy } : {}),

@@ -333,6 +333,9 @@ export type OrderItem = {
   price: number;
   /** 下单时固化的商品最低回厂价。 */
   minReturnPrice?: number;
+  /** 下单时为疾病状态，可不受最低回厂价限制；原最低回厂价仍保留用于提成核算。 */
+  minReturnPriceExempt?: boolean;
+  minReturnPriceExemptReason?: "sick";
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   plannedShipDate?: string;

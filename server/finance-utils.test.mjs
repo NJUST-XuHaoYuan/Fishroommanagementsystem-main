@@ -87,6 +87,21 @@ test("calculates order owner commission with the minimum-return cap", () => {
   assert.equal(calculateOrderCommission({ ...order, status: "cancelled" }, 1).commissionAmount, 0);
 });
 
+test("sick-fish price exemption does not create commission room below the original floor", () => {
+  const result = calculateOrderCommission({
+    status: "pending",
+    discount: 0,
+    commissionRate: 1,
+    items: [
+      { price: 100, minReturnPrice: 180, minReturnPriceExempt: true },
+    ],
+  });
+
+  assert.equal(result.minimumReturnTotal, 180);
+  assert.equal(result.commissionCap, 0);
+  assert.equal(result.commissionAmount, 0);
+});
+
 test("calculates a complete order fee breakdown with shipping and damage adjustments", () => {
   const order = {
     items: [{ price: 300 }, { price: 180 }],

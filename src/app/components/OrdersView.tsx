@@ -164,6 +164,8 @@ type OrderPickerItem = {
   productId: string;
   price: number;
   minReturnPrice: number;
+  minReturnPriceExempt?: boolean;
+  minReturnPriceExemptReason?: "sick";
   commissionRate?: number;
 };
 
@@ -620,8 +622,18 @@ function orderCommissionTotalWithProducts(
   }, 0);
 }
 
-function orderMinimumReturnTotal(items: { minReturnPrice?: number }[]): number {
-  return items.reduce((sum, item) => sum + normalizeMinReturnPrice(item.minReturnPrice), 0);
+function isMinimumReturnPriceExempt(
+  item: { minReturnPriceExempt?: boolean },
+  stockItem?: Pick<StockItem, "status"> | null
+): boolean {
+  return item.minReturnPriceExempt === true || stockItem?.status === "sick";
+}
+
+function orderMinimumReturnTotal(items: { minReturnPrice?: number; minReturnPriceExempt?: boolean }[]): number {
+  return items.reduce(
+    (sum, item) => sum + (item.minReturnPriceExempt ? 0 : normalizeMinReturnPrice(item.minReturnPrice)),
+    0
+  );
 }
 
 function orderGoodsNetTotal(itemsTotal: number, discount: number): number {
@@ -3781,6 +3793,7 @@ function ItemsWithShipments({
     const isUnshipped = !inventoryRemoved && !shippedItemIds.has(item.stockItemId);
     const damageRefunded = !!options?.damageRefunded;
     const minReturnPrice = orderItemMinReturnPrice(item, p);
+    const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
     const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
     return (
       <tr
@@ -3813,7 +3826,14 @@ function ItemsWithShipments({
           {inventoryRemoved ? "已从库存移除" : s ? subTankName(s.subTankId) : "—"}
         </td>
         <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
-        <td className="px-4 py-2.5 text-sm text-right">¥{minReturnPrice.toFixed(2)}</td>
+        <td className="px-4 py-2.5 text-sm text-right">
+          {minReturnPriceExempt ? (
+            <div>
+              <div className="font-medium text-rose-700">疾病价豁免</div>
+              <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
+            </div>
+          ) : `¥${minReturnPrice.toFixed(2)}`}
+        </td>
         <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{commissionAmount.toFixed(2)}</td>
         <td className="px-3 py-2.5 text-right">
           {isUnshipped && canReturnItem ? (
@@ -4186,6 +4206,13 @@ function OrderDetailDialog({
           i,
           state.products.find((product) => product.id === i.productId)
         ),
+        ...(isMinimumReturnPriceExempt(
+          i,
+          state.stock.find((stockItem) => stockItem.id === i.stockItemId)
+        ) ? {
+          minReturnPriceExempt: true,
+          minReturnPriceExemptReason: "sick" as const,
+        } : {}),
         commissionRate: 0,
       })),
     });
@@ -4340,6 +4367,13 @@ function OrderDetailDialog({
   const displayItemsWithMinimumReturn = displayItems.map((item) => ({
     ...item,
     minReturnPrice: orderItemMinReturnPrice(item, getProduct(item.productId)),
+    ...(isMinimumReturnPriceExempt(
+      item,
+      state.stock.find((stockItem) => stockItem.id === item.stockItemId)
+    ) ? {
+      minReturnPriceExempt: true,
+      minReturnPriceExemptReason: "sick" as const,
+    } : {}),
   }));
   const displayItemsTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + i.price, 0);
   const displayShipping  = (editMode && editForm ? editForm.shippingFee  : order?.shippingFee)  ?? 0;
@@ -4873,6 +4907,7 @@ function OrderDetailDialog({
                           const isShipped = shippedItemIds.has(item.stockItemId);
                           const isLost = !!s?.lost;
                           const minReturnPrice = orderItemMinReturnPrice(item, p);
+                          const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
                           const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
                           return (
                             <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
@@ -4904,7 +4939,12 @@ function OrderDetailDialog({
                                   className="h-7 w-24 text-sm text-right ml-auto" />
                               </td>
                               <td className="px-4 py-2 text-sm text-right">
-                                ¥{minReturnPrice.toFixed(2)}
+                                {minReturnPriceExempt ? (
+                                  <div>
+                                    <div className="font-medium text-rose-700">疾病价豁免</div>
+                                    <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
+                                  </div>
+                                ) : `¥${minReturnPrice.toFixed(2)}`}
                               </td>
                               <td className="px-4 py-2 text-sm text-right text-emerald-700">
                                 ¥{commissionAmount.toFixed(2)}
@@ -5561,6 +5601,10 @@ function StockPickerDialog({
         productId: s.productId,
         price: s.basePrice ?? getProduct(s.productId)?.defaultPrice ?? 0,
         minReturnPrice: productMinReturnPrice(getProduct(s.productId)),
+        ...(s.status === "sick" ? {
+          minReturnPriceExempt: true,
+          minReturnPriceExemptReason: "sick" as const,
+        } : {}),
         commissionRate: 0,
       };
     });
@@ -5909,7 +5953,12 @@ function NewOrderDialog({
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPerson, setContactPerson] = useState(defaultContactPerson);
   const [notes, setNotes] = useState("");
-  const [selectedItems, setSelectedItems] = useState<Map<string, { price: number; minReturnPrice: number }>>(new Map());
+  const [selectedItems, setSelectedItems] = useState<Map<string, {
+    price: number;
+    minReturnPrice: number;
+    minReturnPriceExempt?: boolean;
+    minReturnPriceExemptReason?: "sick";
+  }>>(new Map());
   const [shippingFee, setShippingFee] = useState(0);
   const [packagingFee, setPackagingFee] = useState(0);
   const [discount, setDiscount] = useState(0);
@@ -5967,11 +6016,15 @@ function NewOrderDialog({
   const addFromPicker = (items: OrderPickerItem[]) => {
     setSelectedItems((prev) => {
       const next = new Map(prev);
-      for (const { stockItemId, price, minReturnPrice } of items) {
+      for (const { stockItemId, price, minReturnPrice, minReturnPriceExempt, minReturnPriceExemptReason } of items) {
         if (!next.has(stockItemId)) {
           next.set(stockItemId, {
             price: normalizeMoneyAmount(price),
             minReturnPrice: normalizeMinReturnPrice(minReturnPrice),
+            ...(minReturnPriceExempt ? {
+              minReturnPriceExempt: true,
+              minReturnPriceExemptReason: minReturnPriceExemptReason ?? "sick",
+            } : {}),
           });
         }
       }
@@ -6076,6 +6129,10 @@ function NewOrderDialog({
         productId: s.productId,
         price: normalizeMoneyAmount(draft.price),
         minReturnPrice: normalizeMinReturnPrice(draft.minReturnPrice),
+        ...(draft.minReturnPriceExempt ? {
+          minReturnPriceExempt: true,
+          minReturnPriceExemptReason: "sick" as const,
+        } : {}),
         commissionRate: 0,
       };
     });
@@ -6119,8 +6176,9 @@ function NewOrderDialog({
       if (!stockItem) return [];
       const product = state.products.find((item) => item.id === stockItem.productId);
       const minReturnPrice = normalizeMinReturnPrice(draftItem.minReturnPrice);
+      const minReturnPriceExempt = isMinimumReturnPriceExempt(draftItem, stockItem);
       const commissionAmount = itemCommissionAmount({ ...draftItem, minReturnPrice });
-      return [{ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }];
+      return [{ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }];
     })
   ), [selectedItems, state.stock, state.products]);
 
@@ -6327,7 +6385,7 @@ function NewOrderDialog({
                 ) : (
                   <>
                     <div className="flex flex-col divide-y md:hidden">
-                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }) => (
+                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }) => (
                         <div key={stockItemId} className="p-3">
                           <div className="flex items-start gap-2">
                             <div className="size-10 shrink-0 overflow-hidden rounded border bg-muted">
@@ -6369,7 +6427,9 @@ function NewOrderDialog({
                             <div className="grid gap-1">
                               <Label className="text-xs">最低回厂价（¥）</Label>
                               <div className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm">
-                                ¥{minReturnPrice.toFixed(2)}
+                                {minReturnPriceExempt
+                                  ? <span className="text-rose-700">疾病价豁免 <span className="text-muted-foreground">（原 ¥{minReturnPrice.toFixed(2)}）</span></span>
+                                  : `¥${minReturnPrice.toFixed(2)}`}
                               </div>
                             </div>
                           </div>
@@ -6391,7 +6451,7 @@ function NewOrderDialog({
                         </tr>
                       </thead>
                       <tbody>
-                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, commissionAmount }) => (
+                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }) => (
                           <tr key={stockItemId} className="border-t">
                             <td className="px-4 py-2.5">
                               <div className="flex items-center gap-2">
@@ -6420,7 +6480,12 @@ function NewOrderDialog({
                               />
                             </td>
                             <td className="px-4 py-2.5">
-                              <span className="text-sm">¥{minReturnPrice.toFixed(2)}</span>
+                              {minReturnPriceExempt ? (
+                                <div className="text-sm">
+                                  <div className="font-medium text-rose-700">疾病价豁免</div>
+                                  <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
+                                </div>
+                              ) : <span className="text-sm">¥{minReturnPrice.toFixed(2)}</span>}
                             </td>
                             <td className="px-4 py-2.5 text-right text-sm text-emerald-700">
                               ¥{commissionAmount.toFixed(2)}
