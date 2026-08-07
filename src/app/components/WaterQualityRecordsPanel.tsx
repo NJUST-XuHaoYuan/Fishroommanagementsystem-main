@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  DailyLog,
   normalizeWaterQualityParameters,
   uid,
   useStore,
@@ -22,9 +23,9 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Textarea } from "./ui/textarea";
-import { FlaskConical, Pencil, Plus, Trash2 } from "lucide-react";
+import { ClipboardList, FlaskConical, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { isoToDatetimeLocal, nowDatetimeLocal } from "../utils/localDateTime";
+import { formatBioRecordTime, isoToDatetimeLocal, normalizeBioRecordTime, nowDatetimeLocal } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 
 type WaterRecordDraft = {
@@ -34,6 +35,21 @@ type WaterRecordDraft = {
   values: Record<string, string>;
   notes: string;
 };
+
+type WaterQualityRecordsPanelProps = {
+  maintenanceLogs?: DailyLog[];
+  groupFilter?: string;
+  onGroupFilterChange?: (groupId: string) => void;
+  getMaintenanceGroupId?: (log: DailyLog) => string;
+  onCreateMaintenance?: (groupId: string) => void;
+  onEditMaintenance?: (log: DailyLog) => void;
+  onDeleteMaintenance?: (log: DailyLog) => void;
+  maintenanceSaving?: boolean;
+};
+
+type UnifiedTankRecord =
+  | { kind: "maintenance"; id: string; tankGroupId: string; timestamp: number; log: DailyLog }
+  | { kind: "water"; id: string; tankGroupId: string; timestamp: number; record: WaterQualityRecord };
 
 function localDate(value: string) {
   return isoToDatetimeLocal(value).slice(0, 10);
@@ -50,14 +66,29 @@ function formatMeasurement(measurement: WaterQualityMeasurement) {
   return `${measurement.parameterName || measurement.parameterId} ${Number.isFinite(value) ? value.toFixed(precision) : "—"} ${measurement.unit}`;
 }
 
-export function WaterQualityRecordsPanel() {
+export function WaterQualityRecordsPanel({
+  maintenanceLogs = [],
+  groupFilter: controlledGroupFilter,
+  onGroupFilterChange,
+  getMaintenanceGroupId = (log) => log.tankGroupId ?? "",
+  onCreateMaintenance,
+  onEditMaintenance,
+  onDeleteMaintenance,
+  maintenanceSaving = false,
+}: WaterQualityRecordsPanelProps = {}) {
   const { state, saveWaterQualityRecord } = useStore();
   const permission = usePermission("daily");
   const parameters = useMemo(
     () => normalizeWaterQualityParameters(state.systemSettings),
     [state.systemSettings]
   );
-  const [groupFilter, setGroupFilter] = useState("all");
+  const [internalGroupFilter, setInternalGroupFilter] = useState("all");
+  const groupFilter = controlledGroupFilter ?? internalGroupFilter;
+  const setGroupFilter = (groupId: string) => {
+    onGroupFilterChange?.(groupId);
+    if (controlledGroupFilter === undefined) setInternalGroupFilter(groupId);
+  };
+  const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "maintenance" | "water">("all");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -74,16 +105,38 @@ export function WaterQualityRecordsPanel() {
     () => new Map(parameters.map((parameter) => [parameter.id, parameter])),
     [parameters]
   );
-  const filteredRecords = useMemo(() => [...state.waterQualityRecords]
-    .filter((record) => {
-      if (groupFilter !== "all" && record.tankGroupId !== groupFilter) return false;
-      const date = localDate(record.measuredAt);
-      if (startDate && date < startDate) return false;
-      if (endDate && date > endDate) return false;
-      return true;
-    })
-    .sort((a, b) => b.measuredAt.localeCompare(a.measuredAt)),
-  [state.waterQualityRecords, groupFilter, startDate, endDate]);
+  const filteredRecords = useMemo<UnifiedTankRecord[]>(() => {
+    const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.map((record) => ({
+      kind: "water",
+      id: record.id,
+      tankGroupId: record.tankGroupId,
+      timestamp: Date.parse(record.measuredAt) || 0,
+      record,
+    }));
+    const logRecords: UnifiedTankRecord[] = maintenanceLogs.flatMap((log) => {
+      const tankGroupId = getMaintenanceGroupId(log);
+      if (!tankGroupId) return [];
+      return [{
+        kind: "maintenance" as const,
+        id: log.id,
+        tankGroupId,
+        timestamp: Date.parse(normalizeBioRecordTime(log.date)) || 0,
+        log,
+      }];
+    });
+    return [...waterRecords, ...logRecords]
+      .filter((item) => {
+        if (groupFilter !== "all" && item.tankGroupId !== groupFilter) return false;
+        if (recordTypeFilter !== "all" && item.kind !== recordTypeFilter) return false;
+        const date = item.kind === "water"
+          ? localDate(item.record.measuredAt)
+          : normalizeBioRecordTime(item.log.date).slice(0, 10);
+        if (startDate && date < startDate) return false;
+        if (endDate && date > endDate) return false;
+        return true;
+      })
+      .sort((a, b) => b.timestamp - a.timestamp);
+  }, [state.waterQualityRecords, maintenanceLogs, getMaintenanceGroupId, groupFilter, recordTypeFilter, startDate, endDate]);
 
   const draftParameters = useMemo(() => {
     if (!draft?.tankGroupId) return [];
@@ -190,8 +243,15 @@ export function WaterQualityRecordsPanel() {
     toast.success("水质记录已删除");
   };
 
-  const hasFilter = groupFilter !== "all" || Boolean(startDate) || Boolean(endDate);
+  const hasFilter = groupFilter !== "all" || recordTypeFilter !== "all" || Boolean(startDate) || Boolean(endDate);
   const canManage = permission.canUpdate || permission.canDelete;
+  const isRecordSaving = saving || maintenanceSaving;
+
+  const createMaintenance = () => {
+    if (!onCreateMaintenance) return;
+    if (groupFilter === "all") return toast.error("请先选择缸组，再新增养护日志");
+    onCreateMaintenance(groupFilter);
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -206,6 +266,17 @@ export function WaterQualityRecordsPanel() {
                 {state.tankGroups.map((group) => (
                   <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="col-span-2 grid gap-1.5 sm:col-span-1">
+            <Label className="text-xs">记录类型</Label>
+            <Select value={recordTypeFilter} onValueChange={(value: "all" | "maintenance" | "water") => setRecordTypeFilter(value)}>
+              <SelectTrigger className="w-full sm:w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部记录</SelectItem>
+                <SelectItem value="maintenance">养护日志</SelectItem>
+                <SelectItem value="water">水质记录</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -240,6 +311,7 @@ export function WaterQualityRecordsPanel() {
               variant="ghost"
               onClick={() => {
                 setGroupFilter("all");
+                setRecordTypeFilter("all");
                 setStartDate("");
                 setEndDate("");
               }}
@@ -249,10 +321,18 @@ export function WaterQualityRecordsPanel() {
           )}
         </div>
         {permission.canCreate && (
-          <Button className="w-full sm:w-auto" onClick={() => openNewRecord()} disabled={state.tankGroups.length === 0}>
-            <Plus className="size-4" />
-            录入水质
-          </Button>
+          <div className="grid grid-cols-2 gap-2 sm:flex">
+            {onCreateMaintenance && (
+              <Button variant="outline" onClick={createMaintenance} disabled={state.tankGroups.length === 0}>
+                <ClipboardList className="size-4" />
+                新增养护
+              </Button>
+            )}
+            <Button onClick={() => openNewRecord()} disabled={state.tankGroups.length === 0}>
+              <FlaskConical className="size-4" />
+              录入水质
+            </Button>
+          </div>
         )}
       </div>
 
@@ -260,9 +340,10 @@ export function WaterQualityRecordsPanel() {
         <table className="w-full table-fixed">
           <thead className="bg-muted/50">
             <tr>
-              <th className="w-40 px-4 py-3 text-left text-sm font-semibold">测量时间</th>
+              <th className="w-44 px-4 py-3 text-left text-sm font-semibold">记录时间</th>
               <th className="w-36 px-4 py-3 text-left text-sm font-semibold">缸组</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold">测量结果</th>
+              <th className="w-28 px-4 py-3 text-left text-sm font-semibold">类型</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold">记录内容</th>
               <th className="w-28 px-4 py-3 text-left text-sm font-semibold">操作员</th>
               <th className="w-48 px-4 py-3 text-left text-sm font-semibold">备注</th>
               {canManage && <th className="w-32 px-4 py-3 text-right text-sm font-semibold">操作</th>}
@@ -270,32 +351,59 @@ export function WaterQualityRecordsPanel() {
           </thead>
           <tbody className="divide-y">
             {filteredRecords.length === 0 ? (
-              <tr><td colSpan={canManage ? 6 : 5} className="px-4 py-12 text-center text-sm text-muted-foreground">暂无水质记录</td></tr>
-            ) : filteredRecords.map((record) => (
-              <tr key={record.id} className="align-top">
-                <td className="px-4 py-3 text-sm">{formatMeasuredAt(record.measuredAt)}</td>
-                <td className="px-4 py-3 text-sm font-medium">{groupById.get(record.tankGroupId)?.name ?? "已删除缸组"}</td>
-                <td className="px-4 py-3">
-                  <div className="flex flex-wrap gap-1.5">
-                    {record.values.map((measurement) => (
-                      <Badge key={measurement.parameterId} variant="secondary" className="font-normal">
-                        {formatMeasurement(measurement)}
-                      </Badge>
-                    ))}
-                  </div>
+              <tr><td colSpan={canManage ? 7 : 6} className="px-4 py-12 text-center text-sm text-muted-foreground">暂无养护或水质记录</td></tr>
+            ) : filteredRecords.map((item) => (
+              <tr key={`${item.kind}-${item.id}`} className="align-top">
+                <td className="px-4 py-3 text-sm tabular-nums">
+                  {item.kind === "water" ? formatMeasuredAt(item.record.measuredAt) : formatBioRecordTime(item.log.date)}
                 </td>
-                <td className="px-4 py-3 text-sm">{record.operator || "—"}</td>
-                <td className="px-4 py-3 text-sm text-muted-foreground">{record.notes || "—"}</td>
+                <td className="px-4 py-3 text-sm font-medium">{groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</td>
+                <td className="px-4 py-3">
+                  <Badge variant="secondary" className={item.kind === "water" ? "gap-1 bg-cyan-50 text-cyan-800" : "gap-1"}>
+                    {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
+                    {item.kind === "water" ? "水质" : "养护"}
+                  </Badge>
+                </td>
+                <td className="px-4 py-3">
+                  {item.kind === "water" ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {item.record.values.map((measurement) => (
+                        <Badge key={measurement.parameterId} variant="secondary" className="font-normal">
+                          {formatMeasurement(measurement)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-sm font-medium">{item.log.action || "未填写操作"}</div>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-sm">{item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}</td>
+                <td className="px-4 py-3 text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes || "—" : item.log.notes || "—"}</td>
                 {canManage && (
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-1">
-                      {permission.canUpdate && (
-                        <Button type="button" size="icon" variant="ghost" onClick={() => openEditRecord(record)} disabled={saving} title="编辑水质记录">
+                      {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => item.kind === "water" ? openEditRecord(item.record) : onEditMaintenance?.(item.log)}
+                          disabled={isRecordSaving}
+                          title={item.kind === "water" ? "编辑水质记录" : "编辑养护日志"}
+                        >
                           <Pencil className="size-4" />
                         </Button>
                       )}
-                      {permission.canDelete && (
-                        <Button type="button" size="icon" variant="ghost" className="text-red-600" onClick={() => void deleteRecord(record)} disabled={saving} title="删除水质记录">
+                      {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="text-red-600"
+                          onClick={() => item.kind === "water" ? void deleteRecord(item.record) : onDeleteMaintenance?.(item.log)}
+                          disabled={isRecordSaving}
+                          title={item.kind === "water" ? "删除水质记录" : "删除养护日志"}
+                        >
                           <Trash2 className="size-4" />
                         </Button>
                       )}
@@ -310,40 +418,54 @@ export function WaterQualityRecordsPanel() {
 
       <div className="divide-y overflow-hidden rounded-lg border bg-card md:hidden">
         {filteredRecords.length === 0 ? (
-          <div className="px-4 py-12 text-center text-sm text-muted-foreground">暂无水质记录</div>
-        ) : filteredRecords.map((record) => (
-          <div key={record.id} className="grid gap-3 p-4">
+          <div className="px-4 py-12 text-center text-sm text-muted-foreground">暂无养护或水质记录</div>
+        ) : filteredRecords.map((item) => (
+          <div key={`${item.kind}-${item.id}`} className="grid gap-3 p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">{groupById.get(record.tankGroupId)?.name ?? "已删除缸组"}</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">{formatMeasuredAt(record.measuredAt)} · {record.operator || "—"}</div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="truncate text-sm font-semibold">{groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</div>
+                  <Badge variant="secondary" className={item.kind === "water" ? "shrink-0 gap-1 bg-cyan-50 text-cyan-800" : "shrink-0 gap-1"}>
+                    {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
+                    {item.kind === "water" ? "水质" : "养护"}
+                  </Badge>
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {item.kind === "water" ? formatMeasuredAt(item.record.measuredAt) : formatBioRecordTime(item.log.date)} · {item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}
+                </div>
               </div>
               {canManage && (
                 <div className="flex shrink-0 gap-1">
-                  {permission.canUpdate && (
-                    <Button type="button" size="icon" variant="ghost" onClick={() => openEditRecord(record)} disabled={saving} title="编辑水质记录">
+                  {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                    <Button type="button" size="icon" variant="ghost" onClick={() => item.kind === "water" ? openEditRecord(item.record) : onEditMaintenance?.(item.log)} disabled={isRecordSaving} title={item.kind === "water" ? "编辑水质记录" : "编辑养护日志"}>
                       <Pencil className="size-4" />
                     </Button>
                   )}
-                  {permission.canDelete && (
-                    <Button type="button" size="icon" variant="ghost" className="text-red-600" onClick={() => void deleteRecord(record)} disabled={saving} title="删除水质记录">
+                  {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                    <Button type="button" size="icon" variant="ghost" className="text-red-600" onClick={() => item.kind === "water" ? void deleteRecord(item.record) : onDeleteMaintenance?.(item.log)} disabled={isRecordSaving} title={item.kind === "water" ? "删除水质记录" : "删除养护日志"}>
                       <Trash2 className="size-4" />
                     </Button>
                   )}
                 </div>
               )}
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              {record.values.map((measurement) => (
-                <div key={measurement.parameterId} className="rounded-md border bg-muted/30 px-2.5 py-2">
-                  <div className="truncate text-xs text-muted-foreground">{measurement.parameterName}</div>
-                  <div className="mt-0.5 text-sm font-semibold">
-                    {Number(measurement.value).toFixed(Math.max(0, Math.min(4, Math.trunc(Number(measurement.precision ?? 0)))))} <span className="text-xs font-normal text-muted-foreground">{measurement.unit}</span>
+            {item.kind === "water" ? (
+              <div className="grid grid-cols-2 gap-2">
+                {item.record.values.map((measurement) => (
+                  <div key={measurement.parameterId} className="rounded-md border bg-muted/30 px-2.5 py-2">
+                    <div className="truncate text-xs text-muted-foreground">{measurement.parameterName}</div>
+                    <div className="mt-0.5 text-sm font-semibold">
+                      {Number(measurement.value).toFixed(Math.max(0, Math.min(4, Math.trunc(Number(measurement.precision ?? 0)))))} <span className="text-xs font-normal text-muted-foreground">{measurement.unit}</span>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-            {record.notes && <div className="text-sm text-muted-foreground">{record.notes}</div>}
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm font-medium">{item.log.action || "未填写操作"}</div>
+            )}
+            {(item.kind === "water" ? item.record.notes : item.log.notes) && (
+              <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
+            )}
           </div>
         ))}
       </div>

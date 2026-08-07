@@ -16,7 +16,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
-import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, Truck, ExternalLink, Pencil, Trash2, Loader2, UploadCloud } from "lucide-react";
+import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, FlaskConical, Truck, ExternalLink, Pencil, Trash2, Loader2, UploadCloud } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
@@ -33,6 +33,7 @@ import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import {
   formatBioRecordTime,
+  isoToDatetimeLocal,
   minDatetimeForDate,
   normalizeBioRecordTime,
   nowDatetimeLocal,
@@ -59,6 +60,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState("visual");
+  const [recordGroupFilter, setRecordGroupFilter] = useState("all");
   const [publicLookupCode, setPublicLookupCode] = useState("");
   const [highlightStockId, setHighlightStockId] = useState("");
 
@@ -95,10 +98,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [logOpen, setLogOpen] = useState(false);
   const [editingLog, setEditingLog] = useState<DailyLog | null>(null);
   const [logSaving, setLogSaving] = useState(false);
-  const [logGroupFilter, setLogGroupFilter] = useState("all");
-  const [logStartDate, setLogStartDate] = useState("");
-  const [logEndDate, setLogEndDate] = useState("");
-  const [viewLogGroupId, setViewLogGroupId] = useState<string | null>(null);
 
   // Batch move state
   const [selectMode, setSelectMode] = useState(false);
@@ -204,19 +203,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
     return options;
   }, [state.personnel, editingLog?.operator]);
-  const filteredLogs = useMemo(
-    () => [...(state.logs ?? [])]
-      .filter((log) => {
-        const gid = logGroupId(log);
-        if (logGroupFilter !== "all" && gid !== logGroupFilter) return false;
-        const logDate = String(log.date ?? "").slice(0, 10);
-        if (logStartDate && logDate < logStartDate) return false;
-        if (logEndDate && logDate > logEndDate) return false;
-        return true;
-      })
-      .sort((a, b) => b.date.localeCompare(a.date)),
-    [state.logs, state.tankGroups, logGroupFilter, logStartDate, logEndDate]
-  );
   const logsByGroup = useMemo(() => {
     const map = new Map<string, DailyLog[]>();
     for (const log of state.logs ?? []) {
@@ -229,11 +215,30 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     }
     return map;
   }, [state.logs, state.tankGroups]);
-  const viewLogGroup = viewLogGroupId
-    ? state.tankGroups.find((group) => group.id === viewLogGroupId) ?? null
-    : null;
-  const viewGroupLogs = viewLogGroupId ? logsByGroup.get(viewLogGroupId) ?? [] : [];
-  const hasLogFilter = logGroupFilter !== "all" || !!logStartDate || !!logEndDate;
+  const waterRecordsByGroup = useMemo(() => {
+    const map = new Map<string, typeof state.waterQualityRecords>();
+    for (const record of state.waterQualityRecords ?? []) {
+      map.set(record.tankGroupId, [...(map.get(record.tankGroupId) ?? []), record]);
+    }
+    for (const [groupId, records] of map) {
+      map.set(groupId, records.sort((a, b) => b.measuredAt.localeCompare(a.measuredAt)));
+    }
+    return map;
+  }, [state.waterQualityRecords]);
+
+  const formatWaterSummary = (values: (typeof state.waterQualityRecords)[number]["values"]) => {
+    const visibleValues = values.slice(0, 4).map((measurement) => {
+      const precision = Math.max(0, Math.min(4, Math.trunc(Number(measurement.precision ?? 0))));
+      const value = Number(measurement.value);
+      return `${measurement.parameterName || measurement.parameterId} ${Number.isFinite(value) ? value.toFixed(precision) : "—"}${measurement.unit ? ` ${measurement.unit}` : ""}`;
+    });
+    return `${visibleValues.join(" · ")}${values.length > visibleValues.length ? ` · 另 ${values.length - visibleValues.length} 项` : ""}`;
+  };
+
+  const openGroupRecords = (groupId: string) => {
+    setRecordGroupFilter(groupId);
+    setActiveTab("records");
+  };
 
   const toggleStatusFilter = (st: StockStatus) =>
     setFilterStatuses((prev) => {
@@ -1064,15 +1069,14 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   return (
     <div className="flex flex-col gap-3">
-      <Tabs defaultValue="visual" className="gap-3">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-3">
         <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
           <div className="min-w-0">
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
               <h2 className="leading-tight">日常管理</h2>
               <TabsList className="h-8 w-full rounded-full sm:w-auto">
                 <TabsTrigger value="visual" className="flex-1 rounded-full px-3 text-sm sm:flex-none">缸位视图</TabsTrigger>
-                <TabsTrigger value="logs" className="flex-1 rounded-full px-3 text-sm sm:flex-none">养护日志</TabsTrigger>
-                <TabsTrigger value="water" className="flex-1 rounded-full px-3 text-sm sm:flex-none">水质记录</TabsTrigger>
+                <TabsTrigger value="records" className="flex-1 rounded-full px-3 text-sm sm:flex-none">养护与水质</TabsTrigger>
               </TabsList>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">巡缸、生物维护与水质测量记录</p>
@@ -1225,80 +1229,92 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
             {visibleGroups.map((g) => {
               const groupLogs = logsByGroup.get(g.id) ?? [];
               const latestLog = groupLogs[0];
+              const groupWaterRecords = waterRecordsByGroup.get(g.id) ?? [];
+              const latestWaterRecord = groupWaterRecords[0];
               const isGroupExpanded = expandedGroupIds.has(g.id);
               const subTanks = visibleSubTanks(g);
               const visibleStockCount = subTanks.reduce((sum, t) => sum + stockBySub(t.id).length, 0);
+              const recordCount = groupLogs.length + groupWaterRecords.length;
               return (
               <Card key={g.id} className="p-3 border border-sky-200 bg-sky-50/30">
-                <div className={`grid gap-2.5 md:items-start ${
-                  isGroupExpanded
-                    ? "mb-2.5 md:grid-cols-[minmax(9rem,13rem)_minmax(16rem,1fr)_auto]"
-                    : "md:grid-cols-[minmax(12rem,1fr)_auto]"
-                }`}>
-                  <button
-                    type="button"
-                    aria-expanded={isGroupExpanded}
-                    aria-controls={`daily-group-${g.id}`}
-                    className="flex min-w-0 items-start gap-2 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-white/70"
-                    onClick={() => toggleGroupExpand(g.id)}
-                  >
-                    <ChevronDown
-                      className={`mt-1 size-4 shrink-0 text-sky-600 transition-transform ${isGroupExpanded ? "rotate-180" : "-rotate-90"}`}
-                    />
-                    <div className="min-w-0">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <h3 className="truncate text-base">{g.name}</h3>
-                        <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
-                          {visibleStockCount} 条
-                        </span>
-                      </div>
-                      <div className="truncate text-xs text-muted-foreground">{g.location}</div>
-                    </div>
-                  </button>
-                  {isGroupExpanded && (
+                <div className={isGroupExpanded ? "mb-2.5 grid gap-2.5" : "grid gap-2.5"}>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                     <button
                       type="button"
-                      className="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/80 px-3 py-2 text-left transition-colors hover:bg-white"
-                      onClick={() => setViewLogGroupId(g.id)}
+                      aria-expanded={isGroupExpanded}
+                      aria-controls={`daily-group-${g.id}`}
+                      className="flex min-w-0 items-start gap-2 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-white/70"
+                      onClick={() => toggleGroupExpand(g.id)}
                     >
-                      <Clock className="size-4 shrink-0 text-sky-600" />
-                      <div className="min-w-0 flex items-center gap-2 text-sm">
-                        <span className="shrink-0 text-xs font-medium text-sky-700">最近养护</span>
-                        {latestLog ? (
-                          <span className="min-w-0 truncate font-medium">
-                            {latestLog.date} · {latestLog.action}
-                            {latestLog.operator ? ` · ${latestLog.operator}` : ""}
-                            {latestLog.notes ? ` · ${latestLog.notes}` : ""}
+                      <ChevronDown
+                        className={`mt-1 size-4 shrink-0 text-sky-600 transition-transform ${isGroupExpanded ? "rotate-180" : "-rotate-90"}`}
+                      />
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <h3 className="truncate text-base">{g.name}</h3>
+                          <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+                            {visibleStockCount} 条
                           </span>
-                        ) : (
-                          <span className="truncate text-muted-foreground">暂无养护日志</span>
-                        )}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">{g.location}</div>
                       </div>
                     </button>
-                  )}
-                  <div className="flex shrink-0 flex-wrap items-center gap-2 md:justify-end">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 flex-1 border-slate-200 px-2.5 text-slate-700 hover:bg-white sm:flex-none"
-                      onClick={() => setViewLogGroupId(g.id)}
-                    >
-                      <ClipboardList className="size-3.5 mr-1" />
-                      查看日志{groupLogs.length > 0 ? ` ${groupLogs.length}` : ""}
-                    </Button>
-                    {permission.canCreate && (
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 md:justify-end">
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="h-8 flex-1 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50 sm:flex-none"
-                        onClick={() => openNewLogForGroup(g.id)}
+                        className="h-8 flex-1 border-slate-200 px-2.5 text-slate-700 hover:bg-white sm:flex-none"
+                        onClick={() => openGroupRecords(g.id)}
                       >
-                        <Plus className="size-3.5 mr-1" />
-                        新增日志
+                        <ClipboardList className="size-3.5 mr-1" />
+                        查看记录{recordCount > 0 ? ` ${recordCount}` : ""}
                       </Button>
-                    )}
+                      {permission.canCreate && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 flex-1 border-sky-200 px-2.5 text-sky-600 hover:bg-sky-50 sm:flex-none"
+                          onClick={() => openNewLogForGroup(g.id)}
+                        >
+                          <Plus className="size-3.5 mr-1" />
+                          新增养护
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid gap-1.5 border-t border-sky-100 pt-2 sm:grid-cols-2 sm:gap-3">
+                    <button
+                      type="button"
+                      className="flex min-w-0 items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-white/80"
+                      onClick={() => openGroupRecords(g.id)}
+                    >
+                      <Clock className="mt-0.5 size-3.5 shrink-0 text-sky-700" />
+                      <span className="min-w-0 text-xs">
+                        <span className="mr-1.5 font-semibold text-slate-700">最新养护</span>
+                        {latestLog ? (
+                          <span className="text-slate-600">{formatBioRecordTime(latestLog.date)} · {latestLog.action || "未填写操作"}</span>
+                        ) : (
+                          <span className="text-muted-foreground">暂无记录</span>
+                        )}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="flex min-w-0 items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-white/80"
+                      onClick={() => openGroupRecords(g.id)}
+                    >
+                      <FlaskConical className="mt-0.5 size-3.5 shrink-0 text-cyan-700" />
+                      <span className="min-w-0 text-xs">
+                        <span className="mr-1.5 font-semibold text-slate-700">最新水质</span>
+                        {latestWaterRecord ? (
+                          <span className="text-slate-600">{isoToDatetimeLocal(latestWaterRecord.measuredAt).replace("T", " ")} · {formatWaterSummary(latestWaterRecord.values)}</span>
+                        ) : (
+                          <span className="text-muted-foreground">暂无记录</span>
+                        )}
+                      </span>
+                    </button>
                   </div>
                 </div>
                 {/* 子缸横向排列，溢出滚动 */}
@@ -1494,190 +1510,17 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
           </div>
         </TabsContent>
 
-        <TabsContent value="logs" className="flex flex-col gap-4">
-          {(() => {
-            const canManageLogs = permission.canUpdate || permission.canDelete;
-            return (
-              <>
-          <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
-            <div className="grid gap-3 sm:flex sm:flex-wrap sm:items-end">
-              <div className="grid gap-1.5">
-                <Label className="text-xs">缸组</Label>
-                <Select value={logGroupFilter} onValueChange={setLogGroupFilter}>
-                  <SelectTrigger className="w-full sm:w-44"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部缸组</SelectItem>
-                    {state.tankGroups.map((group) => (
-                      <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs">开始日期</Label>
-                <Input
-                  type="date"
-                  value={logStartDate}
-                  max={logEndDate || today}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    if (value && value > today) return toast.error("开始日期不能晚于今天");
-                    setLogStartDate(value);
-                    if (logEndDate && value && logEndDate < value) setLogEndDate("");
-                  }}
-                  className="w-full sm:w-40"
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs">结束日期</Label>
-                <Input
-                  type="date"
-                  value={logEndDate}
-                  min={logStartDate || undefined}
-                  max={today}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    if (value && value > today) return toast.error("结束日期不能晚于今天");
-                    if (logStartDate && value && value < logStartDate) return toast.error("结束日期不能早于开始日期");
-                    setLogEndDate(value);
-                  }}
-                  className="w-full sm:w-40"
-                />
-              </div>
-              {hasLogFilter && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    setLogGroupFilter("all");
-                    setLogStartDate("");
-                    setLogEndDate("");
-                  }}
-                >
-                  清除筛选
-                </Button>
-              )}
-            </div>
-            {permission.canCreate && (
-              <Button className="w-full sm:w-auto" onClick={() => {
-                if (logGroupFilter === "all") {
-                  toast.error("请先选择缸组，或从缸组卡片新增日志");
-                  return;
-                }
-                setEditingLog({ id: "", date: nowDatetimeLocal(), tankGroupId: logGroupFilter, action: "", operator: currentOperator, notes: "" });
-                setLogOpen(true);
-              }}>新增日志</Button>
-            )}
-          </div>
-          <div className="hidden overflow-hidden rounded-lg border bg-card md:block">
-            <table className="w-full">
-              <thead className="bg-muted/50">
-                <tr>
-                  <th className="text-left px-4 py-3 text-sm">记录时间</th>
-                  <th className="text-left px-4 py-3 text-sm">缸组</th>
-                  <th className="text-left px-4 py-3 text-sm">操作</th>
-                  <th className="text-left px-4 py-3 text-sm">操作员</th>
-                  <th className="text-left px-4 py-3 text-sm">备注</th>
-                  {canManageLogs && <th className="text-right px-4 py-3 text-sm">操作</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredLogs.length === 0 ? (
-                  <tr><td colSpan={canManageLogs ? 6 : 5} className="px-4 py-12 text-center text-muted-foreground text-sm">暂无日志</td></tr>
-                ) : filteredLogs.map((l) => (
-                  <tr key={l.id} className="border-t">
-                    <td className="px-4 py-3 text-sm tabular-nums">{formatBioRecordTime(l.date)}</td>
-                    <td className="px-4 py-3 text-sm">{groupName(logGroupId(l))}</td>
-                    <td className="px-4 py-3 text-sm">{l.action}</td>
-                    <td className="px-4 py-3 text-sm">{l.operator}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{l.notes}</td>
-                    {canManageLogs && (
-                      <td className="px-4 py-3 text-sm">
-                        <div className="flex items-center justify-end gap-2">
-                          {permission.canUpdate && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={logSaving}
-                              onClick={() => editLog(l)}
-                            >
-                              编辑
-                            </Button>
-                          )}
-                          {permission.canDelete && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                              disabled={logSaving}
-                              onClick={() => deleteLog(l)}
-                            >
-                              删除
-                            </Button>
-                          )}
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex flex-col gap-3 md:hidden">
-            {filteredLogs.length === 0 ? (
-              <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
-                暂无日志
-              </div>
-            ) : filteredLogs.map((l) => (
-              <div key={l.id} className="rounded-lg border bg-card p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-semibold tabular-nums">{formatBioRecordTime(l.date)}</span>
-                  <Badge variant="secondary">{groupName(logGroupId(l))}</Badge>
-                  {l.operator && <span className="text-xs text-muted-foreground">{l.operator}</span>}
-                </div>
-                <div className="mt-2 text-sm font-medium">{l.action || "未填写操作"}</div>
-                {l.notes && (
-                  <div className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{l.notes}</div>
-                )}
-                {canManageLogs && (
-                  <div className="mt-3 flex flex-wrap justify-end gap-2 border-t pt-3">
-                    {permission.canUpdate && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={logSaving}
-                        onClick={() => editLog(l)}
-                      >
-                        编辑
-                      </Button>
-                    )}
-                    {permission.canDelete && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="text-red-600 hover:bg-red-50 hover:text-red-700"
-                        disabled={logSaving}
-                        onClick={() => deleteLog(l)}
-                      >
-                        删除
-                      </Button>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-              </>
-            );
-          })()}
-        </TabsContent>
-
-        <TabsContent value="water" className="flex flex-col gap-4">
-          <WaterQualityRecordsPanel />
+        <TabsContent value="records" className="flex flex-col gap-4">
+          <WaterQualityRecordsPanel
+            maintenanceLogs={state.logs ?? []}
+            groupFilter={recordGroupFilter}
+            onGroupFilterChange={setRecordGroupFilter}
+            getMaintenanceGroupId={logGroupId}
+            onCreateMaintenance={openNewLogForGroup}
+            onEditMaintenance={editLog}
+            onDeleteMaintenance={deleteLog}
+            maintenanceSaving={logSaving}
+          />
         </TabsContent>
       </Tabs>
 
@@ -2537,94 +2380,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	          </DialogFooter>
 	        </DialogContent>
 	      </Dialog>
-
-	      {/* ── 缸组养护日志查看 Dialog ── */}
-      <Dialog open={!!viewLogGroupId} onOpenChange={(open) => !open && setViewLogGroupId(null)}>
-        <DialogContent aria-describedby={undefined} className="max-w-3xl max-h-[86vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <ClipboardList className="size-5 text-sky-600" />
-              {viewLogGroup?.name ?? "缸组"}养护日志
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <div className="truncate text-sm font-medium">{viewLogGroup?.location || "—"}</div>
-              <div className="text-xs text-muted-foreground">共 {viewGroupLogs.length} 条记录，按时间从新到旧排列</div>
-            </div>
-            {permission.canCreate && viewLogGroupId && (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => openNewLogForGroup(viewLogGroupId)}
-              >
-                <Plus className="size-3.5 mr-1" />
-                新增日志
-              </Button>
-            )}
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border bg-card">
-            {viewGroupLogs.length === 0 ? (
-              <div className="px-4 py-12 text-center text-sm text-muted-foreground">暂无养护日志</div>
-            ) : (
-              <div className="divide-y">
-                {viewGroupLogs.map((log) => (
-                  <div key={log.id} className="grid gap-2 px-4 py-3">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-semibold tabular-nums">{formatBioRecordTime(log.date)}</span>
-                          <Badge variant="secondary">{log.operator || "—"}</Badge>
-                          {log.syncedStockItemIds && log.syncedStockItemIds.length > 0 && (
-                            <span className="text-xs text-muted-foreground">
-                              已同步 {log.syncedStockItemIds.length} 条鱼
-                            </span>
-                          )}
-                        </div>
-                        <div className="mt-1 text-sm font-medium">{log.action}</div>
-                        {log.notes && <div className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{log.notes}</div>}
-                      </div>
-                      {(permission.canUpdate || permission.canDelete) && (
-                        <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
-                          {permission.canUpdate && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={logSaving}
-                              onClick={() => {
-                                setViewLogGroupId(null);
-                                editLog(log);
-                              }}
-                            >
-                              编辑
-                            </Button>
-                          )}
-                          {permission.canDelete && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              className="text-red-600 hover:bg-red-50 hover:text-red-700"
-                              disabled={logSaving}
-                              onClick={() => deleteLog(log)}
-                            >
-                              删除
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setViewLogGroupId(null)}>关闭</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
 	      {/* ── 养护日志 Dialog ── */}
       <Dialog open={logOpen} onOpenChange={setLogOpen}>
