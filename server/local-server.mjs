@@ -24,8 +24,10 @@ import {
   DEFAULT_COMMISSION_RATE,
   calculateOrderCommission,
   calculateOrderFeeBreakdown,
+  configuredOrderPackagingFee,
   normalizeCommissionRate,
   normalizeExternalOrderNo,
+  normalizeShippingFeeMode,
   parseDouyinSettlementCsv,
 } from "./finance-utils.mjs";
 import {
@@ -3334,6 +3336,7 @@ function nextOrderNo(state = {}) {
 }
 
 function getBillableShippingFeeForOrder(order = {}, shipments = []) {
+  if (normalizeShippingFeeMode(order?.shippingFeeMode, order?.source) === "collect") return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment?.orderId === order.id && shipmentBlocksInventory(shipment)
   );
@@ -4249,15 +4252,32 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   if (new Set(normalizedItemIds).size !== normalizedItemIds.length) {
     throw new Error("订单内不能重复选择同一条鱼");
   }
-  const shippingFee = isPickupOrder
+  const requestedShippingFeeMode = body.shippingFeeMode ?? currentOrder?.shippingFeeMode;
+  if (!isPickupOrder && requestedShippingFeeMode != null && !["collect", "prepaid", "free"].includes(String(requestedShippingFeeMode))) {
+    throw new Error("请选择有效运费方式");
+  }
+  const shippingFeeMode = normalizeShippingFeeMode(requestedShippingFeeMode, source);
+  if (
+    currentOrder &&
+    shippingFeeMode !== normalizeShippingFeeMode(currentOrder.shippingFeeMode, currentOrder.source) &&
+    (Array.isArray(state.shipments) ? state.shipments : []).some((shipment) =>
+      String(shipment?.orderId ?? "") === String(currentOrder.id ?? "") && shipmentBlocksInventory(shipment)
+    )
+  ) {
+    throw new Error("订单已经出库，不能再修改运费方式");
+  }
+  const shippingFee = shippingFeeMode === "collect"
     ? 0
     : normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
-  const packagingFee = normalizeMoney(body.packagingFee ?? currentOrder?.packagingFee, "Packaging fee");
+  const packagingFee = currentOrder
+    ? normalizeMoney(currentOrder.packagingFee ?? configuredOrderPackagingFee(state.systemSettings), "Packaging fee")
+    : configuredOrderPackagingFee(state.systemSettings);
   const discount = normalizeMoney(body.discount ?? currentOrder?.discount, "Discount");
   const itemsTotal = items.reduce((sum, item) => sum + item.price, 0);
   const minimumReturnTotal = orderMinimumReturnFloorTotal(items);
   const goodsNetTotal = Number((itemsTotal - discount).toFixed(2));
-  if (itemsTotal + shippingFee + packagingFee - discount < -0.005) {
+  const customerShippingFee = shippingFeeMode === "prepaid" ? shippingFee : 0;
+  if (itemsTotal + customerShippingFee + packagingFee - discount < -0.005) {
     throw new Error("折扣过大，应付金额不能为负数");
   }
   if (goodsNetTotal <= minimumReturnTotal + 0.005) {
@@ -4279,6 +4299,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     plannedShipDate: plannedShipDate || undefined,
     contactPerson,
     items,
+    shippingFeeMode,
     shippingFee,
     packagingFee,
     discount,
@@ -4485,6 +4506,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "plannedShipDate",
   "contactPerson",
   "items",
+  "shippingFeeMode",
   "shippingFee",
   "packagingFee",
   "discount",
@@ -4534,6 +4556,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
         ...(inventoryRemovedBy ? { inventoryRemovedBy } : {}),
       };
     }),
+    shippingFeeMode: normalizeShippingFeeMode(order.shippingFeeMode, order.source),
     shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
     packagingFee: normalizeMoney(order.packagingFee, "Packaging fee"),
     discount: normalizeMoney(order.discount, "Discount"),
@@ -8216,6 +8239,13 @@ async function handleApi(req, res, url) {
       const shipDate = String(body.shipDate ?? "").trim();
       if (!shipDate) throw new Error("请选择出库日期");
       const isPickup = shipMethod === "pickup";
+      const shippingFeeMode = normalizeShippingFeeMode(order.shippingFeeMode, order.source);
+      const actualShippingFee = isPickup || shippingFeeMode === "collect"
+        ? 0
+        : normalizeMoney(body.actualShippingFee, "Actual shipping fee");
+      if (!isPickup && shippingFeeMode !== "collect" && actualShippingFee <= 0) {
+        throw new Error(`${shippingFeeMode === "free" ? "包邮" : "寄付"}订单发货时必须填写实际运费`);
+      }
       const createdAt = nowDatetimeInChina();
       const shipment = {
         id: String(body.id || uid("ship")),
@@ -8229,7 +8259,7 @@ async function handleApi(req, res, url) {
         status: isPickup ? "delivered" : "outbound",
         notes: String(body.notes ?? ""),
         shipMethod,
-        actualShippingFee: isPickup ? 0 : normalizeMoney(body.actualShippingFee, "Actual shipping fee"),
+        actualShippingFee,
         itemStockIds: selectedItemIds,
         ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
@@ -8684,6 +8714,20 @@ async function handleApi(req, res, url) {
 	      if (
 	        rawPatch.systemSettings &&
 	        typeof rawPatch.systemSettings === "object" &&
+	        Object.prototype.hasOwnProperty.call(rawPatch.systemSettings, "orderPackagingFee")
+	      ) {
+	        const orderPackagingFee = Number(rawPatch.systemSettings.orderPackagingFee);
+	        if (!Number.isFinite(orderPackagingFee) || orderPackagingFee < 0 || orderPackagingFee > 100000) {
+	          throw new Error("统一包装费必须是 0 至 100000 之间的金额");
+	        }
+	        rawPatch.systemSettings = {
+	          ...rawPatch.systemSettings,
+	          orderPackagingFee: Number(orderPackagingFee.toFixed(2)),
+	        };
+	      }
+	      if (
+	        rawPatch.systemSettings &&
+	        typeof rawPatch.systemSettings === "object" &&
 	        Object.prototype.hasOwnProperty.call(rawPatch.systemSettings, "shippingCarriers")
 	      ) {
 	        rawPatch.systemSettings = {
@@ -8696,6 +8740,25 @@ async function handleApi(req, res, url) {
 	      await client.query("BEGIN");
 	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	      const current = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+	      if (Array.isArray(rawPatch.shipments)) {
+	        const currentShipments = new Map((Array.isArray(current.shipments) ? current.shipments : [])
+	          .map((shipment) => [String(shipment?.id ?? ""), shipment]));
+	        const orders = new Map((Array.isArray(current.orders) ? current.orders : [])
+	          .map((order) => [String(order?.id ?? ""), order]));
+	        rawPatch.shipments = rawPatch.shipments.map((shipment) => {
+	          const previous = currentShipments.get(String(shipment?.id ?? ""));
+	          if (previous && stableJson(previous) === stableJson(shipment)) return shipment;
+	          if (shipment?.shipMethod === "pickup") return { ...shipment, actualShippingFee: 0 };
+	          const order = orders.get(String(shipment?.orderId ?? ""));
+	          const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
+	          if (mode === "collect") return { ...shipment, actualShippingFee: 0 };
+	          const actualShippingFee = normalizeMoney(shipment?.actualShippingFee, "Actual shipping fee");
+	          if (shipment?.status !== "preparing" && actualShippingFee <= 0) {
+	            throw new Error(`${mode === "free" ? "包邮" : "寄付"}订单必须填写实际运费`);
+	          }
+	          return { ...shipment, actualShippingFee };
+	        });
+	      }
 	      const validationState = buildStatePatch(current, rawPatch, basePatch, incomingLogs, req);
 
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));

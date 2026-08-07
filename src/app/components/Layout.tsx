@@ -220,7 +220,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : view === "paymentMethods"
         ? "付款方式管理"
       : view === "shippingCarriers"
-        ? "快递公司管理"
+        ? "订单与物流设置"
       : view === "waterQualitySettings"
         ? "水质参数管理"
       : NAV.flatMap((s) => s.items).find((i) => i.key === view)?.label ?? "";
@@ -330,7 +330,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                 onClick={() => navigate("shippingCarriers")}
                 className={navButtonClass(view === "shippingCarriers")}
               >
-                <span className="flex items-center gap-2"><Truck className="size-3.5" />快递公司管理</span>
+                <span className="flex items-center gap-2"><Truck className="size-3.5" />订单与物流设置</span>
                 {view === "shippingCarriers" && <ChevronRight className="size-3.5 shrink-0" />}
               </button>
               <button

@@ -22,6 +22,7 @@ import React from "react";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
+import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -118,12 +119,14 @@ function PlannedShipBadge({ date }: { date?: string }) {
 
 function EditShipmentDialog({
   shipment,
+  order,
   minShipDate,
   open,
   onOpenChange,
   onSave,
 }: {
   shipment: Shipment | null;
+  order?: Order;
   minShipDate?: string;
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -151,6 +154,7 @@ function EditShipmentDialog({
   if (!shipment) return null;
 
   const isExpress = (shipment.shipMethod ?? "express") === "express";
+  const shippingFeeMode = orderShippingFeeMode(order);
   const configuredCarriers = configuredShippingCarriers(state.systemSettings);
   const carrierOptions = carrier && !configuredCarriers.some((item) => item.name === carrier)
     ? [{ id: "legacy-carrier", name: carrier, enabled: false }, ...configuredCarriers]
@@ -158,10 +162,13 @@ function EditShipmentDialog({
 
   const handleSave = () => {
     if (isExpress && !carrier.trim()) return toast.error("请选择快递公司");
+    if (isExpress && shippingFeeMode !== "collect" && actualFee <= 0) {
+      return toast.error(`${shippingFeeModeLabel(shippingFeeMode)}订单必须填写实际运费`);
+    }
     if (!shipDate) return toast.error("请填写发货日期");
     if (minShipDate && shipDate < minShipDate) return toast.error("发货日期不能早于下单日期");
     if (shipDate > today) return toast.error("发货日期不能晚于今天");
-    onSave({ carrier, trackingNo, actualShippingFee: actualFee, shipDate, notes });
+    onSave({ carrier, trackingNo, actualShippingFee: isExpress && shippingFeeMode === "collect" ? 0 : actualFee, shipDate, notes });
     onOpenChange(false);
   };
 
@@ -204,15 +211,17 @@ function EditShipmentDialog({
                 }}
               />
             </div>
-            <div className="grid gap-1.5">
-              <Label className="text-sm">实际运费（¥）</Label>
-              <Input
-                type="number" min={0} step={0.01}
-                value={actualFee || ""}
-                placeholder="0"
-                onChange={(e) => setActualFee(Number(e.target.value))}
-              />
-            </div>
+            {(!isExpress || shippingFeeMode !== "collect") && (
+              <div className="grid gap-1.5">
+                <Label className="text-sm">实际运费（¥）</Label>
+                <Input
+                  type="number" min={0} step={0.01}
+                  value={actualFee || ""}
+                  placeholder="0"
+                  onChange={(e) => setActualFee(Number(e.target.value))}
+                />
+              </div>
+            )}
           </div>
 
           {isExpress && (
@@ -358,8 +367,13 @@ export function ShipmentsView() {
 
     const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
     const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
+    const shippingFeeMode = orderShippingFeeMode(order);
     if (data.shipMethod === "pickup") {
       toast.success(`订单 ${order.orderNo} 已确认上门自取签收`);
+    } else if (shippingFeeMode === "collect") {
+      toast.success(`订单 ${order.orderNo} 已出库 — 运费到付，不计订单应收`);
+    } else if (shippingFeeMode === "free") {
+      toast.success(`订单 ${order.orderNo} 已出库 — 实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
     } else if (Math.abs(feeDiff) > 0.005) {
       if (feeDiff > 0)
         toast.success(`订单 ${order.orderNo} 已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
@@ -437,7 +451,7 @@ export function ShipmentsView() {
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">订单号</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">客户</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
-                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">订单运费</th>
+                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">运费方式 / 预计</th>
                       <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">状态</th>
                       <th className="w-24 px-4 py-2" />
                     </tr>
@@ -452,7 +466,9 @@ export function ShipmentsView() {
                             {customer?.name ?? (isPlatformOrderSource(o.source) ? platformOrderDisplayName(o) : "—")}
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">{o.items.length} 条</td>
-                          <td className="px-4 py-3 text-sm text-right">¥{(o.shippingFee ?? 0).toFixed(2)}</td>
+                          <td className="px-4 py-3 text-sm text-right">
+                            {shippingFeeModeLabel(orderShippingFeeMode(o))}{orderShippingFeeMode(o) !== "collect" && o.shippingFee > 0 ? ` / ¥${o.shippingFee.toFixed(2)}` : ""}
+                          </td>
                           <td className="px-4 py-3 text-right">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${o.status === "confirmed" ? "bg-blue-100 text-blue-700" : "bg-orange-100 text-orange-700"}`}>
                               {o.status === "confirmed" ? "已确认" : "待确认"}
@@ -489,7 +505,7 @@ export function ShipmentsView() {
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">客户</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">预计发货</th>
                       <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">商品</th>
-                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">订单运费</th>
+                      <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">运费方式 / 预计</th>
                       <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">状态</th>
                       <th className="w-24 px-4 py-2" />
                     </tr>
@@ -509,7 +525,9 @@ export function ShipmentsView() {
                               : <PlannedShipBadge date={o.plannedShipDate} />}
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground">{o.items.length} 条</td>
-                          <td className="px-4 py-3 text-sm text-right">¥{(o.shippingFee ?? 0).toFixed(2)}</td>
+                          <td className="px-4 py-3 text-sm text-right">
+                            {shippingFeeModeLabel(orderShippingFeeMode(o))}{orderShippingFeeMode(o) !== "collect" && o.shippingFee > 0 ? ` / ¥${o.shippingFee.toFixed(2)}` : ""}
+                          </td>
                           <td className="px-4 py-3 text-right">
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${o.status === "confirmed" ? "bg-blue-100 text-blue-700" : "bg-orange-100 text-orange-700"}`}>
                               {o.status === "confirmed" ? "已确认" : "待确认"}
@@ -571,7 +589,8 @@ export function ShipmentsView() {
                 {shipmentRecords.map((sh) => {
                   const order = getOrder(sh.orderId);
                   const customer = order ? getCustomer(order.customerId) : undefined;
-                  const preCollected = order?.shippingFee ?? 0;
+                  const mode = orderShippingFeeMode(order);
+                  const preCollected = mode === "prepaid" ? order?.shippingFee ?? 0 : 0;
                   const actual = sh.actualShippingFee ?? 0;
                   const feeDiff = actual - preCollected;
                   const isExpanded = expandedShipIds.has(sh.id);
@@ -625,12 +644,12 @@ export function ShipmentsView() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-sm text-right text-muted-foreground">
-                          ¥{preCollected.toFixed(2)}
+                          {sh.shipMethod === "pickup" ? "—" : `${shippingFeeModeLabel(mode)}${preCollected > 0 ? ` ¥${preCollected.toFixed(2)}` : ""}`}
                         </td>
                         <td className="px-4 py-3 text-sm text-right">
                           <div className="flex flex-col items-end">
                             <span>¥{actual.toFixed(2)}</span>
-                            {Math.abs(feeDiff) > 0.005 && (
+                            {mode === "prepaid" && Math.abs(feeDiff) > 0.005 && (
                               <span className={`text-xs ${feeDiff > 0 ? "text-amber-600" : "text-sky-600"}`}>
                                 {feeDiff > 0 ? `+¥${feeDiff.toFixed(2)}` : `-¥${Math.abs(feeDiff).toFixed(2)}`} 待补
                               </span>
@@ -758,6 +777,7 @@ export function ShipmentsView() {
       {/* ── Edit Shipment Dialog ── */}
       <EditShipmentDialog
         shipment={editShipment}
+        order={editShipment ? getOrder(editShipment.orderId) : undefined}
         minShipDate={editShipment ? getOrder(editShipment.orderId)?.date : undefined}
         open={!!editShipment}
         onOpenChange={(o) => { if (!o) setEditShipment(null); }}

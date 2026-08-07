@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  configuredOrderPackagingFee,
   normalizeShippingCarrierSettings,
   ShippingCarrierSetting,
   uid,
@@ -9,7 +10,7 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Switch } from "./ui/switch";
-import { Plus, Save, Trash2, Truck } from "lucide-react";
+import { Package, Plus, Save, Trash2, Truck } from "lucide-react";
 import { toast } from "sonner";
 
 function copyCarriers(carriers: ShippingCarrierSetting[]): ShippingCarrierSetting[] {
@@ -23,13 +24,16 @@ export function ShippingCarriersView() {
     [state.systemSettings]
   );
   const [draft, setDraft] = useState<ShippingCarrierSetting[]>(() => copyCarriers(savedCarriers));
+  const savedPackagingFee = configuredOrderPackagingFee(state.systemSettings);
+  const [packagingFee, setPackagingFee] = useState(savedPackagingFee);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setDraft(copyCarriers(savedCarriers));
-  }, [savedCarriers]);
+    setPackagingFee(savedPackagingFee);
+  }, [savedCarriers, savedPackagingFee]);
 
-  const changed = JSON.stringify(draft) !== JSON.stringify(savedCarriers);
+  const changed = JSON.stringify(draft) !== JSON.stringify(savedCarriers) || packagingFee !== savedPackagingFee;
   const enabledCount = draft.filter((carrier) => carrier.enabled).length;
 
   const updateCarrier = (id: string, patch: Partial<ShippingCarrierSetting>) => {
@@ -63,23 +67,25 @@ export function ShippingCarriersView() {
     );
     if (duplicate) return toast.error(`快递公司名称不能重复：${duplicate.name}`);
     if (!normalized.some((carrier) => carrier.enabled)) return toast.error("请至少启用一家快递公司");
-    if (!confirmWrite("修改", "保存快递公司配置。")) return;
+    if (!Number.isFinite(packagingFee) || packagingFee < 0) return toast.error("请填写有效的统一包装费");
+    if (!confirmWrite("修改", "保存订单包装费和快递公司配置。")) return;
     setSaving(true);
     const ok = await saveStateTransform((latest) => ({
       ...latest,
       systemSettings: {
         ...latest.systemSettings,
+        orderPackagingFee: Number(packagingFee.toFixed(2)),
         shippingCarriers: normalized,
       },
     }));
     setSaving(false);
-    if (!ok) return toast.error("快递公司配置保存失败，请重试");
+    if (!ok) return toast.error("订单与物流配置保存失败，请重试");
     setDraft(copyCarriers(normalized));
-    toast.success("快递公司配置已保存");
+    toast.success("订单与物流配置已保存");
   };
 
   if (state.user?.role !== "admin") {
-    return <div className="p-6 text-sm text-muted-foreground">当前账户无权访问快递公司管理。</div>;
+    return <div className="p-6 text-sm text-muted-foreground">当前账户无权访问订单与物流设置。</div>;
   }
 
   return (
@@ -89,9 +95,9 @@ export function ShippingCarriersView() {
           <div>
             <div className="flex items-center gap-2">
               <Truck className="size-5 text-sky-700" />
-              <h1 className="text-xl font-semibold">快递公司管理</h1>
+              <h1 className="text-xl font-semibold">订单与物流设置</h1>
             </div>
-            <p className="mt-1 text-sm text-muted-foreground">共 {draft.length} 家，已启用 {enabledCount} 家</p>
+            <p className="mt-1 text-sm text-muted-foreground">统一订单包装费，并维护发货时可选择的快递公司</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={addCarrier} disabled={saving}>
@@ -102,6 +108,37 @@ export function ShippingCarriersView() {
               <Save className="size-4" />
               {saving ? "保存中..." : "保存配置"}
             </Button>
+          </div>
+        </div>
+
+        <section className="rounded-md border bg-card p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/40">
+              <Package className="size-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">统一包装费</div>
+              <p className="mt-1 text-sm text-muted-foreground">新建订单自动使用该金额，订单内不能单独修改；历史订单保留创建时的金额。</p>
+              <div className="mt-3 flex max-w-xs items-center gap-2">
+                <span className="text-sm text-muted-foreground">¥</span>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={Number.isFinite(packagingFee) ? packagingFee : ""}
+                  onChange={(event) => setPackagingFee(Number(event.target.value))}
+                  aria-label="统一包装费"
+                />
+                <span className="shrink-0 text-sm text-muted-foreground">元 / 单</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">快递公司</h2>
+            <p className="mt-1 text-sm text-muted-foreground">共 {draft.length} 家，已启用 {enabledCount} 家</p>
           </div>
         </div>
 

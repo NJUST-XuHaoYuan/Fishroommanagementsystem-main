@@ -3,6 +3,19 @@ import Papa from "papaparse";
 
 export const DEFAULT_COMMISSION_RATE = 1;
 export const DOUYIN_PLATFORM = "douyin";
+export const DEFAULT_ORDER_PACKAGING_FEE = 15;
+export const SHIPPING_FEE_MODES = new Set(["collect", "prepaid", "free"]);
+
+export function normalizeShippingFeeMode(value, source = "") {
+  if (["线下", "线下自提"].includes(String(source ?? "").trim())) return "collect";
+  return SHIPPING_FEE_MODES.has(String(value ?? "")) ? String(value) : "prepaid";
+}
+
+export function configuredOrderPackagingFee(settings = {}) {
+  const candidate = Number(settings?.orderPackagingFee ?? DEFAULT_ORDER_PACKAGING_FEE);
+  if (!Number.isFinite(candidate) || candidate < 0) return DEFAULT_ORDER_PACKAGING_FEE;
+  return roundMoney(candidate);
+}
 
 const REQUIRED_DOUYIN_HEADERS = [
   "结算时间",
@@ -96,13 +109,17 @@ export function calculateOrderFeeBreakdown(order = {}, adjustments = {}) {
     Number(adjustments?.billableShippingFee ?? orderShippingFee)
   ));
   const shippingFeeAdjustment = roundMoney(billableShippingFee - orderShippingFee);
+  const shippingFeeMode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
+  const shippingDiscount = shippingFeeMode === "free" ? billableShippingFee : 0;
+  const customerShippingFee = shippingFeeMode === "prepaid" ? billableShippingFee : 0;
+  const totalDiscount = roundMoney(discount + shippingDiscount);
   const packagingFee = roundMoney(Math.max(0, Number(order?.packagingFee ?? 0)));
   const damageRefundAdjustment = roundMoney(Math.max(
     0,
     Number(adjustments?.damageRefundAdjustment ?? 0)
   ));
   const calculatedReceivable = roundMoney(
-    goodsNetTotal + billableShippingFee + packagingFee - damageRefundAdjustment
+    goodsNetTotal + customerShippingFee + packagingFee - damageRefundAdjustment
   );
 
   return {
@@ -112,6 +129,10 @@ export function calculateOrderFeeBreakdown(order = {}, adjustments = {}) {
     orderShippingFee,
     billableShippingFee,
     shippingFeeAdjustment,
+    shippingFeeMode,
+    shippingDiscount,
+    customerShippingFee,
+    totalDiscount,
     packagingFee,
     damageRefundAdjustment,
     calculatedReceivable,

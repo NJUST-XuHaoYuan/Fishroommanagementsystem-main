@@ -21,6 +21,7 @@ import {
   platformOrderNoForOrder,
   platformOrderNoLabel,
 } from "../utils/orderSources";
+import { orderShippingFeeMode } from "../utils/orderFees";
 
 const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = {
   deposit: "定金",
@@ -35,6 +36,7 @@ function countsAsActiveShipment(shipment: Shipment): boolean {
 }
 
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
+  if (orderShippingFeeMode(order) === "collect") return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsActiveShipment(shipment)
   );
@@ -44,7 +46,8 @@ function getBillableShippingFee(order: Order, shipments: Shipment[] = []): numbe
 
 function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
   const items = order.items.reduce((sum, item) => sum + item.price, 0);
-  return items + getBillableShippingFee(order, shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0);
+  const customerShippingFee = orderShippingFeeMode(order) === "prepaid" ? getBillableShippingFee(order, shipments) : 0;
+  return items + customerShippingFee + (order.packagingFee ?? 0) - (order.discount ?? 0);
 }
 
 function calcAmountPaid(order: Order): number {

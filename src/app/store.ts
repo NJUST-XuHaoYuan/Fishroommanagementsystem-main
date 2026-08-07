@@ -464,6 +464,8 @@ export type Order = {
   plannedShipDate?: string;
   contactPerson?: string;
   items: OrderItem[];
+  /** 物流订单的运费承担方式；历史订单未设置时按寄付处理。 */
+  shippingFeeMode?: ShippingFeeMode;
   shippingFee: number;
   packagingFee: number;
   discount: number;
@@ -475,6 +477,8 @@ export type Order = {
   creditSaleApproval?: CreditSaleApproval;
   payments: PaymentRecord[];
 };
+
+export type ShippingFeeMode = "collect" | "prepaid" | "free";
 
 export type ShipmentStatus = "preparing" | "outbound" | "shipped" | "delivered" | "damaged";
 
@@ -593,9 +597,19 @@ export type SystemSettings = {
   paymentMethods?: PaymentMethodSetting[];
   /** 后台配置的发货承运方；发货时只能选择启用项。 */
   shippingCarriers?: ShippingCarrierSetting[];
+  /** 新建订单统一使用的包装费，订单创建后保留当时的金额快照。 */
+  orderPackagingFee?: number;
   /** 后台统一维护的水质参数名称、单位和显示精度。 */
   waterQualityParameters?: WaterQualityParameterSetting[];
 };
+
+export const DEFAULT_ORDER_PACKAGING_FEE = 15;
+
+export function configuredOrderPackagingFee(settings?: SystemSettings | null): number {
+  const value = Number(settings?.orderPackagingFee ?? DEFAULT_ORDER_PACKAGING_FEE);
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_ORDER_PACKAGING_FEE;
+  return Number(value.toFixed(2));
+}
 
 export function normalizeShippingCarrierSettings(settings?: SystemSettings | null): ShippingCarrierSetting[] {
   const source = Array.isArray(settings?.shippingCarriers)
@@ -812,6 +826,7 @@ export const initialState: Store = {
     financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
     shippingCarriers: DEFAULT_SHIPPING_CARRIER_SETTINGS.map((carrier) => ({ ...carrier })),
+    orderPackagingFee: DEFAULT_ORDER_PACKAGING_FEE,
     waterQualityParameters: DEFAULT_WATER_QUALITY_PARAMETERS.map((parameter) => ({ ...parameter })),
   },
   sites: [

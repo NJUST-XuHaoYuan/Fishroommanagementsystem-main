@@ -4,6 +4,7 @@ import {
   Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
+  configuredOrderPackagingFee, ShippingFeeMode,
 } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -61,6 +62,7 @@ import {
 } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
+import { orderShippingFeeMode, shippingFeeModeLabel, SHIPPING_FEE_MODE_OPTIONS } from "../utils/orderFees";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -79,7 +81,7 @@ const CUSTOMER_TYPE_OPTIONS: { value: Exclude<CustomerType, "">; label: string }
   { value: "B", label: "B端（批发）" },
   { value: "C", label: "C端（零售）" },
 ];
-const ORDER_FORM_SCHEMA_VERSION = 2;
+const ORDER_FORM_SCHEMA_VERSION = 3;
 const MOBILE_ORDER_PAGE_SIZE = 12;
 const NEW_ORDER_SOURCE_CHOICES = [
   {
@@ -289,6 +291,7 @@ function shipmentHasActuallyShipped(shipment: Shipment): boolean {
 }
 
 function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
+  if (orderShippingFeeMode(order) === "collect") return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment.orderId === order.id && countsAsBillableShipment(shipment)
   );
@@ -303,6 +306,7 @@ function hasActualShippingFee(order: Order, shipments: Shipment[] = []): boolean
 }
 
 function calcShippingAdjustment(order: Order, shipments: Shipment[] = []): number {
+  if (orderShippingFeeMode(order) !== "prepaid") return 0;
   if (!hasActualShippingFee(order, shipments)) return 0;
   return getBillableShippingFee(order, shipments) - (order.shippingFee ?? 0);
 }
@@ -325,7 +329,10 @@ function calcDamageRefundAdjustment(order: Order, shipments: Shipment[] = []): n
 
 function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
   const items = order.items.reduce((s, i) => s + i.price, 0);
-  return items + getBillableShippingFee(order, shipments) + (order.packagingFee ?? 0) - (order.discount ?? 0) - calcDamageRefundAdjustment(order, shipments);
+  const customerShippingFee = orderShippingFeeMode(order) === "prepaid"
+    ? getBillableShippingFee(order, shipments)
+    : 0;
+  return items + customerShippingFee + (order.packagingFee ?? 0) - (order.discount ?? 0) - calcDamageRefundAdjustment(order, shipments);
 }
 
 function calcAmountRefunded(order: Order): number {
@@ -1120,6 +1127,8 @@ function exportOrdersExcel(orders: Order[], state: Store) {
     const orderCustomer = customer(order.customerId);
     const orderShipments = shipmentsForOrder(order.id);
     const itemSubtotal = order.items.reduce((sum, item) => sum + item.price, 0);
+    const billableShippingFee = getBillableShippingFee(order, state.shipments);
+    const shippingDiscount = orderShippingFeeMode(order) === "free" ? billableShippingFee : 0;
     const amountDue = calcAmountDue(order, state.shipments);
     return [
       index + 1,
@@ -1138,9 +1147,11 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       order.items.length,
       orderShipments.length,
       money(itemSubtotal),
-      money(getBillableShippingFee(order, state.shipments)),
+      shippingFeeModeLabel(orderShippingFeeMode(order)),
+      money(billableShippingFee),
       money(order.packagingFee),
       money(order.discount),
+      money(shippingDiscount),
       money(amountDue),
       order.notes || "",
     ];
@@ -1218,7 +1229,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
         </style>
       </head>
       <body>
-        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "平台订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "计费运费", "包装费", "折扣/优惠", "订单应收", "备注"], orderRows)}
+        ${table("订单汇总", ["序号", "订单号", "状态", "来源", "平台订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "运费方式", "计费运费", "包装费", "订单优惠", "包邮折扣", "订单应收", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
         ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
       </body>
@@ -4006,7 +4017,7 @@ function ItemsWithShipments({
 
 type EditForm = {
   customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
-  shippingFee: number; packagingFee: number; discount: number;
+  shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
 
@@ -4197,7 +4208,7 @@ function OrderDetailDialog({
       paymentChannel,
       shippingAddress: order.shippingAddress ?? "",
       contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
-      shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
+      shippingFeeMode: orderShippingFeeMode(order), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
         stockItemId: i.stockItemId,
         productId: i.productId,
@@ -4258,8 +4269,8 @@ function OrderDetailDialog({
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         contactPerson: editForm.contactPerson.trim(),
         notes: editForm.notes,
+        shippingFeeMode: isPickupOrderSource(editForm.source) ? "collect" : editForm.shippingFeeMode,
         shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
-        packagingFee: editForm.packagingFee,
         discount: editForm.discount,
         items: editForm.items.map((item) => ({
           ...item,
@@ -4327,6 +4338,7 @@ function OrderDetailDialog({
         paymentChannel: selectedPaymentMethod?.channel ?? "",
         shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
         plannedShipDate: isPickupOrderSource(nextSource) ? "" : form.plannedShipDate,
+        shippingFeeMode: isPickupOrderSource(nextSource) ? "collect" : form.shippingFeeMode,
         shippingFee: isPickupOrderSource(nextSource) ? 0 : form.shippingFee,
       };
     });
@@ -4376,20 +4388,25 @@ function OrderDetailDialog({
     } : {}),
   }));
   const displayItemsTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + i.price, 0);
-  const displayShipping  = (editMode && editForm ? editForm.shippingFee  : order?.shippingFee)  ?? 0;
+  const displayShippingMode = editMode && editForm ? editForm.shippingFeeMode : orderShippingFeeMode(order);
+  const displayShipping  = displayShippingMode === "collect" ? 0 : (editMode && editForm ? editForm.shippingFee : order?.shippingFee) ?? 0;
   const displayPackaging = (editMode && editForm ? editForm.packagingFee : order?.packagingFee) ?? 0;
   const displayDiscount  = (editMode && editForm ? editForm.discount     : order?.discount)     ?? 0;
   const displayGoodsNetTotal = orderGoodsNetTotal(displayItemsTotal, displayDiscount);
   const displayMinimumReturnTotal = orderMinimumReturnTotal(displayItemsWithMinimumReturn);
   const displayCommissionTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + itemCommissionAmount(i), 0);
   const displayBelowMinimumReturn = displayItemsWithMinimumReturn.length > 0 && displayGoodsNetTotal <= displayMinimumReturnTotal;
-  const draftAmountDue = displayItemsTotal + displayShipping + displayPackaging - displayDiscount;
+  const draftCustomerShipping = displayShippingMode === "prepaid" ? displayShipping : 0;
+  const draftShippingDiscount = displayShippingMode === "free" ? displayShipping : 0;
+  const draftAmountDue = displayItemsTotal + draftCustomerShipping + displayPackaging - displayDiscount;
 
   const orderShipments = state.shipments.filter((s) => s.orderId === order?.id);
+  const shippingModeLocked = orderShipments.some(countsAsBillableShipment);
   const damageRefundOrder = !!order && isDamageRefundOrder(order, state.shipments);
   const amountDue = order ? calcAmountDue(order, state.shipments) : 0;
   const damageRefundAdjustment = order ? calcDamageRefundAdjustment(order, state.shipments) : 0;
   const billableShipping = order ? getBillableShippingFee(order, state.shipments) : displayShipping;
+  const shippingDiscount = order && orderShippingFeeMode(order) === "free" ? billableShipping : draftShippingDiscount;
   const hasActualShipping = order ? hasActualShippingFee(order, state.shipments) : false;
   const shippingAdjustment = order ? calcShippingAdjustment(order, state.shipments) : 0;
   const displayAmountDue = editMode && editForm ? draftAmountDue : amountDue;
@@ -4609,8 +4626,13 @@ function OrderDetailDialog({
     setShipDialogOpen(false);
     const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
     const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
+    const shippingFeeMode = orderShippingFeeMode(order);
     if (data.shipMethod === "pickup") {
       toast.success("已确认上门自取签收");
+    } else if (shippingFeeMode === "collect") {
+      toast.success("已出库，运费到付，不计订单应收");
+    } else if (shippingFeeMode === "free") {
+      toast.success(`已出库，实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
     } else if (Math.abs(feeDiff) > 0.005) {
       if (feeDiff > 0)
         toast.success(`已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
@@ -4997,18 +5019,41 @@ function OrderDetailDialog({
             {editMode && editForm ? (
               <div className="rounded-lg border p-4 bg-amber-50/50">
                 <div className="text-xs font-medium text-muted-foreground mb-3">费用设置</div>
-                <div className={`grid gap-3 mb-4 ${isPickupOrderSource(editForm.source) ? "grid-cols-2" : "grid-cols-3"}`}>
-                  {!isPickupOrderSource(editForm.source) && (
+                {!isPickupOrderSource(editForm.source) && (
+                  <div className="mb-3 grid grid-cols-3 overflow-hidden rounded-md border bg-background">
+                    {SHIPPING_FEE_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        disabled={shippingModeLocked}
+                        className={`border-r px-3 py-2 text-sm last:border-r-0 ${editForm.shippingFeeMode === option.value ? "bg-foreground font-semibold text-background" : "hover:bg-muted/50"}`}
+                        onClick={() => setEditForm((form) => form ? {
+                          ...form,
+                          shippingFeeMode: option.value,
+                          shippingFee: option.value === "collect" ? 0 : form.shippingFee,
+                        } : form)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {shippingModeLocked && !isPickupOrderSource(editForm.source) && (
+                  <p className="mb-3 text-xs text-muted-foreground">订单已经出库，运费方式不可再修改。</p>
+                )}
+                <div className="grid gap-3 mb-4 sm:grid-cols-3">
+                  {!isPickupOrderSource(editForm.source) && editForm.shippingFeeMode !== "collect" && (
                     <div className="grid gap-1.5">
-                      <Label className="text-xs">订单运费（¥）</Label>
+                      <Label className="text-xs">预计运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
                         onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
+                      <p className="text-xs text-muted-foreground">发货时必须补充实际运费</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
-                    <Input type="number" min={0} step={0.01} value={editForm.packagingFee || ""} placeholder="0" className="h-8 text-sm"
-                      onChange={(e) => setEditForm((f) => f ? { ...f, packagingFee: Number(e.target.value) } : f)} />
+                    <div className="flex h-8 items-center rounded-md border bg-muted/40 px-3 text-sm">¥{editForm.packagingFee.toFixed(2)}</div>
+                    <p className="text-xs text-muted-foreground">后台统一配置，不可修改</p>
                   </div>
                   <div className="grid gap-1.5">
                     <Label className="text-xs">折扣/优惠（¥）</Label>
@@ -5029,7 +5074,9 @@ function OrderDetailDialog({
                       商品折后金额必须高于最低回厂价合计。
                     </div>
                   )}
-                  {displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
+                  {!isPickupOrderSource(editForm.source) && <div className="flex justify-between"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(displayShippingMode)}</span></div>}
+                  {displayShippingMode !== "collect" && displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 预计运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
+                  {draftShippingDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 包邮折扣</span><span>¥{draftShippingDiscount.toFixed(2)}</span></div>}
                   {displayPackaging > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>}
                   <div className="flex justify-between font-semibold text-base border-t pt-2 mt-1">
                     <span>订单应收</span>
@@ -5046,7 +5093,10 @@ function OrderDetailDialog({
                 <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
                 {!isPickupOrderSource(order.source) && (
-                  <div className="flex justify-between"><span className="text-muted-foreground">订单运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(displayShippingMode)}</span></div>
+                )}
+                {!isPickupOrderSource(order.source) && displayShippingMode !== "collect" && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">订单预计运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
                 )}
                 {hasActualShipping && (
                   <div className="flex justify-between">
@@ -5059,6 +5109,9 @@ function OrderDetailDialog({
                     <span>{shippingAdjustment > 0 ? "运费补收" : "运费应退"}</span>
                     <span>{shippingAdjustment > 0 ? "+" : "−"}¥{Math.abs(shippingAdjustment).toFixed(2)}</span>
                   </div>
+                )}
+                {shippingDiscount > 0.005 && (
+                  <div className="flex justify-between text-orange-600"><span>包邮折扣</span><span>− ¥{shippingDiscount.toFixed(2)}</span></div>
                 )}
                 <div className="flex justify-between"><span className="text-muted-foreground">包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>
                 {damageRefundOrder && damageRefundAdjustment > 0.005 && (
@@ -5959,8 +6012,8 @@ function NewOrderDialog({
     minReturnPriceExempt?: boolean;
     minReturnPriceExemptReason?: "sick";
   }>>(new Map());
+  const [shippingFeeMode, setShippingFeeMode] = useState<ShippingFeeMode>("prepaid");
   const [shippingFee, setShippingFee] = useState(0);
-  const [packagingFee, setPackagingFee] = useState(0);
   const [discount, setDiscount] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
@@ -5970,7 +6023,7 @@ function NewOrderDialog({
     if (open) {
       setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
       setSelectedItems(new Map());
-      setShippingFee(0); setPackagingFee(0); setDiscount(0);
+      setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
       setCustomerDialogOpen(false);
       setSubmitAttempted(false);
@@ -5992,6 +6045,7 @@ function NewOrderDialog({
   const paymentMethod = configuredPaymentMethod(state.systemSettings, paymentMethodId);
   const paymentChannel = paymentMethod?.channel ?? "";
   const paymentAccount = paymentMethod?.account ?? "";
+  const packagingFee = configuredOrderPackagingFee(state.systemSettings);
 
   const chooseSource = (nextSource: string) => {
     setSource(nextSource);
@@ -6002,6 +6056,7 @@ function NewOrderDialog({
     setPaymentMethodId(nextPaymentMethods.length === 1 ? nextPaymentMethods[0].id : "");
     setShippingAddress("");
     setPlannedShipDate("");
+    setShippingFeeMode(isPickupOrderSource(nextSource) ? "collect" : "prepaid");
     setShippingFee(0);
   };
 
@@ -6046,7 +6101,9 @@ function NewOrderDialog({
   const goodsNetTotal = orderGoodsNetTotal(itemsTotal, discount);
   const belowMinimumReturn = selectedItems.size > 0 && goodsNetTotal <= minimumReturnTotal;
   const commissionTotal = Array.from(selectedItems.values()).reduce((s, item) => s + itemCommissionAmount(item), 0);
-  const amountDue = itemsTotal + shippingFee + packagingFee - discount;
+  const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
+  const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
+  const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
   const contactOptions = getContactPersonOptions(personnel, contactPerson);
 
   const createCustomer = async (customer: Customer) => {
@@ -6153,8 +6210,8 @@ function NewOrderDialog({
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
         contactPerson: contactPerson.trim(),
         items,
+        shippingFeeMode: pickupOrder ? "collect" : shippingFeeMode,
         shippingFee: pickupOrder ? 0 : shippingFee,
-        packagingFee,
         discount,
         notes,
         operator: state.user?.username ?? "system",
@@ -6528,16 +6585,41 @@ function NewOrderDialog({
             <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
               <div className="flex flex-col gap-3">
                 <div className="text-xs font-medium text-muted-foreground">费用设置</div>
-                <div className={`grid grid-cols-1 gap-3 ${pickupOrder ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
-                  {!pickupOrder && (
+                {!pickupOrder && (
+                  <div className="grid grid-cols-3 overflow-hidden rounded-md border">
+                    {SHIPPING_FEE_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`border-r px-2 py-2 text-sm last:border-r-0 ${shippingFeeMode === option.value ? "bg-foreground font-semibold text-background" : "hover:bg-muted/50"}`}
+                        title={option.hint}
+                        onClick={() => {
+                          setShippingFeeMode(option.value);
+                          if (option.value === "collect") setShippingFee(0);
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!pickupOrder && (
+                  <p className="text-xs text-muted-foreground">
+                    {SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
+                  </p>
+                )}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  {!pickupOrder && shippingFeeMode !== "collect" && (
                     <div className="grid gap-1.5">
-                      <Label className="text-xs">订单运费（¥）</Label>
+                      <Label className="text-xs">预计运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                      <p className="text-xs text-muted-foreground">现在未知可留空，发货时必须补充</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
                     <Label className="text-xs">包装费（¥）</Label>
-                    <Input type="number" min={0} step={0.01} value={packagingFee || ""} onChange={(e) => setPackagingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                    <div className="flex h-8 items-center rounded-md border bg-muted/40 px-3 text-sm">¥{packagingFee.toFixed(2)}</div>
+                    <p className="text-xs text-muted-foreground">后台统一配置，不可修改</p>
                   </div>
                   <div className="grid gap-1.5">
                     <Label className="text-xs">折扣/优惠（¥）</Label>
@@ -6560,7 +6642,9 @@ function NewOrderDialog({
                     商品折后金额必须高于最低回厂价合计。
                   </div>
                 )}
-                {shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
+                {!pickupOrder && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(shippingFeeMode)}</span></div>}
+                {!pickupOrder && shippingFeeMode !== "collect" && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 预计运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
+                {shippingDiscount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 包邮折扣</span><span>¥{shippingDiscount.toFixed(2)}</span></div>}
                 {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-semibold text-base border-t pt-2">
                   <span>订单应收</span>

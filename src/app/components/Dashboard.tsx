@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -930,9 +930,13 @@ export function Dashboard() {
   const [focusData, setFocusData] = useState<FocusData | null>(null);
   const [focusLoading, setFocusLoading] = useState(false);
   const sites = getSites(state);
-  const fishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
+  const configuredFishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
     ? state.systemSettings.fishListFooterText
     : DEFAULT_FISH_LIST_FOOTER_TEXT;
+  const fishListFooterText = configuredFishListFooterText.replace(
+    /包装费统一\s*\d+(?:\.\d+)?\s*元/,
+    `包装费统一 ${configuredOrderPackagingFee(state.systemSettings)} 元`
+  );
   useEffect(() => {
     setDashboardSiteId((current) => current === ALL_SITE_ID ? current : activeSiteId);
   }, [activeSiteId]);

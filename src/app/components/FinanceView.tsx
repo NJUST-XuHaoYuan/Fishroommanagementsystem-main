@@ -114,6 +114,10 @@ type FinanceOrderRow = {
   orderShippingFee: number;
   billableShippingFee: number;
   shippingFeeAdjustment: number;
+  shippingFeeMode: "collect" | "prepaid" | "free";
+  shippingDiscount: number;
+  customerShippingFee: number;
+  totalDiscount: number;
   packagingFee: number;
   damageRefundAdjustment: number;
   calculatedReceivable: number;
@@ -912,7 +916,7 @@ function OrderFinanceDialog({
                       <span className="font-medium tabular-nums">{money(order.itemSubtotal)}</span>
                     </div>
                     <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
-                      <span>订单折扣</span>
+                      <span>订单优惠</span>
                       <span className="tabular-nums text-rose-700">−{money(order.discount)}</span>
                     </div>
                     <div className="flex items-center justify-between gap-4 border-y bg-muted/30 px-3 py-2.5 text-sm">
@@ -920,16 +924,28 @@ function OrderFinanceDialog({
                       <span className="font-semibold tabular-nums">{money(order.goodsNetTotal)}</span>
                     </div>
                     <div className="flex items-center justify-between gap-4 px-3 py-2.5 text-sm">
-                      <span>订单运费</span>
-                      <span className="tabular-nums">+{money(order.orderShippingFee)}</span>
+                      <span>运费方式</span>
+                      <span>{order.shippingFeeMode === "collect" ? "到付" : order.shippingFeeMode === "free" ? "包邮" : "寄付"}</span>
                     </div>
-                    {Math.abs(order.shippingFeeAdjustment) > 0.005 && (
+                    {order.shippingFeeMode !== "collect" && (
+                      <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
+                        <span>{order.billableShippingFee !== order.orderShippingFee ? "实际运费" : "预计运费"}</span>
+                        <span className="tabular-nums">+{money(order.billableShippingFee)}</span>
+                      </div>
+                    )}
+                    {order.shippingFeeMode === "prepaid" && Math.abs(order.shippingFeeAdjustment) > 0.005 && (
                       <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">
                         <span>
                           实际运费调整
                           <span className="ml-2 text-xs text-muted-foreground">计费运费 {money(order.billableShippingFee)}</span>
                         </span>
                         <span className="tabular-nums">{adjustmentMoney(order.shippingFeeAdjustment)}</span>
+                      </div>
+                    )}
+                    {order.shippingDiscount > 0.005 && (
+                      <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm text-rose-700">
+                        <span>包邮折扣</span>
+                        <span className="tabular-nums">−{money(order.shippingDiscount)}</span>
                       </div>
                     )}
                     <div className="flex items-center justify-between gap-4 border-t px-3 py-2.5 text-sm">

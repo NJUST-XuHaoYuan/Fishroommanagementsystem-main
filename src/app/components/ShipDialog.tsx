@@ -10,6 +10,7 @@ import {
 } from "./ui/dialog";
 import { toast } from "sonner";
 import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
+import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
 
 function todayDateString(): string {
   const now = new Date();
@@ -66,6 +67,7 @@ export function ShipDialog({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const shipMethod: "express" | "pickup" = pickupOnly ? "pickup" : "express";
+  const shippingFeeMode = orderShippingFeeMode(order);
 
   const itemMetas: ItemMeta[] = unshippedItems.map((i) => ({
     stockItemId: i.stockItemId,
@@ -80,7 +82,7 @@ export function ShipDialog({
       setShipDate(todayStr);
       setCarrier("");
       setTrackingNo("");
-      setActualShippingFee(pickupOnly ? 0 : order.shippingFee ?? 0);
+      setActualShippingFee(pickupOnly || orderShippingFeeMode(order) === "collect" ? 0 : order.shippingFee ?? 0);
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
     }
@@ -108,6 +110,9 @@ export function ShipDialog({
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
     if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
+    if (shipMethod === "express" && shippingFeeMode !== "collect" && actualShippingFee <= 0) {
+      return toast.error(`${shippingFeeModeLabel(shippingFeeMode)}订单发货时必须填写实际运费`);
+    }
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
     setSaving(true);
     const ok = await onShip({ shipDate, shipMethod, carrier, trackingNo, actualShippingFee, notes, selectedItemIds: [...selectedIds] });
@@ -185,9 +190,9 @@ export function ShipDialog({
                 上门自取
               </div>
             ) : (
-              <div className="flex items-center gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2.5 text-sm font-medium text-sky-800">
-                <Truck className="size-4" />
-                物流发货
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2.5 text-sm font-medium text-sky-800">
+                <span className="flex items-center gap-2"><Truck className="size-4" />物流发货</span>
+                <span>{shippingFeeModeLabel(shippingFeeMode)}</span>
               </div>
             )}
           </div>
@@ -234,9 +239,9 @@ export function ShipDialog({
                 }}
               />
             </div>
-            {shipMethod === "express" && (
+            {shipMethod === "express" && shippingFeeMode !== "collect" && (
               <div className="grid gap-1.5">
-                <Label className="text-sm">实际运费（¥）</Label>
+                <Label className="text-sm">实际运费（¥）<span className="text-red-500 ml-0.5">*</span></Label>
                 <Input
                   type="number" min={0} step={0.01}
                   value={actualShippingFee || ""}
@@ -248,7 +253,19 @@ export function ShipDialog({
           </div>
 
           {/* Fee diff hint */}
-          {shipMethod === "express" && Math.abs(feeDiff) > 0.005 && (
+          {shipMethod === "express" && shippingFeeMode === "collect" && (
+            <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
+              <Info className="size-4 mt-0.5 shrink-0" />
+              到付运费由客户向承运方支付，不填写金额，也不计入订单应收。
+            </div>
+          )}
+          {shipMethod === "express" && shippingFeeMode === "free" && (
+            <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
+              <Info className="size-4 mt-0.5 shrink-0" />
+              实际运费会计入包邮折扣，订单应收不会增加。
+            </div>
+          )}
+          {shipMethod === "express" && shippingFeeMode === "prepaid" && Math.abs(feeDiff) > 0.005 && (
             <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-sm ${
               feeDiff > 0
                 ? "bg-amber-50 text-amber-800 border border-amber-200"

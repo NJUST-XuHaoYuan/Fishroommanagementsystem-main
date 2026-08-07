@@ -3,9 +3,16 @@ import assert from "node:assert/strict";
 import {
   calculateOrderCommission,
   calculateOrderFeeBreakdown,
+  configuredOrderPackagingFee,
   normalizeExternalOrderNo,
   parseDouyinSettlementCsv,
 } from "./finance-utils.mjs";
+
+test("uses a 15 yuan default order packaging fee and accepts configured values", () => {
+  assert.equal(configuredOrderPackagingFee({}), 15);
+  assert.equal(configuredOrderPackagingFee({ orderPackagingFee: 18.567 }), 18.57);
+  assert.equal(configuredOrderPackagingFee({ orderPackagingFee: -1 }), 15);
+});
 
 const CSV_HEADERS = [
   "结算时间",
@@ -120,8 +127,43 @@ test("calculates a complete order fee breakdown with shipping and damage adjustm
     orderShippingFee: 25,
     billableShippingFee: 35,
     shippingFeeAdjustment: 10,
+    shippingFeeMode: "prepaid",
+    shippingDiscount: 0,
+    customerShippingFee: 35,
+    totalDiscount: 30,
     packagingFee: 15,
     damageRefundAdjustment: 80,
     calculatedReceivable: 420,
   });
+});
+
+test("treats free shipping as a separate discount without changing goods net total", () => {
+  const result = calculateOrderFeeBreakdown({
+    source: "私域线上",
+    shippingFeeMode: "free",
+    items: [{ price: 300 }],
+    discount: 20,
+    shippingFee: 25,
+    packagingFee: 15,
+  }, { billableShippingFee: 35 });
+
+  assert.equal(result.goodsNetTotal, 280);
+  assert.equal(result.shippingDiscount, 35);
+  assert.equal(result.totalDiscount, 55);
+  assert.equal(result.customerShippingFee, 0);
+  assert.equal(result.calculatedReceivable, 295);
+});
+
+test("does not include collect-on-delivery shipping in order receivable", () => {
+  const result = calculateOrderFeeBreakdown({
+    source: "私域线上",
+    shippingFeeMode: "collect",
+    items: [{ price: 300 }],
+    shippingFee: 40,
+    packagingFee: 15,
+  });
+
+  assert.equal(result.shippingFeeMode, "collect");
+  assert.equal(result.customerShippingFee, 0);
+  assert.equal(result.calculatedReceivable, 315);
 });
