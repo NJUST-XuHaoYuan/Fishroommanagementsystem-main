@@ -88,8 +88,8 @@ type DailyFinanceMetricKey = "received" | "unshippedRefund" | "shippedDamage" | 
 
 const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
   { key: "received", label: "实际收款", color: "#10b981" },
-  { key: "unshippedRefund", label: "未发货退款", color: "#f43f5e" },
-  { key: "shippedDamage", label: "已发货报损", color: "#f59e0b" },
+  { key: "unshippedRefund", label: "退单金额", color: "#f43f5e" },
+  { key: "shippedDamage", label: "报损金额", color: "#f59e0b" },
   { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
 ];
 
@@ -1861,8 +1861,8 @@ export function Dashboard() {
 
   const cards = [
     { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote, color: "bg-emerald-500" },
-    { label: "今日未发货退款", value: formatMoney(todayUnshippedRefund), icon: RotateCcw, color: "bg-rose-500" },
-    { label: "今日已发货报损", value: formatMoney(todayShippedDamage), icon: CircleAlert, color: "bg-amber-500" },
+    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw, color: "bg-rose-500" },
+    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert, color: "bg-amber-500" },
     { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck, color: "bg-indigo-500" },
     { label: "在缸鱼类", value: inFishStock, icon: Fish, color: "bg-sky-500" },
     { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch, color: "bg-emerald-500" },
@@ -2155,7 +2155,7 @@ export function Dashboard() {
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">销售情况</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、未发货退款、已发货报损与订单金额</p>
+              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退单金额、报损金额与订单金额</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5 text-muted-foreground">
