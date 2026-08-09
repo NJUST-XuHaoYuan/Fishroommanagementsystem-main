@@ -21,7 +21,7 @@ import {
   platformOrderNoForOrder,
   platformOrderNoLabel,
 } from "../utils/orderSources";
-import { orderShippingFeeMode } from "../utils/orderFees";
+import { getBillableShippingFee, orderShippingFeeMode } from "../utils/orderFees";
 
 const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = {
   deposit: "定金",
@@ -30,19 +30,6 @@ const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = {
   refund: "退款",
   other: "其他",
 };
-
-function countsAsActiveShipment(shipment: Shipment): boolean {
-  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
-}
-
-function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
-  if (orderShippingFeeMode(order) === "collect") return 0;
-  const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipment(shipment)
-  );
-  if (activeShipments.length === 0) return order.shippingFee ?? 0;
-  return activeShipments.reduce((sum, shipment) => sum + (shipment.actualShippingFee ?? 0), 0);
-}
 
 function calcAmountDue(order: Order, shipments: Shipment[] = []): number {
   const items = order.items.reduce((sum, item) => sum + item.price, 0);

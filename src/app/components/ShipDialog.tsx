@@ -82,7 +82,9 @@ export function ShipDialog({
       setShipDate(todayStr);
       setCarrier("");
       setTrackingNo("");
-      setActualShippingFee(pickupOnly || orderShippingFeeMode(order) === "collect" ? 0 : order.shippingFee ?? 0);
+      setActualShippingFee(
+        pickupOnly || orderShippingFeeMode(order) !== "free" ? 0 : order.shippingFee ?? 0
+      );
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
     }
@@ -110,8 +112,8 @@ export function ShipDialog({
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
     if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
-    if (shipMethod === "express" && shippingFeeMode !== "collect" && actualShippingFee <= 0) {
-      return toast.error(`${shippingFeeModeLabel(shippingFeeMode)}订单发货时必须填写实际运费`);
+    if (shipMethod === "express" && shippingFeeMode === "free" && actualShippingFee <= 0) {
+      return toast.error("包邮订单发货时必须填写实际运费");
     }
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
     setSaving(true);
@@ -241,11 +243,14 @@ export function ShipDialog({
             </div>
             {shipMethod === "express" && shippingFeeMode !== "collect" && (
               <div className="grid gap-1.5">
-                <Label className="text-sm">实际运费（¥）<span className="text-red-500 ml-0.5">*</span></Label>
+                <Label className="text-sm">
+                  实际运费（¥）
+                  {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
+                </Label>
                 <Input
                   type="number" min={0} step={0.01}
                   value={actualShippingFee || ""}
-                  placeholder="0"
+                  placeholder={shippingFeeMode === "prepaid" ? "可发货后补录" : "0"}
                   onChange={(e) => setActualShippingFee(Number(e.target.value))}
                 />
               </div>
@@ -265,7 +270,13 @@ export function ShipDialog({
               实际运费会计入包邮折扣，订单应收不会增加。
             </div>
           )}
-          {shipMethod === "express" && shippingFeeMode === "prepaid" && Math.abs(feeDiff) > 0.005 && (
+          {shipMethod === "express" && shippingFeeMode === "prepaid" && actualShippingFee <= 0 && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              <Info className="size-4 mt-0.5 shrink-0" />
+              寄付可以先出库和发货，实际运费必须在确认收货和完成订单前补录。
+            </div>
+          )}
+          {shipMethod === "express" && shippingFeeMode === "prepaid" && actualShippingFee > 0 && Math.abs(feeDiff) > 0.005 && (
             <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-sm ${
               feeDiff > 0
                 ? "bg-amber-50 text-amber-800 border border-amber-200"

@@ -48,7 +48,12 @@ import {
   orderHasActuallyShipped,
   shipmentHasActuallyShipped,
 } from "./order-refund-rules.mjs";
-import { requiredShipMethodForOrderSource } from "./shipment-rules.mjs";
+import {
+  actualShippingFeeRequiredAtOutbound,
+  requiredShipMethodForOrderSource,
+  shipmentHasPendingActualShippingFee,
+  shipmentsHavePendingActualShippingFee,
+} from "./shipment-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import {
   ensureApprovalNotifications,
@@ -3336,11 +3341,15 @@ function nextOrderNo(state = {}) {
 }
 
 function getBillableShippingFeeForOrder(order = {}, shipments = []) {
-  if (normalizeShippingFeeMode(order?.shippingFeeMode, order?.source) === "collect") return 0;
+  const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
+  if (mode === "collect") return 0;
   const activeShipments = shipments.filter((shipment) =>
     shipment?.orderId === order.id && shipmentBlocksInventory(shipment)
   );
   if (activeShipments.length === 0) return Number(order.shippingFee ?? 0);
+  if (shipmentsHavePendingActualShippingFee(mode, activeShipments)) {
+    return Number(order.shippingFee ?? 0);
+  }
   return activeShipments.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee ?? 0), 0);
 }
 
@@ -4346,6 +4355,16 @@ function paymentChangeAction(currentPayments = [], nextPayments = []) {
   return null;
 }
 
+function validateOrderShippingFeesRecorded(order = {}, shipments = []) {
+  const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
+  const relatedShipments = (Array.isArray(shipments) ? shipments : []).filter((shipment) =>
+    String(shipment?.orderId ?? "") === String(order?.id ?? "") && countsAsCompletionShipment(shipment)
+  );
+  if (shipmentsHavePendingActualShippingFee(mode, relatedShipments)) {
+    throw new Error(`${mode === "free" ? "包邮" : "寄付"}订单尚有发货单未填写实际运费，不能完成订单`);
+  }
+}
+
 function validateOrderCanComplete(order = {}, shipments = []) {
   const activeShipments = shipments.filter((shipment) =>
     String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
@@ -4361,6 +4380,7 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   if (!allShipmentsResolved) {
     throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
   }
+  validateOrderShippingFeesRecorded(order, shipments);
   const paymentGate = shipmentPaymentGateForOrder(order, shipments);
   if (!paymentGate.canShip) {
     throw new Error(`订单尚有 ¥${paymentGate.outstandingAmount.toFixed(2)} 未核销，不能标记完成`);
@@ -4416,6 +4436,11 @@ function applyAutomaticOrderTransitions(state = {}) {
     if (status === "shipped") {
       const shippedDate = datePart(shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt);
       if (isDateOnOrBefore(shippedDate, shippedThreshold)) {
+        const order = orders.find((item) => String(item?.id ?? "") === String(shipment?.orderId ?? ""));
+        const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
+        if (order && shipmentHasPendingActualShippingFee(mode, shipment)) {
+          return shipment;
+        }
         autoDeliveredCount += 1;
         return {
           ...shipment,
@@ -4733,6 +4758,16 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
       if (resolvedCarrier !== nextCarrier) throw new Error("快递公司必须从后台启用项中选择");
     }
     validateShipmentPatchTransition(currentShipment, nextShipment);
+    const relatedShippingFeeMode = relatedOrder
+      ? normalizeShippingFeeMode(relatedOrder.shippingFeeMode, relatedOrder.source)
+      : "collect";
+    if (
+      String(nextShipment.status ?? "") === "delivered" &&
+      relatedOrder &&
+      shipmentHasPendingActualShippingFee(relatedShippingFeeMode, nextShipment)
+    ) {
+      throw new Error(`${relatedShippingFeeMode === "free" ? "包邮" : "寄付"}订单确认签收前必须补录实际运费`);
+    }
     if (
       String(currentShipment.status ?? "") === "outbound" &&
       ["shipped", "delivered"].includes(String(nextShipment.status ?? "")) &&
@@ -8096,6 +8131,7 @@ async function handleApi(req, res, url) {
         return;
       }
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能标记完成");
+      validateOrderShippingFeesRecorded(currentOrder, state.shipments);
       const paymentGate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
       if (!paymentGate.canShip) {
         const blocked = await commitShipmentPaymentBlock(client, req, state, currentOrder, paymentGate);
@@ -8243,8 +8279,8 @@ async function handleApi(req, res, url) {
       const actualShippingFee = isPickup || shippingFeeMode === "collect"
         ? 0
         : normalizeMoney(body.actualShippingFee, "Actual shipping fee");
-      if (!isPickup && shippingFeeMode !== "collect" && actualShippingFee <= 0) {
-        throw new Error(`${shippingFeeMode === "free" ? "包邮" : "寄付"}订单发货时必须填写实际运费`);
+      if (!isPickup && actualShippingFeeRequiredAtOutbound(shippingFeeMode) && actualShippingFee <= 0) {
+        throw new Error("包邮订单发货时必须填写实际运费");
       }
       const createdAt = nowDatetimeInChina();
       const shipment = {
@@ -8440,6 +8476,10 @@ async function handleApi(req, res, url) {
         await client.query("ROLLBACK");
         sendJson(req, res, 200, { ok: true, shipment, orders, shipments });
         return;
+      }
+      const shippingFeeMode = normalizeShippingFeeMode(order.shippingFeeMode, order.source);
+      if (shipmentHasPendingActualShippingFee(shippingFeeMode, shipment)) {
+        throw new Error(`${shippingFeeMode === "free" ? "包邮" : "寄付"}订单确认签收前必须补录实际运费`);
       }
       const nextShipment = {
         ...shipment,
@@ -8753,8 +8793,8 @@ async function handleApi(req, res, url) {
 	          const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
 	          if (mode === "collect") return { ...shipment, actualShippingFee: 0 };
 	          const actualShippingFee = normalizeMoney(shipment?.actualShippingFee, "Actual shipping fee");
-	          if (shipment?.status !== "preparing" && actualShippingFee <= 0) {
-	            throw new Error(`${mode === "free" ? "包邮" : "寄付"}订单必须填写实际运费`);
+	          if (shipment?.status !== "preparing" && actualShippingFeeRequiredAtOutbound(mode) && actualShippingFee <= 0) {
+	            throw new Error("包邮订单必须填写实际运费");
 	          }
 	          return { ...shipment, actualShippingFee };
 	        });

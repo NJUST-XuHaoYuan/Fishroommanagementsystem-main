@@ -62,7 +62,16 @@ import {
 } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
-import { orderShippingFeeMode, shippingFeeModeLabel, SHIPPING_FEE_MODE_OPTIONS } from "../utils/orderFees";
+import {
+  getBillableShippingFee,
+  hasActualShippingFee,
+  orderHasPendingActualShippingFee,
+  orderShippingFeeMode,
+  shipmentHasPendingActualShippingFee,
+  shippingFeeAdjustmentForOrder,
+  shippingFeeModeLabel,
+  SHIPPING_FEE_MODE_OPTIONS,
+} from "../utils/orderFees";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -288,27 +297,6 @@ function shipmentHasActuallyShipped(shipment: Shipment): boolean {
   if (shipment.shipMethod === "pickup" && shipment.status !== "preparing") return true;
   return ["shipped", "delivered", "damaged"].includes(shipment.status) ||
     Boolean(String(shipment.shippedAt ?? "").trim());
-}
-
-function getBillableShippingFee(order: Order, shipments: Shipment[] = []): number {
-  if (orderShippingFeeMode(order) === "collect") return 0;
-  const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsBillableShipment(shipment)
-  );
-  if (activeShipments.length === 0) return order.shippingFee ?? 0;
-  return activeShipments.reduce((sum, shipment) => sum + (shipment.actualShippingFee ?? 0), 0);
-}
-
-function hasActualShippingFee(order: Order, shipments: Shipment[] = []): boolean {
-  return shipments.some((shipment) =>
-    shipment.orderId === order.id && countsAsBillableShipment(shipment)
-  );
-}
-
-function calcShippingAdjustment(order: Order, shipments: Shipment[] = []): number {
-  if (orderShippingFeeMode(order) !== "prepaid") return 0;
-  if (!hasActualShippingFee(order, shipments)) return 0;
-  return getBillableShippingFee(order, shipments) - (order.shippingFee ?? 0);
 }
 
 function calcDamageRefundAdjustment(order: Order, shipments: Shipment[] = []): number {
@@ -2086,10 +2074,11 @@ function ReturnItemDialog({
 // ─── Shipment Status Actions ─────────────────────────────────────────────────
 
 function ShipmentActionDialog({
-  shipment, orderNo, open, saving = false, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
+  shipment, order, open, saving = false, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
+  onSaveActualShippingFee,
 }: {
   shipment: Shipment | null;
-  orderNo?: string;
+  order: Order | null;
   open: boolean;
   saving?: boolean;
   onOpenChange: (o: boolean) => void;
@@ -2097,15 +2086,35 @@ function ShipmentActionDialog({
   onDamage: (shipment: Shipment) => void;
   onCancelShipment: (shipment: Shipment) => void;
   onConfirmShipment: (shipment: Shipment, packingProof: string[]) => void;
+  onSaveActualShippingFee: (shipment: Shipment, actualShippingFee: number) => boolean | Promise<boolean>;
 }) {
   const [packingProof, setPackingProof] = useState<string[]>([]);
+  const [actualShippingFee, setActualShippingFee] = useState(0);
+  const [savingShippingFee, setSavingShippingFee] = useState(false);
 
   useEffect(() => {
-    if (open && shipment) setPackingProof([...(shipment.packingProof ?? [])]);
+    if (open && shipment) {
+      setPackingProof([...(shipment.packingProof ?? [])]);
+      setActualShippingFee(Number(shipment.actualShippingFee ?? 0));
+      setSavingShippingFee(false);
+    }
   }, [open, shipment?.id]);
 
   if (!shipment) return null;
   const method = shipment.shipMethod === "pickup" ? "上门自取" : (shipment.carrier || "快递");
+  const shippingFeeMode = orderShippingFeeMode(order);
+  const shippingFeePending = !!order && shipmentHasPendingActualShippingFee(order, shipment);
+
+  const saveActualShippingFee = async () => {
+    if (actualShippingFee <= 0) {
+      toast.error("请填写大于 0 的实际运费");
+      return;
+    }
+    setSavingShippingFee(true);
+    const ok = await onSaveActualShippingFee(shipment, actualShippingFee);
+    setSavingShippingFee(false);
+    return ok;
+  };
 
   if (shipment.status === "outbound") {
     const confirmShipment = () => {
@@ -2124,7 +2133,7 @@ function ShipmentActionDialog({
           </DialogHeader>
           <div className="grid gap-4">
             <div className="rounded-lg border bg-muted/30 p-3 text-sm flex flex-col gap-1">
-              <div><span className="text-muted-foreground">订单：</span>{orderNo ?? "—"}</div>
+              <div><span className="text-muted-foreground">订单：</span>{order?.orderNo ?? "—"}</div>
               <div><span className="text-muted-foreground">方式：</span>{method}</div>
               <div><span className="text-muted-foreground">出库操作时间：</span>{formatShipmentCreatedAt(shipment.createdAt)}</div>
               <div><span className="text-muted-foreground">出库日期：</span>{shipment.outboundDate || shipment.shipDate}</div>
@@ -2171,7 +2180,7 @@ function ShipmentActionDialog({
           <DialogTitle>处理运输状态</DialogTitle>
         </DialogHeader>
         <div className="rounded-lg border bg-muted/30 p-3 text-sm flex flex-col gap-1">
-          <div><span className="text-muted-foreground">订单：</span>{orderNo ?? "—"}</div>
+          <div><span className="text-muted-foreground">订单：</span>{order?.orderNo ?? "—"}</div>
           <div><span className="text-muted-foreground">方式：</span>{method}</div>
           {shipment.trackingNo && (
             <div><span className="text-muted-foreground">运单号：</span>{shipment.trackingNo}</div>
@@ -2180,11 +2189,36 @@ function ShipmentActionDialog({
           <div><span className="text-muted-foreground">发货操作时间：</span>{formatShipmentCreatedAt(shipment.shippedAt || shipment.createdAt)}</div>
           <div><span className="text-muted-foreground">发货日期：</span>{shipment.shipDate}</div>
         </div>
+        {shipment.shipMethod !== "pickup" && shippingFeeMode === "prepaid" && (
+          <div className={`grid gap-2 rounded-lg border p-3 ${shippingFeePending ? "border-amber-200 bg-amber-50/70" : "bg-muted/20"}`}>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="shipment-actual-shipping-fee">寄付实际运费（¥）</Label>
+              {shippingFeePending && <Badge variant="outline" className="border-amber-300 bg-white text-amber-700">待补运费</Badge>}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                id="shipment-actual-shipping-fee"
+                type="number"
+                min={0}
+                step={0.01}
+                value={actualShippingFee || ""}
+                placeholder="发货后补录"
+                onChange={(event) => setActualShippingFee(Number(event.target.value))}
+              />
+              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={saving || savingShippingFee}>
+                {savingShippingFee ? "保存中..." : shippingFeePending ? "补录运费" : "更新运费"}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">寄付可以先发货，实际运费必须在确认收货和完成订单前补录。</p>
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-3">
           <Button
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
+            disabled={saving || savingShippingFee || shippingFeePending}
+            title={shippingFeePending ? "请先补录实际运费" : undefined}
           >
             <CheckCircle className="size-4" />
             确认收货
@@ -3919,6 +3953,9 @@ function ItemsWithShipments({
                   ? () => onShipmentAction?.(sh)
                   : undefined}
               />
+              {shipmentHasPendingActualShippingFee(order, sh) && (
+                <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">待补运费</Badge>
+              )}
             </div>
             {damageReplacements.length > 0 && (
               <div className="border-t border-sky-100 bg-sky-50/40 px-4 py-3">
@@ -4033,7 +4070,7 @@ type DamageResult =
 function OrderDetailDialog({
   order, open, onOpenChange,
 }: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, setState } = useStore();
+  const { state, setState, saveStateTransform } = useStore();
   const permission = usePermission("orders");
   const today = todayDateString();
 
@@ -4408,10 +4445,14 @@ function OrderDetailDialog({
   const billableShipping = order ? getBillableShippingFee(order, state.shipments) : displayShipping;
   const shippingDiscount = order && orderShippingFeeMode(order) === "free" ? billableShipping : draftShippingDiscount;
   const hasActualShipping = order ? hasActualShippingFee(order, state.shipments) : false;
-  const shippingAdjustment = order ? calcShippingAdjustment(order, state.shipments) : 0;
+  const shippingAdjustment = order ? shippingFeeAdjustmentForOrder(order, state.shipments) : 0;
   const displayAmountDue = editMode && editForm ? draftAmountDue : amountDue;
 
   const activeOrderShipments = orderShipments.filter(countsAsFulfillmentShipment);
+  const pendingActualShippingFee = order ? orderHasPendingActualShippingFee(order, activeOrderShipments) : false;
+  const pendingActualShippingFeeCount = order
+    ? activeOrderShipments.filter((shipment) => shipmentHasPendingActualShippingFee(order, shipment)).length
+    : 0;
   const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
   const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
@@ -4429,7 +4470,8 @@ function OrderDetailDialog({
     order.status !== "cancelled" &&
     order.status !== "completed" &&
     allItemsShipped &&
-    allShipmentsResolved;
+    allShipmentsResolved &&
+    !pendingActualShippingFee;
   const canShip = !!order && shippableUnshippedItems.length > 0
     && order.status !== "cancelled" && order.status !== "completed";
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
@@ -4506,6 +4548,8 @@ function OrderDetailDialog({
         : "尚有商品未发货，请先完成所有发货再确认完成");
     if (!allShipmentsResolved)
       return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
+    if (pendingActualShippingFee)
+      return toast.error(`尚有 ${pendingActualShippingFeeCount} 笔寄付实际运费未补录，不能完成订单`);
     if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
     try {
       const result = await postOrderApi("orders/complete", { orderId: order.id });
@@ -4520,6 +4564,10 @@ function OrderDetailDialog({
   const markShipmentDelivered = async (shipment: Shipment) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
+    if (shipmentHasPendingActualShippingFee(order, shipment)) {
+      toast.error("寄付订单确认收货前必须先补录实际运费");
+      return;
+    }
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     try {
       const result = await postOrderApi("shipments/deliver", { shipmentId: shipment.id });
@@ -4529,6 +4577,30 @@ function OrderDetailDialog({
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
     }
+  };
+
+  const saveShipmentActualShippingFee = async (shipment: Shipment, actualShippingFee: number) => {
+    if (!order) return false;
+    if (!permission.requirePermission("update")) return false;
+    if (!Number.isFinite(actualShippingFee) || actualShippingFee <= 0) {
+      toast.error("请填写大于 0 的实际运费");
+      return false;
+    }
+    if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${actualShippingFee.toFixed(2)}。`)) return false;
+    const normalizedFee = Number(actualShippingFee.toFixed(2));
+    const ok = await saveStateTransform((latest) => ({
+      ...latest,
+      shipments: latest.shipments.map((item) =>
+        item.id === shipment.id ? { ...item, actualShippingFee: normalizedFee } : item
+      ),
+    }));
+    if (!ok) {
+      toast.error("运费保存失败，请重试");
+      return false;
+    }
+    setShipmentAction({ ...shipment, actualShippingFee: normalizedFee });
+    toast.success("实际运费已补录");
+    return true;
   };
 
   const confirmOutboundShipment = async (shipment: Shipment, packingProof: string[]) => {
@@ -4631,6 +4703,8 @@ function OrderDetailDialog({
       toast.success("已确认上门自取签收");
     } else if (shippingFeeMode === "collect") {
       toast.success("已出库，运费到付，不计订单应收");
+    } else if (shippingFeeMode === "prepaid" && actualShippingFee <= 0) {
+      toast.success("已出库，实际运费待补录；确认收货前必须填写");
     } else if (shippingFeeMode === "free") {
       toast.success(`已出库，实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
     } else if (Math.abs(feeDiff) > 0.005) {
@@ -5047,7 +5121,7 @@ function OrderDetailDialog({
                       <Label className="text-xs">预计运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
                         onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
-                      <p className="text-xs text-muted-foreground">发货时必须补充实际运费</p>
+                      <p className="text-xs text-muted-foreground">寄付可发货后补录；确认收货和完成订单前必须填写</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
@@ -5102,6 +5176,12 @@ function OrderDetailDialog({
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">实际运费</span>
                     <span>¥{billableShipping.toFixed(2)}</span>
+                  </div>
+                )}
+                {pendingActualShippingFee && (
+                  <div className="flex justify-between text-amber-700">
+                    <span>实际运费</span>
+                    <span>{pendingActualShippingFeeCount} 笔待补录</span>
                   </div>
                 )}
                 {Math.abs(shippingAdjustment) > 0.005 && (
@@ -5177,6 +5257,9 @@ function OrderDetailDialog({
                     {allItemsShipped && !allShipmentsResolved && (
                       <p className="text-xs text-purple-500">尚有发货未签收或报损未完成处理</p>
                     )}
+                    {allItemsShipped && allShipmentsResolved && pendingActualShippingFee && (
+                      <p className="text-xs text-amber-600">尚有 {pendingActualShippingFeeCount} 笔寄付实际运费未补录</p>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
@@ -5230,7 +5313,7 @@ function OrderDetailDialog({
 
       <ShipmentActionDialog
         shipment={shipmentAction}
-        orderNo={order.orderNo}
+        order={order}
         open={!!shipmentAction}
         saving={shipmentConfirmSaving}
         onOpenChange={(o) => { if (!o) setShipmentAction(null); }}
@@ -5241,6 +5324,7 @@ function OrderDetailDialog({
         }}
         onCancelShipment={cancelShipment}
         onConfirmShipment={confirmOutboundShipment}
+        onSaveActualShippingFee={saveShipmentActualShippingFee}
       />
 
       <ReportDamageDialog

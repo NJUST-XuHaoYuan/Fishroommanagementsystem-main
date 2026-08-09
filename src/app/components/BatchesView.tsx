@@ -17,10 +17,7 @@ import { readAndCompressImage } from "../utils/imageUtils";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
-
-function countsAsActiveShipment(shipment: Shipment): boolean {
-  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
-}
+import { getBillableShippingFee } from "../utils/orderFees";
 
 function calcBatchPaymentAmount(order: Order): number {
   return (Array.isArray(order.payments) ? order.payments : []).reduce(
@@ -31,14 +28,6 @@ function calcBatchPaymentAmount(order: Order): number {
       : sum + Number(payment.amount || 0),
     0
   );
-}
-
-function getBatchBillableShippingFee(order: Order, shipments: Shipment[]): number {
-  const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipment(shipment)
-  );
-  if (activeShipments.length === 0) return Number(order.shippingFee || 0);
-  return activeShipments.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee || 0), 0);
 }
 
 function collectDamageRefundShareByStockId(shipments: Shipment[]): Map<string, number> {
@@ -141,7 +130,7 @@ export function BatchesView() {
       if (productDue <= 0) continue;
 
       const orderDue = productDue +
-        getBatchBillableShippingFee(order, shipmentList) +
+        getBillableShippingFee(order, shipmentList) +
         Number(order.packagingFee ?? 0);
       const netPaid = Math.max(0, calcBatchPaymentAmount(order));
       const paidProductPool = orderDue > 0

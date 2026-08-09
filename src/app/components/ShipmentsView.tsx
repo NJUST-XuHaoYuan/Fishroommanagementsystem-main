@@ -22,7 +22,11 @@ import React from "react";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
-import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
+import {
+  orderShippingFeeMode,
+  shipmentHasPendingActualShippingFee,
+  shippingFeeModeLabel,
+} from "../utils/orderFees";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -162,8 +166,8 @@ function EditShipmentDialog({
 
   const handleSave = () => {
     if (isExpress && !carrier.trim()) return toast.error("请选择快递公司");
-    if (isExpress && shippingFeeMode !== "collect" && actualFee <= 0) {
-      return toast.error(`${shippingFeeModeLabel(shippingFeeMode)}订单必须填写实际运费`);
+    if (isExpress && shippingFeeMode === "free" && actualFee <= 0) {
+      return toast.error("包邮订单必须填写实际运费");
     }
     if (!shipDate) return toast.error("请填写发货日期");
     if (minShipDate && shipDate < minShipDate) return toast.error("发货日期不能早于下单日期");
@@ -213,11 +217,14 @@ function EditShipmentDialog({
             </div>
             {(!isExpress || shippingFeeMode !== "collect") && (
               <div className="grid gap-1.5">
-                <Label className="text-sm">实际运费（¥）</Label>
+                <Label className="text-sm">
+                  实际运费（¥）
+                  {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
+                </Label>
                 <Input
                   type="number" min={0} step={0.01}
                   value={actualFee || ""}
-                  placeholder="0"
+                  placeholder={shippingFeeMode === "prepaid" ? "发货后补录" : "0"}
                   onChange={(e) => setActualFee(Number(e.target.value))}
                 />
               </div>
@@ -245,6 +252,11 @@ function EditShipmentDialog({
                 <Label className="text-sm">运单号</Label>
                 <Input value={trackingNo} onChange={(e) => setTrackingNo(e.target.value)} placeholder="选填" />
               </div>
+            </div>
+          )}
+          {isExpress && shippingFeeMode === "prepaid" && actualFee <= 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              该发货单仍为待补运费；可先保存其他物流信息，但确认签收前必须补录实际运费。
             </div>
           )}
 
@@ -372,6 +384,8 @@ export function ShipmentsView() {
       toast.success(`订单 ${order.orderNo} 已确认上门自取签收`);
     } else if (shippingFeeMode === "collect") {
       toast.success(`订单 ${order.orderNo} 已出库 — 运费到付，不计订单应收`);
+    } else if (shippingFeeMode === "prepaid" && actualShippingFee <= 0) {
+      toast.success(`订单 ${order.orderNo} 已出库 — 实际运费待补录，确认签收前必须填写`);
     } else if (shippingFeeMode === "free") {
       toast.success(`订单 ${order.orderNo} 已出库 — 实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
     } else if (Math.abs(feeDiff) > 0.005) {
@@ -388,6 +402,13 @@ export function ShipmentsView() {
   };
 
   const doMarkDelivered = async (sh: Shipment) => {
+    const order = getOrder(sh.orderId);
+    if (order && shipmentHasPendingActualShippingFee(order, sh)) {
+      toast.error("寄付订单确认签收前必须先补录实际运费");
+      setDeliverShipment(null);
+      setEditShipment(sh);
+      return;
+    }
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     try {
       const result = await postShipmentApi("shipments/deliver", { shipmentId: sh.id });
@@ -592,6 +613,7 @@ export function ShipmentsView() {
                   const mode = orderShippingFeeMode(order);
                   const preCollected = mode === "prepaid" ? order?.shippingFee ?? 0 : 0;
                   const actual = sh.actualShippingFee ?? 0;
+                  const feePending = !!order && shipmentHasPendingActualShippingFee(order, sh);
                   const feeDiff = actual - preCollected;
                   const isExpanded = expandedShipIds.has(sh.id);
                   const itemNames = getShipmentItemNames(sh);
@@ -648,8 +670,12 @@ export function ShipmentsView() {
                         </td>
                         <td className="px-4 py-3 text-sm text-right">
                           <div className="flex flex-col items-end">
-                            <span>¥{actual.toFixed(2)}</span>
-                            {mode === "prepaid" && Math.abs(feeDiff) > 0.005 && (
+                            {feePending ? (
+                              <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">待补运费</span>
+                            ) : (
+                              <span>¥{actual.toFixed(2)}</span>
+                            )}
+                            {!feePending && mode === "prepaid" && Math.abs(feeDiff) > 0.005 && (
                               <span className={`text-xs ${feeDiff > 0 ? "text-amber-600" : "text-sky-600"}`}>
                                 {feeDiff > 0 ? `+¥${feeDiff.toFixed(2)}` : `-¥${Math.abs(feeDiff).toFixed(2)}`} 待补
                               </span>

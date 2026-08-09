@@ -21,11 +21,37 @@ export function shipmentCountsForFees(shipment: Shipment): boolean {
   return shipment.status !== "preparing";
 }
 
+export function shipmentHasPendingActualShippingFee(order: Order, shipment: Shipment): boolean {
+  const mode = orderShippingFeeMode(order);
+  if (mode === "collect" || shipment.shipMethod === "pickup" || !shipmentCountsForFees(shipment)) return false;
+  return Number(shipment.actualShippingFee ?? 0) <= 0;
+}
+
+export function orderHasPendingActualShippingFee(order: Order, shipments: Shipment[]): boolean {
+  return shipments.some((shipment) =>
+    shipment.orderId === order.id && shipmentHasPendingActualShippingFee(order, shipment)
+  );
+}
+
 export function getBillableShippingFee(order: Order, shipments: Shipment[]): number {
   if (orderShippingFeeMode(order) === "collect") return 0;
   const active = shipments.filter((shipment) => shipment.orderId === order.id && shipmentCountsForFees(shipment));
   if (active.length === 0) return Number(order.shippingFee ?? 0);
+  if (active.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment))) {
+    return Number(order.shippingFee ?? 0);
+  }
   return active.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee ?? 0), 0);
+}
+
+export function hasActualShippingFee(order: Order, shipments: Shipment[]): boolean {
+  if (orderShippingFeeMode(order) === "collect") return false;
+  const active = shipments.filter((shipment) => shipment.orderId === order.id && shipmentCountsForFees(shipment));
+  return active.length > 0 && !active.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment));
+}
+
+export function shippingFeeAdjustmentForOrder(order: Order, shipments: Shipment[]): number {
+  if (orderShippingFeeMode(order) !== "prepaid" || !hasActualShippingFee(order, shipments)) return 0;
+  return getBillableShippingFee(order, shipments) - Number(order.shippingFee ?? 0);
 }
 
 export function shippingDiscountForOrder(order: Order, shipments: Shipment[]): number {

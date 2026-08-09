@@ -11,6 +11,7 @@ import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from
 import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
+import { getBillableShippingFee } from "../utils/orderFees";
 
 function todayDateString(): string {
   const now = new Date();
@@ -293,22 +294,10 @@ function normalizeSalespersonName(value?: string): string {
   return String(value ?? "").trim() || "未指定";
 }
 
-function countsAsActiveShipmentForAmount(shipment: Shipment): boolean {
-  return shipment.status !== "preparing" && !(shipment.status === "damaged" && shipment.damageResolution === "reship");
-}
-
 function calcAmountRefundedForOrder(order: Order): number {
   return (order.payments ?? [])
     .filter((payment) => payment.type === "refund" && isPaymentVerified(payment))
     .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-}
-
-function calcBillableShippingFeeForOrder(order: Order, shipments: Shipment[]): number {
-  const activeShipments = shipments.filter((shipment) =>
-    shipment.orderId === order.id && countsAsActiveShipmentForAmount(shipment)
-  );
-  if (activeShipments.length === 0) return Number(order.shippingFee || 0);
-  return activeShipments.reduce((sum, shipment) => sum + Number(shipment.actualShippingFee || 0), 0);
 }
 
 function calcDamageRefundAdjustmentForOrder(order: Order, shipments: Shipment[]): number {
@@ -330,7 +319,7 @@ function calcOrderDealAmount(order: Order, shipments: Shipment[]): number {
   const itemTotal = (order.items ?? []).reduce((sum, item) => sum + Number(item.price || 0), 0);
   return Number(Math.max(0,
     itemTotal +
-    calcBillableShippingFeeForOrder(order, shipments) +
+    getBillableShippingFee(order, shipments) +
     Number(order.packagingFee || 0) -
     Number(order.discount || 0) -
     calcDamageRefundAdjustmentForOrder(order, shipments)
