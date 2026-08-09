@@ -4,7 +4,7 @@ import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Textarea } from "./ui/textarea";
-import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2 } from "lucide-react";
+import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert } from "lucide-react";
 import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
@@ -12,6 +12,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 import { getBillableShippingFee } from "../utils/orderFees";
+import { dashboardOrderAdjustmentTotals } from "../../../server/dashboard-sales-metrics.mjs";
 
 function todayDateString(): string {
   const now = new Date();
@@ -74,18 +75,21 @@ type DailyFinancePoint = {
   date: string;
   label: string;
   received: number;
-  refunded: number;
+  refunded?: number;
+  unshippedRefund: number;
+  shippedDamage: number;
   orderAmount: number;
   platformAmount: number;
   offlinePickupAmount: number;
   privateDomainAmount: number;
 };
 
-type DailyFinanceMetricKey = "received" | "refunded" | "orderAmount";
+type DailyFinanceMetricKey = "received" | "unshippedRefund" | "shippedDamage" | "orderAmount";
 
 const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
   { key: "received", label: "实际收款", color: "#10b981" },
-  { key: "refunded", label: "退款", color: "#f43f5e" },
+  { key: "unshippedRefund", label: "未发货退款", color: "#f43f5e" },
+  { key: "shippedDamage", label: "已发货报损", color: "#f59e0b" },
   { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
 ];
 
@@ -158,7 +162,9 @@ type DailySalespersonPoint = {
 type DashboardSummary = {
   siteId?: string;
   todayReceived: number;
-  todayRefunded: number;
+  todayUnshippedRefund: number;
+  todayShippedDamage: number;
+  todayRefunded?: number;
   todayShippedOut: number;
   inFishStock: number;
   sick: number;
@@ -218,7 +224,8 @@ function normalizeDailyFinancePoint(point: Partial<DailyFinancePoint>): DailyFin
     date,
     label: String(point.label ?? shortDateLabel(date)),
     received: Number(point.received || 0),
-    refunded: Number(point.refunded || 0),
+    unshippedRefund: Number(point.unshippedRefund ?? point.refunded ?? 0),
+    shippedDamage: Number(point.shippedDamage || 0),
     orderAmount: Number(point.orderAmount || 0),
     platformAmount: Number(point.platformAmount || 0),
     offlinePickupAmount: Number(point.offlinePickupAmount || 0),
@@ -1041,9 +1048,9 @@ export function Dashboard() {
   let todayReceived = todayPayments
     .filter((payment) => payment.type !== "refund")
     .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-  let todayRefunded = todayPayments
-    .filter((payment) => payment.type === "refund")
-    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const todayAdjustments = dashboardOrderAdjustmentTotals(dashboardOrders, dashboardShipments, today);
+  let todayUnshippedRefund = todayAdjustments.unshippedRefund;
+  let todayShippedDamage = todayAdjustments.shippedDamage;
   let todayShippedOut = dashboardShipments
     .filter((shipment) => shipment.shipDate === today && shipment.status !== "preparing")
     .reduce((sum, shipment) => sum + (shipment.itemStockIds?.length ?? 0), 0);
@@ -1056,6 +1063,7 @@ export function Dashboard() {
 
   let dailyFinanceData = Array.from({ length: financeDays }, (_, index) => {
     const date = toLocalDateString(addDays(todayDate, index - financeDays + 1));
+    const adjustments = dashboardOrderAdjustmentTotals(dashboardOrders, dashboardShipments, date);
     const payments = dashboardOrders.flatMap((order) =>
       (order.payments ?? []).filter((payment) =>
         isPaymentVerified(payment) && String(payment.time ?? "").slice(0, 10) === date
@@ -1078,9 +1086,8 @@ export function Dashboard() {
       received: payments
         .filter((payment) => payment.type !== "refund")
         .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
-      refunded: payments
-        .filter((payment) => payment.type === "refund")
-        .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
+      unshippedRefund: adjustments.unshippedRefund,
+      shippedDamage: adjustments.shippedDamage,
       orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
       platformAmount: salesRows
         .filter((row) => isPlatformOrderSource(row.order.source))
@@ -1218,7 +1225,8 @@ export function Dashboard() {
   });
   if (summary) {
     todayReceived = summary.todayReceived;
-    todayRefunded = summary.todayRefunded;
+    todayUnshippedRefund = Number(summary.todayUnshippedRefund ?? summary.todayRefunded ?? 0);
+    todayShippedDamage = Number(summary.todayShippedDamage ?? 0);
     todayShippedOut = summary.todayShippedOut;
     inFishStock = summary.inFishStock;
     sick = summary.sick;
@@ -1853,7 +1861,8 @@ export function Dashboard() {
 
   const cards = [
     { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote, color: "bg-emerald-500" },
-    { label: "今日退款金额", value: formatMoney(todayRefunded), icon: RotateCcw, color: "bg-rose-500" },
+    { label: "今日未发货退款", value: formatMoney(todayUnshippedRefund), icon: RotateCcw, color: "bg-rose-500" },
+    { label: "今日已发货报损", value: formatMoney(todayShippedDamage), icon: CircleAlert, color: "bg-amber-500" },
     { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck, color: "bg-indigo-500" },
     { label: "在缸鱼类", value: inFishStock, icon: Fish, color: "bg-sky-500" },
     { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch, color: "bg-emerald-500" },
@@ -1933,7 +1942,7 @@ export function Dashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {cards.map((c) => {
           const Icon = c.icon;
           return (
@@ -2146,7 +2155,7 @@ export function Dashboard() {
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">销售情况</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退款与订单金额</p>
+              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、未发货退款、已发货报损与订单金额</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5 text-muted-foreground">
@@ -2169,7 +2178,7 @@ export function Dashboard() {
               ))}
             </div>
           </div>
-          <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
             {financeRangeTotals.map((item) => (
               <div key={item.key} className="rounded-lg border bg-slate-50/60 px-3 py-2">
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

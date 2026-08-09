@@ -92,6 +92,7 @@ import {
   countsAsCompletionShipment,
   shipmentIsResolvedForCompletion,
 } from "./shipment-completion-rules.mjs";
+import { dashboardOrderAdjustmentTotals } from "./dashboard-sales-metrics.mjs";
 import {
   resolveShippingCarrier,
   validateShippingCarrierSettings,
@@ -1233,6 +1234,7 @@ function buildDashboardSummary(state = {}, options = {}) {
     addDaysToDateString(today, index - financeDays + 1)
   );
   const dailyFinanceData = dailyDates.map((date) => {
+    const adjustments = dashboardOrderAdjustmentTotals(orders, shipments, date);
     const payments = orders.flatMap((order) =>
       (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
         isPaymentVerified(payment) && String(payment?.time ?? "").slice(0, 10) === date
@@ -1254,9 +1256,9 @@ function buildDashboardSummary(state = {}, options = {}) {
       received: payments
         .filter((payment) => payment?.type !== "refund")
         .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
-      refunded: payments
-        .filter((payment) => payment?.type === "refund")
-        .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
+      refunded: adjustments.unshippedRefund,
+      unshippedRefund: adjustments.unshippedRefund,
+      shippedDamage: adjustments.shippedDamage,
       orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
       platformAmount: salesRows
         .filter((row) => isPlatformOrderSource(row.order?.source))
@@ -1270,15 +1272,16 @@ function buildDashboardSummary(state = {}, options = {}) {
     };
   });
   const dailyLossData = buildDailyLossData(scopedState, dailyDates, productById, speciesById);
+  const todayAdjustments = dashboardOrderAdjustmentTotals(orders, shipments, today);
 
   return {
     today,
     todayReceived: todayPayments
       .filter((payment) => payment?.type !== "refund")
       .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
-    todayRefunded: todayPayments
-      .filter((payment) => payment?.type === "refund")
-      .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
+    todayUnshippedRefund: todayAdjustments.unshippedRefund,
+    todayShippedDamage: todayAdjustments.shippedDamage,
+    todayRefunded: todayAdjustments.unshippedRefund,
     todayShippedOut: shipments
       .filter((shipment) => shipment?.shipDate === today && shipment?.status !== "preparing")
       .reduce((sum, shipment) => sum + (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.length : 0), 0),
@@ -2323,7 +2326,9 @@ function buildAssistantSnapshot(state = {}, options = {}) {
     dashboard: {
       today: summary.today,
       todayReceived: summary.todayReceived,
-      todayRefunded: summary.todayRefunded,
+      todayUnshippedRefund: summary.todayUnshippedRefund,
+      todayShippedDamage: summary.todayShippedDamage,
+      todayRefunded: summary.todayUnshippedRefund,
       todayShippedOut: summary.todayShippedOut,
       inFishStock: summary.inFishStock,
       inTankNormal: summary.inTankNormal,
@@ -8556,6 +8561,7 @@ async function handleApi(req, res, url) {
         ...shipment,
         status: "damaged",
         damageResolution: resolution,
+        damagedAt: nowDatetimeInChina(),
         notes: String(body.notes ?? shipment.notes ?? ""),
       };
       let nextOrder = order;
@@ -8582,6 +8588,7 @@ async function handleApi(req, res, url) {
         nextShipment = {
           ...nextShipment,
           damageItemStockIds: damagedItemStockIds,
+          damageAmount: refundAmount,
           damageRefundAmount: refundAmount,
           damageProof: Array.isArray(body.proof) ? body.proof.map((item) => String(item ?? "")).filter(Boolean) : [],
         };
@@ -8616,6 +8623,10 @@ async function handleApi(req, res, url) {
         nextShipment = {
           ...nextShipment,
           damageItemStockIds: [...replacementMap.keys()],
+          damageAmount: Number(orderItems
+            .filter((item) => replacementMap.has(String(item?.stockItemId ?? "")))
+            .reduce((sum, item) => sum + Number(item?.price ?? 0), 0)
+            .toFixed(2)),
           damageReplacements,
         };
         nextStock = nextStock.map((stockItem) =>

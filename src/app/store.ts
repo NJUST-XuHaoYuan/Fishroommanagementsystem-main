@@ -513,10 +513,14 @@ export type Shipment = {
   actualShippingFee?: number;
   itemStockIds?: string[]; // stock item IDs included in this shipment
   damageResolution?: "refund" | "reship";
+  /** 物流报损的登记时间。 */
+  damagedAt?: string;
   /** 报损补发时的原鱼与补发鱼对应关系及业务快照。 */
   damageReplacements?: ShipmentDamageReplacement[];
   /** 物流报损退款实际涉及的鱼，可小于本发货单商品数。 */
   damageItemStockIds?: string[];
+  /** 报损业务金额快照：退款为应收调减额，补发为原商品售价。 */
+  damageAmount?: number;
   /** 物流报损造成的应收调整金额，和资金记录里的退款金额对应。 */
   damageRefundAmount?: number;
   /** 物流报损凭证，不代表已经实际退款。 */
