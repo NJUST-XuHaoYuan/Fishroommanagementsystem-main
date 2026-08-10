@@ -31,6 +31,7 @@ import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/pub
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
+import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
   formatBioRecordTime,
   isoToDatetimeLocal,
@@ -872,12 +873,33 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     if (!bioItemId) return;
     if (!permission.requirePermission("update")) return;
     if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+    const savePendingRecord = hasBioRecordDraftContent(newRecord);
+    let pendingRecordTime = "";
+    if (savePendingRecord) {
+      if (!permission.requirePermission("create")) return;
+      if (!newRecord.date) return toast.error("请选择记录时间");
+      pendingRecordTime = normalizeBioRecordTime(newRecord.date);
+      if (pendingRecordTime > nowForRecord) return toast.error("记录时间不能晚于当前时间");
+      const currentItem = stockItem(bioItemId);
+      const minTime = minDatetimeForDate(currentItem?.inDate);
+      if (currentItem && minTime && pendingRecordTime < minTime) {
+        return toast.error("记录时间不能早于入库日期");
+      }
+    }
     const price = Number(bioBasePrice);
     if (!bioBasePrice.trim() || Number.isNaN(price) || price <= 0) {
       return toast.error("请填写大于 0 的销售默认价");
     }
-    if (!confirmWrite("修改", "将保存鱼的状态、售价、编号和备注。")) return;
+    if (!confirmWrite(
+      "修改",
+      savePendingRecord
+        ? "将保存鱼的信息，并新增当前填写的观察/治疗记录及媒体。"
+        : "将保存鱼的状态、售价、编号和备注。",
+    )) return;
     const normalizedPrice = Number(price.toFixed(2));
+    const pendingRecord = savePendingRecord
+      ? bioRecordFromDraft(newRecord, { id: uid(), stockItemId: bioItemId, date: pendingRecordTime })
+      : null;
     const ok = await saveStateTransform((latest) => ({
       ...latest,
       stock: latest.stock.map((x) => {
@@ -892,10 +914,14 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
           notes: bioNotes,
         };
       }),
+      bioRecords: pendingRecord ? [...latest.bioRecords, pendingRecord] : latest.bioRecords,
     }));
     if (!ok) return toast.error("保存失败，请重试");
+    if (pendingRecord) {
+      setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    }
     setBioOpen(false);
-    toast.success("鱼的信息已更新");
+    toast.success(pendingRecord ? "鱼的信息和观察记录已更新" : "鱼的信息已更新");
   };
 
   // Add bio record
@@ -1972,7 +1998,11 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		              )}
 		            </div>
 		            <Button variant="outline" disabled={recordMediaUploading} onClick={() => setBioOpen(false)}>关闭</Button>
-		            {permission.canUpdate && <Button disabled={recordMediaUploading} onClick={saveBio}>保存信息</Button>}
+		            {permission.canUpdate && (
+                  <Button disabled={recordMediaUploading} onClick={saveBio}>
+                    {hasBioRecordDraftContent(newRecord) ? "保存信息和记录" : "保存信息"}
+                  </Button>
+                )}
 		          </DialogFooter>
         </DialogContent>
 	      </Dialog>

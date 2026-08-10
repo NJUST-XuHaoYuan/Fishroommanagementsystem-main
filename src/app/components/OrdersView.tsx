@@ -62,6 +62,7 @@ import {
 } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
+import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
   getBillableShippingFee,
   hasActualShippingFee,
@@ -3186,15 +3187,37 @@ function StockPickerBioDialog({
     if (!item) return;
     if (!permission.requirePermission("update")) return;
     if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
-    if (!confirmWrite("修改", "将保存鱼的状态、编号和备注。")) return;
+    const savePendingRecord = hasBioRecordDraftContent(newRecord);
+    let pendingRecordTime = "";
+    if (savePendingRecord) {
+      if (!permission.requirePermission("create")) return;
+      if (!newRecord.date) return toast.error("请选择记录时间");
+      pendingRecordTime = normalizeBioRecordTime(newRecord.date);
+      if (pendingRecordTime > nowForRecord) return toast.error("记录时间不能晚于当前时间");
+      const minTime = minDatetimeForDate(item.inDate);
+      if (minTime && pendingRecordTime < minTime) return toast.error("记录时间不能早于入库日期");
+    }
+    if (!confirmWrite(
+      "修改",
+      savePendingRecord
+        ? "将保存鱼的信息，并新增当前填写的观察记录及媒体。"
+        : "将保存鱼的状态、编号和备注。",
+    )) return;
+    const pendingRecord = savePendingRecord
+      ? bioRecordFromDraft(newRecord, { id: uid(), stockItemId: item.id, date: pendingRecordTime })
+      : null;
     const ok = await saveStateTransform((latest) => ({
       ...latest,
       stock: latest.stock.map((stock) =>
         stock.id === item.id ? { ...stock, status: bioStatus, code: bioCode.trim(), notes: bioNotes } : stock
       ),
+      bioRecords: pendingRecord ? [...latest.bioRecords, pendingRecord] : latest.bioRecords,
     }));
     if (!ok) return toast.error("保存失败，请重试");
-    toast.success("状态已更新");
+    if (pendingRecord) {
+      setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    }
+    toast.success(pendingRecord ? "状态和观察记录已更新" : "状态已更新");
   };
 
   const addBioRecord = async () => {
@@ -3642,7 +3665,11 @@ function StockPickerBioDialog({
             )}
           </div>
           <Button variant="outline" disabled={recordMediaUploading} onClick={() => onOpenChange(false)}>关闭</Button>
-          {permission.canUpdate && item && <Button disabled={recordMediaUploading} onClick={saveBio}>保存状态</Button>}
+          {permission.canUpdate && item && (
+            <Button disabled={recordMediaUploading} onClick={saveBio}>
+              {hasBioRecordDraftContent(newRecord) ? "保存状态和记录" : "保存状态"}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
