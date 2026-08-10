@@ -1,7 +1,7 @@
 import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
-  Customer, CustomerType, Personnel, ShipmentStatus, Store, uid,
+  Customer, CustomerType, Personnel, ShipmentStatus, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
   configuredOrderPackagingFee, ShippingFeeMode,
@@ -4095,11 +4095,20 @@ type DamageResult =
   | { resolution: "reship"; notes: string; replacements: ReshipReplacement[] };
 
 function OrderDetailDialog({
-  order, open, onOpenChange,
-}: { order: Order | null; open: boolean; onOpenChange: (o: boolean) => void }) {
+  order, open, onOpenChange, allStock, allTankGroups,
+}: {
+  order: Order | null;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  allStock?: StockItem[];
+  allTankGroups?: TankGroup[];
+}) {
   const { state, setState, saveStateTransform } = useStore();
   const permission = usePermission("orders");
   const today = todayDateString();
+  const accessibleStock = allStock ?? state.stock;
+  const accessibleTankGroups = allTankGroups ?? state.tankGroups;
+  const getAccessibleStockItem = (id: string) => accessibleStock.find((item) => item.id === id);
 
   const [editMode, setEditMode] = useState(false);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
@@ -4283,7 +4292,7 @@ function OrderDetailDialog({
         ),
         ...(isMinimumReturnPriceExempt(
           i,
-          state.stock.find((stockItem) => stockItem.id === i.stockItemId)
+          getAccessibleStockItem(i.stockItemId)
         ) ? {
           minReturnPriceExempt: true,
           minReturnPriceExemptReason: "sick" as const,
@@ -4425,9 +4434,16 @@ function OrderDetailDialog({
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
   const subTankName = (id: string) => {
-    for (const g of state.tankGroups) {
+    for (const g of accessibleTankGroups) {
       const t = g.subTanks.find((x) => x.id === id);
-      if (t) return `${g.name} / ${t.name}`;
+      if (t) {
+        const currentSiteId = String(g.siteId ?? "nanjing");
+        const orderSiteId = String(order?.siteId ?? "nanjing");
+        const currentSiteName = state.sites.find((site) => site.id === currentSiteId)?.name ?? currentSiteId;
+        return currentSiteId === orderSiteId
+          ? `${g.name} / ${t.name}`
+          : `${currentSiteName} · ${g.name} / ${t.name}`;
+      }
     }
     return "—";
   };
@@ -4445,7 +4461,7 @@ function OrderDetailDialog({
     minReturnPrice: orderItemMinReturnPrice(item, getProduct(item.productId)),
     ...(isMinimumReturnPriceExempt(
       item,
-      state.stock.find((stockItem) => stockItem.id === item.stockItemId)
+      getAccessibleStockItem(item.stockItemId)
     ) ? {
       minReturnPriceExempt: true,
       minReturnPriceExemptReason: "sick" as const,
@@ -4484,9 +4500,10 @@ function OrderDetailDialog({
   const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
   const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
   const unshippedItems = inventoryActiveItems.filter((i) => !shippedItemIds.has(i.stockItemId));
-  const lostUnshippedItems = unshippedItems.filter((i) => state.stock.find((s) => s.id === i.stockItemId)?.lost);
+  const lostUnshippedItems = unshippedItems.filter((i) => getAccessibleStockItem(i.stockItemId)?.lost);
+  const unavailableUnshippedItems = unshippedItems.filter((i) => !getAccessibleStockItem(i.stockItemId));
   const shippableUnshippedItems = unshippedItems.filter((i) => {
-    const stockItem = state.stock.find((s) => s.id === i.stockItemId);
+    const stockItem = getAccessibleStockItem(i.stockItemId);
     return Boolean(stockItem) && !stockItem?.lost;
   });
   const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
@@ -4502,7 +4519,7 @@ function OrderDetailDialog({
   const canShip = !!order && shippableUnshippedItems.length > 0
     && order.status !== "cancelled" && order.status !== "completed";
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
-  const returnStock = returnItem ? state.stock.find((stock) => stock.id === returnItem.stockItemId) : undefined;
+  const returnStock = returnItem ? getAccessibleStockItem(returnItem.stockItemId) : undefined;
   const returnProduct = returnItem ? getProduct(returnItem.productId) : undefined;
 
   const openReturnItem = (item: OrderItem) => {
@@ -4699,7 +4716,7 @@ function OrderDetailDialog({
   const handleShipFromDetail = async (data: ShipFormData) => {
     if (!order) return false;
     if (!permission.requirePermission("update")) return false;
-    const lostSelected = data.selectedItemIds.filter((id) => state.stock.find((stock) => stock.id === id)?.lost);
+    const lostSelected = data.selectedItemIds.filter((id) => getAccessibleStockItem(id)?.lost);
     if (lostSelected.length > 0) { toast.error("已损耗商品不能出库，请先从订单中删除"); return false; }
     const confirmDetail = data.shipMethod === "pickup"
       ? `将确认 ${data.selectedItemIds.length} 条商品上门自取并直接签收。`
@@ -5026,7 +5043,7 @@ function OrderDetailDialog({
                       <tbody>
                         {displayItems.map((item, idx) => {
                           const p = getProduct(item.productId);
-                          const s = state.stock.find((x) => x.id === item.stockItemId);
+                          const s = getAccessibleStockItem(item.stockItemId);
                           const isShipped = shippedItemIds.has(item.stockItemId);
                           const isLost = !!s?.lost;
                           const minReturnPrice = orderItemMinReturnPrice(item, p);
@@ -5106,7 +5123,7 @@ function OrderDetailDialog({
                     orderShipments={orderShipments}
                     shippedItemIds={shippedItemIds}
                     getProduct={getProduct}
-                    getStockItem={(id) => state.stock.find((x) => x.id === id)}
+                    getStockItem={getAccessibleStockItem}
                     subTankName={subTankName}
                     onShipmentAction={setShipmentAction}
                     onReturnItem={openReturnItem}
@@ -5258,6 +5275,11 @@ function OrderDetailDialog({
                     {shippableUnshippedItems.length === 0 && lostUnshippedItems.length > 0 && (
                       <p className="text-xs text-muted-foreground">无可出库商品</p>
                     )}
+                    {unavailableUnshippedItems.length > 0 && (
+                      <p className="max-w-72 text-right text-xs text-amber-700">
+                        {unavailableUnshippedItems.length} 件库存已删除或位于当前账号不可见的场地
+                      </p>
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
@@ -5370,7 +5392,7 @@ function OrderDetailDialog({
         unshippedItems={shippableUnshippedItems}
         getProductName={(pid) => getProduct(pid)?.name ?? "—"}
         getTankName={(sid) => {
-          const s = state.stock.find((x) => x.id === sid);
+          const s = getAccessibleStockItem(sid);
           return s ? subTankName(s.subTankId) : "—";
         }}
         pickupOnly={isPickupOrderSource(order.source)}
@@ -6798,6 +6820,8 @@ function NewOrderDialog({
 // ─── Main View ────────────────────────────────────────────────────────────────
 
 type OrdersViewProps = {
+  allStock?: StockItem[];
+  allTankGroups?: TankGroup[];
   openOrderRequest?: { orderId: string; requestId: number } | null;
   onOpenOrderRequestHandled?: () => void;
 };
@@ -6949,6 +6973,8 @@ function PaymentClaimDialog({
 }
 
 export function OrdersView({
+  allStock,
+  allTankGroups,
   openOrderRequest,
   onOpenOrderRequestHandled,
 }: OrdersViewProps = {}) {
@@ -8116,6 +8142,8 @@ export function OrdersView({
 
       <OrderDetailDialog
         order={syncedViewOrder}
+        allStock={allStock}
+        allTankGroups={allTankGroups}
         open={!!viewOrder}
         onOpenChange={(o) => {
           if (o) return;

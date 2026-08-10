@@ -1516,6 +1516,8 @@ function AdminApp() {
       case "customers":  return <CustomersView />;
       case "orders":     return (
         <OrdersView
+          allStock={state.stock}
+          allTankGroups={state.tankGroups}
           openOrderRequest={openOrderRequest}
           onOpenOrderRequestHandled={finishOpenOrderRequest}
         />
