@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import {
   Truck, CheckCircle2, Package, PackageCheck, CalendarClock, MapPin, ArrowUpDown,
-  ChevronDown, ChevronUp, Pencil, XCircle, ArrowRightLeft,
+  ChevronDown, ChevronUp, Pencil, XCircle, ArrowRightLeft, Camera,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import React from "react";
@@ -27,6 +27,7 @@ import {
   shipmentHasPendingActualShippingFee,
   shippingFeeModeLabel,
 } from "../utils/orderFees";
+import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -282,6 +283,7 @@ export function ShipmentsView() {
   const [shipOrder, setShipOrder] = useState<Order | null>(null);
   const [deliverShipment, setDeliverShipment] = useState<Shipment | null>(null);
   const [editShipment, setEditShipment] = useState<Shipment | null>(null);
+  const [proofShipment, setProofShipment] = useState<Shipment | null>(null);
   const [expandedShipIds, setExpandedShipIds] = useState<Set<string>>(new Set());
 
   const toggleExpand = (id: string) =>
@@ -619,6 +621,7 @@ export function ShipmentsView() {
                   const itemNames = getShipmentItemNames(sh);
                   const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
                   const canExpand = itemNames.length > 0 || damageReplacements.length > 0;
+                  const packingProofs = shipmentPackingProofs(sh);
 
                   return (
                     <React.Fragment key={sh.id}>
@@ -708,6 +711,17 @@ export function ShipmentsView() {
                         </td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
+                            {packingProofs.length > 0 && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="whitespace-nowrap"
+                                onClick={() => setProofShipment(sh)}
+                              >
+                                <Camera className="size-3.5" />
+                                凭证 {packingProofs.length}
+                              </Button>
+                            )}
                             {sh.status === "shipped" && (
                               <Button
                                 size="sm"
@@ -808,6 +822,13 @@ export function ShipmentsView() {
         open={!!editShipment}
         onOpenChange={(o) => { if (!o) setEditShipment(null); }}
         onSave={(patch) => { if (editShipment) doEditShipment(editShipment, patch); }}
+      />
+
+      <ShipmentProofDialog
+        shipment={proofShipment}
+        orderNo={proofShipment ? getOrder(proofShipment.orderId)?.orderNo : undefined}
+        open={!!proofShipment}
+        onOpenChange={(nextOpen) => { if (!nextOpen) setProofShipment(null); }}
       />
 
       {/* ── Confirm Delivered ── */}

@@ -73,6 +73,7 @@ import {
   shippingFeeModeLabel,
   SHIPPING_FEE_MODE_OPTIONS,
 } from "../utils/orderFees";
+import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -3840,6 +3841,7 @@ function ItemsWithShipments({
   canReturnItem?: boolean;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [proofShipment, setProofShipment] = useState<{ shipment: Shipment; number: number } | null>(null);
 
   const replacementSide = (replacement: ShipmentDamageReplacement, side: "original" | "replacement") => {
     const stockItemId = side === "original" ? replacement.originalStockItemId : replacement.replacementStockItemId;
@@ -3953,6 +3955,7 @@ function ItemsWithShipments({
     <>
       {orderShipments.map((sh, si) => {
         const shItems = order.items.filter((i) => (sh.itemStockIds ?? []).includes(i.stockItemId));
+        const packingProofs = shipmentPackingProofs(sh);
         const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
         const shipmentHeaderTone = sh.status === "delivered"
           ? "bg-emerald-50/60 text-emerald-800"
@@ -3964,11 +3967,11 @@ function ItemsWithShipments({
         return (
           <div key={sh.id}>
             {/* Shipment header */}
-            <div className={`px-4 py-2 flex items-center gap-3 text-xs font-medium ${si === 0 ? "border-t" : "border-t"} ${shipmentHeaderTone}`}>
+            <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-4 py-1.5 text-xs font-medium ${shipmentHeaderTone}`}>
               {sh.shipMethod === "pickup"
                 ? <MapPin className="size-3.5 shrink-0" />
                 : <Truck className="size-3.5 shrink-0" />}
-              <span>
+              <span className="min-w-0 flex-1 basis-64 break-words py-0.5">
                 {sh.status === "outbound" ? "出库单" : "发货单"} {si + 1}：
                 {sh.shipMethod === "pickup" ? "上门自取" : `${sh.carrier || "快递"}`}
                 {sh.trackingNo ? ` · ${sh.trackingNo}` : ""}
@@ -3982,6 +3985,18 @@ function ItemsWithShipments({
               />
               {shipmentHasPendingActualShippingFee(order, sh) && (
                 <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">待补运费</Badge>
+              )}
+              {packingProofs.length > 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-9 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white"
+                  onClick={() => setProofShipment({ shipment: sh, number: si + 1 })}
+                >
+                  <Camera className="size-3.5" />
+                  凭证 {packingProofs.length} 张
+                </Button>
               )}
             </div>
             {damageReplacements.length > 0 && (
@@ -4072,6 +4087,13 @@ function ItemsWithShipments({
         stockItemId={detailId}
         open={!!detailId}
         onOpenChange={(o) => { if (!o) setDetailId(null); }}
+      />
+      <ShipmentProofDialog
+        shipment={proofShipment?.shipment ?? null}
+        orderNo={order.orderNo}
+        shipmentNumber={proofShipment?.number}
+        open={!!proofShipment}
+        onOpenChange={(nextOpen) => { if (!nextOpen) setProofShipment(null); }}
       />
     </>
   );
