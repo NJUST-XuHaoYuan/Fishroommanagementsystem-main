@@ -101,6 +101,7 @@ import {
   orderMinimumReturnFloorTotal,
   sickMinimumReturnExemption,
 } from "./order-pricing-rules.mjs";
+import { validateImageUploadBuffer } from "./media-upload-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -7115,6 +7116,7 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { ok: false, error: "上传文件为空" });
         return;
       }
+      if (isImage) validateImageUploadBuffer(buffer, mime);
       const mediaUrl = await uploadOriginalMedia(buffer, mime);
       const storedMime = isVideo && TRANSCODE_VIDEO_UPLOADS ? "video/mp4" : mime;
       sendJson(req, res, 200, {
@@ -7125,7 +7127,7 @@ async function handleApi(req, res, url) {
         storage: cosReady() ? "cos" : "local",
       });
     } catch (error) {
-      const status = error?.statusCode === 413 ? 413 : 500;
+      const status = error?.statusCode === 413 ? 413 : error?.statusCode === 400 ? 400 : 500;
       sendJson(req, res, status, {
         ok: false,
         error: status === 413

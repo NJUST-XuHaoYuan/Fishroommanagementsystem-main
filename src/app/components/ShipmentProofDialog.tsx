@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Camera, ChevronLeft, ChevronRight, Download, ExternalLink, Loader2 } from "lucide-react";
+import { AlertTriangle, Camera, ChevronLeft, ChevronRight, Download, ExternalLink, Loader2 } from "lucide-react";
 import type { Shipment } from "../store";
 import { downloadMedia, useResolvedMediaUrl } from "../utils/media";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
@@ -29,6 +29,54 @@ export function shipmentPackingProofs(shipment?: Shipment | null): string[] {
   return shipment.packingProof.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
+function ShipmentProofImage({
+  src,
+  alt,
+  onLoaded,
+  onFailed,
+}: {
+  src: string;
+  alt: string;
+  onLoaded: (resolvedUrl: string) => void;
+  onFailed: () => void;
+}) {
+  const resolvedSrc = useResolvedMediaUrl(src);
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
+
+  if (status === "error") {
+    return (
+      <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-white/80">
+        <AlertTriangle className="size-8 text-amber-400" />
+        <div>
+          <div className="font-medium text-white">该照片文件已损坏或无法读取</div>
+          <div className="mt-1 text-xs text-white/60">历史记录仍保留，但原图内容无法恢复</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {status === "loading" && <Loader2 className="size-6 animate-spin text-white/70" />}
+      {resolvedSrc && (
+        <img
+          src={resolvedSrc}
+          alt={alt}
+          className={`absolute inset-0 size-full object-contain ${status === "loaded" ? "opacity-100" : "opacity-0"}`}
+          onLoad={() => {
+            setStatus("loaded");
+            onLoaded(resolvedSrc);
+          }}
+          onError={() => {
+            setStatus("error");
+            onFailed();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
 export function ShipmentProofDialog({
   shipment,
   orderNo,
@@ -45,9 +93,10 @@ export function ShipmentProofDialog({
   const proofs = useMemo(() => shipmentPackingProofs(shipment), [shipment]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const [activeImageUrl, setActiveImageUrl] = useState("");
+  const [activeImageAvailable, setActiveImageAvailable] = useState(false);
   const boundedIndex = Math.min(activeIndex, Math.max(0, proofs.length - 1));
   const activeProof = proofs[boundedIndex];
-  const activeResolvedProof = useResolvedMediaUrl(activeProof);
 
   useEffect(() => {
     if (open) {
@@ -55,6 +104,11 @@ export function ShipmentProofDialog({
       setDownloading(false);
     }
   }, [open, shipment?.id]);
+
+  useEffect(() => {
+    setActiveImageUrl("");
+    setActiveImageAvailable(false);
+  }, [activeProof]);
 
   if (!shipment) return null;
 
@@ -99,16 +153,19 @@ export function ShipmentProofDialog({
         {activeProof ? (
           <div className="min-h-0 overflow-y-auto px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:px-5 sm:pb-5">
             <div className="relative mt-4 flex h-[46dvh] min-h-60 items-center justify-center overflow-hidden rounded-md border bg-zinc-950 sm:h-[58vh]">
-              {activeResolvedProof ? (
-                <ImageWithFallback
-                  src={activeResolvedProof}
-                  disableMediaProxy
-                  alt={`发货凭证 ${boundedIndex + 1}`}
-                  className="size-full object-contain"
-                />
-              ) : (
-                <Loader2 className="size-6 animate-spin text-white/70" />
-              )}
+              <ShipmentProofImage
+                key={activeProof}
+                src={activeProof}
+                alt={`发货凭证 ${boundedIndex + 1}`}
+                onLoaded={(resolvedUrl) => {
+                  setActiveImageUrl(resolvedUrl);
+                  setActiveImageAvailable(true);
+                }}
+                onFailed={() => {
+                  setActiveImageUrl("");
+                  setActiveImageAvailable(false);
+                }}
+              />
 
               {proofs.length > 1 && (
                 <>
@@ -163,13 +220,13 @@ export function ShipmentProofDialog({
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={!activeResolvedProof}
-                  onClick={() => activeResolvedProof && window.open(activeResolvedProof, "_blank", "noopener,noreferrer")}
+                  disabled={!activeImageAvailable || !activeImageUrl}
+                  onClick={() => activeImageUrl && window.open(activeImageUrl, "_blank", "noopener,noreferrer")}
                 >
                   <ExternalLink className="size-4" />
                   查看原图
                 </Button>
-                <Button type="button" variant="outline" disabled={downloading} onClick={downloadActiveProof}>
+                <Button type="button" variant="outline" disabled={downloading || !activeImageAvailable} onClick={downloadActiveProof}>
                   {downloading ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
                   {downloading ? "下载中" : "下载当前照片"}
                 </Button>
