@@ -31,6 +31,10 @@ services:
       # Optional single-string alternative. Leave empty when using PG* above.
       DATABASE_URL: ${DATABASE_URL:-}
       UPLOAD_DIR: /app/uploads
+      VIDEO_TRANSCODE_CONCURRENCY: ${VIDEO_TRANSCODE_CONCURRENCY:-1}
+      VIDEO_TRANSCODE_MAX_PENDING: ${VIDEO_TRANSCODE_MAX_PENDING:-2}
+      VIDEO_TRANSCODE_THREADS: ${VIDEO_TRANSCODE_THREADS:-1}
+      VIDEO_TRANSCODE_MAX_EDGE: ${VIDEO_TRANSCODE_MAX_EDGE:-1920}
 
       # Tencent Cloud COS. Leave empty to use local uploads.
       COS_SECRET_ID: ${COS_SECRET_ID:-}

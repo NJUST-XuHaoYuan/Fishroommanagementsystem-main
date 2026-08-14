@@ -73,23 +73,20 @@ export function useRecordMediaUpload<T extends RecordMediaDraft>(
     toast.info(source === "clipboard"
       ? "正在上传剪贴板中的媒体文件…"
       : source === "drop" ? "正在上传拖入的媒体文件…" : "媒体原文件上传中…");
-    const results = await Promise.allSettled(
-      accepted.map(async ({ file, kind }) => ({ kind, url: await uploadOriginalMedia(file) })),
-    );
-
     const photos: string[] = [];
     const videos: string[] = [];
     let failedCount = 0;
     let firstError = "";
-    results.forEach((result) => {
-      if (result.status === "fulfilled") {
-        if (result.value.kind === "image") photos.push(result.value.url);
-        else videos.push(result.value.url);
-        return;
+    for (const { file, kind } of accepted) {
+      try {
+        const url = await uploadOriginalMedia(file);
+        if (kind === "image") photos.push(url);
+        else videos.push(url);
+      } catch (error) {
+        failedCount += 1;
+        if (!firstError) firstError = error instanceof Error ? error.message : "媒体上传失败，请重试";
       }
-      failedCount += 1;
-      if (!firstError) firstError = result.reason instanceof Error ? result.reason.message : "媒体上传失败，请重试";
-    });
+    }
 
     if (photos.length > 0 || videos.length > 0) {
       setDraft((draft) => ({
