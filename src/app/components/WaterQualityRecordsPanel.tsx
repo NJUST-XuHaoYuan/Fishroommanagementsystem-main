@@ -45,6 +45,7 @@ type WaterQualityRecordsPanelProps = {
   onEditMaintenance?: (log: DailyLog) => void;
   onDeleteMaintenance?: (log: DailyLog) => void;
   maintenanceSaving?: boolean;
+  viewMode?: "page" | "tank";
 };
 
 type UnifiedTankRecord =
@@ -75,6 +76,7 @@ export function WaterQualityRecordsPanel({
   onEditMaintenance,
   onDeleteMaintenance,
   maintenanceSaving = false,
+  viewMode = "page",
 }: WaterQualityRecordsPanelProps = {}) {
   const { state, saveWaterQualityRecord } = useStore();
   const permission = usePermission("daily");
@@ -246,6 +248,7 @@ export function WaterQualityRecordsPanel({
   const hasFilter = groupFilter !== "all" || recordTypeFilter !== "all" || Boolean(startDate) || Boolean(endDate);
   const canManage = permission.canUpdate || permission.canDelete;
   const isRecordSaving = saving || maintenanceSaving;
+  const isTankView = viewMode === "tank";
 
   const createMaintenance = () => {
     if (!onCreateMaintenance) return;
@@ -255,87 +258,178 @@ export function WaterQualityRecordsPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
-        <div className="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap sm:items-end">
-          <div className="col-span-2 grid gap-1.5 sm:col-span-1">
-            <Label className="text-xs">缸组</Label>
-            <Select value={groupFilter} onValueChange={setGroupFilter}>
-              <SelectTrigger className="w-full sm:w-44"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部缸组</SelectItem>
-                {state.tankGroups.map((group) => (
-                  <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+      {isTankView ? (
+        <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-medium">共 {filteredRecords.length} 条记录</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">养护日志和水质记录按时间从新到旧排列</div>
           </div>
-          <div className="col-span-2 grid gap-1.5 sm:col-span-1">
-            <Label className="text-xs">记录类型</Label>
-            <Select value={recordTypeFilter} onValueChange={(value: "all" | "maintenance" | "water") => setRecordTypeFilter(value)}>
-              <SelectTrigger className="w-full sm:w-40"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部记录</SelectItem>
-                <SelectItem value="maintenance">养护日志</SelectItem>
-                <SelectItem value="water">水质记录</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">开始日期</Label>
-            <Input
-              type="date"
-              value={startDate}
-              max={endDate || today}
-              onChange={(event) => {
-                const value = event.target.value;
-                setStartDate(value);
-                if (endDate && value && endDate < value) setEndDate("");
-              }}
-              className="w-full sm:w-40"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">结束日期</Label>
-            <Input
-              type="date"
-              value={endDate}
-              min={startDate || undefined}
-              max={today}
-              onChange={(event) => setEndDate(event.target.value)}
-              className="w-full sm:w-40"
-            />
-          </div>
-          {hasFilter && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setGroupFilter("all");
-                setRecordTypeFilter("all");
-                setStartDate("");
-                setEndDate("");
-              }}
-            >
-              清除筛选
-            </Button>
+          {permission.canCreate && (
+            <div className="grid grid-cols-2 gap-2 sm:flex">
+              {onCreateMaintenance && (
+                <Button variant="outline" onClick={createMaintenance} disabled={state.tankGroups.length === 0}>
+                  <ClipboardList className="size-4" />
+                  新增养护
+                </Button>
+              )}
+              <Button onClick={() => openNewRecord()} disabled={state.tankGroups.length === 0}>
+                <FlaskConical className="size-4" />
+                录入水质
+              </Button>
+            </div>
           )}
         </div>
-        {permission.canCreate && (
-          <div className="grid grid-cols-2 gap-2 sm:flex">
-            {onCreateMaintenance && (
-              <Button variant="outline" onClick={createMaintenance} disabled={state.tankGroups.length === 0}>
-                <ClipboardList className="size-4" />
-                新增养护
+      ) : (
+        <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+          <div className="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap sm:items-end">
+            <div className="col-span-2 grid gap-1.5 sm:col-span-1">
+              <Label className="text-xs">缸组</Label>
+              <Select value={groupFilter} onValueChange={setGroupFilter}>
+                <SelectTrigger className="w-full sm:w-44"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部缸组</SelectItem>
+                  {state.tankGroups.map((group) => (
+                    <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="col-span-2 grid gap-1.5 sm:col-span-1">
+              <Label className="text-xs">记录类型</Label>
+              <Select value={recordTypeFilter} onValueChange={(value: "all" | "maintenance" | "water") => setRecordTypeFilter(value)}>
+                <SelectTrigger className="w-full sm:w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部记录</SelectItem>
+                  <SelectItem value="maintenance">养护日志</SelectItem>
+                  <SelectItem value="water">水质记录</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs">开始日期</Label>
+              <Input
+                type="date"
+                value={startDate}
+                max={endDate || today}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setStartDate(value);
+                  if (endDate && value && endDate < value) setEndDate("");
+                }}
+                className="w-full sm:w-40"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs">结束日期</Label>
+              <Input
+                type="date"
+                value={endDate}
+                min={startDate || undefined}
+                max={today}
+                onChange={(event) => setEndDate(event.target.value)}
+                className="w-full sm:w-40"
+              />
+            </div>
+            {hasFilter && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setGroupFilter("all");
+                  setRecordTypeFilter("all");
+                  setStartDate("");
+                  setEndDate("");
+                }}
+              >
+                清除筛选
               </Button>
             )}
-            <Button onClick={() => openNewRecord()} disabled={state.tankGroups.length === 0}>
-              <FlaskConical className="size-4" />
-              录入水质
-            </Button>
           </div>
-        )}
-      </div>
+          {permission.canCreate && (
+            <div className="grid grid-cols-2 gap-2 sm:flex">
+              {onCreateMaintenance && (
+                <Button variant="outline" onClick={createMaintenance} disabled={state.tankGroups.length === 0}>
+                  <ClipboardList className="size-4" />
+                  新增养护
+                </Button>
+              )}
+              <Button onClick={() => openNewRecord()} disabled={state.tankGroups.length === 0}>
+                <FlaskConical className="size-4" />
+                录入水质
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
+      {isTankView ? (
+        <div className="divide-y overflow-hidden rounded-lg border bg-card">
+          {filteredRecords.length === 0 ? (
+            <div className="px-4 py-12 text-center text-sm text-muted-foreground">该缸暂无养护或水质记录</div>
+          ) : filteredRecords.map((item) => (
+            <div key={`${item.kind}-${item.id}`} className="grid gap-2.5 p-3 sm:p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <Badge variant="secondary" className={item.kind === "water" ? "gap-1 bg-cyan-50 text-cyan-800" : "gap-1"}>
+                    {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
+                    {item.kind === "water" ? "水质" : "养护"}
+                  </Badge>
+                  <span className="text-sm font-semibold tabular-nums">
+                    {item.kind === "water" ? formatMeasuredAt(item.record.measuredAt) : formatBioRecordTime(item.log.date)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}
+                  </span>
+                </div>
+                {canManage && (
+                  <div className="flex shrink-0 gap-2 sm:justify-end">
+                    {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => item.kind === "water" ? openEditRecord(item.record) : onEditMaintenance?.(item.log)}
+                        disabled={isRecordSaving}
+                      >
+                        <Pencil className="size-3.5" />
+                        编辑
+                      </Button>
+                    )}
+                    {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                        onClick={() => item.kind === "water" ? void deleteRecord(item.record) : onDeleteMaintenance?.(item.log)}
+                        disabled={isRecordSaving}
+                      >
+                        <Trash2 className="size-3.5" />
+                        删除
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {item.kind === "water" ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {item.record.values.map((measurement) => (
+                    <Badge key={measurement.parameterId} variant="secondary" className="font-normal">
+                      {formatMeasurement(measurement)}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm font-medium">{item.log.action || "未填写操作"}</div>
+              )}
+              {(item.kind === "water" ? item.record.notes : item.log.notes) && (
+                <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+      <>
       <div className="hidden overflow-hidden rounded-lg border bg-card md:block">
         <table className="w-full table-fixed">
           <thead className="bg-muted/50">
@@ -469,6 +563,8 @@ export function WaterQualityRecordsPanel({
           </div>
         ))}
       </div>
+      </>
+      )}
 
       <Dialog open={dialogOpen} onOpenChange={(open) => {
         setDialogOpen(open);
@@ -488,7 +584,7 @@ export function WaterQualityRecordsPanel({
                   <Label>缸组<span className="ml-0.5 text-red-500">*</span></Label>
                   <Select
                     value={draft.tankGroupId}
-                    disabled={Boolean(draft.id)}
+                    disabled={Boolean(draft.id) || isTankView}
                     onValueChange={(tankGroupId) => setDraft({ ...draft, tankGroupId, values: {} })}
                   >
                     <SelectTrigger><SelectValue placeholder="请选择缸组" /></SelectTrigger>

@@ -63,6 +63,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState("visual");
   const [recordGroupFilter, setRecordGroupFilter] = useState("all");
+  const [viewRecordGroupId, setViewRecordGroupId] = useState<string | null>(null);
+  const dailyViewRef = useRef<HTMLDivElement>(null);
+  const recordScrollSnapshotRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const [publicLookupCode, setPublicLookupCode] = useState("");
   const [highlightStockId, setHighlightStockId] = useState("");
 
@@ -237,9 +240,31 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   };
 
   const openGroupRecords = (groupId: string) => {
-    setRecordGroupFilter(groupId);
-    setActiveTab("records");
+    let scrollElement = dailyViewRef.current?.parentElement ?? null;
+    while (scrollElement) {
+      const style = window.getComputedStyle(scrollElement);
+      if (/(auto|scroll)/.test(style.overflowY) && scrollElement.scrollHeight > scrollElement.clientHeight) break;
+      scrollElement = scrollElement.parentElement;
+    }
+    const fallbackScrollElement = document.scrollingElement instanceof HTMLElement
+      ? document.scrollingElement
+      : document.documentElement;
+    const snapshotElement = scrollElement ?? fallbackScrollElement;
+    recordScrollSnapshotRef.current = { element: snapshotElement, top: snapshotElement.scrollTop };
+    setViewRecordGroupId(groupId);
   };
+  const closeGroupRecords = () => {
+    const snapshot = recordScrollSnapshotRef.current;
+    setViewRecordGroupId(null);
+    if (!snapshot) return;
+    window.requestAnimationFrame(() => {
+      snapshot.element.scrollTop = snapshot.top;
+      recordScrollSnapshotRef.current = null;
+    });
+  };
+  const viewRecordGroup = viewRecordGroupId
+    ? state.tankGroups.find((group) => group.id === viewRecordGroupId) ?? null
+    : null;
 
   const toggleStatusFilter = (st: StockStatus) =>
     setFilterStatuses((prev) => {
@@ -1094,7 +1119,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const STATUS_ORDER: StockStatus[] = ["sick", "feeding", "healthy"];
 
   return (
-    <div className="flex flex-col gap-3">
+    <div ref={dailyViewRef} className="flex flex-col gap-3">
       <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-3">
         <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
           <div className="min-w-0">
@@ -1549,6 +1574,49 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
           />
         </TabsContent>
       </Tabs>
+
+      {/* Keep tank-context records over the tank view so closing returns to the same position. */}
+      <Dialog open={Boolean(viewRecordGroupId)} onOpenChange={(open) => !open && closeGroupRecords()}>
+        <DialogContent
+          aria-describedby={undefined}
+          className="flex max-h-[90dvh] w-[min(96vw,56rem)] max-w-[96vw] flex-col overflow-hidden sm:max-w-4xl"
+          data-daily-group-records-dialog
+          onCloseAutoFocus={(event) => event.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex flex-wrap items-center gap-2 pr-6 text-left">
+              <ClipboardList className="size-5 shrink-0 text-sky-700" />
+              <span>{viewRecordGroup?.name ?? "缸组"}养护与水质</span>
+            </DialogTitle>
+            {viewRecordGroup?.location && (
+              <div className="text-left text-sm text-muted-foreground">{viewRecordGroup.location}</div>
+            )}
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {viewRecordGroupId && (
+              <WaterQualityRecordsPanel
+                maintenanceLogs={state.logs ?? []}
+                groupFilter={viewRecordGroupId}
+                getMaintenanceGroupId={logGroupId}
+                onCreateMaintenance={(groupId) => {
+                  closeGroupRecords();
+                  openNewLogForGroup(groupId);
+                }}
+                onEditMaintenance={(log) => {
+                  closeGroupRecords();
+                  editLog(log);
+                }}
+                onDeleteMaintenance={deleteLog}
+                maintenanceSaving={logSaving}
+                viewMode="tank"
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeGroupRecords}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── 生物详情 Dialog ── */}
       <Dialog
