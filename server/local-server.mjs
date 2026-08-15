@@ -177,7 +177,8 @@ const STATE_PATCH_PERMISSION_MODULES = {
   systemSettings: "accounts",
   sites: "accounts",
   species: "species",
-  speciesCategories: "species",
+  speciesCategories: "accounts",
+  speciesCategoryMajorMap: "accounts",
   products: "products",
   productOrigins: "products",
   tankGroups: "tankGroups",
@@ -239,6 +240,7 @@ const STATE_KEYS = [
   "operationLogs",
   "species",
   "speciesCategories",
+  "speciesCategoryMajorMap",
   "products",
   "productOrigins",
   "tankGroups",
@@ -759,6 +761,35 @@ function publicBioRecordPayload(record = {}, media = {}) {
   };
 }
 
+const PUBLIC_CATALOG_MAJOR_CATEGORIES = [
+  { key: "marineFish", label: "海水鱼" },
+  { key: "coral", label: "珊瑚" },
+  { key: "invertebrate", label: "无脊椎" },
+  { key: "consumable", label: "耗材" },
+];
+const PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS = new Set(
+  PUBLIC_CATALOG_MAJOR_CATEGORIES.map((category) => category.key)
+);
+
+function inferPublicCatalogMajorCategory(categoryName) {
+  const name = String(categoryName ?? "").trim();
+  if (/鱼科$|海马科$|虾虎/u.test(name)) return "marineFish";
+  if (/耗材|器材|用品|药剂|海盐|饲料|滤材|测试|设备|工具|添加剂|包装/u.test(name)) return "consumable";
+  if (/珊瑚|硬骨|脑珊瑚|榔头|火柴头|纽扣|菇珊瑚|飞盘|SPS|LPS/iu.test(name)) return "coral";
+  if (/无脊椎|虾|蟹|螺|海星|海胆|海参|贝|管虫|海葵/u.test(name)) return "invertebrate";
+  return "marineFish";
+}
+
+function normalizePublicCatalogCategoryMajorMap(categories = [], value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return Object.fromEntries(categories.map((category) => [
+    category,
+    PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS.has(source[category])
+      ? source[category]
+      : inferPublicCatalogMajorCategory(category),
+  ]));
+}
+
 function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
   const shippedIds = shippedOutStockIds(scopedState);
@@ -811,9 +842,15 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
     ...storedCategories.map((item) => String(item ?? "").trim()).filter((item) => item && categorySet.has(item)),
     ...[...categorySet].filter((item) => !storedCategories.includes(item)),
   ];
+  const speciesCategoryMajorMap = normalizePublicCatalogCategoryMajorMap(
+    speciesCategories,
+    scopedState.speciesCategoryMajorMap
+  );
 
   return {
+    majorCategories: PUBLIC_CATALOG_MAJOR_CATEGORIES,
     speciesCategories,
+    speciesCategoryMajorMap,
     species: species
       .filter((item) => speciesIds.has(String(item?.id ?? "")))
       .map((item) => ({
@@ -1573,6 +1610,10 @@ function validateStatePatchAuthorization(req, patch = {}) {
       throw new Error("人员账号和权限必须通过专用接口修改");
     }
     if (key === "operationLogs") continue;
+    if (key === "speciesCategories" || key === "speciesCategoryMajorMap") {
+      requireAdminForAuth(req, "仅管理员可以修改商品分类");
+      continue;
+    }
     const module = STATE_PATCH_PERMISSION_MODULES[key];
     if (module) requireModulePermissionForAuth(req, module, "update");
   }

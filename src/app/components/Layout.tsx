@@ -30,6 +30,7 @@ import {
   Inbox,
   FlaskConical,
   Truck,
+  Tags,
 } from "lucide-react";
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
@@ -49,6 +50,7 @@ export type ViewKey =
   | "customers"
   | "orders"
   | "finance"
+  | "categorySettings"
   | "paymentMethods"
   | "shippingCarriers"
   | "waterQualitySettings"
@@ -215,6 +217,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         ? "个人中心"
       : view === "permissions"
         ? "人员与权限"
+      : view === "categorySettings"
+        ? "分类管理"
       : view === "operationLogs"
         ? "操作日志"
       : view === "paymentMethods"
@@ -233,6 +237,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : view === "profile"
         ? "个人中心"
       : view === "permissions"
+        ? "后台管理"
+      : view === "categorySettings"
         ? "后台管理"
       : view === "operationLogs"
         ? "日志管理"
@@ -312,6 +318,13 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                 </span>
                 <span>后台管理</span>
               </div>
+              <button
+                onClick={() => navigate("categorySettings")}
+                className={navButtonClass(view === "categorySettings")}
+              >
+                <span className="flex items-center gap-2"><Tags className="size-3.5" />分类管理</span>
+                {view === "categorySettings" && <ChevronRight className="size-3.5 shrink-0" />}
+              </button>
               <button
                 onClick={() => navigate("permissions")}
                 className={navButtonClass(view === "permissions")}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -22,6 +22,7 @@ import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
 import { ShippingCarriersView } from "./components/ShippingCarriersView";
 import { WaterQualitySettingsView } from "./components/WaterQualitySettingsView";
+import { CategorySettingsView } from "./components/CategorySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
@@ -35,7 +36,8 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "systemSettings", module: "系统设置" },
   { key: "sites", module: "场地管理" },
   { key: "species", module: "物种管理" },
-  { key: "speciesCategories", module: "物种分类" },
+  { key: "speciesCategories", module: "分类管理" },
+  { key: "speciesCategoryMajorMap", module: "分类管理" },
   { key: "products", module: "商品管理" },
   { key: "productOrigins", module: "商品产地" },
   { key: "tankGroups", module: "缸组管理" },
@@ -73,7 +75,8 @@ const PERSISTED_KEYS = AUDIT_COLLECTIONS
 const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   dashboard: ["sites", "systemSettings"],
   notifications: [],
-  species: ["species", "speciesCategories", "products"],
+  species: ["species", "speciesCategories", "speciesCategoryMajorMap", "products"],
+  categorySettings: ["species", "speciesCategories", "speciesCategoryMajorMap"],
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
   batches: ["batches", "stock", "orders", "shipments"],
@@ -111,6 +114,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   operationLogs: [],
   species: [],
   speciesCategories: [],
+  speciesCategoryMajorMap: {},
   products: [],
   productOrigins: [],
   tankGroups: [],
@@ -303,6 +307,15 @@ function normalizePersistedState(data: any, currentUser: User): Store {
       }))
     : migratedData.products;
   const migratedProductOrigins = mergeProductOrigins(migratedData.productOrigins, migratedProducts ?? migratedData.products);
+  const migratedSpecies = Array.isArray(migratedData.species) ? migratedData.species : [];
+  const migratedSpeciesCategories = Array.from(new Set([
+    ...(Array.isArray(migratedData.speciesCategories) ? migratedData.speciesCategories : []),
+    ...migratedSpecies.map((species: { category?: unknown }) => species?.category),
+  ].map((category) => String(category ?? "").trim()).filter(Boolean)));
+  const migratedSpeciesCategoryMajorMap = normalizeSpeciesCategoryMajorMap(
+    migratedSpeciesCategories,
+    migratedData.speciesCategoryMajorMap
+  );
   const migratedPersonnel = Array.isArray(migratedData.personnel)
     ? migratedData.personnel.map((person: Record<string, unknown>, index: number) => {
         const name = String(person.name ?? person.username ?? "");
@@ -370,6 +383,9 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     sites: migratedSites,
     personnel: migratedPersonnel,
     operationLogs: Array.isArray(migratedData.operationLogs) ? migratedData.operationLogs : [],
+    species: migratedSpecies,
+    speciesCategories: migratedSpeciesCategories,
+    speciesCategoryMajorMap: migratedSpeciesCategoryMajorMap,
     products: migratedProducts ?? migratedData.products,
     productOrigins: migratedProductOrigins,
     tankGroups: migratedTankGroups,
@@ -1526,6 +1542,7 @@ function AdminApp() {
       case "paymentMethods": return <PaymentMethodsView />;
       case "shippingCarriers": return <ShippingCarriersView />;
       case "waterQualitySettings": return <WaterQualitySettingsView />;
+      case "categorySettings": return <CategorySettingsView />;
       case "profile":    return <PersonalCenterView />;
       case "permissions": return <PersonnelAdminView />;
       case "operationLogs": return <OperationLogsView />;

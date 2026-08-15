@@ -33,6 +33,55 @@ export type Species = {
   imageUrl: string;
 };
 
+export type SpeciesMajorCategoryKey = "marineFish" | "coral" | "invertebrate" | "consumable";
+
+export const SPECIES_MAJOR_CATEGORIES: ReadonlyArray<{
+  key: SpeciesMajorCategoryKey;
+  label: string;
+}> = [
+  { key: "marineFish", label: "海水鱼" },
+  { key: "coral", label: "珊瑚" },
+  { key: "invertebrate", label: "无脊椎" },
+  { key: "consumable", label: "耗材" },
+];
+
+export function isSpeciesMajorCategoryKey(value: unknown): value is SpeciesMajorCategoryKey {
+  return SPECIES_MAJOR_CATEGORIES.some((category) => category.key === value);
+}
+
+export function speciesMajorCategoryLabel(value: SpeciesMajorCategoryKey): string {
+  return SPECIES_MAJOR_CATEGORIES.find((category) => category.key === value)?.label ?? "海水鱼";
+}
+
+export function inferSpeciesMajorCategory(categoryName: string): SpeciesMajorCategoryKey {
+  const name = String(categoryName ?? "").trim();
+  if (/鱼科$|海马科$|虾虎/u.test(name)) return "marineFish";
+  if (/耗材|器材|用品|药剂|海盐|饲料|滤材|测试|设备|工具|添加剂|包装/u.test(name)) return "consumable";
+  if (/珊瑚|硬骨|脑珊瑚|榔头|火柴头|纽扣|菇珊瑚|飞盘|SPS|LPS/iu.test(name)) return "coral";
+  if (/无脊椎|虾|蟹|螺|海星|海胆|海参|贝|管虫|海葵/u.test(name)) return "invertebrate";
+  return "marineFish";
+}
+
+export function normalizeSpeciesCategoryMajorMap(
+  categories: string[] | undefined,
+  value: unknown
+): Record<string, SpeciesMajorCategoryKey> {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return Object.fromEntries(
+    (categories ?? [])
+      .map((category) => String(category ?? "").trim())
+      .filter(Boolean)
+      .map((category) => [
+        category,
+        isSpeciesMajorCategoryKey(source[category])
+          ? source[category]
+          : inferSpeciesMajorCategory(category),
+      ])
+  );
+}
+
 export type Product = {
   id: string;
   speciesId: string;
@@ -725,6 +774,8 @@ export type Store = {
   operationLogs: OperationLog[];
   species: Species[];
   speciesCategories: string[];
+  /** 现有分类均作为小类，通过名称映射到固定的四个商品大类。 */
+  speciesCategoryMajorMap: Record<string, SpeciesMajorCategoryKey>;
   products: Product[];
   productOrigins: string[];
   tankGroups: TankGroup[];
@@ -849,6 +900,21 @@ export const initialState: Store = {
     "鳞鲀科", "炮弹鱼科", "虾虎鱼科", "海马科", "狮子鱼科",
     "石斑鱼科", "笛鲷科", "鲈科",
   ],
+  speciesCategoryMajorMap: {
+    刺尾鱼科: "marineFish",
+    雀鲷科: "marineFish",
+    蝴蝶鱼科: "marineFish",
+    神仙鱼科: "marineFish",
+    隆头鱼科: "marineFish",
+    鳞鲀科: "marineFish",
+    炮弹鱼科: "marineFish",
+    虾虎鱼科: "marineFish",
+    海马科: "marineFish",
+    狮子鱼科: "marineFish",
+    石斑鱼科: "marineFish",
+    笛鲷科: "marineFish",
+    鲈科: "marineFish",
+  },
   productOrigins: [
     "印尼", "菲律宾", "马来西亚", "斯里兰卡", "夏威夷",
     "澳大利亚", "马尔代夫", "红海", "坦桑尼亚", "巴西",
