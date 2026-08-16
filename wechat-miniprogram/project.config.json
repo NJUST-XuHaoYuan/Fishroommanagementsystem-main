@@ -1,0 +1,66 @@
+{
+  "appid": "wxcf900cefaee1432b",
+  "compileType": "miniprogram",
+  "libVersion": "3.8.12",
+  "miniprogramRoot": "./",
+  "projectname": "marine-forest-catalog",
+  "setting": {
+    "urlCheck": true,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "coverView": true,
+    "lazyloadPlaceholderEnable": false,
+    "compileWorklet": false,
+    "uglifyFileName": false,
+    "uploadWithSourceMap": true,
+    "packNpmManually": false,
+    "packNpmRelationList": [],
+    "minifyWXSS": true,
+    "minifyWXML": true,
+    "localPlugins": false,
+    "disableUseStrict": false,
+    "useCompilerPlugins": false,
+    "condition": true,
+    "swc": false,
+    "disableSWC": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "condition": {
+    "miniprogram": {
+      "list": [
+        {
+          "name": "公开目录",
+          "pathName": "pages/catalog/index",
+          "query": ""
+        },
+        {
+          "name": "小类商品",
+          "pathName": "pages/products/index",
+          "query": "category=%E5%88%BA%E5%B0%BE%E9%B1%BC%E7%A7%91&majorKey=marineFish"
+        },
+        {
+          "name": "可选个体",
+          "pathName": "pages/specimens/index",
+          "query": "productId=prod-import-cf190bfa9631"
+        },
+        {
+          "name": "个体详情",
+          "pathName": "pages/detail/index",
+          "query": "stockItemId=afa9z5db"
+        }
+      ]
+    }
+  },
+  "simulatorPluginLibVersion": {},
+  "packOptions": {
+    "ignore": [],
+    "include": []
+  },
+  "editorSetting": {}
+}

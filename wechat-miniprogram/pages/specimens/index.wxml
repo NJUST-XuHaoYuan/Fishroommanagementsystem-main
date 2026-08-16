@@ -1,0 +1,110 @@
+<view class="safe-page specimens-page">
+  <view wx:if="{{loading}}" class="state-panel">
+    <view class="skeleton loading-hero"></view>
+    <view class="skeleton loading-title"></view>
+    <view class="skeleton loading-card"></view>
+  </view>
+
+  <view wx:elif="{{error}}" class="state-panel">
+    <view class="empty-title">可选个体暂时无法加载</view>
+    <view class="empty-text">{{error}}</view>
+    <button class="primary-button" bindtap="onRetry">重新加载</button>
+  </view>
+
+  <view wx:else>
+    <view class="species-visual">
+      <image wx:if="{{context.image}}" class="context-image" src="{{context.image}}" mode="aspectFit" />
+      <view wx:else class="context-image placeholder"></view>
+    </view>
+
+    <view class="species-intro">
+      <view class="species-name">{{context.name}}</view>
+      <view class="species-scientific">{{context.subtitle}}</view>
+      <view class="species-overview">
+        <view class="overview-item">
+          <text class="overview-value">{{context.specimenCount}}</text>
+          <text class="overview-label">可选个体</text>
+        </view>
+        <view class="overview-divider"></view>
+        <view class="overview-item price-overview">
+          <text class="overview-value">{{context.priceRange}}</text>
+          <text class="overview-label">当前售价</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="list-toolbar">
+      <view class="list-heading">
+        <view class="section-title">选择个体</view>
+        <view class="section-count">{{specimens.length}} 条</view>
+      </view>
+      <view class="filter-row">
+        <button
+          wx:for="{{filterOptions}}"
+          wx:key="key"
+          class="filter-option {{activeFilter === item.key ? 'active' : ''}}"
+          data-key="{{item.key}}"
+          bindtap="onFilterTap"
+        >
+          {{item.label}}
+        </button>
+      </view>
+    </view>
+
+    <view wx:if="{{specimens.length}}" class="specimen-list">
+      <view
+        wx:for="{{specimens}}"
+        wx:key="id"
+        class="specimen-card"
+        hover-class="specimen-card-hover"
+        role="button"
+        aria-label="查看选鱼码{{item.displayCode}}的维护详情"
+        data-id="{{item.id}}"
+        bindtap="onSpecimenTap"
+      >
+        <view class="specimen-main">
+          <view class="specimen-media">
+            <image wx:if="{{item.image}}" class="specimen-image" src="{{item.image}}" mode="aspectFit" lazy-load />
+            <view wx:else class="specimen-image placeholder"></view>
+            <view class="specimen-status {{item.statusClass}}">{{item.statusText}}</view>
+          </view>
+
+          <view class="specimen-info">
+            <view class="specimen-top">
+              <view class="specimen-code mono">{{item.displayCode}}</view>
+              <view class="specimen-price">{{item.priceText}}</view>
+            </view>
+            <view class="specimen-product">{{item.productName}}</view>
+            <view class="specimen-attributes">
+              <view class="attribute">
+                <text class="attribute-label">尺寸</text>
+                <text class="attribute-value">{{item.size}}</text>
+              </view>
+              <view class="attribute">
+                <text class="attribute-label">入库</text>
+                <text class="attribute-value">{{item.arrivalDate}}</text>
+              </view>
+            </view>
+            <view class="location-row">
+              <text class="location-label">缸位</text>
+              <text class="location-value">{{item.location}}</text>
+            </view>
+          </view>
+        </view>
+
+        <view class="latest-record">
+          <view class="record-copy">
+            <text class="record-label">最近维护</text>
+            <text class="record-text two-line">{{item.latestBioText}}</text>
+          </view>
+          <text class="record-arrow">›</text>
+        </view>
+      </view>
+    </view>
+
+    <view wx:else class="state-panel compact">
+      <view class="empty-title">当前筛选下没有个体</view>
+      <view class="empty-text">可以切换到“全部”继续查看。</view>
+    </view>
+  </view>
+</view>

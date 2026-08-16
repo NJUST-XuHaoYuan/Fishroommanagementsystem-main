@@ -1,0 +1,8 @@
+{
+  "navigationBarTitleText": "个体档案",
+  "navigationBarBackgroundColor": "#fcfdfc",
+  "navigationBarTextStyle": "black",
+  "enablePullDownRefresh": true,
+  "backgroundColor": "#f3f5f3",
+  "backgroundTextStyle": "dark"
+}

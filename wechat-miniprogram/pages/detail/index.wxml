@@ -1,0 +1,128 @@
+<view class="safe-page detail-page">
+  <view wx:if="{{loading}}" class="state-panel">
+    <view class="skeleton loading-hero"></view>
+    <view class="skeleton loading-title"></view>
+    <view class="skeleton loading-line"></view>
+    <view class="skeleton loading-line short"></view>
+  </view>
+
+  <view wx:elif="{{error}}" class="state-panel">
+    <view class="empty-title">个体档案暂时无法加载</view>
+    <view class="empty-text">{{error}}</view>
+    <button class="primary-button" bindtap="onRetry">重新加载</button>
+  </view>
+
+  <view wx:else class="detail-content">
+    <view class="hero-visual">
+      <image
+        wx:if="{{specimen.image}}"
+        class="hero-image"
+        src="{{specimen.image}}"
+        mode="aspectFit"
+        data-src="{{specimen.image}}"
+        bindtap="onPreviewImage"
+      />
+      <view wx:else class="hero-image placeholder"></view>
+    </view>
+
+    <view class="identity-section">
+      <view class="identity-top">
+        <view class="display-code mono">{{specimen.displayCode}}</view>
+        <view class="price">{{specimen.priceText}}</view>
+      </view>
+      <view class="product-name">{{specimen.productName}}</view>
+      <view class="taxonomy">
+        <text class="species-name">{{specimen.speciesName}}</text>
+        <text class="scientific">{{specimen.subtitle}}</text>
+      </view>
+      <view class="identity-status">
+        <view class="status-label {{specimen.statusClass}}">
+          <view class="status-dot"></view>
+          <text>{{specimen.statusText}}</text>
+        </view>
+        <view class="stay-days">在缸 {{specimen.daysInStore}} 天</view>
+      </view>
+    </view>
+
+    <view class="info-grid">
+      <view class="info-item">
+        <text class="info-label">尺寸</text>
+        <text class="info-value">{{specimen.size}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">产地</text>
+        <text class="info-value">{{specimen.origin}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">入库日期</text>
+        <text class="info-value">{{specimen.arrivalDate}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">当前缸位</text>
+        <text class="info-value">{{specimen.location}}</text>
+      </view>
+    </view>
+
+    <view class="selection-panel">
+      <view class="selection-copy">
+        <view class="selection-label">选鱼码</view>
+        <view class="selection-code mono">{{specimen.selectionCode}}</view>
+      </view>
+      <button class="copy-button" bindtap="onCopyCode">复制</button>
+    </view>
+
+    <view class="timeline-section">
+      <view class="timeline-heading">
+        <view>
+          <view class="section-title">维护档案</view>
+          <view class="section-subtitle">从入库开始持续记录</view>
+        </view>
+        <view class="timeline-count">{{timeline.length}} 条</view>
+      </view>
+
+      <view wx:if="{{timeline.length}}" class="timeline">
+        <view wx:for="{{timeline}}" wx:key="id" class="timeline-item">
+          <view class="timeline-dot"></view>
+          <view class="timeline-content">
+            <view class="timeline-top">
+              <text class="timeline-title">{{item.title}}</text>
+              <text class="timeline-date">{{item.dateText}}</text>
+            </view>
+            <view class="timeline-text">{{item.text}}</view>
+            <view wx:if="{{item.operator}}" class="timeline-operator">记录人：{{item.operator}}</view>
+            <scroll-view wx:if="{{item.photos.length}}" class="photo-scroll" scroll-x enhanced show-scrollbar="{{false}}">
+              <image
+                wx:for="{{item.photos}}"
+                wx:key="*this"
+                class="timeline-photo"
+                src="{{item}}"
+                mode="aspectFit"
+                lazy-load
+                data-src="{{item}}"
+                bindtap="onPreviewImage"
+              />
+            </scroll-view>
+            <view wx:if="{{item.videos.length}}" class="video-list">
+              <video
+                wx:for="{{item.videos}}"
+                wx:key="*this"
+                class="timeline-video"
+                src="{{item}}"
+                controls
+                object-fit="contain"
+                show-center-play-btn
+                show-fullscreen-btn
+                enable-progress-gesture
+              />
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view wx:else class="state-panel compact">
+        <view class="empty-title">暂无公开维护记录</view>
+        <view class="empty-text">可联系店员进一步确认。</view>
+      </view>
+    </view>
+  </view>
+</view>

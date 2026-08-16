@@ -1,0 +1,197 @@
+page {
+  --ink: #16201c;
+  --ink-soft: #35413e;
+  --muted: #68736e;
+  --line: #c8d0cc;
+  --line-soft: #dde3df;
+  --line-strong: #aeb9b4;
+  --canvas: #f3f5f3;
+  --surface: #fcfdfc;
+  --surface-soft: #e8eeeb;
+  --brand: #0a6b63;
+  --brand-dark: #07544e;
+  --brand-soft: #eaf4f1;
+  --brand-border: #b9d5cf;
+  --coral: #a8464e;
+  --coral-soft: #faeff0;
+  --coral-border: #e5c1c5;
+  --gold: #81601d;
+  --gold-soft: #f8f2e5;
+  --gold-border: #ddcca0;
+  --indigo: #4b5b80;
+  --indigo-soft: #eff1f7;
+  --indigo-border: #c8cedd;
+  --price: #8b5c20;
+  min-height: 100%;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 28rpx;
+  line-height: 1.5;
+}
+
+.custom-nav {
+  position: relative;
+  z-index: 100;
+  width: 100%;
+  border-bottom: 1rpx solid #d3dad6;
+  background: rgba(252, 253, 252, 0.98);
+  box-shadow: 0 6rpx 24rpx rgba(21, 32, 28, 0.035);
+}
+
+.custom-nav-content {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+  padding-left: 32rpx;
+}
+
+.nav-brand-mark {
+  width: 88rpx;
+  height: 88rpx;
+  flex: 0 0 88rpx;
+  overflow: hidden;
+  border: 1rpx solid #cbd3cf;
+  border-radius: 10rpx;
+  background: #fff;
+  box-shadow: 0 2rpx 6rpx rgba(21, 32, 28, 0.08);
+}
+
+.nav-brand-logo {
+  width: 100%;
+  height: 100%;
+  transform: scale(1.24);
+}
+
+.nav-brand-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.nav-brand-title {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 750;
+  line-height: 23px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-brand-subtitle {
+  margin-top: 2rpx;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+view,
+text,
+scroll-view,
+button,
+input,
+image,
+video {
+  box-sizing: border-box;
+}
+
+button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+}
+
+button::after {
+  border: 0;
+}
+
+.safe-page {
+  min-height: 100vh;
+  padding-bottom: calc(44rpx + env(safe-area-inset-bottom));
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.two-line {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.state-panel {
+  margin: 32rpx 28rpx;
+  padding: 48rpx 36rpx;
+  border: 1rpx solid var(--line);
+  border-radius: 16rpx;
+  background: var(--surface);
+}
+
+.state-panel.compact {
+  margin-top: 24rpx;
+}
+
+.empty-title {
+  color: var(--ink);
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.empty-text {
+  margin-top: 10rpx;
+  color: var(--muted);
+  font-size: 26rpx;
+  line-height: 1.6;
+}
+
+.primary-button {
+  display: flex;
+  min-height: 84rpx;
+  align-items: center;
+  justify-content: center;
+  margin-top: 28rpx;
+  border-radius: 12rpx;
+  background: var(--ink);
+  color: #fff;
+  font-size: 27rpx;
+  font-weight: 700;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12rpx;
+  background: #dde4e1;
+}
+
+.skeleton::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
+  content: "";
+  transform: translateX(-100%);
+  animation: skeleton-sweep 1.35s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}

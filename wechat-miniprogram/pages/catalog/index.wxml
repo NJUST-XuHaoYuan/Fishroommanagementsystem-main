@@ -1,0 +1,76 @@
+<view class="safe-page catalog-page">
+  <view
+    class="custom-nav"
+    style="height: {{navigationHeight}}px; padding-top: {{statusBarHeight}}px;"
+  >
+    <view
+      class="custom-nav-content"
+      style="height: {{navBarHeight}}px; padding-right: {{menuRightPadding}}px;"
+    >
+      <view class="nav-brand-mark">
+        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFill" />
+      </view>
+      <view class="nav-brand-copy">
+        <view class="nav-brand-title">海水生物鱼单</view>
+        <view class="nav-brand-subtitle">真实在缸个体 · 持续维护记录</view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{loading}}" class="catalog-loading">
+    <view class="skeleton loading-heading"></view>
+    <view class="skeleton loading-grid"></view>
+    <view class="skeleton loading-heading short"></view>
+    <view class="skeleton loading-row"></view>
+  </view>
+
+  <view wx:elif="{{error}}" class="state-panel">
+    <view class="empty-title">公开鱼单暂时无法加载</view>
+    <view class="empty-text">{{error}}</view>
+    <button class="primary-button" bindtap="onRetry">重新加载</button>
+  </view>
+
+  <view wx:elif="{{majorGroups.length}}" class="major-list">
+    <view
+      wx:for="{{majorGroups}}"
+      wx:for-item="major"
+      wx:key="key"
+      class="major-section {{major.tone}}"
+    >
+      <view class="major-header">
+        <view class="major-title">{{major.label}}</view>
+        <view class="major-summary">
+          <text class="summary-value">{{major.categoryCount}}</text>
+          <text> 小类 · </text>
+          <text class="summary-value">{{major.specimenCount}}</text>
+          <text> {{major.unit}}可选</text>
+        </view>
+      </view>
+
+      <view class="minor-grid {{major.categories.length === 1 ? 'single' : ''}}">
+        <button
+          wx:for="{{major.categories}}"
+          wx:for-item="minor"
+          wx:key="key"
+          class="minor-link {{minor.isLastRow ? 'last-row' : ''}}"
+          hover-class="minor-link-hover"
+          aria-label="查看{{minor.label}}，{{minor.productCount}}款，{{minor.specimenCount}}{{minor.unit}}可选"
+          data-category="{{minor.key}}"
+          data-major-key="{{major.key}}"
+          bindtap="onMinorCategoryTap"
+        >
+          <view class="minor-copy">
+            <view class="minor-name">{{minor.label}}</view>
+            <view class="minor-meta">{{minor.productCount}} 款 · {{minor.specimenCount}} {{minor.unit}}</view>
+          </view>
+          <text class="minor-arrow" aria-hidden="true">›</text>
+        </button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:else class="state-panel">
+    <view class="empty-title">当前没有公开可选商品</view>
+    <view class="empty-text">下拉刷新后再试。</view>
+  </view>
+</view>

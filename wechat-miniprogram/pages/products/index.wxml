@@ -1,0 +1,111 @@
+<view class="safe-page products-page {{categoryInfo.tone}}">
+  <view
+    class="custom-nav"
+    style="height: {{navigationHeight}}px; padding-top: {{statusBarHeight}}px;"
+  >
+    <view
+      class="custom-nav-content"
+      style="height: {{navBarHeight}}px; padding-right: {{menuRightPadding}}px;"
+    >
+      <view class="nav-brand-mark">
+        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFill" />
+      </view>
+      <view class="nav-brand-copy">
+        <view class="nav-brand-title">海水生物鱼单</view>
+        <view class="nav-brand-subtitle">真实在缸个体 · 持续维护记录</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="products-content">
+    <view class="back-row">
+      <button class="back-button" aria-label="返回分类目录" bindtap="onBackTap">
+        <text class="back-symbol" aria-hidden="true">‹</text>
+        <text>分类目录</text>
+      </button>
+      <text wx:if="{{majorLabel}}" class="major-label">{{majorLabel}}</text>
+    </view>
+
+    <view wx:if="{{loading}}" class="products-loading">
+      <view class="skeleton loading-category"></view>
+      <view class="skeleton loading-search"></view>
+      <view class="loading-cards">
+        <view class="skeleton loading-card"></view>
+        <view class="skeleton loading-card"></view>
+      </view>
+    </view>
+
+    <view wx:elif="{{error}}" class="state-panel products-state">
+      <view class="empty-title">商品列表暂时无法加载</view>
+      <view class="empty-text">{{error}}</view>
+      <button class="primary-button" bindtap="onRetry">重新加载</button>
+    </view>
+
+    <view wx:else>
+      <view class="category-band">
+        <view class="category-copy">
+          <view class="category-title">{{categoryInfo.label}}</view>
+          <view class="category-products">{{categoryInfo.productCount}} 款商品</view>
+        </view>
+        <view class="category-total">
+          <text class="category-number">{{categoryInfo.specimenCount}}</text>
+          <text class="category-unit">{{categoryInfo.unit}}可选</text>
+        </view>
+      </view>
+
+      <view class="search-box">
+        <view class="search-icon" aria-hidden="true"></view>
+        <input
+          value="{{keyword}}"
+          placeholder="搜索商品、学名、规格或产地"
+          placeholder-class="search-placeholder"
+          confirm-type="search"
+          bindinput="onSearchInput"
+        />
+        <button wx:if="{{keyword}}" class="search-clear" bindtap="onClearSearch">清除</button>
+      </view>
+
+      <view class="product-head">
+        <view class="product-heading">全部商品</view>
+        <view class="product-summary">{{products.length}} 款 · {{filteredSpecimenCount}} {{categoryInfo.unit}}</view>
+      </view>
+
+      <view wx:if="{{products.length}}" class="product-grid">
+        <view
+          wx:for="{{products}}"
+          wx:key="id"
+          class="product-card"
+          hover-class="product-card-hover"
+          role="button"
+          aria-label="查看{{item.name}}，{{item.size}}，{{item.specimenCount}}{{categoryInfo.unit}}可选"
+          data-id="{{item.id}}"
+          bindtap="onProductTap"
+        >
+          <view class="product-media">
+            <image wx:if="{{item.image}}" class="product-image" src="{{item.image}}" mode="aspectFill" lazy-load />
+            <view wx:else class="product-image product-placeholder"></view>
+            <view class="product-count">{{item.specimenCount}} {{categoryInfo.unit}}</view>
+          </view>
+          <view class="product-copy">
+            <view class="product-name">{{item.name}}</view>
+            <view class="product-species">{{item.speciesName}}</view>
+            <view class="product-spec">{{item.size}} · {{item.origin}}</view>
+            <view class="product-footer">
+              <view class="product-price">
+                <text>{{item.priceText}}</text>
+                <text wx:if="{{item.priceNote}}" class="price-note">{{item.priceNote}}</text>
+              </view>
+              <text class="product-arrow" aria-hidden="true">›</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view wx:else class="state-panel compact products-state">
+        <view class="empty-title">没有匹配商品</view>
+        <view class="empty-text">清除关键词后查看这个小类的全部商品。</view>
+        <button class="primary-button" bindtap="onClearSearch">查看全部</button>
+      </view>
+    </view>
+  </view>
+</view>

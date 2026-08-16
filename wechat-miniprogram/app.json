@@ -1,0 +1,17 @@
+{
+  "pages": [
+    "pages/catalog/index",
+    "pages/products/index",
+    "pages/specimens/index",
+    "pages/detail/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "海水生物鱼单",
+    "navigationBarBackgroundColor": "#fcfdfc",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f3f5f3",
+    "backgroundTextStyle": "dark"
+  },
+  "style": "v2",
+  "lazyCodeLoading": "requiredComponents"
+}

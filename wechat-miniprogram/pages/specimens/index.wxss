@@ -1,0 +1,350 @@
+.specimens-page {
+  background: var(--canvas);
+}
+
+.species-visual {
+  width: 100%;
+  height: 370rpx;
+  background: #101715;
+}
+
+.context-image {
+  width: 100%;
+  height: 100%;
+}
+
+.placeholder {
+  background: #dfe5e2;
+}
+
+.species-intro {
+  padding: 26rpx 28rpx 28rpx;
+  border-bottom: 1rpx solid var(--line);
+  background: #fff;
+}
+
+.species-name {
+  color: var(--ink);
+  font-size: 42rpx;
+  font-weight: 780;
+  line-height: 1.22;
+  word-break: break-word;
+}
+
+.species-scientific {
+  margin-top: 7rpx;
+  color: var(--muted);
+  font-size: 24rpx;
+  font-style: italic;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.species-overview {
+  display: flex;
+  align-items: center;
+  margin-top: 24rpx;
+  padding-top: 20rpx;
+  border-top: 1rpx solid #e4e9e6;
+}
+
+.overview-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8rpx;
+}
+
+.overview-value {
+  color: var(--ink);
+  font-size: 30rpx;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.price-overview .overview-value {
+  color: var(--price);
+}
+
+.overview-label {
+  color: var(--muted);
+  font-size: 22rpx;
+}
+
+.overview-divider {
+  width: 1rpx;
+  height: 28rpx;
+  margin: 0 20rpx;
+  background: var(--line);
+}
+
+.list-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: 20rpx 24rpx;
+  border-bottom: 1rpx solid var(--line);
+  background: rgba(241, 244, 242, 0.97);
+}
+
+.list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+}
+
+.section-title {
+  color: var(--ink);
+  font-size: 34rpx;
+  font-weight: 760;
+}
+
+.section-count {
+  color: var(--muted);
+  font-size: 23rpx;
+}
+
+.filter-row {
+  display: flex;
+  margin-top: 14rpx;
+  padding: 5rpx;
+  border: 1rpx solid #cbd4d0;
+  border-radius: 12rpx;
+  background: #e2e8e5;
+}
+
+.filter-option {
+  display: flex;
+  min-height: 66rpx;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9rpx;
+  color: #53605c;
+  font-size: 24rpx;
+  font-weight: 680;
+}
+
+.filter-option.active {
+  background: #111a18;
+  color: #fff;
+}
+
+.specimen-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18rpx;
+  padding: 22rpx 24rpx 28rpx;
+}
+
+.specimen-card {
+  overflow: hidden;
+  border: 1rpx solid var(--line);
+  border-radius: 14rpx;
+  background: #fff;
+}
+
+.specimen-card-hover {
+  border-color: #9cb3ac;
+  background: #f7faf8;
+  transform: scale(0.99);
+}
+
+.specimen-main {
+  display: flex;
+  min-width: 0;
+  gap: 18rpx;
+  padding: 16rpx;
+}
+
+.specimen-media {
+  position: relative;
+  width: 260rpx;
+  height: 226rpx;
+  flex: 0 0 260rpx;
+  overflow: hidden;
+  border-radius: 10rpx;
+  background: #101715;
+}
+
+.specimen-image {
+  width: 100%;
+  height: 100%;
+}
+
+.specimen-status {
+  position: absolute;
+  top: 11rpx;
+  right: 11rpx;
+  padding: 6rpx 10rpx;
+  border-radius: 8rpx;
+  background: rgba(255, 255, 255, 0.94);
+  color: #2e3a37;
+  font-size: 19rpx;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.specimen-status.feeding {
+  color: var(--brand-dark);
+}
+
+.specimen-status.sick {
+  color: #9a3434;
+}
+
+.specimen-info {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.specimen-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10rpx;
+}
+
+.specimen-code {
+  min-width: 0;
+  color: var(--brand);
+  font-size: 25rpx;
+  font-weight: 760;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.specimen-price {
+  flex: 0 0 auto;
+  color: var(--price);
+  font-size: 30rpx;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.specimen-product {
+  margin-top: 8rpx;
+  color: var(--ink);
+  font-size: 30rpx;
+  font-weight: 740;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.specimen-attributes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8rpx 18rpx;
+  margin-top: 13rpx;
+}
+
+.attribute {
+  display: flex;
+  align-items: baseline;
+  gap: 6rpx;
+}
+
+.attribute-label,
+.location-label {
+  color: #74807c;
+  font-size: 20rpx;
+  font-weight: 650;
+}
+
+.attribute-value,
+.location-value {
+  color: var(--ink-soft);
+  font-size: 22rpx;
+  line-height: 1.4;
+}
+
+.location-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8rpx;
+  margin-top: 10rpx;
+}
+
+.location-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.latest-record {
+  display: flex;
+  min-height: 82rpx;
+  align-items: center;
+  gap: 16rpx;
+  padding: 14rpx 18rpx;
+  border-top: 1rpx solid #e3e8e5;
+  background: #f4f7f5;
+}
+
+.record-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 12rpx;
+}
+
+.record-label {
+  flex: 0 0 auto;
+  color: var(--brand-dark);
+  font-size: 21rpx;
+  font-weight: 720;
+}
+
+.record-text {
+  min-width: 0;
+  color: #4b5854;
+  font-size: 22rpx;
+  line-height: 1.45;
+}
+
+.record-arrow {
+  flex: 0 0 auto;
+  color: var(--brand);
+  font-size: 34rpx;
+  line-height: 1;
+}
+
+.loading-hero {
+  height: 340rpx;
+}
+
+.loading-title {
+  width: 48%;
+  height: 46rpx;
+  margin-top: 24rpx;
+}
+
+.loading-card {
+  height: 320rpx;
+  margin-top: 24rpx;
+}
+
+@media (max-width: 340px) {
+  .specimen-media {
+    width: 244rpx;
+    height: 218rpx;
+    flex-basis: 244rpx;
+  }
+
+  .specimen-main {
+    gap: 14rpx;
+  }
+
+  .specimen-product {
+    font-size: 28rpx;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .specimen-card-hover {
+    transform: none;
+  }
+}

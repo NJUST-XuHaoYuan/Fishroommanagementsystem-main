@@ -23,6 +23,9 @@ deploy/images/
 npm-debug.log*
 .DS_Store
 
+# WeChat DevTools machine-local settings
+wechat-miniprogram/project.private.config.json
+
 # Packaged archives and Docker image exports
 *.zip
 *.tar

@@ -1,0 +1,387 @@
+.detail-page {
+  background: var(--canvas);
+}
+
+.detail-content {
+  padding-bottom: 24rpx;
+}
+
+.hero-visual {
+  width: 100%;
+  height: 500rpx;
+  background: #0e1513;
+}
+
+.hero-image {
+  width: 100%;
+  height: 100%;
+}
+
+.placeholder {
+  background: #dfe5e2;
+}
+
+.identity-section {
+  padding: 26rpx 28rpx 28rpx;
+  border-bottom: 1rpx solid var(--line);
+  background: #fff;
+}
+
+.identity-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20rpx;
+}
+
+.display-code {
+  min-width: 0;
+  color: var(--brand);
+  font-size: 25rpx;
+  font-weight: 760;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.price {
+  flex: 0 0 auto;
+  color: var(--price);
+  font-size: 38rpx;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.product-name {
+  margin-top: 12rpx;
+  color: var(--ink);
+  font-size: 44rpx;
+  font-weight: 800;
+  line-height: 1.22;
+  word-break: break-word;
+}
+
+.taxonomy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4rpx;
+  margin-top: 10rpx;
+}
+
+.species-name {
+  color: var(--ink-soft);
+  font-size: 26rpx;
+  font-weight: 680;
+  line-height: 1.4;
+}
+
+.scientific {
+  width: 100%;
+  color: var(--muted);
+  font-size: 22rpx;
+  font-style: italic;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.identity-status {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-top: 22rpx;
+}
+
+.status-label {
+  display: flex;
+  min-height: 50rpx;
+  align-items: center;
+  gap: 9rpx;
+  padding: 6rpx 13rpx;
+  border: 1rpx solid #cbd5d1;
+  border-radius: 9rpx;
+  color: #35413e;
+  font-size: 22rpx;
+  font-weight: 720;
+}
+
+.status-dot {
+  width: 11rpx;
+  height: 11rpx;
+  border-radius: 50%;
+  background: #7a8883;
+}
+
+.status-label.feeding {
+  border-color: #8eb9b1;
+  color: var(--brand-dark);
+}
+
+.status-label.feeding .status-dot {
+  background: var(--brand);
+}
+
+.status-label.sick {
+  border-color: #d8a5a5;
+  color: #963434;
+}
+
+.status-label.sick .status-dot {
+  background: #b94343;
+}
+
+.stay-days {
+  color: var(--muted);
+  font-size: 23rpx;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1rpx solid var(--line);
+  background: #fff;
+}
+
+.info-item {
+  min-width: 0;
+  min-height: 112rpx;
+  padding: 19rpx 28rpx;
+  border-top: 1rpx solid #e7ebe9;
+}
+
+.info-item:nth-child(odd) {
+  border-right: 1rpx solid #e7ebe9;
+}
+
+.info-label {
+  display: block;
+  color: #74807c;
+  font-size: 21rpx;
+}
+
+.info-value {
+  display: block;
+  margin-top: 5rpx;
+  color: var(--ink);
+  font-size: 27rpx;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.selection-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20rpx;
+  margin: 22rpx 24rpx 0;
+  padding: 23rpx 22rpx;
+  border-radius: 14rpx;
+  background: #111a18;
+}
+
+.selection-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.selection-label {
+  color: #9eafa9;
+  font-size: 21rpx;
+  font-weight: 700;
+}
+
+.selection-code {
+  margin-top: 6rpx;
+  color: #fff;
+  font-size: 24rpx;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.copy-button {
+  display: flex;
+  min-width: 116rpx;
+  min-height: 70rpx;
+  flex: 0 0 116rpx;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10rpx;
+  background: #d9ece8;
+  color: #0a4e48;
+  font-size: 24rpx;
+  font-weight: 760;
+}
+
+.timeline-section {
+  margin-top: 22rpx;
+  padding: 28rpx 24rpx 12rpx;
+  border-top: 1rpx solid var(--line);
+  border-bottom: 1rpx solid var(--line);
+  background: #fff;
+}
+
+.timeline-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20rpx;
+  padding-bottom: 22rpx;
+  border-bottom: 1rpx solid #e4e9e6;
+}
+
+.section-title {
+  color: var(--ink);
+  font-size: 35rpx;
+  font-weight: 780;
+  line-height: 1.3;
+}
+
+.section-subtitle {
+  margin-top: 4rpx;
+  color: var(--muted);
+  font-size: 23rpx;
+}
+
+.timeline-count {
+  flex: 0 0 auto;
+  padding-top: 5rpx;
+  color: var(--muted);
+  font-size: 23rpx;
+}
+
+.timeline {
+  position: relative;
+  padding-left: 34rpx;
+}
+
+.timeline::before {
+  position: absolute;
+  top: 32rpx;
+  bottom: 36rpx;
+  left: 8rpx;
+  width: 2rpx;
+  background: #b9cac5;
+  content: "";
+}
+
+.timeline-item {
+  position: relative;
+}
+
+.timeline-dot {
+  position: absolute;
+  top: 34rpx;
+  left: -34rpx;
+  width: 18rpx;
+  height: 18rpx;
+  border: 4rpx solid #dceeea;
+  border-radius: 50%;
+  background: var(--brand);
+}
+
+.timeline-content {
+  padding: 28rpx 0 30rpx;
+  border-bottom: 1rpx solid #e4e9e6;
+}
+
+.timeline-item:last-child .timeline-content {
+  border-bottom: 0;
+}
+
+.timeline-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8rpx 18rpx;
+}
+
+.timeline-title {
+  color: var(--ink);
+  font-size: 28rpx;
+  font-weight: 760;
+}
+
+.timeline-date {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 21rpx;
+}
+
+.timeline-text {
+  margin-top: 11rpx;
+  color: var(--ink-soft);
+  font-size: 26rpx;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.timeline-operator {
+  margin-top: 9rpx;
+  color: #74807c;
+  font-size: 22rpx;
+}
+
+.photo-scroll {
+  margin-top: 16rpx;
+  white-space: nowrap;
+}
+
+.timeline-photo {
+  display: inline-block;
+  width: 214rpx;
+  height: 158rpx;
+  margin-right: 12rpx;
+  border-radius: 10rpx;
+  background: #101715;
+}
+
+.video-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+  margin-top: 16rpx;
+}
+
+.timeline-video {
+  width: 100%;
+  height: 360rpx;
+  border-radius: 10rpx;
+  background: #101715;
+}
+
+.loading-hero {
+  height: 420rpx;
+}
+
+.loading-title {
+  width: 52%;
+  height: 48rpx;
+  margin-top: 24rpx;
+}
+
+.loading-line {
+  height: 30rpx;
+  margin-top: 18rpx;
+}
+
+.loading-line.short {
+  width: 66%;
+}
+
+@media (max-width: 340px) {
+  .hero-visual {
+    height: 460rpx;
+  }
+
+  .product-name {
+    font-size: 41rpx;
+  }
+
+  .info-item {
+    padding-right: 22rpx;
+    padding-left: 22rpx;
+  }
+}
