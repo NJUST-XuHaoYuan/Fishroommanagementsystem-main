@@ -69,7 +69,7 @@ const SENSITIVE_ASSIGNMENT_NAMES = [
 ];
 
 const SENSITIVE_ASSIGNMENT_PATTERN = new RegExp(
-  `^\\s*(?:-\\s*)?(?:(?:export|ENV)\\s+)?["']?(${SENSITIVE_ASSIGNMENT_NAMES.join("|")})["']?\\s*[:=]\\s*(.*?)\\s*[,;]?\\s*$`,
+  `^[\\t ]*(?:-[\\t ]*)?(?:(?:export|ENV)[\\t ]+)?["']?(${SENSITIVE_ASSIGNMENT_NAMES.join("|")})["']?[\\t ]*[:=][\\t ]*(.*?)[\\t ]*[,;]?[\\t ]*$`,
   "gmi"
 );
 
