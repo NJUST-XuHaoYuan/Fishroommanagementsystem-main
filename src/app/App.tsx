@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelResigned, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelAccountEnabled, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import type { AuthAccountPermissionSummary } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -26,7 +27,7 @@ import { CategorySettingsView } from "./components/CategorySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
-import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession } from "./utils/authSession";
+import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession, saveAuthSession } from "./utils/authSession";
 import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
 
 const API = "/api";
@@ -256,26 +257,78 @@ function sameStringArray(left: readonly string[] | undefined, right: readonly st
   return leftItems.length === rightItems.length && leftItems.every((item, index) => item === rightItems[index]);
 }
 
+function normalizeAuthAccountPermissionSummary(
+  value: unknown,
+  expectedUsername: string
+): AuthAccountPermissionSummary | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const username = String(source.username ?? "").trim();
+  if (!username || username !== expectedUsername) return undefined;
+  const accessRole = source.accessRole === "admin" ? "admin" : source.accessRole === "staff" ? "staff" : null;
+  if (!accessRole) return undefined;
+  return {
+    username,
+    accessRole,
+    accountEnabled: source.accountEnabled === true,
+    permissions: normalizePermissions(source.permissions as Partial<PermissionSet> | undefined),
+  };
+}
+
+function userFromAuthMeResponse(result: any, fallbackUser: User): User {
+  if (!result?.user) return null;
+  const username = String(result.user.username ?? fallbackUser?.username ?? "").trim();
+  if (!username) return null;
+  const role = result.user.role === "admin" ? "admin" : "staff";
+  const visibleSiteIds = Array.isArray(result.user.visibleSiteIds)
+    ? result.user.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean)
+    : fallbackUser?.visibleSiteIds;
+  const normalizedAccount = normalizeAuthAccountPermissionSummary(result.account, username);
+  const account = normalizedAccount?.accountEnabled && normalizedAccount.accessRole === role
+    ? normalizedAccount
+    : undefined;
+  return {
+    username,
+    role,
+    ...(visibleSiteIds?.length ? { visibleSiteIds } : {}),
+    ...(account ? { account } : {}),
+  };
+}
+
+function fetchAuthMeWithRetry(attempt = 0): Promise<Response> {
+  return fetch(`${API}/auth/me`, { headers: authJsonHeaders() }).catch((error) => {
+    if (attempt >= 3) throw error;
+    return new Promise<Response>((resolve, reject) => {
+      window.setTimeout(
+        () => fetchAuthMeWithRetry(attempt + 1).then(resolve, reject),
+        1000 * (attempt + 1)
+      );
+    });
+  });
+}
+
 function normalizeUserWithSiteScope(currentUser: User, personnel: Personnel[], sites: { id: string }[]): User {
   if (!currentUser) return null;
   const username = String(currentUser.username ?? "").trim();
   if (!username) return null;
+  const account = currentUser.account?.username === username ? currentUser.account : undefined;
+  if (currentUser.account && (!account || !account.accountEnabled)) return null;
   const matchedPerson = personnel.find((person) =>
-    person.username === username && !isPersonnelResigned(person)
+    person.username === username && isPersonnelAccountEnabled(person)
   );
-  const role = matchedPerson?.accessRole === "admin" || matchedPerson?.accessRole === "staff"
-    ? matchedPerson.accessRole
-    : currentUser.role;
+  const role = account?.accessRole ?? matchedPerson?.accessRole ?? currentUser.role;
   if (role === "admin") {
     return currentUser.username === username && currentUser.role === role && !currentUser.visibleSiteIds?.length
       ? currentUser
-      : { username, role };
+      : { username, role, ...(account ? { account } : {}) };
   }
-  const visibleSiteIds = normalizeVisibleSiteIds(matchedPerson?.visibleSiteIds ?? currentUser.visibleSiteIds, sites);
-  const nextUser: NonNullable<User> = visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
+  const visibleSiteIds = normalizeVisibleSiteIds(currentUser.visibleSiteIds ?? matchedPerson?.visibleSiteIds, sites);
+  if (visibleSiteIds.length === 0) return null;
+  const nextUser: NonNullable<User> = { username, role, visibleSiteIds, ...(account ? { account } : {}) };
   return currentUser.username === nextUser.username &&
     currentUser.role === nextUser.role &&
-    sameStringArray(currentUser.visibleSiteIds, nextUser.visibleSiteIds)
+    sameStringArray(currentUser.visibleSiteIds, nextUser.visibleSiteIds) &&
+    currentUser.account === nextUser.account
     ? currentUser
     : nextUser;
 }
@@ -319,24 +372,37 @@ function normalizePersistedState(data: any, currentUser: User): Store {
   const migratedPersonnel = Array.isArray(migratedData.personnel)
     ? migratedData.personnel.map((person: Record<string, unknown>, index: number) => {
         const name = String(person.name ?? person.username ?? "");
-        const username = String(person.username ?? name);
+        const username = String(person.username ?? "");
+        const resigned = person.employmentStatus === "resigned" || Boolean(person.resignedAt);
         const accessRole = person.accessRole === "admin" || person.accessRole === "staff"
           ? person.accessRole
           : username === "admin" ? "admin" : "staff";
         return {
           id: String(person.id ?? `person-${index + 1}`),
+          personnelNo: String(person.personnelNo ?? `RY-${String(index + 1).padStart(4, "0")}`),
           name,
           username,
           password: typeof person.password === "string" ? person.password : "",
+          accountEnabled: Boolean(username) && !resigned && person.accountEnabled !== false,
           accessRole,
           visibleSiteIds: accessRole === "admin"
             ? []
             : normalizeVisibleSiteIds((person as any).visibleSiteIds, migratedSites),
           permissions: normalizePermissions((person as any).permissions),
-          employmentStatus: person.employmentStatus === "resigned" || person.resignedAt ? "resigned" : "active",
+          employmentStatus: resigned ? "resigned" : "active",
           resignedAt: typeof person.resignedAt === "string" ? person.resignedAt : undefined,
+          gender: person.gender === "male" || person.gender === "female" || person.gender === "other" ? person.gender : "",
+          birthDate: String(person.birthDate ?? ""),
+          department: String(person.department ?? ""),
           role: String(person.role ?? ""),
+          hireDate: String(person.hireDate ?? ""),
+          siteIds: normalizeVisibleSiteIds((person as any).siteIds, migratedSites),
           phone: String(person.phone ?? ""),
+          email: String(person.email ?? ""),
+          wechat: String(person.wechat ?? ""),
+          address: String(person.address ?? ""),
+          emergencyContact: String(person.emergencyContact ?? ""),
+          emergencyPhone: String(person.emergencyPhone ?? ""),
           notes: String(person.notes ?? ""),
         };
       })
@@ -490,6 +556,11 @@ function AdminApp() {
   const loadedKeysRef = useRef<Set<PersistedKey>>(new Set());
   const viewRef = useRef(view);
   const currentUserKey = userDependencyKey(state.user);
+  const permissionSummaryReady = !state.user || state.user.role === "admin" || Boolean(
+    state.user.account?.accountEnabled &&
+    state.user.account.username === state.user.username &&
+    state.user.account.accessRole === state.user.role
+  );
 
   const setActiveSiteId: Dispatch<SetStateAction<string>> = (value) => {
     setActiveSiteIdBase((current) => {
@@ -586,13 +657,13 @@ function AdminApp() {
 
   const postStatePatch = async (
     patch: Partial<PersistedStore>,
-    operationLogs: OperationLog[] = [],
+    _operationLogs: OperationLog[] = [],
     basePatch: Partial<PersistedStore> = {}
   ): Promise<{ appliedOperationLogs?: OperationLog[] }> => {
     const response = await fetch(`${API}/state/patch`, {
       method: "POST",
       headers: authJsonHeaders(),
-      body: JSON.stringify({ patch, basePatch, operationLogs }),
+      body: JSON.stringify({ patch, basePatch }),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.ok === false) {
@@ -773,7 +844,6 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
-
       setStateBase((current) => {
         const next = {
           ...current,
@@ -884,7 +954,6 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
-
       setStateBase((current) => {
         const orderUpdates = new Map<string, Store["orders"][number]>(
           (Array.isArray(result.orderUpdates) ? result.orderUpdates : [])
@@ -1292,6 +1361,9 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
+      if (result.token && result.user) {
+        saveAuthSession(result.user, result.token, result.expiresAt);
+      }
 
       setStateBase((current) => {
         const next = normalizePersistedState(
@@ -1374,34 +1446,18 @@ function AdminApp() {
       return;
     }
 
-    const fetchWithRetry = (attempt = 0): Promise<Response> =>
-      fetch(`${API}/auth/me`, { headers: authJsonHeaders() }).catch((err) => {
-        if (attempt < 3) {
-          return new Promise<Response>((resolve, reject) =>
-            setTimeout(() => fetchWithRetry(attempt + 1).then(resolve, reject), 1000 * (attempt + 1))
-          );
-        }
-        throw err;
-      });
-
-    fetchWithRetry()
+    fetchAuthMeWithRetry()
       .then(async (r) => {
         const result = await r.json().catch(() => ({}));
         if (!r.ok || !result.user) throw new Error(result.error || `HTTP ${r.status}`);
-        return result.user;
+        return result;
       })
-      .then((userResult) => {
-        const visibleSiteIds = Array.isArray(userResult.visibleSiteIds)
-          ? userResult.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean)
-          : sessionUser.visibleSiteIds;
-        const restoredUser: User = {
-          username: String(userResult.username ?? sessionUser.username),
-          role: userResult.role === "admin" ? "admin" : "staff",
-          ...(visibleSiteIds?.length ? { visibleSiteIds } : {}),
-        };
-        setStateBase((s) => {
-          return normalizePersistedState(EMPTY_PERSISTED_STATE, restoredUser ?? s.user);
-        });
+      .then((result) => {
+        const restoredUser = userFromAuthMeResponse(result, sessionUser);
+        if (!restoredUser || (restoredUser.role === "staff" && !restoredUser.account?.accountEnabled)) {
+          throw new Error("Authenticated account permission summary is missing");
+        }
+        setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, restoredUser));
         setLoadedKeys(new Set<PersistedKey>());
       })
       .catch((e) => {
@@ -1412,6 +1468,51 @@ function AdminApp() {
       })
       .finally(() => setLoading(false));
   }, [isPublicSite]);
+
+  // Fresh logins first receive a token and public user identity. Hydrate the
+  // account permission summary independently instead of loading personnel.
+  useEffect(() => {
+    if (isPublicSite || loading || !state.user || state.user.account) return;
+    const requestedUserKey = currentUserKey;
+    const requestedRole = state.user.role;
+    let cancelled = false;
+
+    fetchAuthMeWithRetry()
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.user) throw new Error(result.error || `HTTP ${response.status}`);
+        return result;
+      })
+      .then((result) => {
+        if (cancelled) return;
+        const hydratedUser = userFromAuthMeResponse(result, stateRef.current.user);
+        if (!hydratedUser || !hydratedUser.account?.accountEnabled ||
+            hydratedUser.account.accessRole !== hydratedUser.role) {
+          throw new Error("Authenticated account permission summary is missing");
+        }
+        setStateBase((current) => {
+          if (userDependencyKey(current.user) !== requestedUserKey) return current;
+          return {
+            ...current,
+            user: normalizeUserWithSiteScope(hydratedUser, current.personnel, getSites(current)),
+          };
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Failed to load authenticated account permissions:", error);
+        if (requestedRole === "staff") {
+          clearAuthSession();
+          setStateBase((current) => userDependencyKey(current.user) === requestedUserKey
+            ? { ...current, user: null }
+            : current);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isPublicSite, loading, currentUserKey, state.user?.account?.username]);
 
   useEffect(() => {
     if (state.user) return;
@@ -1441,7 +1542,7 @@ function AdminApp() {
 
   // ── Load only the current page's business data after a successful login. ──
   useEffect(() => {
-    if (!state.user || stateLoaded || stateLoadStarted.current) return;
+    if (!state.user || !permissionSummaryReady || stateLoaded || stateLoadStarted.current) return;
     stateLoadStarted.current = true;
     setStateLoading(true);
     loadViewState(view, { force: true })
@@ -1454,7 +1555,7 @@ function AdminApp() {
         setStateLoaded(true);
       })
       .finally(() => setStateLoading(false));
-  }, [currentUserKey, stateLoaded]);
+  }, [currentUserKey, permissionSummaryReady, stateLoaded]);
 
   useEffect(() => {
     if (!state.user || !stateLoaded) return;
@@ -1587,7 +1688,9 @@ function AdminApp() {
     setView(nextView);
   };
 
-  const loadingView = viewLoading || Boolean(state.user && (stateLoading || !stateLoaded));
+  const loadingView = viewLoading || Boolean(
+    state.user && (!permissionSummaryReady || stateLoading || !stateLoaded)
+  );
   const viewContent = loadingView ? (
     <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">
       正在加载当前页面数据…

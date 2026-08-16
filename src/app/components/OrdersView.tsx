@@ -3,7 +3,7 @@ import {
   useStore, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
   Customer, CustomerType, Personnel, ShipmentStatus, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
-  isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
+  isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
   configuredOrderPackagingFee, ShippingFeeMode,
 } from "../store";
 import { DataTable } from "./common";
@@ -537,50 +537,49 @@ function formatShipmentCreatedAt(value?: string): string {
   return formatLocalDateTimeMinute(value, "历史发货未记录");
 }
 
-function getDefaultContactPerson(personnel: Personnel[], username?: string): string {
-  const currentAccount = username
-    ? personnel.find((person) =>
-        (person.username === username || person.name === username) &&
-        !isPersonnelResigned(person)
-      )
-    : undefined;
-  if (currentAccount) return currentAccount.name;
-  return personnel.find((person) => !isPersonnelResigned(person))?.name ?? "";
+function normalizedContactReference(value?: string): string {
+  return String(value ?? "").trim();
 }
 
-function normalizeContactPersonName(value?: string): string {
-  return String(value ?? "").trim().toLowerCase();
+function getDefaultContactPersonnel(personnel: Personnel[], username?: string): Personnel | undefined {
+  const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
+  const reference = normalizedContactReference(username);
+  if (!reference) return activePersonnel[0];
+  const usernameMatch = activePersonnel.find((person) => normalizedContactReference(person.username) === reference);
+  if (usernameMatch) return usernameMatch;
+  const nameMatches = activePersonnel.filter((person) => normalizedContactReference(person.name) === reference);
+  return nameMatches.length === 1 ? nameMatches[0] : activePersonnel[0];
 }
 
-function getCurrentContactAliases(personnel: Personnel[], username?: string): Set<string> {
-  const aliases = new Set<string>();
-  const add = (value?: string) => {
-    const normalized = normalizeContactPersonName(value);
-    if (normalized) aliases.add(normalized);
-  };
-  add(username);
-  const currentAccount = username
-    ? personnel.find((person) =>
-        (person.username === username || person.name === username) &&
-        !isPersonnelResigned(person)
-      )
-    : undefined;
-  add(currentAccount?.name);
-  add(currentAccount?.username);
-  return aliases;
+function resolveOrderContactPersonnel(
+  personnel: Personnel[],
+  order: Pick<Order, "contactPersonnelId" | "contactPerson">,
+  requireEnabledAccount = false
+): Personnel | undefined {
+  const isEligible = (person: Personnel) =>
+    requireEnabledAccount ? isPersonnelAccountEnabled(person) : !isPersonnelResigned(person);
+  const personnelId = normalizedContactReference(order.contactPersonnelId);
+  if (personnelId) {
+    return personnel.find((person) =>
+      normalizedContactReference(person.id) === personnelId && isEligible(person)
+    );
+  }
+
+  const reference = normalizedContactReference(order.contactPerson);
+  if (!reference) return undefined;
+  const matches = personnel.filter((person) =>
+    isEligible(person) &&
+    [person.name, person.username].some((value) => normalizedContactReference(value) === reference)
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function isActiveOrder(order: Order): boolean {
   return order.status !== "completed" && order.status !== "cancelled";
 }
 
-function getContactPersonOptions(personnel: Personnel[], current: string): Personnel[] {
-  const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
-  const names = new Set(activePersonnel.map((person) => person.name));
-  if (current && !names.has(current)) {
-    return [{ id: `current-${current}`, name: current, role: "历史记录", phone: "", notes: "" }, ...activePersonnel];
-  }
-  return activePersonnel;
+function getContactPersonOptions(personnel: Personnel[]): Personnel[] {
+  return personnel.filter((person) => !isPersonnelResigned(person));
 }
 
 function excelEscape(value: unknown): string {
@@ -4102,7 +4101,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPersonnelId: string; contactPerson: string; notes: string;
   shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -4147,8 +4146,8 @@ function OrderDetailDialog({
   const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
   const personnel = state.personnel ?? [];
-  const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
-  const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
+  const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
+  const editContactOptions = getContactPersonOptions(personnel);
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const editPaymentOptions = useMemo(() => {
     if (!editForm) return [];
@@ -4192,17 +4191,14 @@ function OrderDetailDialog({
   const showCreditSaleRequest = (error: unknown): boolean => {
     if (!(error instanceof OrderApiError) || error.code !== "CREDIT_SALE_CONFIRMATION_REQUIRED") return false;
     const payload = error.payload;
-    const fallbackOwner = personnel.find((person) =>
-      !isPersonnelResigned(person) &&
-      String(person.username ?? "").trim() &&
-      [person.name, person.username].some((value) => String(value ?? "").trim() === String(order?.contactPerson ?? "").trim())
-    );
+    const fallbackOwner = order
+      ? resolveOrderContactPersonnel(personnel, order, true)
+      : undefined;
     const fallbackApproversByUsername = new Map<string, CreditSaleApprover>(
       personnel
         .filter((person) =>
           person.accessRole === "admin" &&
-          !isPersonnelResigned(person) &&
-          String(person.username ?? "").trim()
+          isPersonnelAccountEnabled(person)
         )
         .map((person) => ({
           username: String(person.username).trim(),
@@ -4295,6 +4291,10 @@ function OrderDetailDialog({
       ? order.paymentMethodId || historicalOrderPaymentMethodId(order.id)
       : configuredOrderMethod?.id ?? (sourceMethods.length === 1 ? sourceMethods[0].id : "");
     const paymentChannel = order.paymentChannel ?? configuredOrderMethod?.channel ?? "";
+    const resolvedContactPersonnel = resolveOrderContactPersonnel(personnel, order)
+      ?? (!normalizedContactReference(order.contactPersonnelId) && !normalizedContactReference(order.contactPerson)
+        ? defaultContactPersonnel
+        : undefined);
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
@@ -4302,7 +4302,9 @@ function OrderDetailDialog({
       paymentMethodId,
       paymentChannel,
       shippingAddress: order.shippingAddress ?? "",
-      contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
+      contactPersonnelId: resolvedContactPersonnel?.id ?? "",
+      contactPerson: resolvedContactPersonnel?.name ?? order.contactPerson ?? "",
+      notes: order.notes ?? "",
       shippingFeeMode: orderShippingFeeMode(order), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
         stockItemId: i.stockItemId,
@@ -4339,7 +4341,8 @@ function OrderDetailDialog({
     }
     if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
-    if (!editForm.contactPerson.trim()) return toast.error("请选择订单负责人");
+    const selectedContactPersonnel = editContactOptions.find((person) => person.id === editForm.contactPersonnelId);
+    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
@@ -4362,7 +4365,8 @@ function OrderDetailDialog({
         paymentChannel: editPaymentMethod.channel,
         shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
-        contactPerson: editForm.contactPerson.trim(),
+        contactPersonnelId: selectedContactPersonnel.id,
+        contactPerson: selectedContactPersonnel.name.trim(),
         notes: editForm.notes,
         shippingFeeMode: isPickupOrderSource(editForm.source) ? "collect" : editForm.shippingFeeMode,
         shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
@@ -4877,16 +4881,23 @@ function OrderDetailDialog({
                 <div className="grid gap-1.5">
                   <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
-                    value={editForm.contactPerson}
-                    onValueChange={(value) => setEditForm((f) => f ? { ...f, contactPerson: value } : f)}
+                    value={editForm.contactPersonnelId}
+                    onValueChange={(value) => {
+                      const selectedPerson = editContactOptions.find((person) => person.id === value);
+                      setEditForm((form) => form && selectedPerson ? {
+                        ...form,
+                        contactPersonnelId: selectedPerson.id,
+                        contactPerson: selectedPerson.name,
+                      } : form);
+                    }}
                   >
-                    <SelectTrigger className={!editForm.contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectTrigger className={!editForm.contactPersonnelId ? "border-red-500 focus-visible:ring-red-500" : ""}>
                       <SelectValue placeholder="请选择订单负责人" />
                     </SelectTrigger>
                     <SelectContent>
                       {editContactOptions.map((person) => (
-                        <SelectItem key={person.id} value={person.name}>
-                          {person.name}{person.role ? ` · ${person.role}` : ""}
+                        <SelectItem key={person.id} value={person.id}>
+                          {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -6150,7 +6161,7 @@ function NewOrderDialog({
   const today = todayDateString();
   const currentUsername = state.user?.username ?? "";
   const personnel = state.personnel ?? [];
-  const defaultContactPerson = getDefaultContactPerson(personnel, currentUsername);
+  const defaultContactPersonnelId = getDefaultContactPersonnel(personnel, currentUsername)?.id ?? "";
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
@@ -6159,7 +6170,7 @@ function NewOrderDialog({
   const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
-  const [contactPerson, setContactPerson] = useState(defaultContactPerson);
+  const [contactPersonnelId, setContactPersonnelId] = useState(defaultContactPersonnelId);
   const [notes, setNotes] = useState("");
   const [selectedItems, setSelectedItems] = useState<Map<string, {
     price: number;
@@ -6176,14 +6187,14 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
       setSelectedItems(new Map());
       setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
       setCustomerDialogOpen(false);
       setSubmitAttempted(false);
     }
-  }, [open, defaultContactPerson, today]);
+  }, [open, defaultContactPersonnelId, today]);
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
   const selectedCustomer = useMemo(
@@ -6259,7 +6270,9 @@ function NewOrderDialog({
   const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
   const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
-  const contactOptions = getContactPersonOptions(personnel, contactPerson);
+  const contactOptions = getContactPersonOptions(personnel);
+  const selectedContactPersonnel = contactOptions.find((person) => person.id === contactPersonnelId);
+  const contactPerson = selectedContactPersonnel?.name ?? "";
 
   const createCustomer = async (customer: Customer) => {
     if (!customerPermission.requirePermission("create")) return false;
@@ -6322,7 +6335,7 @@ function NewOrderDialog({
     if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
     if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
-    if (!contactPerson.trim()) return toast.error("请选择订单负责人");
+    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
     if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
@@ -6363,7 +6376,8 @@ function NewOrderDialog({
         paymentChannel,
         shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
-        contactPerson: contactPerson.trim(),
+        contactPersonnelId: selectedContactPersonnel.id,
+        contactPerson: selectedContactPersonnel.name.trim(),
         items,
         shippingFeeMode: pickupOrder ? "collect" : shippingFeeMode,
         shippingFee: pickupOrder ? 0 : shippingFee,
@@ -6519,16 +6533,16 @@ function NewOrderDialog({
               <div className="grid gap-2">
                 <Label>订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
-                  value={contactPerson}
-                  onValueChange={setContactPerson}
+                  value={contactPersonnelId}
+                  onValueChange={setContactPersonnelId}
                 >
-                  <SelectTrigger className={submitAttempted && !contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger className={submitAttempted && !selectedContactPersonnel ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择订单负责人" />
                   </SelectTrigger>
                   <SelectContent>
                     {contactOptions.map((person) => (
-                      <SelectItem key={person.id} value={person.name}>
-                        {person.name}{person.role ? ` · ${person.role}` : ""}
+                      <SelectItem key={person.id} value={person.id}>
+                        {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -7096,12 +7110,23 @@ export function OrdersView({
     () => [...state.orders].sort(compareOrdersByCreatedDesc),
     [state.orders]
   );
-  const currentContactAliases = useMemo(
-    () => getCurrentContactAliases(state.personnel ?? [], state.user?.username),
-    [state.personnel, state.user?.username]
-  );
-  const isCurrentUserContactOrder = (order: Order) =>
-    currentContactAliases.has(normalizeContactPersonName(order.contactPerson));
+  const currentContactPersonnel = useMemo(() => {
+    const reference = normalizedContactReference(state.user?.username);
+    if (!reference) return undefined;
+    const activeAccounts = (state.personnel ?? []).filter(isPersonnelAccountEnabled);
+    const usernameMatches = activeAccounts.filter((person) =>
+      normalizedContactReference(person.username) === reference
+    );
+    if (usernameMatches.length === 1) return usernameMatches[0];
+    const nameMatches = activeAccounts.filter((person) =>
+      normalizedContactReference(person.name) === reference
+    );
+    return nameMatches.length === 1 ? nameMatches[0] : undefined;
+  }, [state.personnel, state.user?.username]);
+  const isCurrentUserContactOrder = useCallback((order: Order) => {
+    if (!currentContactPersonnel) return false;
+    return resolveOrderContactPersonnel(state.personnel ?? [], order, true)?.id === currentContactPersonnel.id;
+  }, [currentContactPersonnel, state.personnel]);
 
   type OrderListRow = Order & {
     searchText: string;
@@ -7209,7 +7234,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
+	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const mobileFilteredOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7324,7 +7349,7 @@ export function OrdersView({
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
-    [orderList, currentContactAliases]
+    [orderList, isCurrentUserContactOrder]
   );
   const todayShipCount = useMemo(
     () => orderList.filter((order) => hasPlannedShipPlanOnDate(order, today)).length,

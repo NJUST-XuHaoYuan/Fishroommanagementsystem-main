@@ -103,6 +103,26 @@ import {
 } from "./order-pricing-rules.mjs";
 import { validateImageUploadBuffer } from "./media-upload-rules.mjs";
 import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
+import {
+  backfillOrderContactPersonnelIds,
+  hasPersonnelAccount,
+  isPersonnelAccountEnabled,
+  normalizePersonnelGender,
+  normalizePersonnelSensitiveFields,
+  redactPersonnelForViewer,
+  resolveActivePersonnelReference,
+} from "./personnel-rules.mjs";
+import {
+  statePatchActionsForKey,
+  validateStatePatchShapes,
+} from "./state-patch-permission-rules.mjs";
+import {
+  PERSONNEL_SENSITIVE_FIELDS,
+  decryptPersonnelSensitiveFields,
+  encryptPersonnelSensitiveFields,
+  parsePersonnelDataKeyring,
+  rewrapPersonnelSensitiveFields,
+} from "./personnel-sensitive-data.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -113,6 +133,8 @@ const distDir = join(root, "dist");
 const uploadDir = process.env.UPLOAD_DIR || join(root, "uploads");
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || process.env.LOCAL_API_PORT || 8787);
+const releaseRevision = String(process.env.RELEASE_REVISION || "development").trim();
+const releaseBuiltAt = String(process.env.RELEASE_BUILT_AT || "").trim();
 const stateId = "main";
 const MAX_OPERATION_LOGS = 10000;
 const STOCK_DUPLICATE_CONFIRMATION_WINDOW_MS = 10 * 60 * 1000;
@@ -147,6 +169,11 @@ if (process.env.NODE_ENV === "production" && !configuredAuthTokenSecret) {
   throw new Error("AUTH_SESSION_SECRET or SESSION_SECRET must be set in production");
 }
 const authTokenSecret = configuredAuthTokenSecret || randomBytes(32).toString("hex");
+const configuredPersonnelDataKeyring = process.env.PERSONNEL_DATA_KEYRING_JSON || "";
+if (process.env.NODE_ENV === "production" && !configuredPersonnelDataKeyring) {
+  throw new Error("PERSONNEL_DATA_KEYRING_JSON must be set in production");
+}
+const personnelDataKeyring = parsePersonnelDataKeyring(configuredPersonnelDataKeyring);
 const allowDefaultCredentials = process.env.ALLOW_DEFAULT_CREDENTIALS === "true";
 const BOOTSTRAP_AUTH_ACCOUNTS = [
   { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin", employmentStatus: "active" },
@@ -194,7 +221,34 @@ const STATE_PATCH_PERMISSION_MODULES = {
   orders: "orders",
   shipments: "orders",
 };
+const STATE_PATCH_MODULE_LABELS = {
+  systemSettings: "系统设置",
+  sites: "场地管理",
+  species: "物种管理",
+  speciesCategories: "分类管理",
+  speciesCategoryMajorMap: "分类管理",
+  products: "商品管理",
+  productOrigins: "商品产地",
+  tankGroups: "缸组管理",
+  batches: "采购批次",
+  stock: "库存明细",
+  logs: "日常管理",
+  waterQualityRecords: "水质记录",
+  checks: "盘库管理",
+  bioRecords: "生物记录",
+  lossRecords: "损耗记录",
+  customers: "客户管理",
+  customerSources: "客户来源",
+  orders: "订单管理",
+  shipments: "发货管理",
+};
 const DISALLOWED_STATE_PATCH_KEYS = new Set(["personnel"]);
+const ADMIN_ONLY_STATE_PATCH_KEYS = new Set([
+  "systemSettings",
+  "sites",
+  "speciesCategories",
+  "speciesCategoryMajorMap",
+]);
 const PASSWORD_HASH_PREFIX = "scrypt$1$";
 const cosConfig = {
   secretId: process.env.COS_SECRET_ID || "",
@@ -364,7 +418,7 @@ function visibleSiteIdsForAccount(account = {}, state = {}) {
   const allSiteIds = sites.map((site) => site.id);
   if (account?.accessRole === "admin") return allSiteIds;
   const configuredIds = normalizeVisibleSiteIds(account?.visibleSiteIds, sites);
-  return configuredIds.length > 0 ? configuredIds : allSiteIds;
+  return configuredIds;
 }
 
 function matchesAnyVisibleSite(item, visibleSiteIds = []) {
@@ -424,7 +478,7 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
   if (!account || account.accessRole === "admin") return state;
   const sites = getSitesFromState(state);
   const visibleSiteIds = visibleSiteIdsForAccount(account, state);
-  if (visibleSiteIds.length === 0 || visibleSiteIds.length >= sites.length) return state;
+  if (visibleSiteIds.length >= sites.length) return state;
   const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : []).filter((item) =>
     matchesAnyVisibleSite(item, visibleSiteIds)
   );
@@ -1380,6 +1434,16 @@ function emptyPermissionsValue() {
 }
 
 function normalizePermissionsForStorage(permissions) {
+  return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
+    module,
+    Object.fromEntries(PERMISSION_ACTIONS.map((action) => [
+      action,
+      permissions?.[module]?.[action] === true,
+    ])),
+  ]));
+}
+
+function normalizeLegacyPermissionsForStorage(permissions) {
   const full = fullPermissionsValue();
   return Object.fromEntries(PERMISSION_MODULE_KEYS.map((module) => [
     module,
@@ -1425,19 +1489,41 @@ function credentialDigest(username, password) {
   return createHash("sha256").update(`${String(username ?? "").trim()}:${String(password ?? "")}`).digest("hex");
 }
 
+function sessionVersionForAccount(account = {}) {
+  const value = Number(account?.sessionVersion ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function isDefaultCredential(username, password) {
   return DEFAULT_CREDENTIAL_DIGESTS.has(credentialDigest(username, password));
 }
 
 function publicUserFromAccount(account = {}, state = null) {
-  if (isPersonnelResigned(account)) return null;
+  if (!isPersonnelAccountEnabled(account)) return null;
   const username = String(account.username ?? "").trim();
   const role = account.accessRole === "admin" ? "admin" : "staff";
   if (!username) return null;
   if (role === "admin") return { username, role };
   const sites = state && Array.isArray(state.sites) ? getSitesFromState(state) : [];
   const visibleSiteIds = normalizeVisibleSiteIds(account.visibleSiteIds, sites);
-  return visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : { username, role };
+  return visibleSiteIds.length > 0 ? { username, role, visibleSiteIds } : null;
+}
+
+function authAccountPermissionSummary(account = {}) {
+  if (!isPersonnelAccountEnabled(account)) return null;
+  const username = String(account.username ?? "").trim();
+  if (!username) return null;
+  const accessRole = account.accessRole === "admin" ? "admin" : "staff";
+  const permissions = accessRole === "admin"
+    ? fullPermissionsValue()
+    : normalizePermissionsForStorage(account.permissions);
+  if (accessRole !== "admin") permissions.accounts = emptyPermissionsValue().accounts;
+  return {
+    username,
+    accessRole,
+    accountEnabled: true,
+    permissions,
+  };
 }
 
 function isPersonnelResigned(person = {}) {
@@ -1449,29 +1535,38 @@ function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
   const username = String(person.username ?? "");
   const isAdmin = req?.auth?.account?.accessRole === "admin";
   const isCurrentUser = username && username === req?.auth?.user?.username;
-  const { password, ...safePerson } = person;
+  const { password, sessionVersion, ...safePerson } = person;
+  safePerson.accountEnabled = isPersonnelAccountEnabled(safePerson);
   if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
   safePerson.visibleSiteIds = safePerson.accessRole === "admin"
     ? []
     : normalizeVisibleSiteIds(safePerson.visibleSiteIds, []);
   safePerson.employmentStatus = isPersonnelResigned(safePerson) ? "resigned" : "active";
-  if (isPersonnelResigned(safePerson)) {
-    safePerson.permissions = emptyPermissionsValue();
-  }
   if (options.includePermissions || isAdmin || isCurrentUser) {
-    safePerson.permissions = isPersonnelResigned(safePerson)
-      ? emptyPermissionsValue()
-      : normalizePermissionsForStorage(safePerson.permissions);
+    safePerson.permissions = normalizePermissionsForStorage(safePerson.permissions);
   } else {
     delete safePerson.permissions;
   }
-  return safePerson;
+  return redactPersonnelForViewer(safePerson, {
+    canViewPrivate: isAdmin || isCurrentUser,
+    canViewAccount: isAdmin || isCurrentUser,
+    // Identity and payroll fields are fetched one person at a time through the
+    // audited administrator-only endpoint below. Never include them in lists.
+    canViewSensitive: false,
+  });
 }
 
 function sanitizePersonnelForResponse(personnel = [], req, options = {}) {
   return (Array.isArray(personnel) ? personnel : []).map((person) =>
     sanitizePersonnelRecordForResponse(person, req, options)
   );
+}
+
+function personnelSensitiveRevision(person = {}) {
+  return createHash("sha256").update(JSON.stringify({
+    personnelId: String(person?.id ?? ""),
+    fields: PERSONNEL_SENSITIVE_FIELDS.map((field) => String(person?.[field] ?? "")),
+  })).digest("hex");
 }
 
 function sanitizeStateForResponse(data = {}, req) {
@@ -1494,11 +1589,12 @@ function sanitizePersonnelForLoginData(personnel = [], req) {
   });
 }
 
-function createAuthToken(user) {
+function createAuthToken(user, account = {}) {
   const expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
   const payload = base64UrlJson({
     username: user.username,
     role: user.role,
+    sessionVersion: sessionVersionForAccount(account),
     exp: expiresAt,
   });
   const signature = signAuthPayload(payload);
@@ -1576,8 +1672,9 @@ function sanitizeOperationLogsForAuth(logs = [], req) {
 }
 
 function hasModulePermission(account = {}, module, action = "update") {
-  if (isPersonnelResigned(account)) return false;
+  if (!isPersonnelAccountEnabled(account)) return false;
   if (account?.accessRole === "admin") return true;
+  if (module === "accounts") return false;
   if (!PERMISSION_MODULE_KEYS.includes(module) || !PERMISSION_ACTIONS.includes(action)) return false;
   return normalizePermissionsForStorage(account?.permissions)?.[module]?.[action] === true;
 }
@@ -1596,7 +1693,7 @@ function requireFinanceAccessForAuth(req) {
 }
 
 function requireAdminForAuth(req, errorMessage = "仅管理员可以处理库存审批") {
-  if (req.auth?.account?.accessRole !== "admin") {
+  if (!isPersonnelAccountEnabled(req.auth?.account) || req.auth?.account?.accessRole !== "admin") {
     throw new Error(errorMessage);
   }
 }
@@ -1609,50 +1706,163 @@ function validateStatePatchAuthorization(req, patch = {}) {
     if (DISALLOWED_STATE_PATCH_KEYS.has(key)) {
       throw new Error("人员账号和权限必须通过专用接口修改");
     }
-    if (key === "operationLogs") continue;
-    if (key === "speciesCategories" || key === "speciesCategoryMajorMap") {
-      requireAdminForAuth(req, "仅管理员可以修改商品分类");
+    if (key === "operationLogs") throw new Error("操作日志不能通过通用状态接口修改");
+    if (ADMIN_ONLY_STATE_PATCH_KEYS.has(key)) {
+      requireAdminForAuth(req, key === "speciesCategories" || key === "speciesCategoryMajorMap"
+        ? "仅管理员可以修改商品分类"
+        : "仅管理员可以修改系统配置");
       continue;
     }
-    const module = STATE_PATCH_PERMISSION_MODULES[key];
-    if (module) requireModulePermissionForAuth(req, module, "update");
   }
+}
+
+function validateStatePatchActions(req, current = {}, next = {}, patchedKeys = []) {
+  for (const key of patchedKeys) {
+    const actions = statePatchActionsForKey(key, current[key], next[key]);
+    if (ADMIN_ONLY_STATE_PATCH_KEYS.has(key)) continue;
+    const module = STATE_PATCH_PERMISSION_MODULES[key];
+    if (!module) continue;
+    for (const action of actions) {
+      requireModulePermissionForAuth(req, module, action);
+    }
+  }
+}
+
+function statePatchOperationLogs(req, current = {}, next = {}, patchedKeys = []) {
+  const actionLabels = { create: "添加记录", update: "修改记录", delete: "删除记录" };
+  return patchedKeys.flatMap((key) => {
+    const actions = statePatchActionsForKey(key, current[key], next[key]);
+    if (actions.length === 0) return [];
+    const moduleLabel = STATE_PATCH_MODULE_LABELS[key] ?? "系统数据";
+    return [createOperationLog(
+      req,
+      moduleLabel,
+      actions.map((action) => actionLabels[action]).join("、"),
+      `已通过服务端校验保存「${moduleLabel}」变更`
+    )];
+  });
+}
+
+function normalizedPersonnelText(value, label, maxLength = 120) {
+  const normalized = String(value ?? "").trim();
+  if (normalized.length > maxLength) throw new Error(`${label}不能超过 ${maxLength} 个字符`);
+  return normalized;
+}
+
+function normalizedPersonnelDate(value, label, { allowFuture = true } = {}) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  const parsed = new Date(`${normalized}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized) ||
+      Number.isNaN(parsed.getTime()) ||
+      parsed.toISOString().slice(0, 10) !== normalized) {
+    throw new Error(`${label}格式不正确`);
+  }
+  if (!allowFuture && normalized > todayInChina()) throw new Error(`${label}不能晚于今天`);
+  return normalized;
+}
+
+function nextPersonnelNo(personnel = []) {
+  const used = new Set((Array.isArray(personnel) ? personnel : [])
+    .map((person) => String(person?.personnelNo ?? "").trim()).filter(Boolean));
+  let sequence = 1;
+  while (used.has(`RY-${String(sequence).padStart(4, "0")}`)) sequence += 1;
+  return `RY-${String(sequence).padStart(4, "0")}`;
 }
 
 function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   const source = input && typeof input === "object" ? input : {};
   const id = String(source.id || existing?.id || uid("person"));
-  const name = String(source.name ?? existing?.name ?? "").trim();
-  const username = String(source.username ?? existing?.username ?? "").trim();
-  const accessRole = source.accessRole === "admin" ? "admin" : "staff";
+  const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+  const personnelNo = normalizedPersonnelText(
+    source.personnelNo ?? existing?.personnelNo ?? nextPersonnelNo(personnel),
+    "人员编号",
+    32
+  );
+  const name = normalizedPersonnelText(source.name ?? existing?.name, "人员姓名", 80);
+  const requestedUsername = normalizedPersonnelText(source.username ?? existing?.username, "登录账号", 64);
+  if (hasPersonnelAccount(existing) && requestedUsername !== String(existing.username).trim()) {
+    throw new Error("已有登录账号不能直接改名，请停用后联系系统维护人员处理");
+  }
+  const username = requestedUsername;
+  const hasAccount = Boolean(username);
+  const resigned = isPersonnelResigned(existing);
+  const accountEnabled = hasAccount && !resigned && (source.accountEnabled ?? existing?.accountEnabled ?? true) !== false;
+  const accessRole = hasAccount && (source.accessRole ?? existing?.accessRole) === "admin" ? "admin" : "staff";
   const sites = getSitesFromState(state);
   const visibleSiteIds = accessRole === "admin"
     ? []
     : normalizeVisibleSiteIds(source.visibleSiteIds ?? existing?.visibleSiteIds, sites);
-  const role = String(source.role ?? existing?.role ?? "").trim();
-  const phone = String(source.phone ?? existing?.phone ?? "").trim();
-  const notes = String(source.notes ?? existing?.notes ?? "").trim();
+  const siteIds = normalizeVisibleSiteIds(source.siteIds ?? existing?.siteIds, sites);
+  const department = normalizedPersonnelText(source.department ?? existing?.department, "部门", 80);
+  const role = normalizedPersonnelText(source.role ?? existing?.role, "岗位", 80);
+  const phone = normalizedPersonnelText(source.phone ?? existing?.phone, "联系电话", 32);
+  const email = normalizedPersonnelText(source.email ?? existing?.email, "邮箱", 120);
+  const wechat = normalizedPersonnelText(source.wechat ?? existing?.wechat, "微信号", 80);
+  const address = normalizedPersonnelText(source.address ?? existing?.address, "联系地址", 240);
+  const emergencyContact = normalizedPersonnelText(source.emergencyContact ?? existing?.emergencyContact, "紧急联系人", 80);
+  const emergencyPhone = normalizedPersonnelText(source.emergencyPhone ?? existing?.emergencyPhone, "紧急联系电话", 32);
+  const notes = normalizedPersonnelText(source.notes ?? existing?.notes, "备注", 500);
+  const birthDate = normalizedPersonnelDate(source.birthDate ?? existing?.birthDate, "出生日期", { allowFuture: false });
+  const hireDate = normalizedPersonnelDate(source.hireDate ?? existing?.hireDate, "入职日期", { allowFuture: false });
+  const existingSensitiveFields = existing
+    ? decryptPersonnelSensitiveFields(existing, personnelDataKeyring)
+    : {};
+  const normalizedSensitiveFields = normalizePersonnelSensitiveFields({
+    idCardNo: source.idCardNo ?? existingSensitiveFields.idCardNo,
+    bankAccountName: source.bankAccountName ?? existingSensitiveFields.bankAccountName,
+    bankAccountNo: source.bankAccountNo ?? existingSensitiveFields.bankAccountNo,
+    bankName: source.bankName ?? existingSensitiveFields.bankName,
+  });
+  const sensitiveFields = encryptPersonnelSensitiveFields(normalizedSensitiveFields, id, personnelDataKeyring);
   const plainPassword = String(source.password ?? "");
   if (!name) throw new Error("请填写人员姓名");
-  if (!username) throw new Error("请填写登录账号");
-  if (!existing && !plainPassword) throw new Error("新增人员必须设置登录密码");
+  if (!personnelNo) throw new Error("请填写人员编号");
+  if (plainPassword && !hasAccount) throw new Error("开通账号前请先填写登录账号");
+  if (hasPersonnelAccount(existing) && plainPassword) throw new Error("已有账号请通过密码重置功能修改密码");
+  if (hasAccount && !hasPersonnelAccount(existing) && !plainPassword) throw new Error("首次开通账号必须设置登录密码");
+  if (accountEnabled && accessRole === "staff" && visibleSiteIds.length === 0) {
+    throw new Error("启用普通账号时至少选择一个可见场地");
+  }
   if (plainPassword && plainPassword.length < 6) throw new Error("登录密码至少 6 位");
+  const sourcePermissions = source.permissions ?? existing?.permissions;
+  const securityStateChanged = Boolean(existing) && (
+    Boolean(plainPassword) ||
+    isPersonnelAccountEnabled(existing) !== accountEnabled ||
+    existing?.accessRole !== accessRole
+  );
   return {
     id,
+    personnelNo,
     name,
     username,
-    password: plainPassword ? hashPassword(plainPassword) : existing?.password,
+    password: hasAccount ? (plainPassword ? hashPassword(plainPassword) : existing?.password) : undefined,
+    sessionVersion: sessionVersionForAccount(existing) + (securityStateChanged ? 1 : 0),
+    accountEnabled,
     accessRole,
     visibleSiteIds,
-    employmentStatus: isPersonnelResigned(existing) ? "resigned" : "active",
-    resignedAt: isPersonnelResigned(existing) ? existing?.resignedAt : undefined,
-    permissions: isPersonnelResigned(existing)
+    employmentStatus: resigned ? "resigned" : "active",
+    resignedAt: resigned ? existing?.resignedAt : undefined,
+    permissions: !hasAccount
       ? emptyPermissionsValue()
       : accessRole === "admin"
       ? fullPermissionsValue()
-      : normalizePermissionsForStorage(source.permissions ?? existing?.permissions),
+      : sourcePermissions
+      ? normalizePermissionsForStorage(sourcePermissions)
+      : emptyPermissionsValue(),
+    gender: normalizePersonnelGender(source.gender ?? existing?.gender),
+    birthDate,
+    department,
     role,
+    hireDate,
+    siteIds,
     phone,
+    email,
+    wechat,
+    address,
+    emergencyContact,
+    emergencyPhone,
+    ...sensitiveFields,
     notes,
   };
 }
@@ -1683,7 +1893,7 @@ function countAdmins(personnel = [], excludeId = "") {
     .filter((person) =>
       String(person?.id ?? "") !== String(excludeId) &&
       person?.accessRole === "admin" &&
-      !isPersonnelResigned(person)
+      isPersonnelAccountEnabled(person)
     )
     .length;
 }
@@ -1692,8 +1902,7 @@ function activeAdminRecipients(state = {}) {
   return (Array.isArray(state.personnel) ? state.personnel : [])
     .filter((person) =>
       person?.accessRole === "admin" &&
-      !isPersonnelResigned(person) &&
-      String(person?.username ?? "").trim()
+      isPersonnelAccountEnabled(person)
     )
     .map((person) => ({
       username: String(person.username).trim(),
@@ -1701,21 +1910,54 @@ function activeAdminRecipients(state = {}) {
     }));
 }
 
-function isActivePersonnelName(state = {}, value = "") {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return false;
-  return (Array.isArray(state.personnel) ? state.personnel : [])
-    .some((person) =>
-      !isPersonnelResigned(person) &&
-      (String(person?.name ?? "").trim() === normalized || String(person?.username ?? "").trim() === normalized)
-    );
+function personnelHasBusinessHistory(state = {}, person = {}) {
+  const references = new Set([
+    String(person?.id ?? "").trim(),
+    String(person?.name ?? "").trim(),
+    String(person?.username ?? "").trim(),
+  ].filter(Boolean));
+  const matches = (value) => references.has(String(value ?? "").trim());
+  const collections = [
+    [state.orders, ["contactPersonnelId", "contactPerson"]],
+    [state.logs, ["personnelId", "operator"]],
+    [state.waterQualityRecords, ["personnelId", "operator"]],
+    [state.checks, ["personnelId", "operator"]],
+    [state.lossRecords, ["personnelId", "operator"]],
+    [state.bioRecords, ["personnelId", "operator"]],
+    [state.inventoryAdjustmentDrafts, ["personnelId", "createdBy", "createdByName"]],
+    [state.operationLogs, ["personnelId", "operator"]],
+  ];
+  return collections.some(([items, fields]) =>
+    (Array.isArray(items) ? items : []).some((item) => fields.some((field) => matches(item?.[field])))
+  );
 }
 
-function assertActivePersonnelName(state = {}, value = "", label = "人员", allowedHistoricalValue = "") {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) throw new Error(`请选择${label}`);
-  if (allowedHistoricalValue && normalized === String(allowedHistoricalValue ?? "").trim()) return;
-  if (!isActivePersonnelName(state, normalized)) throw new Error(`${label}必须是在职人员`);
+function normalizeOrderContactPersonnel(state = {}, body = {}, currentOrder = null) {
+  const personnelId = String(body.contactPersonnelId ?? currentOrder?.contactPersonnelId ?? "").trim();
+  const reference = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
+  const resolved = resolveActivePersonnelReference(state.personnel, { personnelId, reference });
+  if (resolved.status === "matched" && resolved.person) {
+    return {
+      contactPersonnelId: String(resolved.person.id ?? "").trim(),
+      contactPerson: String(resolved.person.name ?? "").trim(),
+    };
+  }
+
+  const historicalId = String(currentOrder?.contactPersonnelId ?? "").trim();
+  const historicalReference = String(currentOrder?.contactPerson ?? "").trim();
+  const unchangedHistoricalReference = Boolean(currentOrder) &&
+    personnelId === historicalId && reference === historicalReference;
+  if (unchangedHistoricalReference) {
+    return {
+      ...(historicalId ? { contactPersonnelId: historicalId } : {}),
+      contactPerson: historicalReference,
+    };
+  }
+
+  if (resolved.status === "ambiguous") throw new Error("订单负责人存在重名，请重新选择具体人员");
+  if (resolved.status === "invalid-id") throw new Error("订单负责人不存在、已离职或人员 ID 已失效");
+  if (resolved.status === "not-found") throw new Error("订单负责人必须是在职人员");
+  throw new Error("请选择订单负责人");
 }
 
 function createOperationLog(req, module, action, detail) {
@@ -1764,7 +2006,7 @@ function visibleOrdersForNotificationAuth(state = {}, account = {}) {
   if (!account || account.accessRole === "admin") return orders;
   const sites = getSitesFromState(state);
   const visibleSiteIds = visibleSiteIdsForAccount(account, state);
-  if (visibleSiteIds.length === 0 || visibleSiteIds.length >= sites.length) return orders;
+  if (visibleSiteIds.length >= sites.length) return orders;
   return orders.filter((order) => matchesAnyVisibleSite(order, visibleSiteIds));
 }
 
@@ -2038,13 +2280,15 @@ async function authenticateApiRequest(req) {
   const accounts = await readAuthAccounts();
   const account = accounts.find((person) => String(person?.username ?? "") === payload.username);
   const user = account ? publicUserFromAccount(account) : null;
-  if (!user || user.role !== payload.role) return null;
+  if (!user || user.role !== payload.role ||
+      sessionVersionForAccount(account) !== sessionVersionForAccount(payload)) return null;
   return { user, account };
 }
 
 function isPublicApiRoute(req, url) {
   if (req.method === "OPTIONS") return true;
   if (url.pathname === "/api/health" && req.method === "GET") return true;
+  if (url.pathname === "/api/version" && req.method === "GET") return true;
   if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") return true;
   if (url.pathname === "/api/public/media/cos" && req.method === "GET") return true;
@@ -3482,6 +3726,7 @@ function creditApprovalSensitiveSnapshot(order = {}) {
     paymentMethodId: String(order?.paymentMethodId ?? ""),
     paymentChannel: String(order?.paymentChannel ?? ""),
     paymentAccount: String(order?.paymentAccount ?? ""),
+    contactPersonnelId: String(order?.contactPersonnelId ?? ""),
     contactPerson: String(order?.contactPerson ?? ""),
     items: Array.isArray(order?.items) ? order.items : [],
     shippingFee: Number(order?.shippingFee ?? 0),
@@ -4105,8 +4350,7 @@ function financeSiteScope(state = {}, account = {}, requestedSiteId = ALL_SITE_I
 }
 
 function orderPermissionAllowedForAccount(account = {}, action = "update") {
-  if (account?.accessRole === "admin") return true;
-  return account?.permissions?.orders?.[action] !== false;
+  return hasModulePermission(account, "orders", action);
 }
 
 function requireOrderPermissionForAuth(req, action = "update") {
@@ -4272,8 +4516,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     : String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
   if (!isPickupOrder && !plannedShipDate) throw new Error("请选择预计发货日期");
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
-  const contactPerson = String(body.contactPerson ?? currentOrder?.contactPerson ?? "").trim();
-  assertActivePersonnelName(state, contactPerson, "订单负责人", currentOrder?.contactPerson);
+  const contact = normalizeOrderContactPersonnel(state, body, currentOrder);
   const itemsInput = Array.isArray(body.items) ? body.items : [];
   if (itemsInput.length === 0) throw new Error("请至少添加一条商品");
   const itemIds = itemsInput.map((item) => String(item?.stockItemId ?? "").trim()).filter(Boolean);
@@ -4363,7 +4606,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     paymentReference,
     shippingAddress,
     plannedShipDate: plannedShipDate || undefined,
-    contactPerson,
+    ...contact,
     items,
     shippingFeeMode,
     shippingFee,
@@ -4586,6 +4829,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "paymentReference",
   "shippingAddress",
   "plannedShipDate",
+  "contactPersonnelId",
   "contactPerson",
   "items",
   "shippingFeeMode",
@@ -4610,6 +4854,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
     paymentReference: String(order.paymentReference ?? "").trim(),
     shippingAddress: String(order.shippingAddress ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
+    contactPersonnelId: String(order.contactPersonnelId ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
     items: (Array.isArray(order.items) ? order.items : []).map((item) => {
       const stockItemId = String(item?.stockItemId ?? "").trim();
@@ -5404,6 +5649,134 @@ async function backfillDefaultSites() {
   }
 }
 
+async function backfillPersonnelProfiles() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data;
+    if (!state || typeof state !== "object" || !Array.isArray(state.personnel)) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    if (Number(state._personnelSchemaVersion ?? 0) >= 2) {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    const sites = getSitesFromState(state);
+    const allSiteIds = sites.map((site) => site.id);
+    const usedPersonnelNos = new Set(state.personnel
+      .map((person) => String(person?.personnelNo ?? "").trim()).filter(Boolean));
+    const claimedPersonnelNos = new Set();
+    let sequence = 1;
+    const allocatePersonnelNo = () => {
+      while (usedPersonnelNos.has(`RY-${String(sequence).padStart(4, "0")}`)) sequence += 1;
+      const value = `RY-${String(sequence).padStart(4, "0")}`;
+      usedPersonnelNos.add(value);
+      sequence += 1;
+      return value;
+    };
+
+    const nextPersonnel = state.personnel.map((person) => {
+      if (!person || typeof person !== "object") return person;
+      const username = String(person.username ?? "").trim();
+      const resigned = isPersonnelResigned(person);
+      const accountEnabled = Boolean(username) && !resigned && person.accountEnabled !== false;
+      const accessRole = username && person.accessRole === "admin" ? "admin" : "staff";
+      let visibleSiteIds = accessRole === "admin" ? [] : normalizeVisibleSiteIds(person.visibleSiteIds, sites);
+      // Before this migration an empty staff scope meant all sites. Persist that legacy
+      // meaning explicitly so all future empty scopes can safely fail closed.
+      if (accountEnabled && accessRole === "staff" && visibleSiteIds.length === 0) {
+        visibleSiteIds = [...allSiteIds];
+      }
+      const existingPersonnelNo = String(person.personnelNo ?? "").trim();
+      const personnelNo = existingPersonnelNo && !claimedPersonnelNos.has(existingPersonnelNo)
+        ? existingPersonnelNo
+        : allocatePersonnelNo();
+      claimedPersonnelNos.add(personnelNo);
+      return {
+        ...person,
+        personnelNo,
+        username,
+        sessionVersion: sessionVersionForAccount(person),
+        accountEnabled,
+        accessRole,
+        visibleSiteIds,
+        siteIds: normalizeVisibleSiteIds(person.siteIds, sites),
+        employmentStatus: resigned ? "resigned" : "active",
+        permissions: !username
+          ? emptyPermissionsValue()
+          : accessRole === "admin"
+          ? fullPermissionsValue()
+          : normalizeLegacyPermissionsForStorage(person.permissions),
+      };
+    });
+    const nextOrders = backfillOrderContactPersonnelIds(nextPersonnel, state.orders);
+    await client.query(
+      "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify({
+        ...state,
+        personnel: nextPersonnel,
+        orders: nextOrders,
+        _personnelSchemaVersion: 2,
+      })]
+    );
+    await client.query("COMMIT");
+    const linkedOrderCount = nextOrders.filter((order, index) =>
+      String(order?.contactPersonnelId ?? "") !== String(state.orders?.[index]?.contactPersonnelId ?? "")
+    ).length;
+    console.log(`Backfilled ${nextPersonnel.length} personnel profile(s) and linked ${linkedOrderCount} order owner(s)`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function ensurePersonnelSensitiveDataEncryption() {
+  if (!personnelDataKeyring) return;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data;
+    if (!state || typeof state !== "object" || !Array.isArray(state.personnel)) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    let changed = state._personnelSensitiveEncryptionKid !== personnelDataKeyring.activeKid;
+    const nextPersonnel = state.personnel.map((person) => {
+      if (!person || typeof person !== "object" || !String(person.id ?? "").trim()) return person;
+      const nextPerson = rewrapPersonnelSensitiveFields(person, personnelDataKeyring);
+      if (!changed && ["idCardNo", "bankAccountName", "bankAccountNo", "bankName"].some(
+        (field) => String(nextPerson[field] ?? "") !== String(person[field] ?? "")
+      )) changed = true;
+      return nextPerson;
+    });
+    if (!changed) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    await client.query(
+      "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify({
+        ...state,
+        personnel: nextPersonnel,
+        _personnelSensitiveEncryptionKid: personnelDataKeyring.activeKid,
+      })]
+    );
+    await client.query("COMMIT");
+    console.log(`Protected personnel identity and payroll fields with key ${personnelDataKeyring.activeKid}`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureSchema() {
   schemaReady ??= (async () => {
     await pool.query(`
@@ -5541,6 +5914,8 @@ async function ensureSchema() {
     `);
     await importLegacyStateIfPresent();
     await backfillDefaultSites();
+    await backfillPersonnelProfiles();
+    await ensurePersonnelSensitiveDataEncryption();
     await rehashPlaintextPersonnelPasswords();
     await externalizePersistedUploads();
     await backfillDailyLogBioRecords();
@@ -5628,6 +6003,15 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/version" && req.method === "GET") {
+    sendJson(req, res, 200, {
+      product: "fishroom-management-system",
+      revision: releaseRevision,
+      buildTime: releaseBuiltAt || null,
+    }, { "Cache-Control": "no-store" });
+    return;
+  }
+
   await ensureSchema();
 
   if (url.pathname === "/api/health" && req.method === "GET") {
@@ -5673,7 +6057,7 @@ async function handleApi(req, res, url) {
 	      if (passwordNeedsRehash(account.password)) {
 	        await rehashStoredPasswordIfNeeded(username, password);
 	      }
-	      const session = createAuthToken(user);
+      const session = createAuthToken(user, account);
       sendJson(req, res, 200, {
         ok: true,
         user,
@@ -5766,7 +6150,11 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/auth/me" && req.method === "GET") {
-    sendJson(req, res, 200, { ok: true, user: req.auth.user });
+    sendJson(req, res, 200, {
+      ok: true,
+      user: req.auth.user,
+      account: authAccountPermissionSummary(req.auth.account),
+    });
     return;
   }
 
@@ -6818,13 +7206,58 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/personnel/sensitive" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireAdminForAuth(req, "仅管理员可以查看证件与工资账户信息");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const personnelId = String(body.id ?? body.personnelId ?? "").trim();
+      if (!personnelId) throw new Error("缺少人员 ID");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const target = personnel.find((person) => String(person?.id ?? "") === personnelId);
+      if (!target) throw new Error("人员不存在或已被删除");
+      const sensitive = decryptPersonnelSensitiveFields(target, personnelDataKeyring);
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "查看敏感档案",
+        `查看人员「${target.name || target.personnelNo}」（${target.personnelNo || target.id}）的证件与工资账户信息`
+      );
+      const nextState = {
+        ...state,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query(
+        "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+        [stateId, JSON.stringify(nextState)]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        personnelId,
+        sensitive,
+        sensitiveRevision: personnelSensitiveRevision(target),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, 400, { ok: false, error: error.message || "读取人员敏感档案失败" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/personnel/save" && req.method === "POST") {
     const client = await pool.connect();
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       const incoming = body.personnel && typeof body.personnel === "object" ? body.personnel : body;
       const incomingId = String(incoming?.id ?? "").trim();
-      requireModulePermissionForAuth(req, "accounts", incomingId ? "update" : "create");
+      requireAdminForAuth(req, "仅管理员可以维护人员档案和登录账号");
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
@@ -6834,32 +7267,59 @@ async function handleApi(req, res, url) {
         ? personnel.find((person) => String(person?.id ?? "") === incomingId)
         : null;
       if (incomingId && !existing) throw new Error("人员不存在或已被删除");
+      if (existing && String(incoming?.sensitiveRevision ?? "").trim() !== personnelSensitiveRevision(existing)) {
+        throw new Error("敏感档案已发生变化或尚未完整加载，请重新打开人员档案后再保存");
+      }
       const nextPerson = normalizePersonnelInput(incoming, existing, state);
-      const duplicate = personnel.find((person) =>
+      const duplicate = nextPerson.username && personnel.find((person) =>
         String(person?.id ?? "") !== nextPerson.id &&
         String(person?.username ?? "").trim() === nextPerson.username
       );
       if (duplicate) throw new Error("登录账号不能重复");
-      if (existing?.username === req.auth.user.username && nextPerson.accessRole !== "admin") {
-        throw new Error("不能把当前管理员改为店员");
+      const duplicatePersonnelNo = personnel.find((person) =>
+        String(person?.id ?? "") !== nextPerson.id &&
+        String(person?.personnelNo ?? "").trim() === nextPerson.personnelNo
+      );
+      if (duplicatePersonnelNo) throw new Error("人员编号不能重复");
+      if (existing?.username === req.auth.user.username &&
+          (nextPerson.accessRole !== "admin" || !nextPerson.accountEnabled)) {
+        throw new Error("不能停用当前管理员或把当前管理员改为普通账号");
       }
-      if (existing?.accessRole === "admin" && nextPerson.accessRole !== "admin" && countAdmins(personnel, existing.id) === 0) {
+      if (existing?.accessRole === "admin" && isPersonnelAccountEnabled(existing) &&
+          (nextPerson.accessRole !== "admin" || !nextPerson.accountEnabled) &&
+          countAdmins(personnel, existing.id) === 0) {
         throw new Error("至少需要保留一个管理员账号");
       }
 
       const nextPersonnel = existing
         ? personnel.map((person) => String(person?.id ?? "") === nextPerson.id ? nextPerson : person)
         : [...personnel, nextPerson];
-      const nextOrders = existing?.name && existing.name !== nextPerson.name
-        ? orders.map((order) =>
-            order?.contactPerson === existing.name ? { ...order, contactPerson: nextPerson.name } : order
-          )
+      const nextOrders = existing
+        ? orders.map((order) => {
+            const linkedPersonnelId = String(order?.contactPersonnelId ?? "").trim();
+            if (linkedPersonnelId === String(existing.id ?? "")) {
+              return { ...order, contactPerson: nextPerson.name };
+            }
+            if (linkedPersonnelId) return order;
+            const reference = String(order?.contactPerson ?? "").trim();
+            if (!reference) return order;
+            const matches = personnel.filter((person) =>
+              String(person?.name ?? "").trim() === reference ||
+              String(person?.username ?? "").trim() === reference
+            );
+            if (matches.length !== 1 || String(matches[0]?.id ?? "") !== String(existing.id ?? "")) return order;
+            return {
+              ...order,
+              contactPersonnelId: String(existing.id),
+              contactPerson: nextPerson.name,
+            };
+          })
         : orders;
       const operationLog = createOperationLog(
         req,
         "人员管理",
         existing ? "修改记录" : "添加记录",
-        `${existing ? "修改" : "新增"}人员账号「${nextPerson.name}」（${nextPerson.username}）`
+        `${existing ? "修改" : "新增"}人员档案「${nextPerson.name}」（${nextPerson.personnelNo}）${nextPerson.username ? `，账号 ${nextPerson.username}` : "，未开通账号"}`
       );
       const nextState = {
         ...state,
@@ -6893,7 +7353,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/personnel/delete" && req.method === "POST") {
     const client = await pool.connect();
     try {
-      requireModulePermissionForAuth(req, "accounts", "delete");
+      requireAdminForAuth(req, "仅管理员可以删除误录的人员档案");
       const body = JSON.parse(await readBody(req) || "{}");
       const deleteId = String(body.id ?? body.deleteId ?? "").trim();
       if (!deleteId) throw new Error("缺少人员 ID");
@@ -6901,22 +7361,21 @@ async function handleApi(req, res, url) {
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
       const personnel = Array.isArray(state.personnel) ? state.personnel : [];
-      const orders = Array.isArray(state.orders) ? state.orders : [];
       const target = personnel.find((person) => String(person?.id ?? "") === deleteId);
       if (!target) throw new Error("人员不存在或已被删除");
       if (target.username === req.auth.user.username) throw new Error("当前登录人员不能删除");
-      if (target.accessRole === "admin" && countAdmins(personnel, target.id) === 0) {
+      if (target.accessRole === "admin" && isPersonnelAccountEnabled(target) && countAdmins(personnel, target.id) === 0) {
         throw new Error("至少需要保留一个管理员账号");
       }
-      if (orders.some((order) => order?.contactPerson === target.name)) {
-        throw new Error("该人员已有订单关联，不能删除");
+      if (personnelHasBusinessHistory(state, target)) {
+        throw new Error("该人员已有业务或操作历史，不能彻底删除，请改为办理离职");
       }
       const nextPersonnel = personnel.filter((person) => String(person?.id ?? "") !== deleteId);
       const operationLog = createOperationLog(
         req,
         "人员管理",
         "删除记录",
-        `删除人员账号「${target.name || target.username}」（${target.username}）`
+        `删除人员档案「${target.name || target.username}」（${target.personnelNo || target.username}）`
       );
       const nextState = {
         ...state,
@@ -6948,7 +7407,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/personnel/resign" && req.method === "POST") {
     const client = await pool.connect();
     try {
-      requireModulePermissionForAuth(req, "accounts", "update");
+      requireAdminForAuth(req, "仅管理员可以办理人员离职");
       const body = JSON.parse(await readBody(req) || "{}");
       const targetId = String(body.id ?? body.personnelId ?? "").trim();
       if (!targetId) throw new Error("缺少人员 ID");
@@ -6960,7 +7419,7 @@ async function handleApi(req, res, url) {
       if (!target) throw new Error("人员不存在或已被删除");
       if (isPersonnelResigned(target)) throw new Error("该人员已经离职");
       if (target.username === req.auth.user.username) throw new Error("当前登录人员不能设为离职");
-      if (target.accessRole === "admin" && countAdmins(personnel, target.id) === 0) {
+      if (target.accessRole === "admin" && isPersonnelAccountEnabled(target) && countAdmins(personnel, target.id) === 0) {
         throw new Error("至少需要保留一个在职管理员账号");
       }
       const resignedAt = nowDatetimeInChina();
@@ -6968,10 +7427,10 @@ async function handleApi(req, res, url) {
         String(person?.id ?? "") === targetId
           ? {
               ...person,
-              accessRole: "staff",
+              accountEnabled: false,
+              sessionVersion: sessionVersionForAccount(person) + 1,
               employmentStatus: "resigned",
               resignedAt,
-              permissions: emptyPermissionsValue(),
             }
           : person
       );
@@ -6979,7 +7438,7 @@ async function handleApi(req, res, url) {
         req,
         "人员管理",
         "修改记录",
-        `设置人员「${target.name || target.username}」（${target.username}）离职，并清空权限`
+        `办理人员「${target.name || target.username}」（${target.personnelNo || target.username}）离职，并停用登录账号`
       );
       const nextState = {
         ...state,
@@ -7011,7 +7470,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/personnel/permissions" && req.method === "POST") {
     const client = await pool.connect();
     try {
-      requireModulePermissionForAuth(req, "accounts", "update");
+      requireAdminForAuth(req, "仅管理员可以配置账号权限");
       const body = JSON.parse(await readBody(req) || "{}");
       const targetId = String(body.id ?? body.personnelId ?? "").trim();
       if (!targetId) throw new Error("缺少人员 ID");
@@ -7021,7 +7480,8 @@ async function handleApi(req, res, url) {
       const personnel = Array.isArray(state.personnel) ? state.personnel : [];
       const target = personnel.find((person) => String(person?.id ?? "") === targetId);
       if (!target) throw new Error("人员不存在或已被删除");
-      if (isPersonnelResigned(target)) throw new Error("离职人员权限已清空，不能再授权");
+      if (!hasPersonnelAccount(target)) throw new Error("该人员尚未开通登录账号");
+      if (isPersonnelResigned(target)) throw new Error("离职账号不能修改权限");
       const nextPermissions = target.accessRole === "admin"
         ? fullPermissionsValue()
         : normalizePermissionsForStorage(body.permissions);
@@ -7077,17 +7537,23 @@ async function handleApi(req, res, url) {
         ? personnel.find((person) => String(person?.id ?? "") === targetId)
         : personnel.find((person) => String(person?.username ?? "") === req.auth.user.username);
       if (!target) throw new Error("人员不存在或已被删除");
-      if (isPersonnelResigned(target)) throw new Error("离职人员不能修改登录密码");
+      if (!hasPersonnelAccount(target)) throw new Error("该人员尚未开通登录账号");
       const adminReset = Boolean(targetId) && req.auth.account?.accessRole === "admin";
+      if (isPersonnelResigned(target)) throw new Error("离职账号不能修改登录密码");
+      if (!isPersonnelAccountEnabled(target) && !adminReset) throw new Error("停用账号不能自行修改登录密码");
       if (adminReset) {
-        requireModulePermissionForAuth(req, "accounts", "update");
+        requireAdminForAuth(req, "仅管理员可以重置其他账号的密码");
       } else {
         if (target.username !== req.auth.user.username) throw new Error("只能修改自己的密码");
         if (!verifyPassword(target.password, String(body.oldPassword ?? ""))) throw new Error("原密码不正确");
       }
       const nextPersonnel = personnel.map((person) =>
         String(person?.id ?? "") === String(target.id ?? "")
-          ? { ...person, password: hashPassword(newPassword) }
+          ? {
+              ...person,
+              password: hashPassword(newPassword),
+              sessionVersion: sessionVersionForAccount(person) + 1,
+            }
           : person
       );
       const operationLog = createOperationLog(
@@ -7111,11 +7577,20 @@ async function handleApi(req, res, url) {
         [stateId, JSON.stringify(nextState)]
       );
       await client.query("COMMIT");
+      const updatedTarget = nextPersonnel.find((person) => String(person?.id ?? "") === String(target.id ?? ""));
+      const currentUserChanged = updatedTarget?.username === req.auth.user.username;
+      const replacementUser = currentUserChanged ? publicUserFromAccount(updatedTarget) : null;
+      const replacementSession = replacementUser ? createAuthToken(replacementUser, updatedTarget) : null;
       sendJson(req, res, 200, {
         ok: true,
         personnel: sanitizePersonnelForResponse(nextPersonnel, req),
         operationLog,
-      });
+        ...(replacementSession ? {
+          user: replacementUser,
+          token: replacementSession.token,
+          expiresAt: replacementSession.expiresAt,
+        } : {}),
+      }, replacementSession ? { "Set-Cookie": authCookieHeader(replacementSession.token, replacementSession.expiresAt) } : {});
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "修改密码失败" });
@@ -8844,6 +9319,7 @@ async function handleApi(req, res, url) {
 	      const parsed = JSON.parse(body);
 	      const rawPatch = parsed?.patch && typeof parsed.patch === "object" ? parsed.patch : {};
 	      validateStatePatchAuthorization(req, rawPatch);
+	      validateStatePatchShapes(rawPatch);
 	      if (
 	        rawPatch.systemSettings &&
 	        typeof rawPatch.systemSettings === "object" &&
@@ -8869,7 +9345,10 @@ async function handleApi(req, res, url) {
 	        };
 	      }
 	      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
-	      const incomingLogs = sanitizeOperationLogsForAuth(parsed?.operationLogs, req);
+	      validateStatePatchShapes(basePatch);
+	      if (Array.isArray(parsed?.operationLogs) && parsed.operationLogs.length > 0) {
+	        throw new Error("操作日志只能由服务端生成");
+	      }
 	      await client.query("BEGIN");
 	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	      const current = normalizePickupShipmentsForState(rows[0]?.data ?? {});
@@ -8892,15 +9371,21 @@ async function handleApi(req, res, url) {
 	          return { ...shipment, actualShippingFee };
 	        });
 	      }
-	      const validationState = buildStatePatch(current, rawPatch, basePatch, incomingLogs, req);
+	      const validationState = buildStatePatch(current, rawPatch, basePatch, [], req);
 
+	      validateStatePatchActions(req, current, validationState, Object.keys(rawPatch));
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
 	      const patch = await externalizeDataUrls(rawPatch);
 	      if (Object.prototype.hasOwnProperty.call(patch, "batches") && Array.isArray(patch.batches)) {
 	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
 	      }
-	      const nextState = buildStatePatch(current, patch, basePatch, incomingLogs, req);
+	      const stateWithoutLogs = buildStatePatch(current, patch, basePatch, [], req);
+	      const appliedOperationLogs = statePatchOperationLogs(req, current, stateWithoutLogs, Object.keys(patch));
+	      const nextState = {
+	        ...stateWithoutLogs,
+	        operationLogs: mergeOperationLogsForGenericPost(current.operationLogs, appliedOperationLogs),
+	      };
 
 	      await client.query(
         `INSERT INTO app_state (id, data, updated_at)
@@ -8910,7 +9395,7 @@ async function handleApi(req, res, url) {
         [stateId, JSON.stringify(nextState)]
       );
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, appliedOperationLogs: incomingLogs });
+      sendJson(req, res, 200, { ok: true, appliedOperationLogs });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { error: `Failed to patch PostgreSQL state: ${error.message}` });

@@ -1,6 +1,7 @@
 # Local dependencies and build output
 node_modules/
 dist/
+release-output/
 .data/
 
 # Local tooling bundles

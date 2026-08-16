@@ -49,7 +49,7 @@ export function visibleSitesForUser(user: User, state?: Partial<Store>) {
   const sites = getSites(state);
   if (!user || user.role === "admin") return sites;
   const visibleSiteIds = normalizeVisibleSiteIds(user.visibleSiteIds, sites);
-  if (visibleSiteIds.length === 0) return sites;
+  if (visibleSiteIds.length === 0) return [];
   const allowedIds = new Set(visibleSiteIds);
   return sites.filter((site) => allowedIds.has(site.id));
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { isPaymentVerified, isPersonnelResigned, Order, PaymentType, Shipment, useStore } from "../store";
+import { hasPersonnelAccount, isPaymentVerified, isPersonnelResigned, Order, PaymentType, Shipment, useStore } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -60,7 +60,7 @@ export function PersonalCenterView() {
   const currentContactName = currentAccount?.name || user?.username || "";
   const isAdmin = user?.role === "admin" || currentAccount?.accessRole === "admin";
   const activePersonnel = useMemo(
-    () => (state.personnel ?? []).filter((person) => !isPersonnelResigned(person)),
+    () => (state.personnel ?? []).filter((person) => hasPersonnelAccount(person) && !isPersonnelResigned(person)),
     [state.personnel]
   );
 

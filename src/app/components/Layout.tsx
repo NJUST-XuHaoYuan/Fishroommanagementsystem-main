@@ -35,7 +35,7 @@ import {
 import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
 import { NotificationNavBadge, useNotificationUnreadCount } from "./NotificationCenter";
-import { normalizePermissions } from "../utils/permissions";
+import { usePermission } from "../utils/permissions";
 
 export type ViewKey =
   | "dashboard"
@@ -152,18 +152,17 @@ function Brand() {
 
 export function Layout({ view, setView, children, saveStatus }: Props) {
   const { state, activeSiteId, setActiveSiteId, setState } = useStore();
+  const financePermission = usePermission("finance");
   const user = state.user!;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const notificationUnreadCount = useNotificationUnreadCount();
   const sites = visibleSitesForUser(user, state);
   const activeSiteName = sites.find((site) => site.id === normalizeSiteId(activeSiteId))?.name ?? siteName(state, activeSiteId);
   const currentAccount = (state.personnel ?? []).find((person) => person.username === user.username);
-  const financePermissions = normalizePermissions(currentAccount?.permissions).finance;
-  const canSeeFinance = user.role === "admin" ||
-    currentAccount?.accessRole === "admin" ||
-    financePermissions.create ||
-    financePermissions.update ||
-    financePermissions.delete;
+  const canSeeFinance = financePermission.isAdmin ||
+    financePermission.canCreate ||
+    financePermission.canUpdate ||
+    financePermission.canDelete;
 
   useEffect(() => {
     const scrollX = window.scrollX;
@@ -375,7 +374,10 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       <div className="fishroom-sidebar-footer border-t p-2.5 flex flex-col gap-2 bg-sidebar">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col">
-            <div className="text-sm font-medium truncate">{user.username}</div>
+            <div className="text-sm font-medium truncate">{currentAccount?.name || user.username}</div>
+            {currentAccount?.name && currentAccount.name !== user.username && (
+              <div className="truncate text-[11px] text-muted-foreground">账号：{user.username}</div>
+            )}
             <Badge variant="secondary" className="fishroom-status-pill w-fit text-xs">
               {user.role === "admin" ? "管理员" : "店员"}
             </Badge>

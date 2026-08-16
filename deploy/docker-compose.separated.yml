@@ -2,7 +2,13 @@ name: fishroom-management
 
 services:
   frontend:
-    image: fishroom-frontend:local
+    image: fishroom-frontend:${RELEASE_VERSION:?RELEASE_VERSION must be set from RELEASE.env}
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must be set from RELEASE.env}
+        RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set from RELEASE.env}
     container_name: fishroom-frontend
     depends_on:
       backend:
@@ -12,13 +18,22 @@ services:
     restart: unless-stopped
 
   backend:
-    image: fishroom-backend:local
+    image: fishroom-backend:${RELEASE_VERSION:?RELEASE_VERSION must be set from RELEASE.env}
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+      args:
+        RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must be set from RELEASE.env}
+        RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set from RELEASE.env}
     container_name: fishroom-backend
     environment:
       # Backend HTTP service
       HOST: 0.0.0.0
       PORT: 8787
       AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
+      PERSONNEL_DATA_KEYRING_JSON: ${PERSONNEL_DATA_KEYRING_JSON:?PERSONNEL_DATA_KEYRING_JSON must be set}
+      RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must be set from RELEASE.env}
+      RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set from RELEASE.env}
       ALLOW_DEFAULT_CREDENTIALS: ${ALLOW_DEFAULT_CREDENTIALS:-false}
 
       # Database connection. Change these in .env on the server.
@@ -26,7 +41,7 @@ services:
       PGPORT: 5432
       PGDATABASE: ${POSTGRES_DB:-fishroom}
       PGUSER: ${POSTGRES_USER:-fishroom}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-fishroom_local_password}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
 
       # Optional single-string alternative. Leave empty when using PG* above.
       DATABASE_URL: ${DATABASE_URL:-}
@@ -59,19 +74,25 @@ services:
       FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
       FEISHU_DEFAULT_SITE_ID: ${FEISHU_DEFAULT_SITE_ID:-all}
     volumes:
-      - ../uploads:/app/uploads
+      - ${UPLOADS_DIR:?UPLOADS_DIR must be a stable absolute path}:/app/uploads
     depends_on:
       database:
         condition: service_healthy
     restart: unless-stopped
 
   database:
-    image: fishroom-database:local
+    image: fishroom-database:${RELEASE_VERSION:?RELEASE_VERSION must be set from RELEASE.env}
+    build:
+      context: ..
+      dockerfile: deploy/database.Dockerfile
+      args:
+        RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must be set from RELEASE.env}
+        RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set from RELEASE.env}
     container_name: fishroom-database
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-fishroom}
       POSTGRES_USER: ${POSTGRES_USER:-fishroom}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fishroom_local_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - fishroom-postgres-data:/var/lib/postgresql/data
     healthcheck:

@@ -2,7 +2,13 @@ import { createContext, useContext } from "react";
 
 export type Role = "admin" | "staff";
 
-export type User = { username: string; role: Role; visibleSiteIds?: string[] } | null;
+export type User = {
+  username: string;
+  role: Role;
+  visibleSiteIds?: string[];
+  /** 当前登录账号的最小权限摘要，仅存在于前端会话，不进入业务状态持久化。 */
+  account?: AuthAccountPermissionSummary;
+} | null;
 
 export type PermissionAction = "create" | "update" | "delete";
 
@@ -22,6 +28,13 @@ export type PermissionModule =
 export type ModulePermission = Record<PermissionAction, boolean>;
 
 export type PermissionSet = Record<PermissionModule, ModulePermission>;
+
+export type AuthAccountPermissionSummary = {
+  username: string;
+  accessRole: Role;
+  accountEnabled: boolean;
+  permissions: PermissionSet;
+};
 
 export type Species = {
   id: string;
@@ -511,6 +524,8 @@ export type Order = {
   paymentReference?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
+  /** Stable personnel reference for the order owner. `contactPerson` remains the saved display-name snapshot. */
+  contactPersonnelId?: string;
   contactPerson?: string;
   items: OrderItem[];
   /** 物流订单的运费承担方式；历史订单未设置时按寄付处理。 */
@@ -596,21 +611,49 @@ export type Customer = {
 
 export type Personnel = {
   id: string;
+  personnelNo?: string;
   name: string;
   username: string;
   password: string;
+  accountEnabled?: boolean;
   accessRole: Role;
   visibleSiteIds?: string[];
   permissions?: PermissionSet;
   employmentStatus?: "active" | "resigned";
   resignedAt?: string;
+  gender?: "" | "male" | "female" | "other";
+  birthDate?: string;
+  department?: string;
   role: string;
+  hireDate?: string;
+  siteIds?: string[];
   phone: string;
+  email?: string;
+  wechat?: string;
+  address?: string;
+  emergencyContact?: string;
+  emergencyPhone?: string;
+  idCardNo?: string;
+  bankAccountName?: string;
+  bankAccountNo?: string;
+  bankName?: string;
+  /** 编辑敏感档案时由服务端签发的并发版本，只在当前编辑会话中使用。 */
+  sensitiveRevision?: string;
   notes: string;
 };
 
 export function isPersonnelResigned(person?: Pick<Personnel, "employmentStatus" | "resignedAt"> | null): boolean {
   return person?.employmentStatus === "resigned" || Boolean(person?.resignedAt);
+}
+
+export function hasPersonnelAccount(person?: Pick<Personnel, "username"> | null): boolean {
+  return Boolean(String(person?.username ?? "").trim());
+}
+
+export function isPersonnelAccountEnabled(
+  person?: Pick<Personnel, "username" | "accountEnabled" | "employmentStatus" | "resignedAt"> | null
+): boolean {
+  return hasPersonnelAccount(person) && person?.accountEnabled !== false && !isPersonnelResigned(person);
 }
 
 export type OperationLog = {
@@ -890,9 +933,9 @@ export const initialState: Store = {
     { id: "beijing", name: "北京" },
   ],
   personnel: [
-    { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
-    { id: "person-staff", name: "staff", username: "staff", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "店员", phone: "", notes: "系统默认店员账户" },
-    { id: "person-a", name: "店员A", username: "staff-a", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "养护", phone: "", notes: "" },
+    { id: "person-admin", personnelNo: "RY-0001", name: "admin", username: "admin", password: "", accountEnabled: true, accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
+    { id: "person-staff", personnelNo: "RY-0002", name: "staff", username: "staff", password: "", accountEnabled: true, accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "店员", phone: "", notes: "系统默认店员账户" },
+    { id: "person-a", personnelNo: "RY-0003", name: "店员A", username: "staff-a", password: "", accountEnabled: true, accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "养护", phone: "", notes: "" },
   ],
   operationLogs: [],
   speciesCategories: [
