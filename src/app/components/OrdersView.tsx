@@ -74,6 +74,12 @@ import {
   SHIPPING_FEE_MODE_OPTIONS,
 } from "../utils/orderFees";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
+import {
+  actualShippingFeePayload,
+  canApplyActualShippingFeeResponse,
+  MAX_ACTUAL_SHIPPING_FEE,
+  normalizedPositiveShippingFee,
+} from "../utils/shipmentFee";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -235,12 +241,14 @@ type CreditSaleRequestDialogState = {
 class OrderApiError extends Error {
   code: string;
   payload: CreditSaleRequiredPayload;
+  status: number;
 
-  constructor(message: string, payload: CreditSaleRequiredPayload = {}) {
+  constructor(message: string, payload: CreditSaleRequiredPayload = {}, status = 0) {
     super(message);
     this.name = "OrderApiError";
     this.code = String(payload.code ?? "");
     this.payload = payload;
+    this.status = status;
   }
 }
 
@@ -255,7 +263,7 @@ async function postOrderApi(path: string, body: Record<string, unknown>) {
     window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
   }
   if (!response.ok || !result.ok) {
-    throw new OrderApiError(result.error || `HTTP ${response.status}`, result);
+    throw new OrderApiError(result.error || `HTTP ${response.status}`, result, response.status);
   }
   return result;
 }
@@ -267,22 +275,44 @@ function mergeOperationLog(current: Store, operationLog: Store["operationLogs"][
     .slice(0, 10000);
 }
 
+function mergeApiRecord<T extends { id: string }>(items: T[], record?: T): T[] {
+  if (!record) return items;
+  const exists = items.some((item) => item.id === record.id);
+  return exists
+    ? items.map((item) => item.id === record.id ? record : item)
+    : [record, ...items];
+}
+
 function applyOrderApiResult(
   setState: (value: Store | ((current: Store) => Store)) => void,
   result: {
     orders?: Store["orders"];
     shipments?: Store["shipments"];
+    order?: Store["orders"][number];
+    shipment?: Store["shipments"][number];
     stock?: Store["stock"];
     operationLog?: Store["operationLogs"][number];
-  }
+  },
+  options: {
+    requireExistingShipmentId?: string;
+    shouldApply?: () => boolean;
+  } = {}
 ) {
-  setState((current) => ({
-    ...current,
-    orders: Array.isArray(result.orders) ? result.orders : current.orders,
-    shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
-    stock: Array.isArray(result.stock) ? result.stock : current.stock,
-    operationLogs: mergeOperationLog(current, result.operationLog),
-  }));
+  setState((current) => {
+    if (options.shouldApply && !options.shouldApply()) return current;
+    if (options.requireExistingShipmentId && !current.shipments.some(
+      (shipment) => shipment.id === options.requireExistingShipmentId
+    )) return current;
+    const orders = Array.isArray(result.orders) ? result.orders : current.orders;
+    const shipments = Array.isArray(result.shipments) ? result.shipments : current.shipments;
+    return {
+      ...current,
+      orders: mergeApiRecord(orders, result.order),
+      shipments: mergeApiRecord(shipments, result.shipment),
+      stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      operationLogs: mergeOperationLog(current, result.operationLog),
+    };
+  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2092,12 +2122,14 @@ function ShipmentActionDialog({
   const [packingProof, setPackingProof] = useState<string[]>([]);
   const [actualShippingFee, setActualShippingFee] = useState(0);
   const [savingShippingFee, setSavingShippingFee] = useState(false);
+  const [actualShippingFeeError, setActualShippingFeeError] = useState("");
 
   useEffect(() => {
     if (open && shipment) {
       setPackingProof([...(shipment.packingProof ?? [])]);
       setActualShippingFee(Number(shipment.actualShippingFee ?? 0));
       setSavingShippingFee(false);
+      setActualShippingFeeError("");
     }
   }, [open, shipment?.id]);
 
@@ -2105,16 +2137,36 @@ function ShipmentActionDialog({
   const method = shipment.shipMethod === "pickup" ? "上门自取" : (shipment.carrier || "快递");
   const shippingFeeMode = orderShippingFeeMode(order);
   const shippingFeePending = !!order && shipmentHasPendingActualShippingFee(order, shipment);
+  const actionLocked = saving || savingShippingFee;
 
   const saveActualShippingFee = async () => {
-    if (actualShippingFee <= 0) {
-      toast.error("请填写大于 0 的实际运费");
-      return;
+    if (savingShippingFee || saving) return false;
+    const normalizedFee = normalizedPositiveShippingFee(actualShippingFee);
+    if (normalizedFee === null) {
+      const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+      setActualShippingFeeError(message);
+      toast.error(message);
+      return false;
     }
+    setActualShippingFee(normalizedFee);
+    setActualShippingFeeError("");
     setSavingShippingFee(true);
-    const ok = await onSaveActualShippingFee(shipment, actualShippingFee);
-    setSavingShippingFee(false);
-    return ok;
+    try {
+      const ok = await onSaveActualShippingFee(shipment, normalizedFee);
+      if (ok) setActualShippingFeeError("");
+      return ok;
+    } catch (error) {
+      const message = error instanceof OrderApiError && error.status === 401
+        ? "登录状态已失效，请重新登录后再保存"
+        : error instanceof Error && error.message
+        ? error.message
+        : "运费保存失败，请重试";
+      setActualShippingFeeError(message);
+      toast.error(message);
+      return false;
+    } finally {
+      setSavingShippingFee(false);
+    }
   };
 
   if (shipment.status === "outbound") {
@@ -2127,8 +2179,14 @@ function ShipmentActionDialog({
     };
 
     return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent aria-describedby={undefined} className="max-w-2xl">
+      <Dialog open={open} onOpenChange={(nextOpen) => { if (!actionLocked) onOpenChange(nextOpen); }}>
+        <DialogContent
+          aria-describedby={undefined}
+          aria-busy={actionLocked}
+          onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
+          onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
+          className={`max-w-2xl ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+        >
           <DialogHeader>
             <DialogTitle>出库发货确认</DialogTitle>
           </DialogHeader>
@@ -2154,17 +2212,17 @@ function ShipmentActionDialog({
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>关闭</Button>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>关闭</Button>
             <Button
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
               onClick={() => onCancelShipment(shipment)}
-              disabled={saving}
+              disabled={actionLocked}
             >
               <RotateCcw className="size-4 mr-1" />
               取消出库
             </Button>
-            <Button onClick={confirmShipment} disabled={saving}>
+            <Button onClick={confirmShipment} disabled={actionLocked}>
               <Truck className="size-4 mr-1" />
               {saving ? "保存中..." : "确认发货"}
             </Button>
@@ -2175,8 +2233,14 @@ function ShipmentActionDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-w-sm">
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!actionLocked) onOpenChange(nextOpen); }}>
+      <DialogContent
+        aria-describedby={undefined}
+        aria-busy={actionLocked}
+        onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
+        onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
+        className={`max-w-sm ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+      >
         <DialogHeader>
           <DialogTitle>处理运输状态</DialogTitle>
         </DialogHeader>
@@ -2201,15 +2265,27 @@ function ShipmentActionDialog({
                 id="shipment-actual-shipping-fee"
                 type="number"
                 min={0}
+                max={MAX_ACTUAL_SHIPPING_FEE}
                 step={0.01}
                 value={actualShippingFee || ""}
                 placeholder="发货后补录"
-                onChange={(event) => setActualShippingFee(Number(event.target.value))}
+                disabled={actionLocked}
+                aria-invalid={Boolean(actualShippingFeeError)}
+                aria-describedby={actualShippingFeeError ? "shipment-actual-shipping-fee-error" : undefined}
+                onChange={(event) => {
+                  setActualShippingFee(Number(event.target.value));
+                  if (actualShippingFeeError) setActualShippingFeeError("");
+                }}
               />
-              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={saving || savingShippingFee}>
+              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={actionLocked}>
                 {savingShippingFee ? "保存中..." : shippingFeePending ? "补录运费" : "更新运费"}
               </Button>
             </div>
+            {actualShippingFeeError && (
+              <p id="shipment-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">
+                {actualShippingFeeError}
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">寄付可以先发货，实际运费必须在确认收货和完成订单前补录。</p>
           </div>
         )}
@@ -2218,7 +2294,7 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
-            disabled={saving || savingShippingFee || shippingFeePending}
+            disabled={actionLocked || shippingFeePending}
             title={shippingFeePending ? "请先补录实际运费" : undefined}
           >
             <CheckCircle className="size-4" />
@@ -2228,6 +2304,7 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-red-700 border-red-200 hover:bg-red-50"
             onClick={() => onDamage(shipment)}
+            disabled={actionLocked}
           >
             <XCircle className="size-4" />
             报损处理
@@ -2236,13 +2313,14 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-amber-700 border-amber-200 hover:bg-amber-50"
             onClick={() => onCancelShipment(shipment)}
+            disabled={actionLocked}
           >
             <RotateCcw className="size-4" />
             取消发货
           </Button>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>取消</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -4137,6 +4215,8 @@ function OrderDetailDialog({
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
+  const shipmentFeeRequestSequence = useRef(0);
+  const shipmentListRef = useRef(state.shipments);
   const [damageShipment, setDamageShipment] = useState<Shipment | null>(null);
   const [returnItem, setReturnItem] = useState<OrderItem | null>(null);
   const [returnSaving, setReturnSaving] = useState(false);
@@ -4171,7 +4251,12 @@ function OrderDetailDialog({
   const editPaymentAccount = editPaymentMethod?.account ?? "";
 
   useEffect(() => {
+    shipmentListRef.current = state.shipments;
+  }, [state.shipments]);
+
+  useEffect(() => {
     if (!open) {
+      shipmentFeeRequestSequence.current += 1;
       setEditMode(false);
       setEditForm(null);
       setShipDialogOpen(false);
@@ -4639,6 +4724,7 @@ function OrderDetailDialog({
       return;
     }
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
+    shipmentFeeRequestSequence.current += 1;
     try {
       const result = await postOrderApi("shipments/deliver", { shipmentId: shipment.id });
       applyOrderApiResult(setState, result);
@@ -4650,25 +4736,29 @@ function OrderDetailDialog({
   };
 
   const saveShipmentActualShippingFee = async (shipment: Shipment, actualShippingFee: number) => {
-    if (!order) return false;
-    if (!permission.requirePermission("update")) return false;
-    if (!Number.isFinite(actualShippingFee) || actualShippingFee <= 0) {
-      toast.error("请填写大于 0 的实际运费");
+    if (!order) throw new Error("订单不存在或已关闭，请刷新后重试");
+    if (!permission.canUpdate) throw new Error("当前账号没有修改订单的权限");
+    const payload = actualShippingFeePayload(shipment, actualShippingFee);
+    if (!payload) throw new Error("实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数");
+    if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${payload.actualShippingFee.toFixed(2)}。`)) return false;
+
+    const requestSequence = ++shipmentFeeRequestSequence.current;
+    const result = await postOrderApi("shipments/actual-shipping-fee", payload);
+    if (!result.shipment) throw new Error("服务端未返回更新后的发货记录，请刷新后重试");
+    if (!canApplyActualShippingFeeResponse(
+      shipmentListRef.current,
+      shipment.id,
+      requestSequence,
+      shipmentFeeRequestSequence.current
+    )) {
+      setShipmentAction((current) => current?.id === shipment.id ? null : current);
       return false;
     }
-    if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${actualShippingFee.toFixed(2)}。`)) return false;
-    const normalizedFee = Number(actualShippingFee.toFixed(2));
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      shipments: latest.shipments.map((item) =>
-        item.id === shipment.id ? { ...item, actualShippingFee: normalizedFee } : item
-      ),
-    }));
-    if (!ok) {
-      toast.error("运费保存失败，请重试");
-      return false;
-    }
-    setShipmentAction({ ...shipment, actualShippingFee: normalizedFee });
+    applyOrderApiResult(setState, result, {
+      requireExistingShipmentId: shipment.id,
+      shouldApply: () => requestSequence === shipmentFeeRequestSequence.current,
+    });
+    setShipmentAction((current) => current?.id === shipment.id ? result.shipment : current);
     toast.success("实际运费已补录");
     return true;
   };
@@ -4681,6 +4771,7 @@ function OrderDetailDialog({
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
+    shipmentFeeRequestSequence.current += 1;
     setShipmentConfirmSaving(true);
     try {
       const result = await postOrderApi("shipments/confirm", {
@@ -4705,6 +4796,7 @@ function OrderDetailDialog({
     if (order.status === "completed") return toast.error("已完成订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
     if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。")) return;
+    shipmentFeeRequestSequence.current += 1;
     setShipmentConfirmSaving(true);
     try {
       const result = await postOrderApi("shipments/cancel", { shipmentId: shipment.id });
@@ -5398,9 +5490,15 @@ function OrderDetailDialog({
         order={order}
         open={!!shipmentAction}
         saving={shipmentConfirmSaving}
-        onOpenChange={(o) => { if (!o) setShipmentAction(null); }}
+        onOpenChange={(o) => {
+          if (!o) {
+            shipmentFeeRequestSequence.current += 1;
+            setShipmentAction(null);
+          }
+        }}
         onDelivered={markShipmentDelivered}
         onDamage={(shipment) => {
+          shipmentFeeRequestSequence.current += 1;
           setShipmentAction(null);
           setDamageShipment(shipment);
         }}

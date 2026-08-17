@@ -27,6 +27,13 @@ import {
   shipmentHasPendingActualShippingFee,
   shippingFeeModeLabel,
 } from "../utils/orderFees";
+import {
+  actualShippingFeePayload,
+  canUseActualShippingFeeApi,
+  MAX_ACTUAL_SHIPPING_FEE,
+  normalizedPositiveShippingFee,
+  roundShippingFee,
+} from "../utils/shipmentFee";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -57,6 +64,18 @@ function formatLocalDateTimeMinute(value?: string): string {
   return local.toISOString().slice(0, 16).replace("T", " ");
 }
 
+class ShipmentApiError extends Error {
+  status: number;
+  code: string;
+
+  constructor(message: string, status = 0, code = "") {
+    super(message);
+    this.name = "ShipmentApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function postShipmentApi(path: string, body: Record<string, unknown>) {
   const response = await fetch(`/api/${path}`, {
     method: "POST",
@@ -65,9 +84,28 @@ async function postShipmentApi(path: string, body: Record<string, unknown>) {
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || !result.ok) {
-    throw new Error(result.error || `HTTP ${response.status}`);
+    throw new ShipmentApiError(result.error || `HTTP ${response.status}`, response.status, String(result.code ?? ""));
   }
   return result;
+}
+
+async function fetchCurrentShipment(shipmentId: string): Promise<Shipment | null> {
+  const response = await fetch("/api/state/slice?keys=shipments", { headers: authJsonHeaders() });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ShipmentApiError(result.error || `HTTP ${response.status}`, response.status, String(result.code ?? ""));
+  }
+  const shipments = Array.isArray(result.data?.shipments) ? result.data.shipments as Shipment[] : [];
+  return shipments.find((shipment) => shipment.id === shipmentId) ?? null;
+}
+
+function shipmentApiErrorMessage(error: unknown): string {
+  if (error instanceof ShipmentApiError && error.status === 401) {
+    return "登录状态已失效，请重新登录后再保存";
+  }
+  return error instanceof Error && error.message
+    ? error.message
+    : "保存失败，请重试";
 }
 
 function mergeOperationLog(current: Store, operationLog: Store["operationLogs"][number] | undefined) {
@@ -77,22 +115,33 @@ function mergeOperationLog(current: Store, operationLog: Store["operationLogs"][
     .slice(0, 10000);
 }
 
+function mergeShipmentRecord(shipments: Store["shipments"], shipment?: Store["shipments"][number]) {
+  if (!shipment) return shipments;
+  return shipments.some((item) => item.id === shipment.id)
+    ? shipments.map((item) => item.id === shipment.id ? shipment : item)
+    : [shipment, ...shipments];
+}
+
 function applyShipmentApiResult(
   setState: (value: Store | ((current: Store) => Store)) => void,
   result: {
     orders?: Store["orders"];
     shipments?: Store["shipments"];
+    shipment?: Store["shipments"][number];
     stock?: Store["stock"];
     operationLog?: Store["operationLogs"][number];
   }
 ) {
-  setState((current) => ({
-    ...current,
-    orders: Array.isArray(result.orders) ? result.orders : current.orders,
-    shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
-    stock: Array.isArray(result.stock) ? result.stock : current.stock,
-    operationLogs: mergeOperationLog(current, result.operationLog),
-  }));
+  setState((current) => {
+    const shipments = Array.isArray(result.shipments) ? result.shipments : current.shipments;
+    return {
+      ...current,
+      orders: Array.isArray(result.orders) ? result.orders : current.orders,
+      shipments: mergeShipmentRecord(shipments, result.shipment),
+      stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      operationLogs: mergeOperationLog(current, result.operationLog),
+    };
+  });
 }
 
 function countsAsActiveShipment(shipment: Shipment): boolean {
@@ -122,6 +171,13 @@ function PlannedShipBadge({ date }: { date?: string }) {
 
 // ─── Edit Shipment Dialog ─────────────────────────────────────────────────────
 
+type EditShipmentSaveResult = {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
+  errorField?: "actualShippingFee" | "form";
+};
+
 function EditShipmentDialog({
   shipment,
   order,
@@ -135,7 +191,7 @@ function EditShipmentDialog({
   minShipDate?: string;
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  onSave: (updated: Partial<Shipment>) => void;
+  onSave: (updated: Partial<Shipment>) => Promise<EditShipmentSaveResult>;
 }) {
   const { state } = useStore();
   const [carrier, setCarrier] = useState("");
@@ -143,6 +199,9 @@ function EditShipmentDialog({
   const [actualFee, setActualFee] = useState(0);
   const [shipDate, setShipDate] = useState("");
   const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [actualFeeError, setActualFeeError] = useState("");
   const today = todayDateString();
 
   // populate when dialog opens
@@ -153,6 +212,9 @@ function EditShipmentDialog({
       setActualFee(shipment.actualShippingFee ?? 0);
       setShipDate(shipment.shipDate ?? "");
       setNotes(shipment.notes ?? "");
+      setSaving(false);
+      setSaveError("");
+      setActualFeeError("");
     }
   }, [open, shipment?.id]); // eslint-disable-line
 
@@ -160,25 +222,77 @@ function EditShipmentDialog({
 
   const isExpress = (shipment.shipMethod ?? "express") === "express";
   const shippingFeeMode = orderShippingFeeMode(order);
+  const actualFeeApiEnabled = canUseActualShippingFeeApi(shipment, shippingFeeMode);
   const configuredCarriers = configuredShippingCarriers(state.systemSettings);
   const carrierOptions = carrier && !configuredCarriers.some((item) => item.name === carrier)
     ? [{ id: "legacy-carrier", name: carrier, enabled: false }, ...configuredCarriers]
     : configuredCarriers;
 
-  const handleSave = () => {
-    if (isExpress && !carrier.trim()) return toast.error("请选择快递公司");
-    if (isExpress && shippingFeeMode === "free" && actualFee <= 0) {
-      return toast.error("包邮订单必须填写实际运费");
+  const handleSave = async () => {
+    if (saving) return;
+    setSaveError("");
+    setActualFeeError("");
+    if (isExpress && !carrier.trim()) {
+      setSaveError("请选择快递公司");
+      return toast.error("请选择快递公司");
     }
-    if (!shipDate) return toast.error("请填写发货日期");
-    if (minShipDate && shipDate < minShipDate) return toast.error("发货日期不能早于下单日期");
-    if (shipDate > today) return toast.error("发货日期不能晚于今天");
-    onSave({ carrier, trackingNo, actualShippingFee: isExpress && shippingFeeMode === "collect" ? 0 : actualFee, shipDate, notes });
-    onOpenChange(false);
+    const normalizedActualFee = normalizedPositiveShippingFee(actualFee);
+    if (actualFeeApiEnabled) {
+      const zeroPendingFeeAllowed = shippingFeeMode === "prepaid" && actualFee === 0;
+      if (!zeroPendingFeeAllowed && normalizedActualFee === null) {
+        const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+        setActualFeeError(message);
+        return toast.error(message);
+      }
+      setActualFee(normalizedActualFee ?? 0);
+    }
+    if (!shipDate) {
+      setSaveError("请填写发货日期");
+      return toast.error("请填写发货日期");
+    }
+    if (minShipDate && shipDate < minShipDate) {
+      setSaveError("发货日期不能早于下单日期");
+      return toast.error("发货日期不能早于下单日期");
+    }
+    if (shipDate > today) {
+      setSaveError("发货日期不能晚于今天");
+      return toast.error("发货日期不能晚于今天");
+    }
+
+    setSaving(true);
+    try {
+      const updated: Partial<Shipment> = {
+        carrier,
+        trackingNo,
+        shipDate,
+        notes,
+      };
+      if (actualFeeApiEnabled) {
+        updated.actualShippingFee = normalizedActualFee ?? 0;
+      }
+      const result = await onSave(updated);
+      if (result.ok) {
+        onOpenChange(false);
+        return;
+      }
+      if (result.cancelled) return;
+      const message = result.error || "保存失败，请重试";
+      if (result.errorField === "actualShippingFee") {
+        setActualFeeError(message);
+      } else {
+        setSaveError(message);
+      }
+    } catch (error) {
+      const message = shipmentApiErrorMessage(error);
+      setSaveError(message);
+      toast.error(message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!saving) onOpenChange(nextOpen); }}>
       <DialogContent aria-describedby={undefined} className="max-w-sm">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -216,18 +330,29 @@ function EditShipmentDialog({
                 }}
               />
             </div>
-            {(!isExpress || shippingFeeMode !== "collect") && (
+            {actualFeeApiEnabled && (
               <div className="grid gap-1.5">
-                <Label className="text-sm">
+                <Label htmlFor="edit-shipment-actual-fee" className="text-sm">
                   实际运费（¥）
                   {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
                 </Label>
                 <Input
-                  type="number" min={0} step={0.01}
+                  id="edit-shipment-actual-fee"
+                  type="number" min={0} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
                   value={actualFee || ""}
                   placeholder={shippingFeeMode === "prepaid" ? "发货后补录" : "0"}
-                  onChange={(e) => setActualFee(Number(e.target.value))}
+                  aria-invalid={Boolean(actualFeeError)}
+                  aria-describedby={actualFeeError ? "edit-shipment-actual-fee-error" : undefined}
+                  onChange={(e) => {
+                    setActualFee(Number(e.target.value));
+                    if (actualFeeError) setActualFeeError("");
+                  }}
                 />
+                {actualFeeError && (
+                  <p id="edit-shipment-actual-fee-error" role="alert" className="text-xs text-red-600">
+                    {actualFeeError}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -265,10 +390,15 @@ function EditShipmentDialog({
             <Label className="text-sm">备注</Label>
             <Textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填…" />
           </div>
+          {saveError && (
+            <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {saveError}
+            </div>
+          )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave}>保存</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
+          <Button onClick={handleSave} disabled={saving}>{saving ? "保存中..." : "保存"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -422,14 +552,119 @@ export function ShipmentsView() {
     }
   };
 
-  const doEditShipment = async (sh: Shipment, patch: Partial<Shipment>) => {
-    if (!confirmWrite("修改", "将保存发货信息的修改。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      shipments: latest.shipments.map((x) => x.id === sh.id ? { ...x, ...patch } : x),
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
-    toast.success("发货信息已更新");
+  const doEditShipment = async (sh: Shipment, patch: Partial<Shipment>): Promise<EditShipmentSaveResult> => {
+    const { actualShippingFee: requestedActualShippingFee, ...nonFeePatch } = patch;
+    const order = getOrder(sh.orderId);
+    const feeCanBeEdited = canUseActualShippingFeeApi(sh, orderShippingFeeMode(order));
+    const currentActualShippingFee = roundShippingFee(sh.actualShippingFee ?? 0) ?? 0;
+    const hasRequestedFee = requestedActualShippingFee !== undefined;
+    const normalizedRequestedFee = hasRequestedFee
+      ? normalizedPositiveShippingFee(requestedActualShippingFee)
+      : null;
+    const zeroPendingFeeAllowed = orderShippingFeeMode(order) === "prepaid"
+      && Number(requestedActualShippingFee) === 0
+      && currentActualShippingFee === 0;
+    const roundedRequestedFee = hasRequestedFee
+      ? (zeroPendingFeeAllowed ? 0 : normalizedRequestedFee)
+      : currentActualShippingFee;
+    const hasNonFeeChanges = Object.entries(nonFeePatch).some(
+      ([key, value]) => sh[key as keyof Shipment] !== value
+    );
+    const feeChanged = feeCanBeEdited && roundedRequestedFee !== null && roundedRequestedFee !== currentActualShippingFee;
+
+    if (feeCanBeEdited && hasRequestedFee && normalizedRequestedFee === null && !zeroPendingFeeAllowed) {
+      const error = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+      toast.error(error);
+      return { ok: false, error, errorField: "actualShippingFee" };
+    }
+
+    const feePayload = feeChanged
+      ? actualShippingFeePayload(sh, roundedRequestedFee)
+      : null;
+    if (feeChanged && !feePayload) {
+      const error = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+      toast.error(error);
+      return { ok: false, error, errorField: "actualShippingFee" };
+    }
+
+    if (!hasNonFeeChanges && !feeChanged) {
+      toast.info("未检测到需要保存的修改");
+      return { ok: true };
+    }
+
+    const confirmation = hasNonFeeChanges && feeChanged
+      ? "将先保存快递、日期和备注，再通过专用接口保存实际运费；如果运费保存失败，已保存的物流信息不会回退。"
+      : feeChanged
+      ? "将通过专用接口保存实际运费。"
+      : "将保存发货信息的修改。";
+    if (!confirmWrite("修改", confirmation)) return { ok: false, cancelled: true };
+
+    let nonFeeSaved = false;
+    if (hasNonFeeChanges) {
+      const ok = await saveStateTransform((latest) => ({
+        ...latest,
+        shipments: latest.shipments.map((item) => item.id === sh.id ? { ...item, ...nonFeePatch } : item),
+      }));
+      if (!ok) {
+        const error = "物流信息保存失败，实际运费尚未提交，请重试";
+        toast.error(error);
+        return { ok: false, error, errorField: "form" };
+      }
+      nonFeeSaved = true;
+      setEditShipment((current) => current?.id === sh.id ? { ...current, ...nonFeePatch } : current);
+    }
+
+    if (feePayload) {
+      try {
+        const result = await postShipmentApi("shipments/actual-shipping-fee", feePayload);
+        if (!result.shipment) throw new Error("服务端未返回更新后的发货记录，请刷新后重试");
+        applyShipmentApiResult(setState, result);
+        setEditShipment(result.shipment);
+      } catch (error) {
+        const detail = shipmentApiErrorMessage(error);
+        if (error instanceof ShipmentApiError && error.code === "ACTUAL_SHIPPING_FEE_CONFLICT") {
+          try {
+            const latestShipment = await fetchCurrentShipment(sh.id);
+            if (latestShipment) {
+              applyShipmentApiResult(setState, { shipment: latestShipment });
+              setEditShipment(null);
+              const latestFee = roundShippingFee(latestShipment.actualShippingFee ?? 0) ?? 0;
+              const message = nonFeeSaved
+                ? `其他物流信息已保存；实际运费已被他人更新为 ¥${latestFee.toFixed(2)}。已刷新记录并关闭编辑，请重新打开核对后再保存`
+                : `实际运费已被他人更新为 ¥${latestFee.toFixed(2)}。已刷新记录并关闭编辑，请重新打开核对后再保存`;
+              toast.error(message);
+              return { ok: false, error: message, errorField: "actualShippingFee" };
+            }
+          } catch (refreshError) {
+            if (refreshError instanceof ShipmentApiError && refreshError.status === 401) {
+              setEditShipment(null);
+              const message = nonFeeSaved
+                ? "其他物流信息已保存，但实际运费未保存；登录状态已失效，请重新登录后查看最新金额"
+                : "登录状态已失效，请重新登录后查看最新运费";
+              toast.error(message);
+              return { ok: false, error: message, errorField: "actualShippingFee" };
+            }
+            // Fall through to an explicit manual refresh instruction below.
+          }
+          setEditShipment(null);
+          const message = nonFeeSaved
+            ? "其他物流信息已保存；实际运费已被他人更新。编辑已关闭，请刷新页面后再试"
+            : "实际运费已被他人更新。编辑已关闭，请刷新页面后再试";
+          toast.error(message);
+          return { ok: false, error: message, errorField: "actualShippingFee" };
+        }
+        const message = nonFeeSaved
+          ? `其他物流信息已保存，但实际运费未保存：${detail}`
+          : `实际运费未保存：${detail}`;
+        toast.error(message);
+        return { ok: false, error: message, errorField: "actualShippingFee" };
+      }
+    }
+
+    if (nonFeeSaved && feePayload) toast.success("物流信息和实际运费已更新");
+    else if (feePayload) toast.success("实际运费已更新");
+    else toast.success("发货信息已更新");
+    return { ok: true };
   };
 
   const todayPending = pendingOrders.filter((o) => o.plannedShipDate === today);
@@ -807,7 +1042,7 @@ export function ShipmentsView() {
         order={shipOrder}
         open={!!shipOrder}
         onOpenChange={(o) => { if (!o) setShipOrder(null); }}
-        onShip={(data) => { if (shipOrder) doShip(shipOrder, data); }}
+        onShip={(data) => shipOrder ? doShip(shipOrder, data) : false}
         unshippedItems={shipOrder ? getUnshippedItems(shipOrder) : []}
         getProductName={getProductName}
         getTankName={getTankName}
@@ -821,7 +1056,9 @@ export function ShipmentsView() {
         minShipDate={editShipment ? getOrder(editShipment.orderId)?.date : undefined}
         open={!!editShipment}
         onOpenChange={(o) => { if (!o) setEditShipment(null); }}
-        onSave={(patch) => { if (editShipment) doEditShipment(editShipment, patch); }}
+        onSave={(patch) => editShipment
+          ? doEditShipment(editShipment, patch)
+          : Promise.resolve({ ok: false, error: "发货单不存在，请刷新后重试", errorField: "form" })}
       />
 
       <ShipmentProofDialog

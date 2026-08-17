@@ -49,11 +49,17 @@ import {
   shipmentHasActuallyShipped,
 } from "./order-refund-rules.mjs";
 import {
-  actualShippingFeeRequiredAtOutbound,
   requiredShipMethodForOrderSource,
   shipmentHasPendingActualShippingFee,
   shipmentsHavePendingActualShippingFee,
 } from "./shipment-rules.mjs";
+import {
+  ShipmentActualShippingFeeError,
+  actualShippingFeeValuesDiffer,
+  normalizeOutboundActualShippingFee,
+  planActualShippingFeeUpdate,
+  updateLockedAppState,
+} from "./shipment-actual-shipping-fee-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import {
   ensureApprovalNotifications,
@@ -103,6 +109,7 @@ import {
 } from "./order-pricing-rules.mjs";
 import { validateImageUploadBuffer } from "./media-upload-rules.mjs";
 import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
+import { RecordIdConflictError, resolveCreateRecordId } from "./record-id-rules.mjs";
 import {
   backfillOrderContactPersonnelIds,
   hasPersonnelAccount,
@@ -5045,6 +5052,9 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    if (actualShippingFeeValuesDiffer(currentShipment.actualShippingFee, nextShipment.actualShippingFee)) {
+      throw new Error("实际运费必须通过补录运费专用接口修改");
+    }
     requireOrderPermissionForAuth(req, "update");
     const relatedOrder = nextOrdersById.get(String(nextShipment.orderId ?? ""));
     if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
@@ -8091,8 +8101,15 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
+      const orderId = resolveCreateRecordId({
+        records: state.orders,
+        requestedId: body.id,
+        createId: () => uid("order"),
+        label: "订单",
+        conflictCode: "ORDER_ID_CONFLICT",
+      });
       const order = {
-        id: String(body.id || uid("order")),
+        id: orderId,
         orderNo: nextOrderNo(state),
         createdAt: nowDatetimeInChina(),
         ...orderInput,
@@ -8121,7 +8138,11 @@ async function handleApi(req, res, url) {
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       console.warn(`[orders/create] ${error.message}`);
-      sendJson(req, res, 400, { ok: false, error: error.message });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+      });
     } finally {
       client.release();
     }
@@ -8797,10 +8818,24 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
+      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
       const orderId = String(body.orderId ?? "");
-      const order = orders.find((item) => String(item?.id ?? "") === orderId);
-      if (!order) throw new Error("订单不存在，请刷新后重试");
+      const matchingOrders = orders.filter((item) => String(item?.id ?? "") === orderId);
+      if (matchingOrders.length === 0) throw new Error("订单不存在，请刷新后重试");
+      if (matchingOrders.length !== 1) {
+        throw new RecordIdConflictError("订单 ID 不唯一，无法安全出库，请联系管理员处理", {
+          code: "ORDER_ID_NOT_UNIQUE",
+        });
+      }
+      const [order] = matchingOrders;
       if (order.status === "completed" || order.status === "cancelled") throw new Error("该订单当前状态不能出库");
+      const shipmentId = resolveCreateRecordId({
+        records: shipments,
+        requestedId: body.id,
+        createId: () => uid("ship"),
+        label: "发货单",
+        conflictCode: "SHIPMENT_ID_CONFLICT",
+      });
       const selectedItemIds = Array.isArray(body.selectedItemIds)
         ? body.selectedItemIds.map((id) => String(id ?? "").trim()).filter(Boolean)
         : [];
@@ -8840,13 +8875,10 @@ async function handleApi(req, res, url) {
       const shippingFeeMode = normalizeShippingFeeMode(order.shippingFeeMode, order.source);
       const actualShippingFee = isPickup || shippingFeeMode === "collect"
         ? 0
-        : normalizeMoney(body.actualShippingFee, "Actual shipping fee");
-      if (!isPickup && actualShippingFeeRequiredAtOutbound(shippingFeeMode) && actualShippingFee <= 0) {
-        throw new Error("包邮订单发货时必须填写实际运费");
-      }
+        : normalizeOutboundActualShippingFee(body.actualShippingFee, shippingFeeMode);
       const createdAt = nowDatetimeInChina();
       const shipment = {
-        id: String(body.id || uid("ship")),
+        id: shipmentId,
         siteId: normalizeSiteId(order.siteId),
         orderId: order.id,
         createdAt,
@@ -8862,7 +8894,7 @@ async function handleApi(req, res, url) {
         ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
       const paymentGate = shipmentPaymentGateForOrder(order, [
-        ...(Array.isArray(state.shipments) ? state.shipments : []),
+        ...shipments,
         shipment,
       ]);
       if (!paymentGate.canShip) {
@@ -8874,7 +8906,7 @@ async function handleApi(req, res, url) {
         });
         return;
       }
-      const nextShipments = [...(Array.isArray(state.shipments) ? state.shipments : []), shipment];
+      const nextShipments = [...shipments, shipment];
       const nextOrders = orders.map((item) =>
         String(item?.id ?? "") === order.id
           ? { ...item, status: item.status === "damaged" ? "damaged" : "shipped" }
@@ -8908,7 +8940,63 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, { ok: true, shipment, orders: nextOrders, shipments: nextShipments, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+      });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/shipments/actual-shipping-fee" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req) || "{}");
+      } catch {
+        throw new ShipmentActualShippingFeeError("请求 JSON 格式不正确");
+      }
+      const result = await updateLockedAppState(client, stateId, (state) => {
+        const planned = planActualShippingFeeUpdate({
+          state,
+          request: body,
+          hasOrderUpdatePermission: orderPermissionAllowedForAccount(req.auth?.account, "update"),
+          visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+        });
+        const previousFee = Number(planned.shipment.actualShippingFee ?? 0);
+        const operationLog = createOperationLog(
+          req,
+          "订单管理",
+          "修改记录",
+          `订单「${planned.order.orderNo || planned.order.id}」发货单「${planned.updatedShipment.id}」实际运费 ¥${previousFee.toFixed(2)} → ¥${planned.updatedShipment.actualShippingFee.toFixed(2)}`
+        );
+        return {
+          nextState: {
+            ...state,
+            shipments: planned.shipments,
+            operationLogs: pushOperationLog(state.operationLogs, operationLog),
+          },
+          shipment: planned.updatedShipment,
+          operationLog,
+        };
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        shipment: result.shipment,
+        operationLog: result.operationLog,
+      });
+    } catch (error) {
+      const knownError = error instanceof ShipmentActualShippingFeeError;
+      if (!knownError) console.error("Failed to save actual shipping fee:", error);
+      sendJson(req, res, knownError ? error.statusCode : 500, {
+        ok: false,
+        ...(knownError && error.code ? { code: error.code } : {}),
+        error: knownError ? error.message : "补录实际运费失败，请稍后重试",
+      });
     } finally {
       client.release();
     }
@@ -9364,10 +9452,9 @@ async function handleApi(req, res, url) {
 	          const order = orders.get(String(shipment?.orderId ?? ""));
 	          const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
 	          if (mode === "collect") return { ...shipment, actualShippingFee: 0 };
-	          const actualShippingFee = normalizeMoney(shipment?.actualShippingFee, "Actual shipping fee");
-	          if (shipment?.status !== "preparing" && actualShippingFeeRequiredAtOutbound(mode) && actualShippingFee <= 0) {
-	            throw new Error("包邮订单必须填写实际运费");
-	          }
+	          const actualShippingFee = shipment?.status === "preparing"
+	            ? normalizeOutboundActualShippingFee(shipment?.actualShippingFee, "prepaid")
+	            : normalizeOutboundActualShippingFee(shipment?.actualShippingFee, mode);
 	          return { ...shipment, actualShippingFee };
 	        });
 	      }
