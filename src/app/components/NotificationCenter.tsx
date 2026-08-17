@@ -26,6 +26,11 @@ import {
   type StockItem,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
+import {
+  createLatestRequestCoordinator,
+  profileApprovalDetailsReady,
+  profileAttachmentChangeKind,
+} from "../utils/notificationCenter";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -266,6 +271,67 @@ function formatAttachmentSize(value?: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const PROFILE_ATTACHMENT_CHANGE_COPY = {
+  added: { label: "新增附件", className: "border-emerald-200 bg-emerald-50 text-emerald-700" },
+  replaced: { label: "替换附件", className: "border-sky-200 bg-sky-50 text-sky-700" },
+  removed: { label: "删除附件", className: "border-red-200 bg-red-50 text-red-700" },
+  unchanged: { label: "附件未变", className: "border-slate-200 bg-slate-50 text-slate-700" },
+} as const;
+
+function ProfileAttachmentSnapshot({
+  heading,
+  attachment,
+  requested,
+  download,
+  busy,
+  disabled,
+  onAccess,
+}: {
+  heading: string;
+  attachment: PersonnelProfileAttachment | null | undefined;
+  requested: boolean;
+  download: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onAccess: (attachment: PersonnelProfileAttachment, download: boolean) => void;
+}) {
+  return (
+    <div className={`min-w-0 rounded-md border px-3 py-3 ${requested ? "border-sky-200 bg-sky-50/70" : "bg-muted/30"}`}>
+      <div className={`text-[11px] font-medium ${requested ? "text-sky-800" : "text-muted-foreground"}`}>{heading}</div>
+      {attachment ? (
+        <div className="mt-2 grid gap-2">
+          <div className="min-w-0">
+            <div className="font-medium [overflow-wrap:anywhere]">{attachment.originalName || "资料附件"}</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {[attachment.mime, formatAttachmentSize(attachment.size)].filter(Boolean).join(" · ") || "受保护附件"}
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-11 w-full"
+            disabled={disabled}
+            aria-label={`${heading}：${download ? "下载附件并留痕" : "在线预览附件"}`}
+            onClick={() => onAccess(attachment, download)}
+          >
+            {busy
+              ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              : download
+                ? <Download className="size-3.5" aria-hidden="true" />
+                : <ExternalLink className="size-3.5" aria-hidden="true" />}
+            {busy ? "读取中" : download ? "下载核对（留痕）" : "在线预览"}
+          </Button>
+        </div>
+      ) : (
+        <div className={`mt-2 rounded border border-dashed px-3 py-4 text-center text-sm ${requested ? "border-sky-200 text-sky-800" : "text-muted-foreground"}`}>
+          {requested ? "申请删除，不再保留附件" : "当前档案未上传附件"}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function actorLabel(name?: string, username?: string): string {
   const safeName = String(name ?? "").trim();
   const safeUsername = String(username ?? "").trim();
@@ -361,6 +427,7 @@ export function NotificationNavBadge({ unreadCount }: { unreadCount: number }) {
 export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
   const { setState, setActiveSiteId } = useStore();
   const [loading, setLoading] = useState(true);
+  const [notificationLoadError, setNotificationLoadError] = useState("");
   const [notifications, setNotifications] = useState<StationNotification[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -384,6 +451,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [processingProfileApproval, setProcessingProfileApproval] = useState(false);
   const [loadingProfileDetails, setLoadingProfileDetails] = useState(false);
   const [profileDetailError, setProfileDetailError] = useState("");
+  const [loadedProfileDetailNotificationId, setLoadedProfileDetailNotificationId] = useState("");
+  const [accessingProfileAttachmentId, setAccessingProfileAttachmentId] = useState("");
+  const profileDetailRequestCoordinator = useMemo(() => createLatestRequestCoordinator(), []);
 
   const typeOptions = useMemo<NotificationFacet[]>(() => {
     const options = new Map<string, string>();
@@ -432,6 +502,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
 
   const loadNotifications = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
+    setNotificationLoadError("");
     try {
       const response = await fetch("/api/notifications?limit=500", { headers: authJsonHeaders() });
       const result = await response.json().catch(() => ({}));
@@ -441,7 +512,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       setTotalCount(Math.max(loaded.length, Number(result.totalCount ?? loaded.length)));
       setUnreadCount(Math.max(0, Number(result.unreadCount ?? 0)));
     } catch (error) {
-      if (!silent) toast.error(error instanceof Error ? error.message : "站内信加载失败");
+      const message = error instanceof Error ? error.message : "站内信加载失败";
+      setNotificationLoadError(message);
+      if (!silent) toast.error(message);
     } finally {
       if (!silent) setLoading(false);
     }
@@ -464,8 +537,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       window.clearInterval(timer);
       window.removeEventListener("fishroom:notifications-refresh", refresh);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
+      profileDetailRequestCoordinator.cancel();
     };
-  }, [loadNotifications]);
+  }, [loadNotifications, profileDetailRequestCoordinator]);
 
   const applyNotificationPayload = (result: {
     notifications?: StationNotification[];
@@ -706,38 +780,65 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     }
   };
 
-  const loadProfileApprovalDetails = async (notification: StationNotification) => {
-    if (Array.isArray(notification.profileChanges)) {
+  const loadProfileApprovalDetails = async (notification: StationNotification, force = false) => {
+    profileDetailRequestCoordinator.cancel();
+    setLoadedProfileDetailNotificationId("");
+    if (!force && Array.isArray(notification.profileChanges)) {
       setLoadingProfileDetails(false);
       setProfileDetailError("");
+      setLoadedProfileDetailNotificationId(notification.id);
       return;
     }
+    const request = profileDetailRequestCoordinator.begin(notification.id);
     setLoadingProfileDetails(true);
     setProfileDetailError("");
     try {
       const response = await fetch(`/api/notifications/detail?id=${encodeURIComponent(notification.id)}`, {
         headers: authJsonHeaders(),
+        signal: request.signal,
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok || !result.notification) {
+      if (!response.ok || !result.ok || !result.notification || !Array.isArray(result.notification.profileChanges)) {
         throw new Error(result.error || "人员资料审批明细加载失败");
       }
+      if (!profileDetailRequestCoordinator.isCurrent(request)) return;
+      if (
+        String(result.notification.id ?? "") !== notification.id ||
+        String(result.notification.profileRequestId ?? "") !== String(notification.profileRequestId ?? "")
+      ) throw new Error("人员资料审批明细与当前申请不匹配，请重新打开后重试");
       setSelectedProfileApproval((current) => current?.id === notification.id ? result.notification : current);
+      setLoadedProfileDetailNotificationId(notification.id);
     } catch (error) {
+      if (!profileDetailRequestCoordinator.isCurrent(request)) return;
       const message = error instanceof Error ? error.message : "人员资料审批明细加载失败";
       setProfileDetailError(message);
       toast.error(message);
     } finally {
-      setLoadingProfileDetails(false);
+      if (profileDetailRequestCoordinator.isCurrent(request)) setLoadingProfileDetails(false);
     }
+  };
+
+  const closeProfileApproval = () => {
+    profileDetailRequestCoordinator.cancel();
+    setSelectedProfileApproval(null);
+    setProfileDecision(null);
+    setProfileNote("");
+    setProfileDetailError("");
+    setLoadedProfileDetailNotificationId("");
+    setLoadingProfileDetails(false);
+    setAccessingProfileAttachmentId("");
   };
 
   const openProfileApproval = (
     notification: StationNotification,
     decision: "approve" | "reject" | null
   ) => {
+    profileDetailRequestCoordinator.cancel();
     setProfileDecision(decision);
     setProfileNote("");
+    setProfileDetailError("");
+    setLoadedProfileDetailNotificationId("");
+    setLoadingProfileDetails(true);
     setSelectedProfileApproval(notification);
     void markRead(notification);
     void loadProfileApprovalDetails(notification);
@@ -749,7 +850,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       !profileDecision ||
       processingProfileApproval ||
       loadingProfileDetails ||
-      profileDetailError
+      profileDetailError ||
+      !profileDetailsReady
     ) return;
     if (profileDecision === "reject" && !profileNote.trim()) {
       toast.error("请填写驳回原因，便于申请人修改后重新提交");
@@ -779,9 +881,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             : current.operationLogs,
         }));
       }
-      setSelectedProfileApproval(null);
-      setProfileDecision(null);
-      setProfileNote("");
+      closeProfileApproval();
       if (!applyNotificationPayload(result)) {
         notifyNotificationRefresh();
         void loadNotifications(true);
@@ -795,6 +895,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   };
 
   const accessProfileAttachment = async (attachment: PersonnelProfileAttachment, download: boolean) => {
+    if (!attachment.id || accessingProfileAttachmentId) return;
+    setAccessingProfileAttachmentId(attachment.id);
     try {
       const response = await fetch(
         `/api/personnel/attachments/${encodeURIComponent(attachment.id)}${download ? "?download=1" : ""}`,
@@ -802,7 +904,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       );
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
-        throw new Error(result.error || "附件下载失败");
+        throw new Error(result.error || (download ? "附件下载失败" : "附件预览失败"));
       }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -822,7 +924,9 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "附件下载失败");
+      toast.error(error instanceof Error ? error.message : download ? "附件下载失败" : "附件预览失败");
+    } finally {
+      setAccessingProfileAttachmentId((current) => current === attachment.id ? "" : current);
     }
   };
 
@@ -846,6 +950,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     },
     {}
   );
+  const profileDetailsReady = profileApprovalDetailsReady({
+    selectedNotificationId: selectedProfileApproval?.id,
+    loadedNotificationId: loadedProfileDetailNotificationId,
+    profileChanges: selectedProfileApproval?.profileChanges,
+  });
 
   return (
     <>
@@ -970,11 +1079,32 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             </div>
           </div>
 
+          {notificationLoadError && (
+            <div className="m-3 flex flex-col items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-900 sm:flex-row sm:items-center" role="alert">
+              <div>
+                <div className="font-medium">
+                  {notifications.length > 0 ? "站内信刷新失败，以下内容可能不是最新" : "站内信暂时无法加载"}
+                </div>
+                <div className="mt-1 text-xs leading-5 text-red-800">{notificationLoadError}</div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-11 shrink-0"
+                disabled={loading}
+                onClick={() => void loadNotifications()}
+              >
+                <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+                {loading ? "重新加载中" : "重新加载"}
+              </Button>
+            </div>
+          )}
+
           {loading && notifications.length === 0 ? (
             <div className="flex min-h-56 items-center justify-center text-sm text-muted-foreground">
               <Loader2 className="mr-2 size-4 animate-spin" />正在加载站内信
             </div>
-          ) : filteredNotifications.length === 0 ? (
+          ) : notificationLoadError && notifications.length === 0 ? null : filteredNotifications.length === 0 ? (
             <div className="flex min-h-56 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
               <Inbox className="size-6" />
               当前筛选下暂无站内信
@@ -1472,13 +1602,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       </Dialog>
 
       <Dialog open={!!selectedProfileApproval} onOpenChange={(nextOpen) => {
-        if (!nextOpen && !processingProfileApproval) {
-          setSelectedProfileApproval(null);
-          setProfileDecision(null);
-          setProfileNote("");
-          setProfileDetailError("");
-          setLoadingProfileDetails(false);
-        }
+        if (!nextOpen && !processingProfileApproval) closeProfileApproval();
       }}>
         <DialogContent className="sm:max-w-4xl">
           <DialogHeader>
@@ -1490,7 +1614,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                   : "人员资料修改明细"}
             </DialogTitle>
             <DialogDescription>
-              仅批准后才会写入正式人员档案。证件和工资账户属于敏感信息，请勿转发或截屏外传。
+              仅批准后才会写入正式人员档案。申请本人只能在线预览自己的附件；管理员下载当前或申请附件均会留痕，请妥善保管本地副本。
             </DialogDescription>
           </DialogHeader>
 
@@ -1531,45 +1655,61 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
           {!loadingProfileDetails && !profileDetailError && (
             <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
               {Object.entries(groupedProfileChanges).length === 0 ? (
-                <div className="rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
-                  没有可显示的资料差异
+                <div className="grid justify-items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-8 text-center text-sm text-amber-900" role="alert">
+                  <span>没有可核对的资料差异，当前申请不可批准或驳回。</span>
+                  {selectedProfileApproval && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="min-h-11"
+                      onClick={() => void loadProfileApprovalDetails(selectedProfileApproval, true)}
+                    >
+                      <RefreshCw className="size-3.5" aria-hidden="true" />重新加载明细
+                    </Button>
+                  )}
                 </div>
               ) : Object.entries(groupedProfileChanges).map(([section, changes]) => (
                 <section key={section} className="overflow-hidden rounded-md border" aria-label={section}>
                   <div className="border-b bg-muted/40 px-3 py-2 text-sm font-semibold">{section}</div>
                   <div className="divide-y">
                     {changes.map((change) => {
-                      const attachment = change.afterAttachment;
+                      const hasAttachmentChange = Boolean(change.beforeAttachment || change.afterAttachment);
+                      const attachmentChange = profileAttachmentChangeKind(change.beforeAttachment, change.afterAttachment);
+                      const attachmentChangeCopy = PROFILE_ATTACHMENT_CHANGE_COPY[attachmentChange];
+                      const requesterPreview = selectedProfileApproval?.notificationRole === "requester";
                       return (
                         <div key={change.field} className="grid gap-2 px-3 py-3 text-sm md:grid-cols-[9rem_1fr_1fr] md:items-start">
                           <div className="font-medium">
                             {change.label}
                             {change.sensitive && (
-                              <Badge variant="outline" className="ml-2 border-amber-200 text-[10px] text-amber-700">敏感</Badge>
+                                <Badge variant="outline" className="ml-2 border-amber-200 text-[10px] text-amber-700">敏感</Badge>
+                              )}
+                            {hasAttachmentChange && (
+                              <Badge variant="outline" className={`ml-2 text-[10px] ${attachmentChangeCopy.className}`}>
+                                {attachmentChangeCopy.label}
+                              </Badge>
                             )}
                           </div>
-                          {attachment ? (
-                            <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/30 px-3 py-2">
-                              <div className="min-w-0">
-                                <div className="truncate font-medium">{attachment.originalName || "资料附件"}</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {[attachment.mime, formatAttachmentSize(attachment.size)].filter(Boolean).join(" · ")}
-                                </div>
-                              </div>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => void accessProfileAttachment(
-                                  attachment,
-                                  selectedProfileApproval?.notificationRole !== "requester"
-                                )}
-                              >
-                                {selectedProfileApproval?.notificationRole === "requester"
-                                  ? <ExternalLink className="size-3.5" />
-                                  : <Download className="size-3.5" />}
-                                {selectedProfileApproval?.notificationRole === "requester" ? "预览附件" : "下载核对"}
-                              </Button>
+                          {hasAttachmentChange ? (
+                            <div className="grid gap-2 sm:grid-cols-2 md:col-span-2">
+                              <ProfileAttachmentSnapshot
+                                heading="当前档案"
+                                attachment={change.beforeAttachment}
+                                requested={false}
+                                download={!requesterPreview}
+                                busy={accessingProfileAttachmentId === change.beforeAttachment?.id}
+                                disabled={Boolean(accessingProfileAttachmentId)}
+                                onAccess={(attachment, download) => void accessProfileAttachment(attachment, download)}
+                              />
+                              <ProfileAttachmentSnapshot
+                                heading="申请修改为"
+                                attachment={change.afterAttachment}
+                                requested
+                                download={!requesterPreview}
+                                busy={accessingProfileAttachmentId === change.afterAttachment?.id}
+                                disabled={Boolean(accessingProfileAttachmentId)}
+                                onAccess={(attachment, download) => void accessProfileAttachment(attachment, download)}
+                              />
                             </div>
                           ) : (
                             <>
@@ -1611,7 +1751,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             <Button
               variant="outline"
               disabled={processingProfileApproval}
-              onClick={() => setSelectedProfileApproval(null)}
+              onClick={closeProfileApproval}
             >
               {profileDecision ? "取消" : "关闭"}
             </Button>
@@ -1622,6 +1762,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                   processingProfileApproval ||
                   loadingProfileDetails ||
                   Boolean(profileDetailError) ||
+                  !profileDetailsReady ||
                   (profileDecision === "reject" && !profileNote.trim())
                 }
                 onClick={() => void processProfileApproval()}

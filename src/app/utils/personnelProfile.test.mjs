@@ -87,6 +87,11 @@ test("validates key identity, contact, month and bank formats", () => {
   assert.match(errors.bankAccountNo, /12 至 24 位/);
 });
 
+test("rejects a birth month before the server-supported lower bound", () => {
+  const errors = validatePersonnelSelfProfile({ ...completeProfile(), birthMonth: "1899-12" });
+  assert.match(errors.birthMonth, /不能早于 1900/);
+});
+
 test("normalizes the canonical self-profile response", () => {
   const normalized = normalizePersonnelSelfProfileResult({
     ok: true,

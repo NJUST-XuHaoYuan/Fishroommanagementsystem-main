@@ -230,7 +230,8 @@ export function validatePersonnelSelfProfile(profile: PersonnelSelfProfileForm):
     errors.birthMonth = "请选择正确的出生年月";
   } else if (profile.birthMonth) {
     const currentMonth = new Date().toISOString().slice(0, 7);
-    if (profile.birthMonth > currentMonth) errors.birthMonth = "出生年月不能晚于当前月份";
+    if (profile.birthMonth < "1900-01") errors.birthMonth = "出生年月不能早于 1900 年 1 月";
+    else if (profile.birthMonth > currentMonth) errors.birthMonth = "出生年月不能晚于当前月份";
   }
   if (profile.idCardNo && !/^(?:[1-9]\d{14}|[1-9]\d{16}[\dXx])$/.test(profile.idCardNo.trim())) {
     errors.idCardNo = "请输入 15 位或 18 位身份证件号码";
