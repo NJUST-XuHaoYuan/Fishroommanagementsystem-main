@@ -14,6 +14,7 @@ import {
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -77,6 +78,45 @@ function git(...args) {
   return execFileAsync("git", args, { cwd: projectRoot, maxBuffer: 20 * 1024 * 1024 });
 }
 
+function tar(args, options = {}) {
+  return execFileAsync("tar", args, {
+    ...options,
+    env: {
+      ...process.env,
+      ...options.env,
+      COPYFILE_DISABLE: "1",
+    },
+  });
+}
+
+function readTarHeaderString(buffer, start, length) {
+  return buffer.subarray(start, start + length).toString("utf8").replace(/\0.*$/, "").trim();
+}
+
+function assertNoAppleDoubleTarEntries(archiveBuffer) {
+  const tarBuffer = gunzipSync(archiveBuffer);
+  let offset = 0;
+  while (offset + 512 <= tarBuffer.length) {
+    const header = tarBuffer.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) return;
+
+    const name = readTarHeaderString(header, 0, 100);
+    const prefix = readTarHeaderString(header, 345, 155);
+    const entry = prefix ? `${prefix}/${name}` : name;
+    if (entry.split("/").some((segment) => segment === "__MACOSX" || segment.startsWith("._"))) {
+      throw new Error(`发版包包含 macOS AppleDouble 元数据：${entry}`);
+    }
+
+    const sizeText = readTarHeaderString(header, 124, 12).replace(/\s/g, "");
+    const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new Error(`发版包包含无法解析的 tar 条目：${entry || "<unknown>"}`);
+    }
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  throw new Error("发版包 tar 结构不完整");
+}
+
 function releaseEnvironment({ revision, shortRevision, createdAt }) {
   return [
     `RELEASE_VERSION=${shortRevision}`,
@@ -133,6 +173,7 @@ function assertSafeArchiveEntries(entries, prefix) {
     /(^|\/)uploads(\/|$)/,
     /(^|\/)(backups?|db-backup|server-downloads)(\/|$)/i,
     /(^|\/)deploy\/images(\/|$)/,
+    /(^|\/)(?:\._[^/]+|__MACOSX)(\/|$)/,
     /(^|\/)\.env(?:\.[^/]+)?$/i,
     /(^|\/)\.(npmrc|netrc|pypirc)$/i,
     /(^|\/)(credentials?|secrets?)(?:\.[^/]*)?$/i,
@@ -240,7 +281,7 @@ async function main() {
     await mkdir(workDir);
     const rawTar = join(workDir, "source.tar");
     await git("archive", "--format=tar", `--prefix=${prefix}/`, `--output=${rawTar}`, "HEAD", "--", ...ARCHIVE_PATHS);
-    await execFileAsync("tar", ["-xf", rawTar, "-C", workDir]);
+    await tar(["-xf", rawTar, "-C", workDir]);
     const releaseRoot = join(workDir, prefix);
     const releaseEnv = releaseEnvironment({ revision, shortRevision, createdAt });
     await writeFile(join(releaseRoot, ".release-revision"), `${revision}\n`, { mode: 0o644 });
@@ -253,8 +294,9 @@ async function main() {
     await assertNoHighConfidenceSecrets(releaseRoot);
 
     const stagedArchivePath = join(stagingDir, archiveName);
-    await execFileAsync("tar", ["-czf", stagedArchivePath, "-C", workDir, prefix]);
-    const { stdout: listingOutput } = await execFileAsync("tar", ["-tzf", stagedArchivePath], {
+    await tar(["-czf", stagedArchivePath, "-C", workDir, prefix]);
+    assertNoAppleDoubleTarEntries(await readFile(stagedArchivePath));
+    const { stdout: listingOutput } = await tar(["-tzf", stagedArchivePath], {
       maxBuffer: 20 * 1024 * 1024,
     });
     const entries = listingOutput.split(/\r?\n/).filter(Boolean);
