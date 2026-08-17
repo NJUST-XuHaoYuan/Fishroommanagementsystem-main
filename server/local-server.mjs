@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
@@ -64,10 +64,12 @@ import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import {
   ensureApprovalNotifications,
   ensureCreditSaleNotifications,
+  ensurePersonnelProfileApprovalNotifications,
   markNotificationsRead,
   notificationsForRecipient,
   resolveApprovalNotifications,
   resolveCreditSaleNotifications,
+  resolvePersonnelProfileApprovalNotifications,
 } from "./station-notifications.mjs";
 import {
   buildStockDeletionSnapshot,
@@ -112,8 +114,10 @@ import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
 import { RecordIdConflictError, resolveCreateRecordId } from "./record-id-rules.mjs";
 import {
   backfillOrderContactPersonnelIds,
+  canViewPersonnelOperationLogs,
   hasPersonnelAccount,
   isPersonnelAccountEnabled,
+  missingPersonnelRecordFields,
   normalizePersonnelGender,
   normalizePersonnelSensitiveFields,
   redactPersonnelForViewer,
@@ -126,10 +130,40 @@ import {
 import {
   PERSONNEL_SENSITIVE_FIELDS,
   decryptPersonnelSensitiveFields,
+  decryptPersonnelProfileProposalFields,
+  encryptedPersonnelSensitiveValueKid,
   encryptPersonnelSensitiveFields,
+  encryptPersonnelProfileProposalFields,
   parsePersonnelDataKeyring,
+  rewrapPersonnelProfileProposalFields,
   rewrapPersonnelSensitiveFields,
 } from "./personnel-sensitive-data.mjs";
+import {
+  PERSONNEL_PROFILE_ATTACHMENT_FIELDS,
+  PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS,
+  PERSONNEL_SELF_PROFILE_FIELDS,
+  assertPersonnelSelfProfileComplete,
+  attachmentKindForPersonnelProfileField,
+  changedPersonnelSelfProfileFields,
+  isPersonnelProfileComplete,
+  missingPersonnelProfileFields,
+  normalizePersonnelSelfProfile,
+  personnelProfileChangeDetails,
+  personnelSelfProfileSnapshot,
+  sanitizePersonnelAttachmentMetadata,
+} from "./personnel-profile-rules.mjs";
+import {
+  PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY,
+  assertPersonnelAttachmentReferenceAccess,
+  decryptPersonnelAttachmentBuffer,
+  encryptPersonnelAttachmentBuffer,
+  isPersonnelPrivateAttachmentPath,
+  normalizePersonnelAttachmentKind,
+  personnelAttachmentCiphertextKid,
+  privatePersonnelAttachmentPath,
+  rewrapPersonnelAttachmentBuffer,
+  sanitizeAttachmentFilename,
+} from "./personnel-private-attachments.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -149,6 +183,15 @@ const DEFAULT_FINANCE_DAYS = 30;
 const MIN_FINANCE_DAYS = 7;
 const MAX_FINANCE_DAYS = 730;
 const MAX_IMAGE_UPLOAD_BYTES = numberFromEnv(process.env.MAX_IMAGE_UPLOAD_BYTES, 50 * 1024 * 1024);
+const MAX_PERSONNEL_ATTACHMENT_BYTES = numberFromEnv(process.env.MAX_PERSONNEL_ATTACHMENT_BYTES, 15 * 1024 * 1024);
+const PERSONNEL_ATTACHMENT_DRAFT_RETENTION_MS = numberFromEnv(
+  process.env.PERSONNEL_ATTACHMENT_DRAFT_RETENTION_MS,
+  30 * 24 * 60 * 60 * 1000
+);
+const PERSONNEL_ATTACHMENT_REJECTED_RETENTION_MS = numberFromEnv(
+  process.env.PERSONNEL_ATTACHMENT_REJECTED_RETENTION_MS,
+  30 * 24 * 60 * 60 * 1000
+);
 const MAX_VIDEO_UPLOAD_BYTES = numberFromEnv(process.env.MAX_VIDEO_UPLOAD_BYTES, 300 * 1024 * 1024);
 const VIDEO_TRANSCODE_TIMEOUT_MS = numberFromEnv(process.env.VIDEO_TRANSCODE_TIMEOUT_MS, 5 * 60 * 1000);
 const TRANSCODE_VIDEO_UPLOADS = process.env.TRANSCODE_VIDEO_UPLOADS !== "false";
@@ -1526,6 +1569,7 @@ function authAccountPermissionSummary(account = {}) {
     : normalizePermissionsForStorage(account.permissions);
   if (accessRole !== "admin") permissions.accounts = emptyPermissionsValue().accounts;
   return {
+    personnelId: String(account?.id ?? ""),
     username,
     accessRole,
     accountEnabled: true,
@@ -1543,6 +1587,8 @@ function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
   const isAdmin = req?.auth?.account?.accessRole === "admin";
   const isCurrentUser = username && username === req?.auth?.user?.username;
   const { password, sessionVersion, ...safePerson } = person;
+  safePerson.missingProfileFields = missingPersonnelRecordFields(person);
+  safePerson.profileComplete = safePerson.missingProfileFields.length === 0;
   safePerson.accountEnabled = isPersonnelAccountEnabled(safePerson);
   if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
   safePerson.visibleSiteIds = safePerson.accessRole === "admin"
@@ -1573,6 +1619,9 @@ function personnelSensitiveRevision(person = {}) {
   return createHash("sha256").update(JSON.stringify({
     personnelId: String(person?.id ?? ""),
     fields: PERSONNEL_SENSITIVE_FIELDS.map((field) => String(person?.[field] ?? "")),
+    attachments: PERSONNEL_PROFILE_ATTACHMENT_FIELDS.map((field) =>
+      publicPersonnelAttachmentMetadata(person?.[field])
+    ),
   })).digest("hex");
 }
 
@@ -1581,7 +1630,12 @@ function sanitizeStateForResponse(data = {}, req) {
   const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
   delete next.notifications;
   delete next.approvalRequests;
+  delete next.personnelProfileRequests;
+  delete next.personnelPrivateAttachments;
+  delete next.retiredPersonnelUsernames;
   delete next.inventoryAdjustmentDrafts;
+  delete next._personnelPrivateAttachmentEncryptionKid;
+  if (!canViewPersonnelOperationLogs(req?.auth?.account)) delete next.operationLogs;
   next.sites = getSitesFromState(next);
   if (Array.isArray(next.personnel)) {
     next.personnel = sanitizePersonnelForResponse(next.personnel, req);
@@ -1777,6 +1831,11 @@ function nextPersonnelNo(personnel = []) {
   return `RY-${String(sequence).padStart(4, "0")}`;
 }
 
+function storedPersonnelSelfProfile(person = {}) {
+  const sensitive = decryptPersonnelSensitiveFields(person, personnelDataKeyring);
+  return personnelSelfProfileSnapshot({ ...person, ...sensitive });
+}
+
 function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   const source = input && typeof input === "object" ? input : {};
   const id = String(source.id || existing?.id || uid("person"));
@@ -1786,11 +1845,20 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
     "人员编号",
     32
   );
-  const name = normalizedPersonnelText(source.name ?? existing?.name, "人员姓名", 80);
+  // Once a personnel record exists, self-owned fields only change through the
+  // approval workflow. The administrator save route remains responsible for
+  // employment and account fields and cannot bypass that workflow.
+  const selfProfile = existing
+    ? storedPersonnelSelfProfile(existing)
+    : {
+        ...normalizePersonnelSelfProfile(source),
+        idCardFrontAttachment: null,
+        idCardBackAttachment: null,
+        educationProofAttachment: null,
+      };
+  const name = normalizedPersonnelText(selfProfile.name, "人员姓名", 80);
   const requestedUsername = normalizedPersonnelText(source.username ?? existing?.username, "登录账号", 64);
-  if (hasPersonnelAccount(existing) && requestedUsername !== String(existing.username).trim()) {
-    throw new Error("已有登录账号不能直接改名，请停用后联系系统维护人员处理");
-  }
+  if (hasPersonnelAccount(existing) && !requestedUsername) throw new Error("已有登录账号不能删除，请改为停用账号");
   const username = requestedUsername;
   const hasAccount = Boolean(username);
   const resigned = isPersonnelResigned(existing);
@@ -1803,38 +1871,33 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   const siteIds = normalizeVisibleSiteIds(source.siteIds ?? existing?.siteIds, sites);
   const department = normalizedPersonnelText(source.department ?? existing?.department, "部门", 80);
   const role = normalizedPersonnelText(source.role ?? existing?.role, "岗位", 80);
-  const phone = normalizedPersonnelText(source.phone ?? existing?.phone, "联系电话", 32);
-  const email = normalizedPersonnelText(source.email ?? existing?.email, "邮箱", 120);
-  const wechat = normalizedPersonnelText(source.wechat ?? existing?.wechat, "微信号", 80);
-  const address = normalizedPersonnelText(source.address ?? existing?.address, "联系地址", 240);
   const emergencyContact = normalizedPersonnelText(source.emergencyContact ?? existing?.emergencyContact, "紧急联系人", 80);
   const emergencyPhone = normalizedPersonnelText(source.emergencyPhone ?? existing?.emergencyPhone, "紧急联系电话", 32);
   const notes = normalizedPersonnelText(source.notes ?? existing?.notes, "备注", 500);
-  const birthDate = normalizedPersonnelDate(source.birthDate ?? existing?.birthDate, "出生日期", { allowFuture: false });
   const hireDate = normalizedPersonnelDate(source.hireDate ?? existing?.hireDate, "入职日期", { allowFuture: false });
-  const existingSensitiveFields = existing
-    ? decryptPersonnelSensitiveFields(existing, personnelDataKeyring)
-    : {};
-  const normalizedSensitiveFields = normalizePersonnelSensitiveFields({
-    idCardNo: source.idCardNo ?? existingSensitiveFields.idCardNo,
-    bankAccountName: source.bankAccountName ?? existingSensitiveFields.bankAccountName,
-    bankAccountNo: source.bankAccountNo ?? existingSensitiveFields.bankAccountNo,
-    bankName: source.bankName ?? existingSensitiveFields.bankName,
-  });
+  const normalizedSensitiveFields = normalizePersonnelSensitiveFields(selfProfile);
   const sensitiveFields = encryptPersonnelSensitiveFields(normalizedSensitiveFields, id, personnelDataKeyring);
   const plainPassword = String(source.password ?? "");
   if (!name) throw new Error("请填写人员姓名");
   if (!personnelNo) throw new Error("请填写人员编号");
+  if (!department) throw new Error("请填写部门");
+  if (!role) throw new Error("请填写职位 / 岗位");
+  if (!hireDate) throw new Error("请填写入职日期");
+  if (siteIds.length === 0) throw new Error("请至少选择一个所属工作区域");
+  if (!resigned && !hasAccount) throw new Error("在职人员必须开通系统账号");
   if (plainPassword && !hasAccount) throw new Error("开通账号前请先填写登录账号");
-  if (hasPersonnelAccount(existing) && plainPassword) throw new Error("已有账号请通过密码重置功能修改密码");
-  if (hasAccount && !hasPersonnelAccount(existing) && !plainPassword) throw new Error("首次开通账号必须设置登录密码");
+  if (hasAccount && !String(existing?.password ?? "").trim() && !plainPassword) {
+    throw new Error("首次开通账号或补全旧账号时必须设置登录密码");
+  }
   if (accountEnabled && accessRole === "staff" && visibleSiteIds.length === 0) {
     throw new Error("启用普通账号时至少选择一个可见场地");
   }
   if (plainPassword && plainPassword.length < 6) throw new Error("登录密码至少 6 位");
   const sourcePermissions = source.permissions ?? existing?.permissions;
+  const usernameChanged = Boolean(existing) && String(existing?.username ?? "") !== username;
   const securityStateChanged = Boolean(existing) && (
     Boolean(plainPassword) ||
+    usernameChanged ||
     isPersonnelAccountEnabled(existing) !== accountEnabled ||
     existing?.accessRole !== accessRole
   );
@@ -1857,19 +1920,27 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
       : sourcePermissions
       ? normalizePermissionsForStorage(sourcePermissions)
       : emptyPermissionsValue(),
-    gender: normalizePersonnelGender(source.gender ?? existing?.gender),
-    birthDate,
+    gender: selfProfile.gender,
+    nativePlace: selfProfile.nativePlace,
+    birthMonth: selfProfile.birthMonth,
+    educationLevel: selfProfile.educationLevel,
     department,
     role,
     hireDate,
     siteIds,
-    phone,
-    email,
-    wechat,
-    address,
+    phone: selfProfile.phone,
+    email: selfProfile.email,
+    wechat: selfProfile.wechat,
+    address: selfProfile.address,
     emergencyContact,
     emergencyPhone,
     ...sensitiveFields,
+    idCardFrontAttachment: selfProfile.idCardFrontAttachment,
+    idCardBackAttachment: selfProfile.idCardBackAttachment,
+    educationProofAttachment: selfProfile.educationProofAttachment,
+    profileRevision: Number.isSafeInteger(existing?.profileRevision) && existing.profileRevision >= 0
+      ? existing.profileRevision
+      : 0,
     notes,
   };
 }
@@ -1932,6 +2003,7 @@ function personnelHasBusinessHistory(state = {}, person = {}) {
     [state.lossRecords, ["personnelId", "operator"]],
     [state.bioRecords, ["personnelId", "operator"]],
     [state.inventoryAdjustmentDrafts, ["personnelId", "createdBy", "createdByName"]],
+    [state.personnelProfileRequests, ["personnelId", "requesterUsername"]],
     [state.operationLogs, ["personnelId", "operator"]],
   ];
   return collections.some(([items, fields]) =>
@@ -1991,9 +2063,334 @@ function currentStationNotifications(state = {}) {
   return Array.isArray(state.notifications) ? state.notifications : [];
 }
 
+function currentPersonnelProfileRequests(state = {}) {
+  return Array.isArray(state.personnelProfileRequests) ? state.personnelProfileRequests : [];
+}
+
+function currentPersonnelPrivateAttachments(state = {}) {
+  return Array.isArray(state.personnelPrivateAttachments) ? state.personnelPrivateAttachments : [];
+}
+
+function personnelAttachmentExpiry(reference = {}, nowMs = Date.now()) {
+  const status = String(reference?.status ?? "");
+  if (!["draft", "rejected"].includes(status)) return "";
+  const existing = Date.parse(String(reference?.expiresAt ?? ""));
+  if (Number.isFinite(existing)) return new Date(existing).toISOString();
+  const base = Date.parse(String(reference?.updatedAt ?? reference?.createdAt ?? ""));
+  const retentionMs = status === "rejected"
+    ? PERSONNEL_ATTACHMENT_REJECTED_RETENTION_MS
+    : PERSONNEL_ATTACHMENT_DRAFT_RETENTION_MS;
+  return new Date((Number.isFinite(base) ? base : nowMs) + retentionMs).toISOString();
+}
+
+function normalizePersonnelAttachmentLifecycle(reference = {}, now = new Date()) {
+  const nowMs = now.getTime();
+  const status = String(reference?.status ?? "");
+  if (!["draft", "rejected"].includes(status)) return reference;
+  const expiresAt = personnelAttachmentExpiry(reference, nowMs);
+  if (Date.parse(expiresAt) <= nowMs) {
+    return {
+      ...reference,
+      status: "expired",
+      expiresAt,
+      expiredAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+  }
+  return String(reference?.expiresAt ?? "") === expiresAt
+    ? reference
+    : { ...reference, expiresAt };
+}
+
+function retireReplaceablePersonnelAttachmentDrafts(
+  references = [],
+  { personnelId = "", kind = "", replacementId = "", now = new Date() } = {}
+) {
+  return (Array.isArray(references) ? references : []).map((rawReference) => {
+    const reference = normalizePersonnelAttachmentLifecycle(rawReference, now);
+    if (String(reference?.personnelId ?? "") !== String(personnelId) ||
+        String(reference?.kind ?? "") !== String(kind) ||
+        String(reference?.id ?? "") === String(replacementId) ||
+        !["draft", "rejected"].includes(String(reference?.status ?? "")) ||
+        String(reference?.profileRequestId ?? "") && reference.status === "pending") {
+      return reference;
+    }
+    return {
+      ...reference,
+      status: "superseded",
+      supersededAt: now.toISOString(),
+      replacedByAttachmentId: String(replacementId ?? ""),
+      updatedAt: now.toISOString(),
+    };
+  });
+}
+
+function terminalPersonnelAttachmentIds(before = [], after = []) {
+  const beforeById = new Map((Array.isArray(before) ? before : [])
+    .map((reference) => [String(reference?.id ?? ""), String(reference?.status ?? "")])
+    .filter(([id]) => id));
+  const terminal = new Set(["expired", "retired", "superseded", "orphaned"]);
+  return (Array.isArray(after) ? after : [])
+    .filter((reference) => terminal.has(String(reference?.status ?? "")) &&
+      !terminal.has(beforeById.get(String(reference?.id ?? ""))))
+    .map((reference) => String(reference?.id ?? ""))
+    .filter(Boolean);
+}
+
+async function removePersonnelAttachmentFiles(attachmentIds = []) {
+  await Promise.all([...new Set(attachmentIds.map((id) => String(id ?? "")).filter(Boolean))]
+    .map((attachmentId) => rm(privatePersonnelAttachmentPath(uploadDir, attachmentId), { force: true })
+      .catch((error) => console.warn(`Failed to delete retired personnel attachment ${attachmentId}: ${error.message}`))));
+}
+
+function profileRevisionForPersonnel(person = {}) {
+  const value = Number(person?.profileRevision ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function activeAdministratorRecipients(personnel = []) {
+  return (Array.isArray(personnel) ? personnel : [])
+    .filter((person) => person?.accessRole === "admin" && isPersonnelAccountEnabled(person))
+    .map((person) => ({
+      personnelId: String(person?.id ?? ""),
+      username: String(person?.username ?? "").trim(),
+      name: String(person?.name ?? person?.username ?? "").trim(),
+    }))
+    .filter((person) => person.personnelId && person.username);
+}
+
+function ensurePendingPersonnelProfileApprovalFanout(
+  notifications = [],
+  requests = [],
+  personnel = []
+) {
+  let nextNotifications = Array.isArray(notifications) ? notifications : [];
+  const activeAdministrators = activeAdministratorRecipients(personnel);
+  for (const request of Array.isArray(requests) ? requests : []) {
+    if (request?.status !== "pending") continue;
+    const subjectId = String(request?.personnelId ?? "");
+    const subject = (Array.isArray(personnel) ? personnel : [])
+      .find((person) => String(person?.id ?? "") === subjectId);
+    const otherAdministrators = activeAdministrators
+      .filter((recipient) => recipient.personnelId !== subjectId);
+    const selfAdministrator = activeAdministrators
+      .filter((recipient) => recipient.personnelId === subjectId);
+    const recipients = otherAdministrators.length > 0
+      ? otherAdministrators
+      : selfAdministrator;
+    if (recipients.length === 0) continue;
+    const ensured = ensurePersonnelProfileApprovalNotifications(nextNotifications, {
+      profileRequestId: String(request?.id ?? ""),
+      notificationIds: recipients.map(() => uid("notice")),
+      requesterNotificationId: uid("notice"),
+      recipients,
+      requester: {
+        username: String(subject?.username ?? request?.requesterUsername ?? ""),
+        name: String(subject?.name ?? request?.requesterName ?? ""),
+      },
+      createdAt: String(request?.createdAt ?? new Date().toISOString()),
+      createdBy: String(request?.requesterUsername ?? subject?.username ?? ""),
+      createdByName: String(request?.requesterName ?? subject?.name ?? ""),
+      changedFieldCount: Array.isArray(request?.changedFields) ? request.changedFields.length : 0,
+    });
+    nextNotifications = ensured.notifications;
+  }
+  return nextNotifications;
+}
+
+function personnelForAuthenticatedAccount(state = {}, req) {
+  const personnelId = String(req?.auth?.account?.id ?? "").trim();
+  if (!personnelId) throw new Error("当前系统账号未绑定人员档案");
+  const person = (Array.isArray(state.personnel) ? state.personnel : [])
+    .find((item) => String(item?.id ?? "") === personnelId);
+  if (!person || !isPersonnelAccountEnabled(person)) throw new Error("当前人员档案不存在、已离职或账号已停用");
+  return person;
+}
+
+function publicPersonnelAttachmentMetadata(reference) {
+  if (!reference) return null;
+  return sanitizePersonnelAttachmentMetadata(reference, reference?.kind);
+}
+
+function personnelProfileRequestSummary(request = {}) {
+  if (!request || typeof request !== "object") return null;
+  return {
+    id: String(request.id ?? ""),
+    status: String(request.status ?? ""),
+    changedFields: Array.isArray(request.changedFields) ? [...request.changedFields] : [],
+    createdAt: String(request.createdAt ?? ""),
+    resolvedAt: String(request.resolvedAt ?? ""),
+    resolvedBy: String(request.resolvedBy ?? ""),
+    resolutionNote: String(request.resolutionNote ?? ""),
+    baseProfileRevision: Number(request.baseProfileRevision ?? 0),
+  };
+}
+
+function findPersonnelAttachmentReference(state = {}, attachmentId = "") {
+  const id = String(attachmentId ?? "").trim();
+  if (!id) return null;
+  return currentPersonnelPrivateAttachments(state)
+    .find((reference) => String(reference?.id ?? "") === id) ?? null;
+}
+
+function resolveSelfProfileAttachment(state = {}, person = {}, field, suppliedValue) {
+  const expectedKind = attachmentKindForPersonnelProfileField(field);
+  const attachmentId = String(suppliedValue?.id ?? "").trim();
+  if (!attachmentId) return null;
+  const storedReference = findPersonnelAttachmentReference(state, attachmentId);
+  if (!storedReference) throw new Error("人员资料附件不存在或已失效，请重新上传");
+  const reference = normalizePersonnelAttachmentLifecycle(storedReference);
+  if (String(reference.personnelId ?? "") !== String(person.id ?? "") || reference.kind !== expectedKind) {
+    throw new Error("人员资料附件不属于当前人员或类型不匹配");
+  }
+  const currentAttachmentId = String(person?.[field]?.id ?? "");
+  const isCurrentApprovedAttachment = reference.status === "approved" && attachmentId === currentAttachmentId;
+  const isOwnedDraft = ["draft", "rejected"].includes(reference.status) &&
+    String(reference.uploadedByPersonnelId ?? "") === String(person.id ?? "");
+  if (!isCurrentApprovedAttachment && !isOwnedDraft) {
+    throw new Error("人员资料附件当前不可用于新的资料申请");
+  }
+  return publicPersonnelAttachmentMetadata(reference);
+}
+
+function normalizeSubmittedSelfProfile(state = {}, person = {}, input = {}) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const allowed = new Set(PERSONNEL_SELF_PROFILE_FIELDS);
+  const unsupported = Object.keys(source).filter((field) => !allowed.has(field));
+  if (unsupported.length > 0) throw new Error(`本人资料申请包含不允许修改的字段：${unsupported.join("、")}`);
+  const withCanonicalAttachments = { ...source };
+  for (const field of PERSONNEL_PROFILE_ATTACHMENT_FIELDS) {
+    withCanonicalAttachments[field] = resolveSelfProfileAttachment(state, person, field, source[field]);
+  }
+  const normalized = normalizePersonnelSelfProfile(withCanonicalAttachments, { requireComplete: true });
+  // Keep the existing dedicated validators as a second, shared boundary for
+  // identity and payroll values used by administrator saves.
+  Object.assign(normalized, normalizePersonnelSensitiveFields(normalized));
+  assertPersonnelSelfProfileComplete(normalized);
+  return normalized;
+}
+
+function updateProfileAttachmentRequestStatuses(
+  references = [],
+  profile = {},
+  requestId = "",
+  status = "pending",
+  now = new Date()
+) {
+  const ids = new Set(PERSONNEL_PROFILE_ATTACHMENT_FIELDS
+    .map((field) => String(profile?.[field]?.id ?? ""))
+    .filter(Boolean));
+  return (Array.isArray(references) ? references : []).map((rawReference) => {
+    const reference = normalizePersonnelAttachmentLifecycle(rawReference, now);
+    if (!ids.has(String(reference?.id ?? ""))) return reference;
+    if (status === "pending" && reference?.status === "approved") return reference;
+    if (status !== "pending" && String(reference?.profileRequestId ?? "") !== String(requestId ?? "")) return reference;
+    const { expiresAt: _expiresAt, expiredAt: _expiredAt, ...retained } = reference;
+    return {
+      ...retained,
+      status,
+      profileRequestId: String(requestId ?? ""),
+      ...(status === "rejected" ? {
+        expiresAt: new Date(now.getTime() + PERSONNEL_ATTACHMENT_REJECTED_RETENTION_MS).toISOString(),
+      } : {}),
+      updatedAt: now.toISOString(),
+    };
+  });
+}
+
+function finalizeApprovedProfileAttachments(
+  references = [],
+  beforeProfile = {},
+  afterProfile = {},
+  requestId = "",
+  now = new Date()
+) {
+  const approved = updateProfileAttachmentRequestStatuses(references, afterProfile, requestId, "approved", now);
+  const replacements = new Map(PERSONNEL_PROFILE_ATTACHMENT_FIELDS.flatMap((field) => {
+    const beforeId = String(beforeProfile?.[field]?.id ?? "");
+    const afterId = String(afterProfile?.[field]?.id ?? "");
+    return beforeId && beforeId !== afterId ? [[beforeId, afterId]] : [];
+  }));
+  return approved.map((reference) => {
+    const replacementId = replacements.get(String(reference?.id ?? ""));
+    if (!replacementId || reference?.status !== "approved") return reference;
+    return {
+      ...reference,
+      status: "superseded",
+      supersededAt: now.toISOString(),
+      replacedByAttachmentId: replacementId,
+      updatedAt: now.toISOString(),
+    };
+  });
+}
+
+function selfProfileResponseForPersonnel(state = {}, person = {}) {
+  const profile = storedPersonnelSelfProfile(person);
+  const pending = currentPersonnelProfileRequests(state)
+    .filter((request) => request?.status === "pending" && String(request?.personnelId ?? "") === String(person?.id ?? ""))
+    .sort((left, right) => String(right?.createdAt ?? "").localeCompare(String(left?.createdAt ?? "")))[0] ?? null;
+  const latest = currentPersonnelProfileRequests(state)
+    .filter((request) => String(request?.personnelId ?? "") === String(person?.id ?? ""))
+    .sort((left, right) => String(right?.createdAt ?? "").localeCompare(String(left?.createdAt ?? "")))[0] ?? null;
+  const editableRequest = pending ?? (!pending && latest?.status === "rejected" ? latest : null);
+  const draftProfile = editableRequest
+    ? decryptPersonnelProfileProposalFields(editableRequest.proposedProfile, person.id, personnelDataKeyring)
+    : null;
+  const fullRecordForCompleteness = { ...person, ...profile };
+  const missingProfileFields = missingPersonnelRecordFields(fullRecordForCompleteness);
+  const employment = {
+    department: String(person?.department ?? ""),
+    role: String(person?.role ?? ""),
+    hireDate: String(person?.hireDate ?? ""),
+    siteIds: Array.isArray(person?.siteIds) ? [...person.siteIds] : [],
+  };
+  const account = {
+    personnelId: String(person?.id ?? ""),
+    username: String(person?.username ?? ""),
+    accountEnabled: isPersonnelAccountEnabled(person),
+    accessRole: person?.accessRole === "admin" ? "admin" : "staff",
+  };
+  const profileComplete = missingProfileFields.length === 0;
+  return {
+    profile: {
+      ...profile,
+      personnelNo: String(person?.personnelNo ?? ""),
+      employment,
+      account,
+      profileRevision: profileRevisionForPersonnel(person),
+      profileComplete,
+      missingFields: missingProfileFields,
+      missingProfileFields,
+    },
+    employment,
+    account,
+    profileRevision: profileRevisionForPersonnel(person),
+    profileComplete,
+    missingProfileFields,
+    missingSelfProfileFields: missingPersonnelProfileFields(profile),
+    pendingRequest: personnelProfileRequestSummary(pending),
+    latestRequest: personnelProfileRequestSummary(latest),
+    draftProfile,
+  };
+}
+
+const STATION_NOTIFICATION_LIST_FIELDS = Object.freeze([
+  "id", "type", "status", "resolution", "title", "message", "createdAt", "createdBy", "createdByName",
+  "updatedAt", "readAt", "recipientUsername", "recipientName", "orderId", "orderNo", "siteId",
+  "requiredOutstandingAmount", "creditSaleRequestId", "approvalRequestId", "approvalAction", "notificationRole",
+  "profileRequestId", "resolvedAt", "resolvedBy", "resolvedByName", "resolutionNote",
+]);
+
+function stationNotificationListRecord(notification = {}) {
+  return Object.fromEntries(STATION_NOTIFICATION_LIST_FIELDS
+    .filter((field) => Object.prototype.hasOwnProperty.call(notification, field))
+    .map((field) => [field, notification[field]]));
+}
+
 const stationNotificationStateProjection = `jsonb_build_object(
   'notifications', COALESCE(data->'notifications', '[]'::jsonb),
   'approvalRequests', COALESCE(data->'approvalRequests', '[]'::jsonb),
+  'personnelProfileRequests', COALESCE(data->'personnelProfileRequests', '[]'::jsonb),
   'orders', COALESCE(data->'orders', '[]'::jsonb),
   'personnel', COALESCE(data->'personnel', '[]'::jsonb),
   'sites', COALESCE(data->'sites', '[]'::jsonb)
@@ -2018,6 +2415,7 @@ function visibleOrdersForNotificationAuth(state = {}, account = {}) {
 }
 
 function stationNotificationForAuth(state = {}, req, notification = {}, options = {}) {
+  const safeNotification = stationNotificationListRecord(notification);
   const includeStockDetails = options.includeStockDetails === true;
   if (notification?.type === "credit_sale_confirmation") {
     const ordersById = options.ordersById instanceof Map
@@ -2026,7 +2424,7 @@ function stationNotificationForAuth(state = {}, req, notification = {}, options 
         .map((item) => [String(item?.id ?? ""), item]));
     const order = ordersById.get(String(notification?.orderId ?? ""));
     return {
-      ...notification,
+      ...safeNotification,
       canApprove: notification?.status === "pending" &&
         Boolean(order) &&
         canApproveCreditSale(state.personnel, order, String(req.auth?.user?.username ?? "")),
@@ -2040,7 +2438,7 @@ function stationNotificationForAuth(state = {}, req, notification = {}, options 
         .filter(([id]) => id));
     const approvalRequest = approvalRequestsById.get(String(notification?.approvalRequestId ?? ""));
     return {
-      ...notification,
+      ...safeNotification,
       canApprove: notification?.notificationRole !== "requester" &&
         notification?.status === "pending" &&
         approvalRequest?.status === "pending" &&
@@ -2048,7 +2446,56 @@ function stationNotificationForAuth(state = {}, req, notification = {}, options 
       ...(includeStockDetails ? { stockDetails: stockApprovalDetailsForRequest(state, approvalRequest) } : {}),
     };
   }
-  return notification;
+  if (notification?.type === "personnel_profile_approval") {
+    const profileRequestsById = options.profileRequestsById instanceof Map
+      ? options.profileRequestsById
+      : new Map(currentPersonnelProfileRequests(state)
+        .map((request) => [String(request?.id ?? ""), request])
+        .filter(([id]) => id));
+    const profileRequest = profileRequestsById.get(String(notification?.profileRequestId ?? ""));
+    const requesterIsSubject = String(req.auth?.account?.id ?? "") &&
+      String(req.auth?.account?.id ?? "") === String(profileRequest?.personnelId ?? "");
+    const otherActiveAdministrators = requesterIsSubject
+      ? activeAdministratorRecipients(state.personnel)
+        .filter((recipient) => recipient.personnelId !== String(profileRequest?.personnelId ?? ""))
+      : [];
+    const soleAdministratorSelfReview = requesterIsSubject &&
+      otherActiveAdministrators.length === 0 &&
+      activeAdministratorRecipients(state.personnel)
+        .some((recipient) => recipient.personnelId === String(profileRequest?.personnelId ?? ""));
+    const canApprove = (notification?.notificationRole === "approver" ||
+        (notification?.notificationRole === "requester" && soleAdministratorSelfReview)) &&
+      notification?.status === "pending" &&
+      profileRequest?.status === "pending" &&
+      req.auth?.account?.accessRole === "admin" &&
+      isPersonnelAccountEnabled(req.auth?.account) &&
+      (!requesterIsSubject || otherActiveAdministrators.length === 0);
+    let profileChanges;
+    const requesterCanViewOwnChanges = notification?.notificationRole === "requester" &&
+      String(notification?.recipientUsername ?? "") === String(req.auth?.user?.username ?? "") &&
+      requesterIsSubject;
+    if (options.includeProfileDetails === true &&
+        (req.auth?.account?.accessRole === "admin" || requesterCanViewOwnChanges) &&
+        profileRequest) {
+      const before = decryptPersonnelProfileProposalFields(
+        profileRequest.beforeProfile,
+        profileRequest.personnelId,
+        personnelDataKeyring
+      );
+      const after = decryptPersonnelProfileProposalFields(
+        profileRequest.proposedProfile,
+        profileRequest.personnelId,
+        personnelDataKeyring
+      );
+      profileChanges = personnelProfileChangeDetails(before, after, profileRequest.changedFields);
+    }
+    return {
+      ...safeNotification,
+      canApprove,
+      ...(profileChanges ? { profileChanges } : {}),
+    };
+  }
+  return safeNotification;
 }
 
 function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100, options = {}) {
@@ -2060,11 +2507,15 @@ function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100
   const approvalRequestsById = new Map(currentApprovalRequests(state)
     .map((request) => [String(request?.id ?? ""), request])
     .filter(([id]) => id));
+  const profileRequestsById = new Map(currentPersonnelProfileRequests(state)
+    .map((request) => [String(request?.id ?? ""), request])
+    .filter(([id]) => id));
   const notifications = allNotifications.slice(0, limit)
     .map((notification) => stationNotificationForAuth(state, req, notification, {
       ...options,
       ordersById,
       approvalRequestsById,
+      profileRequestsById,
     }));
   return {
     notifications,
@@ -5669,7 +6120,7 @@ async function backfillPersonnelProfiles() {
       await client.query("ROLLBACK");
       return;
     }
-    if (Number(state._personnelSchemaVersion ?? 0) >= 2) {
+    if (Number(state._personnelSchemaVersion ?? 0) >= 3) {
       await client.query("ROLLBACK");
       return;
     }
@@ -5690,6 +6141,7 @@ async function backfillPersonnelProfiles() {
 
     const nextPersonnel = state.personnel.map((person) => {
       if (!person || typeof person !== "object") return person;
+      const { birthDate: legacyBirthDate, ...legacyPerson } = person;
       const username = String(person.username ?? "").trim();
       const resigned = isPersonnelResigned(person);
       const accountEnabled = Boolean(username) && !resigned && person.accountEnabled !== false;
@@ -5706,7 +6158,7 @@ async function backfillPersonnelProfiles() {
         : allocatePersonnelNo();
       claimedPersonnelNos.add(personnelNo);
       return {
-        ...person,
+        ...legacyPerson,
         personnelNo,
         username,
         sessionVersion: sessionVersionForAccount(person),
@@ -5715,6 +6167,13 @@ async function backfillPersonnelProfiles() {
         visibleSiteIds,
         siteIds: normalizeVisibleSiteIds(person.siteIds, sites),
         employmentStatus: resigned ? "resigned" : "active",
+        nativePlace: String(person.nativePlace ?? ""),
+        birthMonth: String(person.birthMonth ?? legacyBirthDate ?? "").slice(0, 7),
+        educationLevel: String(person.educationLevel ?? ""),
+        idCardFrontAttachment: person.idCardFrontAttachment ?? null,
+        idCardBackAttachment: person.idCardBackAttachment ?? null,
+        educationProofAttachment: person.educationProofAttachment ?? null,
+        profileRevision: profileRevisionForPersonnel(person),
         permissions: !username
           ? emptyPermissionsValue()
           : accessRole === "admin"
@@ -5729,14 +6188,17 @@ async function backfillPersonnelProfiles() {
         ...state,
         personnel: nextPersonnel,
         orders: nextOrders,
-        _personnelSchemaVersion: 2,
+        personnelProfileRequests: currentPersonnelProfileRequests(state),
+        personnelPrivateAttachments: currentPersonnelPrivateAttachments(state),
+        retiredPersonnelUsernames: Array.isArray(state.retiredPersonnelUsernames) ? state.retiredPersonnelUsernames : [],
+        _personnelSchemaVersion: 3,
       })]
     );
     await client.query("COMMIT");
     const linkedOrderCount = nextOrders.filter((order, index) =>
       String(order?.contactPersonnelId ?? "") !== String(state.orders?.[index]?.contactPersonnelId ?? "")
     ).length;
-    console.log(`Backfilled ${nextPersonnel.length} personnel profile(s) and linked ${linkedOrderCount} order owner(s)`);
+    console.log(`Backfilled ${nextPersonnel.length} personnel profile(s) to schema v3 and linked ${linkedOrderCount} order owner(s)`);
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -5765,6 +6227,31 @@ async function ensurePersonnelSensitiveDataEncryption() {
       )) changed = true;
       return nextPerson;
     });
+    const nextPersonnelProfileRequests = currentPersonnelProfileRequests(state).map((request) => {
+      if (!request || typeof request !== "object" || !String(request.personnelId ?? "").trim()) return request;
+      const proposalValues = [request.beforeProfile, request.proposedProfile];
+      const needsRewrap = proposalValues.some((profile) =>
+        PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS.some((field) => {
+          const value = String(profile?.[field] ?? "");
+          return value && encryptedPersonnelSensitiveValueKid(value) !== personnelDataKeyring.activeKid;
+        })
+      );
+      if (!needsRewrap) return request;
+      changed = true;
+      return {
+        ...request,
+        beforeProfile: rewrapPersonnelProfileProposalFields(
+          request.beforeProfile,
+          request.personnelId,
+          personnelDataKeyring
+        ),
+        proposedProfile: rewrapPersonnelProfileProposalFields(
+          request.proposedProfile,
+          request.personnelId,
+          personnelDataKeyring
+        ),
+      };
+    });
     if (!changed) {
       await client.query("ROLLBACK");
       return;
@@ -5774,6 +6261,7 @@ async function ensurePersonnelSensitiveDataEncryption() {
       [stateId, JSON.stringify({
         ...state,
         personnel: nextPersonnel,
+        personnelProfileRequests: nextPersonnelProfileRequests,
         _personnelSensitiveEncryptionKid: personnelDataKeyring.activeKid,
       })]
     );
@@ -5785,6 +6273,145 @@ async function ensurePersonnelSensitiveDataEncryption() {
   } finally {
     client.release();
   }
+}
+
+async function atomicallyReplacePersonnelAttachment(filePath, encryptedBuffer) {
+  const temporaryPath = `${filePath}.${randomBytes(12).toString("hex")}.tmp`;
+  let handle;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(encryptedBuffer);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporaryPath, filePath);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+function referencedPersonnelAttachmentIds(state = {}) {
+  const current = new Map();
+  for (const person of Array.isArray(state.personnel) ? state.personnel : []) {
+    for (const field of PERSONNEL_PROFILE_ATTACHMENT_FIELDS) {
+      const id = String(person?.[field]?.id ?? "").trim();
+      if (id) current.set(id, {
+        personnelId: String(person?.id ?? ""),
+        kind: attachmentKindForPersonnelProfileField(field),
+      });
+    }
+  }
+  const requests = new Map();
+  for (const request of currentPersonnelProfileRequests(state)) {
+    if (!["pending", "rejected"].includes(String(request?.status ?? ""))) continue;
+    const profile = decryptPersonnelProfileProposalFields(
+      request.proposedProfile,
+      request.personnelId,
+      personnelDataKeyring
+    );
+    for (const field of PERSONNEL_PROFILE_ATTACHMENT_FIELDS) {
+      const id = String(profile?.[field]?.id ?? "").trim();
+      if (id) requests.set(`${String(request?.id ?? "")}\0${id}`, {
+        requestId: String(request?.id ?? ""),
+        requestStatus: String(request?.status ?? ""),
+        personnelId: String(request?.personnelId ?? ""),
+        kind: attachmentKindForPersonnelProfileField(field),
+      });
+    }
+  }
+  return { current, requests };
+}
+
+async function ensurePersonnelPrivateAttachmentLifecycleAndEncryption() {
+  const client = await pool.connect();
+  let removedIds = [];
+  try {
+    await mkdir(join(uploadDir, PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY), { recursive: true });
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const state = rows[0]?.data;
+    if (!state || typeof state !== "object") {
+      await client.query("ROLLBACK");
+      return;
+    }
+    const now = new Date();
+    const personnelIds = new Set((Array.isArray(state.personnel) ? state.personnel : [])
+      .map((person) => String(person?.id ?? "")).filter(Boolean));
+    const referenced = referencedPersonnelAttachmentIds(state);
+    const retained = [];
+    for (const rawReference of currentPersonnelPrivateAttachments(state)) {
+      const reference = normalizePersonnelAttachmentLifecycle(rawReference, now);
+      const id = String(reference?.id ?? "").trim();
+      const personnelId = String(reference?.personnelId ?? "").trim();
+      const kind = String(reference?.kind ?? "").trim();
+      const status = String(reference?.status ?? "").trim();
+      const currentReference = referenced.current.get(id);
+      const requestReference = referenced.requests.get(`${String(reference?.profileRequestId ?? "")}\0${id}`);
+      const validCurrent = status === "approved" &&
+        currentReference?.personnelId === personnelId && currentReference?.kind === kind;
+      const validPending = status === "pending" &&
+        requestReference?.requestStatus === "pending" &&
+        requestReference?.personnelId === personnelId && requestReference?.kind === kind &&
+        requestReference?.requestId === String(reference?.profileRequestId ?? "");
+      const validRejected = status === "rejected" &&
+        requestReference?.requestStatus === "rejected" &&
+        requestReference?.personnelId === personnelId && requestReference?.kind === kind &&
+        requestReference?.requestId === String(reference?.profileRequestId ?? "");
+      const validDraft = status === "draft" &&
+        String(reference?.uploadedByPersonnelId ?? "") === personnelId;
+      if (!id || !personnelIds.has(personnelId) || (!validCurrent && !validPending && !validRejected && !validDraft)) {
+        continue;
+      }
+      retained.push(reference);
+    }
+    const retainedIds = new Set(retained.map((reference) => String(reference.id)));
+    removedIds = currentPersonnelPrivateAttachments(state)
+      .map((reference) => String(reference?.id ?? ""))
+      .filter((id) => id && !retainedIds.has(id));
+    if (retained.length > 0 && !personnelDataKeyring) {
+      throw new Error("存在人员私密附件，但人员敏感信息加密密钥未配置");
+    }
+    for (const reference of retained) {
+      const filePath = privatePersonnelAttachmentPath(uploadDir, reference.id);
+      const encrypted = await readFile(filePath);
+      if (personnelAttachmentCiphertextKid(encrypted) === personnelDataKeyring.activeKid) {
+        decryptPersonnelAttachmentBuffer(encrypted, {
+          attachmentId: reference.id,
+          personnelId: reference.personnelId,
+          kind: reference.kind,
+          keyring: personnelDataKeyring,
+        });
+        continue;
+      }
+      const rewrapped = rewrapPersonnelAttachmentBuffer(encrypted, {
+        attachmentId: reference.id,
+        personnelId: reference.personnelId,
+        kind: reference.kind,
+        keyring: personnelDataKeyring,
+      });
+      await atomicallyReplacePersonnelAttachment(filePath, rewrapped);
+    }
+    const nextState = {
+      ...state,
+      personnelPrivateAttachments: retained,
+      _personnelPrivateAttachmentEncryptionKid: personnelDataKeyring?.activeKid ?? "",
+    };
+    await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+      stateId,
+      JSON.stringify(nextState),
+    ]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+  // Only remove IDs that were present and proven unreferenced while holding the
+  // row lock. Never sweep unknown files here: another instance may have written
+  // a new encrypted file and still be waiting to commit its registry record.
+  await removePersonnelAttachmentFiles(removedIds);
 }
 
 async function ensureSchema() {
@@ -5926,6 +6553,7 @@ async function ensureSchema() {
     await backfillDefaultSites();
     await backfillPersonnelProfiles();
     await ensurePersonnelSensitiveDataEncryption();
+    await ensurePersonnelPrivateAttachmentLifecycleAndEncryption();
     await rehashPlaintextPersonnelPasswords();
     await externalizePersistedUploads();
     await backfillDailyLogBioRecords();
@@ -6168,6 +6796,310 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/personnel/self-profile" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const person = personnelForAuthenticatedAccount(state, req);
+      sendJson(req, res, 200, {
+        ok: true,
+        ...selfProfileResponseForPersonnel(state, person),
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "本人资料加载失败",
+      }, { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/self-profile/attachment" && req.method === "POST") {
+    let filePath = "";
+    let persisted = false;
+    let retiredAttachmentIds = [];
+    const client = await pool.connect();
+    try {
+      const kind = normalizePersonnelAttachmentKind(url.searchParams.get("kind"));
+      const requesterPersonnelId = String(req.auth?.account?.id ?? "").trim();
+      if (!requesterPersonnelId) throw new Error("当前系统账号未绑定人员档案");
+      const targetPersonnelId = requesterPersonnelId;
+      const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
+      if (!String(mime).startsWith("image/")) throw new Error("人员资料附件仅支持图片");
+      const buffer = await readRawBody(req, Math.min(MAX_IMAGE_UPLOAD_BYTES, MAX_PERSONNEL_ATTACHMENT_BYTES));
+      if (buffer.length === 0) throw new Error("上传文件为空");
+      validateImageUploadBuffer(buffer, mime);
+      let decodedFilename = String(req.headers["x-file-name"] ?? "");
+      try {
+        decodedFilename = decodeURIComponent(decodedFilename);
+      } catch {
+        // The sanitizer below still handles a malformed, unescaped header safely.
+      }
+      const originalName = sanitizeAttachmentFilename(decodedFilename || `人员资料${extensionForMime(mime)}`);
+      const attachmentId = `pa-${randomBytes(18).toString("base64url")}`;
+      const encrypted = encryptPersonnelAttachmentBuffer(buffer, {
+        attachmentId,
+        personnelId: targetPersonnelId,
+        kind,
+        keyring: personnelDataKeyring,
+      });
+      filePath = privatePersonnelAttachmentPath(uploadDir, attachmentId);
+      await mkdir(join(uploadDir, PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY), { recursive: true });
+      await writeFile(filePath, encrypted, { flag: "wx", mode: 0o600 });
+
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const target = (Array.isArray(state.personnel) ? state.personnel : [])
+        .find((person) => String(person?.id ?? "") === targetPersonnelId);
+      if (!target || isPersonnelResigned(target)) throw new Error("目标人员不存在或已离职");
+      const createdAt = new Date().toISOString();
+      const lifecycleNow = new Date(createdAt);
+      const currentAttachments = currentPersonnelPrivateAttachments(state);
+      const retainedAttachments = retireReplaceablePersonnelAttachmentDrafts(currentAttachments, {
+        personnelId: targetPersonnelId,
+        kind,
+        replacementId: attachmentId,
+        now: lifecycleNow,
+      });
+      retiredAttachmentIds = terminalPersonnelAttachmentIds(currentAttachments, retainedAttachments);
+      const activeAttachmentCount = retainedAttachments
+        .filter((reference) =>
+          String(reference?.personnelId ?? "") === targetPersonnelId &&
+          ["draft", "pending"].includes(reference?.status)
+        ).length;
+      if (activeAttachmentCount >= 20) throw new Error("当前人员待处理附件过多，请完成或驳回现有资料申请后再上传");
+      const reference = {
+        id: attachmentId,
+        kind,
+        originalName,
+        mime,
+        size: buffer.length,
+        personnelId: targetPersonnelId,
+        ownerPersonnelId: targetPersonnelId,
+        uploadedByPersonnelId: requesterPersonnelId,
+        uploadedBy: authenticatedOperator(req),
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+        expiresAt: new Date(lifecycleNow.getTime() + PERSONNEL_ATTACHMENT_DRAFT_RETENTION_MS).toISOString(),
+      };
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "上传私密附件",
+        `为人员「${target.name || target.personnelNo}」上传${kind === "id_card_front" ? "身份证正面" : kind === "id_card_back" ? "身份证反面" : "学历证明"}`
+      );
+      const nextState = {
+        ...state,
+        personnelPrivateAttachments: [reference, ...retainedAttachments],
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      persisted = true;
+      await removePersonnelAttachmentFiles(retiredAttachmentIds);
+      sendJson(req, res, 200, {
+        ok: true,
+        attachment: publicPersonnelAttachmentMetadata(reference),
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (filePath && !persisted) await rm(filePath, { force: true }).catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "人员资料附件上传失败",
+      }, { "Cache-Control": "no-store, private" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  const personnelAttachmentRoute = url.pathname.match(/^\/api\/personnel\/attachments\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/);
+  if (personnelAttachmentRoute && req.method === "GET") {
+    const client = await pool.connect();
+    try {
+      const attachmentId = personnelAttachmentRoute[1];
+      const requesterPersonnelId = String(req.auth?.account?.id ?? "").trim();
+      const isAdmin = req.auth?.account?.accessRole === "admin" && isPersonnelAccountEnabled(req.auth?.account);
+      const download = url.searchParams.get("download") === "1";
+      if (download && !isAdmin) {
+        const error = new Error("仅管理员可以下载人员私密附件");
+        error.statusCode = 403;
+        throw error;
+      }
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const reference = findPersonnelAttachmentReference(state, attachmentId);
+      assertPersonnelAttachmentReferenceAccess(reference, {
+        requesterPersonnelId,
+        isAdmin,
+        allowOwnerPreview: true,
+      });
+      const encrypted = await readFile(privatePersonnelAttachmentPath(uploadDir, attachmentId));
+      const buffer = decryptPersonnelAttachmentBuffer(encrypted, {
+        attachmentId,
+        personnelId: reference.personnelId,
+        kind: reference.kind,
+        keyring: personnelDataKeyring,
+      });
+      if (isAdmin) {
+        const target = (Array.isArray(state.personnel) ? state.personnel : [])
+          .find((person) => String(person?.id ?? "") === String(reference.personnelId ?? ""));
+        const operationLog = createOperationLog(
+          req,
+          "人员管理",
+          download ? "下载私密附件" : "查看私密附件",
+          `${download ? "下载" : "查看"}人员「${target?.name || target?.personnelNo || reference.personnelId}」的${reference.kind === "id_card_front" ? "身份证正面" : reference.kind === "id_card_back" ? "身份证反面" : "学历证明"}`
+        );
+        await client.query("UPDATE app_state SET data = jsonb_set(data, '{operationLogs}', $2::jsonb, true), updated_at = now() WHERE id = $1", [
+          stateId,
+          JSON.stringify(pushOperationLog(state.operationLogs, operationLog)),
+        ]);
+      }
+      await client.query("COMMIT");
+      const originalName = sanitizeAttachmentFilename(reference.originalName);
+      const disposition = download ? "attachment" : "inline";
+      res.writeHead(200, {
+        "Content-Type": String(reference.mime || "application/octet-stream"),
+        "Content-Length": String(buffer.length),
+        "Content-Disposition": `${disposition}; filename="personnel-attachment${extensionForMime(reference.mime)}"; filename*=UTF-8''${encodeURIComponent(originalName)}`,
+        "Cache-Control": "no-store, private",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+      });
+      res.end(buffer);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      const status = Number(error?.statusCode ?? (error?.code === "ENOENT" ? 404 : 400));
+      sendJson(req, res, status, {
+        ok: false,
+        error: status === 404 ? "人员资料附件不存在" : (error.message || "人员资料附件读取失败"),
+      }, { "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/personnel/self-profile/submit" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const input = body.profile && typeof body.profile === "object" && !Array.isArray(body.profile)
+        ? body.profile
+        : {};
+      if (!Object.prototype.hasOwnProperty.call(body, "baseProfileRevision") ||
+          body.baseProfileRevision === "" || body.baseProfileRevision == null) {
+        throw new Error("缺少人员资料版本，请刷新后重试");
+      }
+      const baseProfileRevision = Number(body.baseProfileRevision);
+      if (!Number.isSafeInteger(baseProfileRevision) || baseProfileRevision < 0) {
+        throw new Error("人员资料版本不正确，请刷新后重试");
+      }
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const person = personnelForAuthenticatedAccount(state, req);
+      const currentRevision = profileRevisionForPersonnel(person);
+      if (baseProfileRevision !== currentRevision) {
+        const error = new Error("正式人员资料已发生变化，请刷新后重新提交");
+        error.statusCode = 409;
+        throw error;
+      }
+      const existingPending = currentPersonnelProfileRequests(state)
+        .find((request) => request?.status === "pending" && String(request?.personnelId ?? "") === String(person.id));
+      if (existingPending) {
+        const error = new Error("已有一份人员资料申请等待审批，请勿重复提交");
+        error.statusCode = 409;
+        throw error;
+      }
+      const beforeProfile = storedPersonnelSelfProfile(person);
+      const proposedProfile = normalizeSubmittedSelfProfile(state, person, input);
+      const changedFields = changedPersonnelSelfProfileFields(beforeProfile, proposedProfile);
+      if (changedFields.length === 0) {
+        const error = new Error("人员资料没有发生变化，无需重复提交");
+        error.statusCode = 409;
+        throw error;
+      }
+      const requestId = uid("profile-request");
+      const createdAt = new Date().toISOString();
+      const request = {
+        id: requestId,
+        personnelId: String(person.id),
+        requesterUsername: String(person.username),
+        requesterName: String(person.name),
+        status: "pending",
+        baseProfileRevision: currentRevision,
+        changedFields,
+        beforeProfile: encryptPersonnelProfileProposalFields(beforeProfile, person.id, personnelDataKeyring),
+        proposedProfile: encryptPersonnelProfileProposalFields(proposedProfile, person.id, personnelDataKeyring),
+        createdAt,
+      };
+      const allAdministrators = activeAdministratorRecipients(state.personnel);
+      const otherAdministrators = allAdministrators.filter((recipient) => recipient.personnelId !== String(person.id));
+      const uniqueAdministratorSelfReview = otherAdministrators.length === 0 &&
+        allAdministrators.length === 1 &&
+        allAdministrators[0].personnelId === String(person.id);
+      const approvers = otherAdministrators.length > 0 ? otherAdministrators : (uniqueAdministratorSelfReview ? allAdministrators : []);
+      if (approvers.length === 0) throw new Error("当前没有可审批人员资料的启用管理员，请先配置管理员账号");
+      const ensured = ensurePersonnelProfileApprovalNotifications(currentStationNotifications(state), {
+        profileRequestId: requestId,
+        notificationIds: approvers.map(() => uid("notice")),
+        requesterNotificationId: uid("notice"),
+        recipients: approvers,
+        requester: { username: person.username, name: person.name },
+        createdAt,
+        createdBy: person.username,
+        createdByName: person.name,
+        changedFieldCount: changedFields.length,
+      });
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        "提交资料审批",
+        `人员「${person.name}」（${person.personnelNo || person.id}）提交 ${changedFields.length} 项本人资料修改${uniqueAdministratorSelfReview ? "；当前仅有该管理员账号，允许唯一管理员自审" : ""}`
+      );
+      const nextState = {
+        ...state,
+        personnelProfileRequests: [request, ...currentPersonnelProfileRequests(state)].slice(0, 5000),
+        personnelPrivateAttachments: updateProfileAttachmentRequestStatuses(
+          currentPersonnelPrivateAttachments(state),
+          proposedProfile,
+          requestId,
+          "pending"
+        ),
+        notifications: ensured.notifications,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        request: personnelProfileRequestSummary(request),
+        ...stationNotificationPayloadForAuth(nextState, req, 100),
+        message: "人员资料修改申请已提交，等待管理员审批",
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "人员资料申请提交失败",
+      }, { "Cache-Control": "no-store, private" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/stock/adjustment-draft" && req.method === "GET") {
     try {
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
@@ -6233,11 +7165,14 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/notifications/detail" && req.method === "GET") {
+    let auditClient;
+    let auditTransactionOpen = false;
+    let auditOperationLogs = [];
     try {
       const notificationId = String(url.searchParams.get("id") ?? "").trim();
       if (!notificationId) throw new Error("缺少站内信编号");
       let state = await readStationNotificationState();
-      const notification = notificationsForRecipient(
+      let notification = notificationsForRecipient(
         currentStationNotifications(state),
         req.auth?.user?.username
       ).find((item) => String(item?.id ?? "") === notificationId);
@@ -6257,12 +7192,97 @@ async function handleApi(req, res, url) {
           state = rows[0]?.data ?? state;
         }
       }
+      let projectionRequest = req;
+      const administratorProfileDetail = notification.type === "personnel_profile_approval" &&
+        req.auth?.account?.accessRole === "admin";
+      if (administratorProfileDetail) {
+        auditClient = await pool.connect();
+        await auditClient.query("BEGIN");
+        auditTransactionOpen = true;
+        state = await readStationNotificationState(auditClient, { forUpdate: true });
+        const { rows: operationLogRows } = await auditClient.query(
+          "SELECT COALESCE(data->'operationLogs', '[]'::jsonb) AS operation_logs FROM app_state WHERE id = $1",
+          [stateId]
+        );
+        auditOperationLogs = Array.isArray(operationLogRows[0]?.operation_logs)
+          ? operationLogRows[0].operation_logs
+          : [];
+        notification = notificationsForRecipient(
+          currentStationNotifications(state),
+          req.auth?.user?.username
+        ).find((item) => String(item?.id ?? "") === notificationId);
+        if (!notification || notification.type !== "personnel_profile_approval") {
+          const error = new Error("站内信不存在或无权查看");
+          error.statusCode = 404;
+          throw error;
+        }
+        const lockedAccount = (Array.isArray(state.personnel) ? state.personnel : [])
+          .find((person) => String(person?.id ?? "") === String(req.auth?.account?.id ?? ""));
+        if (!lockedAccount || lockedAccount.accessRole !== "admin" || !isPersonnelAccountEnabled(lockedAccount)) {
+          const error = new Error("仅启用中的管理员可以查看人员资料审批明细");
+          error.statusCode = 403;
+          throw error;
+        }
+        const profileRequest = currentPersonnelProfileRequests(state)
+          .find((request) => String(request?.id ?? "") === String(notification.profileRequestId ?? ""));
+        if (!profileRequest) {
+          const error = new Error("人员资料申请不存在");
+          error.statusCode = 404;
+          throw error;
+        }
+        projectionRequest = {
+          auth: {
+            ...req.auth,
+            account: lockedAccount,
+          },
+        };
+      }
+      const requesterOwnProfileNotification = notification.type === "personnel_profile_approval" &&
+        notification.notificationRole === "requester" &&
+        String(notification.recipientUsername ?? "") === String(req.auth?.user?.username ?? "");
+      if (notification.type === "personnel_profile_approval" &&
+          req.auth?.account?.accessRole !== "admin" &&
+          !requesterOwnProfileNotification) {
+        sendJson(req, res, 403, { ok: false, error: "仅管理员可以查看人员资料审批明细" }, {
+          "Cache-Control": "no-store, private",
+        });
+        return;
+      }
+      const projectedNotification = stationNotificationForAuth(state, projectionRequest, notification, {
+        includeStockDetails: true,
+        includeProfileDetails: notification.type === "personnel_profile_approval",
+      });
+      if (administratorProfileDetail) {
+        const target = (Array.isArray(state.personnel) ? state.personnel : [])
+          .find((person) => String(person?.id ?? "") === String(
+            currentPersonnelProfileRequests(state)
+              .find((request) => String(request?.id ?? "") === String(notification.profileRequestId ?? ""))?.personnelId ?? ""
+          ));
+        const operationLog = createOperationLog(
+          projectionRequest,
+          "人员管理",
+          "查看审批敏感明细",
+          `查看人员「${target?.name || target?.personnelNo || "未知人员"}」的资料审批变更明细（申请 ${notification.profileRequestId}）`
+        );
+        await auditClient.query(
+          "UPDATE app_state SET data = jsonb_set(data, '{operationLogs}', $2::jsonb, true), updated_at = now() WHERE id = $1",
+          [stateId, JSON.stringify(pushOperationLog(auditOperationLogs, operationLog))]
+        );
+        await auditClient.query("COMMIT");
+        auditTransactionOpen = false;
+      }
       sendJson(req, res, 200, {
         ok: true,
-        notification: stationNotificationForAuth(state, req, notification, { includeStockDetails: true }),
-      });
+        notification: projectedNotification,
+      }, notification.type === "personnel_profile_approval" ? { "Cache-Control": "no-store, private" } : {});
     } catch (error) {
-      sendJson(req, res, 400, { ok: false, error: error.message || "站内信明细加载失败" });
+      if (auditTransactionOpen) await auditClient.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "站内信明细加载失败",
+      }, { "Cache-Control": "no-store, private" });
+    } finally {
+      auditClient?.release();
     }
     return;
   }
@@ -7216,6 +8236,206 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/personnel/profile-requests/decision" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      requireAdminForAuth(req, "仅管理员可以审批人员资料");
+      const body = JSON.parse(await readBody(req) || "{}");
+      const requestId = String(body.requestId ?? body.profileRequestId ?? "").trim();
+      const decision = String(body.decision ?? "").trim();
+      const note = normalizedPersonnelText(body.note, "处理说明", 500);
+      if (!requestId) throw new Error("缺少人员资料申请编号");
+      if (!['approve', 'reject'].includes(decision)) throw new Error("人员资料审批决定不正确");
+      if (decision === "reject" && !note) throw new Error("驳回人员资料时请填写处理说明");
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const requests = currentPersonnelProfileRequests(state);
+      const request = requests.find((item) => String(item?.id ?? "") === requestId);
+      if (!request) {
+        const error = new Error("人员资料申请不存在");
+        error.statusCode = 404;
+        throw error;
+      }
+      if (request.status !== "pending") {
+        const error = new Error("该人员资料申请已被处理，请勿重复操作");
+        error.statusCode = 409;
+        throw error;
+      }
+      const personnel = Array.isArray(state.personnel) ? state.personnel : [];
+      const target = personnel.find((person) => String(person?.id ?? "") === String(request.personnelId ?? ""));
+      const approverPersonnelId = String(req.auth?.account?.id ?? "");
+      const selfReview = approverPersonnelId && approverPersonnelId === String(request.personnelId ?? "");
+      if (selfReview) {
+        const otherActiveAdministrators = activeAdministratorRecipients(personnel)
+          .filter((recipient) => recipient.personnelId !== approverPersonnelId);
+        if (otherActiveAdministrators.length > 0) {
+          const error = new Error("存在其他启用管理员时，不能审批自己的人员资料");
+          error.statusCode = 403;
+          throw error;
+        }
+        if (req.auth?.account?.accessRole !== "admin") {
+          const error = new Error("只有唯一启用管理员才可自审人员资料");
+          error.statusCode = 403;
+          throw error;
+        }
+      }
+
+      const resolvedAt = new Date().toISOString();
+      let nextPersonnel = personnel;
+      let nextOrders = Array.isArray(state.orders) ? state.orders : [];
+      let nextAttachments = currentPersonnelPrivateAttachments(state);
+      let retiredAttachmentIds = [];
+      let resolvedRequest;
+      if (decision === "approve") {
+        if (!target || isPersonnelResigned(target)) throw new Error("目标人员不存在或已离职，不能批准资料变更");
+        if (profileRevisionForPersonnel(target) !== Number(request.baseProfileRevision ?? 0)) {
+          const error = new Error("正式人员资料版本已变化，不能覆盖更新后的资料；请驳回后让申请人重新提交");
+          error.statusCode = 409;
+          throw error;
+        }
+        const decryptedProposal = decryptPersonnelProfileProposalFields(
+          request.proposedProfile,
+          request.personnelId,
+          personnelDataKeyring
+        );
+        const canonicalProposal = { ...decryptedProposal };
+        for (const field of PERSONNEL_PROFILE_ATTACHMENT_FIELDS) {
+          const attachmentId = String(decryptedProposal?.[field]?.id ?? "");
+          const reference = findPersonnelAttachmentReference(state, attachmentId);
+          if (!reference ||
+              String(reference.personnelId ?? "") !== String(target.id) ||
+              reference.kind !== attachmentKindForPersonnelProfileField(field)) {
+            throw new Error("人员资料附件不存在、归属错误或类型不匹配");
+          }
+          const currentAttachmentId = String(target?.[field]?.id ?? "");
+          const requestOwnsPendingReference = reference.status === "pending" &&
+            String(reference.profileRequestId ?? "") === requestId;
+          const unchangedApprovedReference = reference.status === "approved" && attachmentId === currentAttachmentId;
+          if (!requestOwnsPendingReference && !unchangedApprovedReference) {
+            throw new Error("人员资料附件状态已变化，请驳回后重新提交");
+          }
+          canonicalProposal[field] = publicPersonnelAttachmentMetadata(reference);
+        }
+        const normalizedProposal = normalizePersonnelSelfProfile(canonicalProposal, { requireComplete: true });
+        Object.assign(normalizedProposal, normalizePersonnelSensitiveFields(normalizedProposal));
+        assertPersonnelSelfProfileComplete(normalizedProposal);
+        const overallCandidate = { ...target, ...normalizedProposal };
+        const missingOverall = missingPersonnelRecordFields(overallCandidate);
+        if (missingOverall.length > 0) {
+          throw new Error(`人员任职或账号档案尚不完整，管理员请先补全：${missingOverall.join("、")}`);
+        }
+        const encryptedSensitive = encryptPersonnelSensitiveFields(normalizedProposal, target.id, personnelDataKeyring);
+        const nextPerson = { ...target };
+        for (const field of PERSONNEL_SELF_PROFILE_FIELDS) {
+          if (PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS.includes(field)) continue;
+          nextPerson[field] = normalizedProposal[field];
+        }
+        Object.assign(nextPerson, encryptedSensitive, {
+          profileRevision: profileRevisionForPersonnel(target) + 1,
+        });
+        nextPersonnel = personnel.map((person) => String(person?.id ?? "") === String(target.id) ? nextPerson : person);
+        if (String(nextPerson.name ?? "") !== String(target.name ?? "")) {
+          nextOrders = nextOrders.map((order) => {
+            const linkedPersonnelId = String(order?.contactPersonnelId ?? "").trim();
+            if (linkedPersonnelId === String(target.id)) return { ...order, contactPerson: nextPerson.name };
+            if (linkedPersonnelId) return order;
+            const reference = String(order?.contactPerson ?? "").trim();
+            if (!reference) return order;
+            const matches = personnel.filter((person) =>
+              String(person?.name ?? "").trim() === reference ||
+              String(person?.username ?? "").trim() === reference
+            );
+            if (matches.length !== 1 || String(matches[0]?.id ?? "") !== String(target.id)) return order;
+            return { ...order, contactPersonnelId: String(target.id), contactPerson: nextPerson.name };
+          });
+        }
+        const attachmentsBeforeApproval = nextAttachments;
+        nextAttachments = finalizeApprovedProfileAttachments(
+          nextAttachments,
+          storedPersonnelSelfProfile(target),
+          normalizedProposal,
+          requestId,
+          new Date(resolvedAt)
+        );
+        retiredAttachmentIds = terminalPersonnelAttachmentIds(attachmentsBeforeApproval, nextAttachments);
+        resolvedRequest = {
+          ...request,
+          status: "approved",
+          resolvedAt,
+          resolvedBy: authenticatedOperator(req),
+          resolvedByPersonnelId: approverPersonnelId,
+          resolutionNote: note,
+          appliedProfileRevision: nextPerson.profileRevision,
+        };
+      } else {
+        nextAttachments = updateProfileAttachmentRequestStatuses(
+          nextAttachments,
+          decryptPersonnelProfileProposalFields(request.proposedProfile, request.personnelId, personnelDataKeyring),
+          requestId,
+          "rejected"
+        );
+        resolvedRequest = {
+          ...request,
+          status: "rejected",
+          resolvedAt,
+          resolvedBy: authenticatedOperator(req),
+          resolvedByPersonnelId: approverPersonnelId,
+          resolutionNote: note,
+        };
+      }
+      const resolvedNotifications = resolvePersonnelProfileApprovalNotifications(
+        currentStationNotifications(state),
+        requestId,
+        {
+          resolution: decision === "approve" ? "approved" : "rejected",
+          resolvedAt,
+          resolvedBy: authenticatedOperator(req),
+          resolvedByName: authenticatedOperatorName(req),
+          resolutionNote: note,
+        }
+      );
+      const targetLabel = target?.name || request.requesterName || request.personnelId;
+      const operationLog = createOperationLog(
+        req,
+        "人员管理",
+        decision === "approve" ? "批准资料修改" : "驳回资料修改",
+        `${decision === "approve" ? "批准" : "驳回"}人员「${targetLabel}」的资料修改申请${selfReview ? "（唯一启用管理员自审）" : ""}${note ? "；审批说明已保存在受控申请记录中" : ""}`
+      );
+      const nextState = {
+        ...state,
+        personnel: nextPersonnel,
+        orders: nextOrders,
+        personnelPrivateAttachments: nextAttachments,
+        personnelProfileRequests: requests.map((item) => item === request ? resolvedRequest : item),
+        notifications: resolvedNotifications.notifications,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
+        stateId,
+        JSON.stringify(nextState),
+      ]);
+      await client.query("COMMIT");
+      await removePersonnelAttachmentFiles(retiredAttachmentIds);
+      sendJson(req, res, 200, {
+        ok: true,
+        ...stationNotificationPayloadForAuth(nextState, req, 100),
+        personnel: sanitizePersonnelForResponse(nextPersonnel, req),
+        operationLog,
+        message: decision === "approve" ? "人员资料已批准并生效" : "人员资料申请已驳回",
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "人员资料审批处理失败",
+      }, { "Cache-Control": "no-store, private" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
   if (url.pathname === "/api/personnel/sensitive" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -7229,7 +8449,12 @@ async function handleApi(req, res, url) {
       const personnel = Array.isArray(state.personnel) ? state.personnel : [];
       const target = personnel.find((person) => String(person?.id ?? "") === personnelId);
       if (!target) throw new Error("人员不存在或已被删除");
-      const sensitive = decryptPersonnelSensitiveFields(target, personnelDataKeyring);
+      const sensitive = {
+        ...decryptPersonnelSensitiveFields(target, personnelDataKeyring),
+        idCardFrontAttachment: publicPersonnelAttachmentMetadata(target.idCardFrontAttachment),
+        idCardBackAttachment: publicPersonnelAttachmentMetadata(target.idCardBackAttachment),
+        educationProofAttachment: publicPersonnelAttachmentMetadata(target.educationProofAttachment),
+      };
       const operationLog = createOperationLog(
         req,
         "人员管理",
@@ -7251,10 +8476,12 @@ async function handleApi(req, res, url) {
         sensitive,
         sensitiveRevision: personnelSensitiveRevision(target),
         operationLog,
-      });
+      }, { "Cache-Control": "no-store, private" });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "读取人员敏感档案失败" });
+      sendJson(req, res, 400, { ok: false, error: error.message || "读取人员敏感档案失败" }, {
+        "Cache-Control": "no-store, private",
+      });
     } finally {
       client.release();
     }
@@ -7281,6 +8508,13 @@ async function handleApi(req, res, url) {
         throw new Error("敏感档案已发生变化或尚未完整加载，请重新打开人员档案后再保存");
       }
       const nextPerson = normalizePersonnelInput(incoming, existing, state);
+      const retiredPersonnelUsernames = Array.isArray(state.retiredPersonnelUsernames)
+        ? state.retiredPersonnelUsernames.map((value) => String(value ?? "").trim()).filter(Boolean)
+        : [];
+      if (nextPerson.username && retiredPersonnelUsernames.includes(nextPerson.username) &&
+          nextPerson.username !== String(existing?.username ?? "")) {
+        throw new Error("该登录账号曾被其他人员使用，为防止接管历史数据不能重复启用");
+      }
       const duplicate = nextPerson.username && personnel.find((person) =>
         String(person?.id ?? "") !== nextPerson.id &&
         String(person?.username ?? "").trim() === nextPerson.username
@@ -7304,6 +8538,41 @@ async function handleApi(req, res, url) {
       const nextPersonnel = existing
         ? personnel.map((person) => String(person?.id ?? "") === nextPerson.id ? nextPerson : person)
         : [...personnel, nextPerson];
+      const previousUsername = String(existing?.username ?? "").trim();
+      const usernameChanged = Boolean(existing) && previousUsername !== nextPerson.username;
+      const migratedNotifications = usernameChanged
+        ? currentStationNotifications(state).map((notification) =>
+            String(notification?.recipientUsername ?? "") === previousUsername
+              ? {
+                  ...notification,
+                  recipientUsername: nextPerson.username,
+                  recipientName: nextPerson.name,
+                }
+              : notification
+          )
+        : currentStationNotifications(state);
+      const nextInventoryAdjustmentDrafts = usernameChanged
+        ? currentInventoryAdjustmentDrafts(state).map((draft) =>
+            String(draft?.createdBy ?? "") === previousUsername
+              ? { ...draft, createdBy: nextPerson.username, createdByName: nextPerson.name }
+              : draft
+          )
+        : currentInventoryAdjustmentDrafts(state);
+      const nextPersonnelProfileRequests = usernameChanged
+        ? currentPersonnelProfileRequests(state).map((request) =>
+            String(request?.personnelId ?? "") === String(nextPerson.id)
+              ? { ...request, requesterUsername: nextPerson.username, requesterName: nextPerson.name }
+              : request
+          )
+        : currentPersonnelProfileRequests(state);
+      const nextNotifications = ensurePendingPersonnelProfileApprovalFanout(
+        migratedNotifications,
+        nextPersonnelProfileRequests,
+        nextPersonnel
+      );
+      const nextRetiredPersonnelUsernames = usernameChanged && previousUsername
+        ? [...new Set([...retiredPersonnelUsernames, previousUsername])]
+        : retiredPersonnelUsernames;
       const nextOrders = existing
         ? orders.map((order) => {
             const linkedPersonnelId = String(order?.contactPersonnelId ?? "").trim();
@@ -7335,6 +8604,10 @@ async function handleApi(req, res, url) {
         ...state,
         personnel: nextPersonnel,
         orders: nextOrders,
+        notifications: nextNotifications,
+        inventoryAdjustmentDrafts: nextInventoryAdjustmentDrafts,
+        personnelProfileRequests: nextPersonnelProfileRequests,
+        retiredPersonnelUsernames: nextRetiredPersonnelUsernames,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query(
@@ -7345,12 +8618,22 @@ async function handleApi(req, res, url) {
         [stateId, JSON.stringify(nextState)]
       );
       await client.query("COMMIT");
+      const currentUserChanged = Boolean(existing) && previousUsername === String(req.auth?.user?.username ?? "");
+      const replacementUser = currentUserChanged ? publicUserFromAccount(nextPerson, nextState) : null;
+      const replacementSession = replacementUser ? createAuthToken(replacementUser, nextPerson) : null;
       sendJson(req, res, 200, {
         ok: true,
         personnel: sanitizePersonnelForResponse(nextPersonnel, req),
         orders: nextOrders,
         operationLog,
-      });
+        ...(replacementSession ? {
+          user: replacementUser,
+          token: replacementSession.token,
+          expiresAt: replacementSession.expiresAt,
+        } : {}),
+      }, replacementSession ? {
+        "Set-Cookie": authCookieHeader(replacementSession.token, replacementSession.expiresAt),
+      } : {});
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "保存人员失败" });
@@ -10799,7 +12082,16 @@ async function serveStatic(req, res, url) {
 
 async function serveUpload(req, res, url) {
   const relative = decodeURIComponent(url.pathname.replace(/^\/uploads\/?/, ""));
+  if (relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
+      relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`)) {
+    sendJson(req, res, 404, { error: "Upload file not found" });
+    return;
+  }
   const candidate = normalize(join(uploadDir, relative));
+  if (isPersonnelPrivateAttachmentPath(uploadDir, candidate)) {
+    sendJson(req, res, 404, { error: "Upload file not found" });
+    return;
+  }
   const finalPath = candidate === uploadDir || candidate.startsWith(`${uploadDir}/`) ? candidate : "";
   if (!finalPath) {
     sendJson(req, res, 404, { error: "Upload file not found" });

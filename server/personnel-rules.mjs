@@ -1,3 +1,11 @@
+import {
+  missingPersonnelProfileFields,
+  normalizePersonnelBankAccountNo,
+  normalizePersonnelIdCardNo,
+} from "./personnel-profile-rules.mjs";
+
+export { normalizePersonnelBankAccountNo, normalizePersonnelIdCardNo };
+
 const DIRECTORY_FIELDS = [
   "id",
   "personnelNo",
@@ -10,7 +18,9 @@ const DIRECTORY_FIELDS = [
 
 const PRIVATE_PROFILE_FIELDS = [
   "gender",
-  "birthDate",
+  "nativePlace",
+  "birthMonth",
+  "educationLevel",
   "hireDate",
   "phone",
   "email",
@@ -24,6 +34,9 @@ const PRIVATE_PROFILE_FIELDS = [
 
 const SENSITIVE_PROFILE_FIELDS = [
   "idCardNo",
+  "idCardFrontAttachment",
+  "idCardBackAttachment",
+  "educationProofAttachment",
   "bankAccountName",
   "bankAccountNo",
   "bankName",
@@ -37,6 +50,11 @@ const ACCOUNT_SECURITY_FIELDS = [
   "accountEnabled",
 ];
 
+const PROFILE_COMPLETENESS_FIELDS = [
+  "profileComplete",
+  "missingProfileFields",
+];
+
 export function hasPersonnelAccount(person = {}) {
   return Boolean(String(person?.username ?? "").trim());
 }
@@ -46,6 +64,10 @@ export function isPersonnelAccountEnabled(person = {}) {
     person?.accountEnabled !== false &&
     person?.employmentStatus !== "resigned" &&
     !person?.resignedAt;
+}
+
+export function canViewPersonnelOperationLogs(person = {}) {
+  return person?.accessRole === "admin" && isPersonnelAccountEnabled(person);
 }
 
 export function isPersonnelActiveProfile(person = {}) {
@@ -116,52 +138,6 @@ function normalizedSensitiveText(value, label, maxLength) {
   return normalized;
 }
 
-function isValidCompactDate(value) {
-  if (!/^\d{8}$/.test(value)) return false;
-  const year = Number(value.slice(0, 4));
-  const month = Number(value.slice(4, 6));
-  const day = Number(value.slice(6, 8));
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day;
-}
-
-export function normalizePersonnelIdCardNo(value) {
-  const normalized = normalizedSensitiveText(value, "身份证号", 18).toUpperCase();
-  if (!normalized) return "";
-  if (/^[1-9]\d{14}$/.test(normalized)) {
-    const birthDate = `19${normalized.slice(6, 12)}`;
-    if (!isValidCompactDate(birthDate) || normalized.slice(12) === "000") {
-      throw new Error("身份证号格式不正确");
-    }
-    return normalized;
-  }
-  if (!/^[1-9]\d{16}[\dX]$/.test(normalized) ||
-      !isValidCompactDate(normalized.slice(6, 14)) ||
-      normalized.slice(14, 17) === "000") {
-    throw new Error("身份证号格式不正确");
-  }
-  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
-  const checksumCharacters = "10X98765432";
-  const checksum = normalized.slice(0, 17)
-    .split("")
-    .reduce((sum, digit, index) => sum + Number(digit) * weights[index], 0);
-  if (normalized[17] !== checksumCharacters[checksum % 11]) {
-    throw new Error("身份证号校验码不正确");
-  }
-  return normalized;
-}
-
-export function normalizePersonnelBankAccountNo(value) {
-  const normalized = normalizedSensitiveText(value, "银行卡号", 24);
-  if (!normalized) return "";
-  if (!/^\d{12,24}$/.test(normalized)) {
-    throw new Error("银行卡号必须是 12 至 24 位数字");
-  }
-  return normalized;
-}
-
 export function normalizePersonnelSensitiveFields(input = {}) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   return {
@@ -172,18 +148,38 @@ export function normalizePersonnelSensitiveFields(input = {}) {
   };
 }
 
+export function missingPersonnelRecordFields(person = {}) {
+  const missing = [...missingPersonnelProfileFields(person)];
+  if (!String(person?.department ?? "").trim()) missing.push("department");
+  if (!String(person?.role ?? "").trim()) missing.push("role");
+  if (!String(person?.hireDate ?? "").trim()) missing.push("hireDate");
+  if (!Array.isArray(person?.siteIds) || person.siteIds.length === 0) missing.push("siteIds");
+  if (!String(person?.username ?? "").trim() || person?.accountEnabled === false || !String(person?.password ?? "").trim()) {
+    missing.push("systemAccount");
+  }
+  return [...new Set(missing)];
+}
+
 export function redactPersonnelForViewer(
   person = {},
   { canViewPrivate = false, canViewAccount = false, canViewSensitive = false } = {}
 ) {
   if (!person || typeof person !== "object") return person;
+  const projectedPerson = { ...person };
+  if (canViewPrivate) {
+    projectedPerson.missingProfileFields = Array.isArray(person?.missingProfileFields)
+      ? [...person.missingProfileFields]
+      : missingPersonnelRecordFields(person);
+    projectedPerson.profileComplete = projectedPerson.missingProfileFields.length === 0;
+  }
   const allowedFields = [
     ...DIRECTORY_FIELDS,
     ...(canViewPrivate ? PRIVATE_PROFILE_FIELDS : []),
+    ...(canViewPrivate ? PROFILE_COMPLETENESS_FIELDS : []),
     ...(canViewAccount ? ACCOUNT_SECURITY_FIELDS : []),
     ...(canViewSensitive ? SENSITIVE_PROFILE_FIELDS : []),
   ];
   return Object.fromEntries(allowedFields
-    .filter((field) => Object.prototype.hasOwnProperty.call(person, field))
-    .map((field) => [field, person[field]]));
+    .filter((field) => Object.prototype.hasOwnProperty.call(projectedPerson, field))
+    .map((field) => [field, projectedPerson[field]]));
 }

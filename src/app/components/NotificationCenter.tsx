@@ -6,12 +6,14 @@ import {
   CheckCircle2,
   ExternalLink,
   FilterX,
+  FileUser,
   HandCoins,
   Inbox,
   Loader2,
   MapPin,
   RefreshCw,
   Trash2,
+  Download,
   UserRound,
   XCircle,
 } from "lucide-react";
@@ -121,6 +123,25 @@ type StockChangeApprovalDetails = {
 
 type StockApprovalDetails = StockDeletionApprovalDetails | StockChangeApprovalDetails;
 
+type PersonnelProfileAttachment = {
+  id: string;
+  kind: string;
+  originalName?: string;
+  mime?: string;
+  size?: number;
+};
+
+type PersonnelProfileChange = {
+  field: string;
+  label: string;
+  section: string;
+  beforeValue?: string;
+  afterValue?: string;
+  sensitive?: boolean;
+  beforeAttachment?: PersonnelProfileAttachment | null;
+  afterAttachment?: PersonnelProfileAttachment | null;
+};
+
 type StationNotification = {
   id: string;
   type: "credit_sale_confirmation" | "stock_approval" | "approval_result" | string;
@@ -148,6 +169,8 @@ type StationNotification = {
   resolvedByName?: string;
   resolutionNote?: string;
   stockDetails?: StockApprovalDetails | null;
+  profileRequestId?: string;
+  profileChanges?: PersonnelProfileChange[];
 };
 
 type NotificationFilter = "all" | "unread" | "pending" | "completed";
@@ -195,7 +218,9 @@ function formatNotificationTime(value?: string): string {
 
 function notificationResultLabel(notification: StationNotification): string {
   if (notification.status === "pending") {
-    return ["stock_approval", "credit_sale_confirmation"].includes(notification.type) ? "待审批" : "待处理";
+    return ["stock_approval", "credit_sale_confirmation", "personnel_profile_approval"].includes(notification.type)
+      ? "待审批"
+      : "待处理";
   }
   return {
     approved: "已批准",
@@ -230,7 +255,15 @@ function notificationTypeLabel(notification: StationNotification): string {
   }
   if (notification.type === "approval_result") return "审批结果";
   if (notification.type === "credit_sale_confirmation") return "赊销确认";
+  if (notification.type === "personnel_profile_approval") return "人员资料审批";
   return "系统消息";
+}
+
+function formatAttachmentSize(value?: number): string {
+  const bytes = Number(value ?? 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function actorLabel(name?: string, username?: string): string {
@@ -345,6 +378,12 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [processingApproval, setProcessingApproval] = useState(false);
   const [loadingApprovalDetails, setLoadingApprovalDetails] = useState(false);
   const [approvalDetailError, setApprovalDetailError] = useState("");
+  const [selectedProfileApproval, setSelectedProfileApproval] = useState<StationNotification | null>(null);
+  const [profileDecision, setProfileDecision] = useState<"approve" | "reject" | null>(null);
+  const [profileNote, setProfileNote] = useState("");
+  const [processingProfileApproval, setProcessingProfileApproval] = useState(false);
+  const [loadingProfileDetails, setLoadingProfileDetails] = useState(false);
+  const [profileDetailError, setProfileDetailError] = useState("");
 
   const typeOptions = useMemo<NotificationFacet[]>(() => {
     const options = new Map<string, string>();
@@ -667,6 +706,126 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     }
   };
 
+  const loadProfileApprovalDetails = async (notification: StationNotification) => {
+    if (Array.isArray(notification.profileChanges)) {
+      setLoadingProfileDetails(false);
+      setProfileDetailError("");
+      return;
+    }
+    setLoadingProfileDetails(true);
+    setProfileDetailError("");
+    try {
+      const response = await fetch(`/api/notifications/detail?id=${encodeURIComponent(notification.id)}`, {
+        headers: authJsonHeaders(),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok || !result.notification) {
+        throw new Error(result.error || "人员资料审批明细加载失败");
+      }
+      setSelectedProfileApproval((current) => current?.id === notification.id ? result.notification : current);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "人员资料审批明细加载失败";
+      setProfileDetailError(message);
+      toast.error(message);
+    } finally {
+      setLoadingProfileDetails(false);
+    }
+  };
+
+  const openProfileApproval = (
+    notification: StationNotification,
+    decision: "approve" | "reject" | null
+  ) => {
+    setProfileDecision(decision);
+    setProfileNote("");
+    setSelectedProfileApproval(notification);
+    void markRead(notification);
+    void loadProfileApprovalDetails(notification);
+  };
+
+  const processProfileApproval = async () => {
+    if (
+      !selectedProfileApproval?.profileRequestId ||
+      !profileDecision ||
+      processingProfileApproval ||
+      loadingProfileDetails ||
+      profileDetailError
+    ) return;
+    if (profileDecision === "reject" && !profileNote.trim()) {
+      toast.error("请填写驳回原因，便于申请人修改后重新提交");
+      return;
+    }
+    setProcessingProfileApproval(true);
+    try {
+      const response = await fetch("/api/personnel/profile-requests/decision", {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify({
+          requestId: selectedProfileApproval.profileRequestId,
+          decision: profileDecision,
+          note: profileNote.trim(),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || "人员资料审批处理失败");
+      if (Array.isArray(result.personnel)) {
+        setState((current) => ({
+          ...current,
+          personnel: result.personnel,
+          operationLogs: result.operationLog
+            ? [result.operationLog, ...(current.operationLogs ?? [])]
+                .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
+                .slice(0, 10000)
+            : current.operationLogs,
+        }));
+      }
+      setSelectedProfileApproval(null);
+      setProfileDecision(null);
+      setProfileNote("");
+      if (!applyNotificationPayload(result)) {
+        notifyNotificationRefresh();
+        void loadNotifications(true);
+      }
+      toast.success(result.message || (profileDecision === "approve" ? "人员资料已批准并生效" : "人员资料申请已驳回"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "人员资料审批处理失败");
+    } finally {
+      setProcessingProfileApproval(false);
+    }
+  };
+
+  const accessProfileAttachment = async (attachment: PersonnelProfileAttachment, download: boolean) => {
+    try {
+      const response = await fetch(
+        `/api/personnel/attachments/${encodeURIComponent(attachment.id)}${download ? "?download=1" : ""}`,
+        { headers: authJsonHeaders() }
+      );
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "附件下载失败");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      if (!download) {
+        const preview = document.createElement("a");
+        preview.href = url;
+        preview.target = "_blank";
+        preview.rel = "noopener noreferrer";
+        preview.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        return;
+      }
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = attachment.originalName || "人员资料附件";
+      anchor.rel = "noopener";
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "附件下载失败");
+    }
+  };
+
   const filters: { value: NotificationFilter; label: string; count: number }[] = [
     { value: "all", label: "全部", count: hasFacetFilters ? facetFilteredNotifications.length : totalCount },
     { value: "unread", label: "未读", count: facetFilteredNotifications.filter((notification) => !notification.readAt).length },
@@ -679,6 +838,14 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const selectedStockChangeDetails = selectedApproval?.stockDetails?.type === "stock_change"
     ? selectedApproval.stockDetails
     : null;
+  const groupedProfileChanges = (selectedProfileApproval?.profileChanges ?? []).reduce<Record<string, PersonnelProfileChange[]>>(
+    (groups, change) => {
+      const section = change.section || "资料变更";
+      (groups[section] ??= []).push(change);
+      return groups;
+    },
+    {}
+  );
 
   return (
     <>
@@ -877,6 +1044,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <Boxes className="size-3.5" />查看明细
                         </Button>
                       )}
+                      {notification.type === "personnel_profile_approval" && notification.profileRequestId && (
+                        <Button variant="outline" size="sm" onClick={() => openProfileApproval(notification, null)}>
+                          <FileUser className="size-3.5" />查看资料变更
+                        </Button>
+                      )}
                       {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                           <HandCoins className="size-3.5" />同意赊销
@@ -892,6 +1064,20 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                             <XCircle className="size-3.5" />驳回
                           </Button>
                           <Button size="sm" onClick={() => openStockApproval(notification, "approve")}>
+                            <CheckCircle2 className="size-3.5" />批准
+                          </Button>
+                        </>
+                      )}
+                      {pending && notification.type === "personnel_profile_approval" && notification.canApprove === true && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openProfileApproval(notification, "reject")}
+                          >
+                            <XCircle className="size-3.5" />驳回
+                          </Button>
+                          <Button size="sm" onClick={() => openProfileApproval(notification, "approve")}>
                             <CheckCircle2 className="size-3.5" />批准
                           </Button>
                         </>
@@ -1281,6 +1467,177 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                   ? "批准并执行"
                   : "确认驳回"}
             </Button>}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!selectedProfileApproval} onOpenChange={(nextOpen) => {
+        if (!nextOpen && !processingProfileApproval) {
+          setSelectedProfileApproval(null);
+          setProfileDecision(null);
+          setProfileNote("");
+          setProfileDetailError("");
+          setLoadingProfileDetails(false);
+        }
+      }}>
+        <DialogContent className="sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>
+              {profileDecision === "approve"
+                ? "批准人员资料修改"
+                : profileDecision === "reject"
+                  ? "驳回人员资料修改"
+                  : "人员资料修改明细"}
+            </DialogTitle>
+            <DialogDescription>
+              仅批准后才会写入正式人员档案。证件和工资账户属于敏感信息，请勿转发或截屏外传。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className={`rounded-md border px-3 py-2 text-sm leading-6 ${
+            profileDecision === "approve"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : profileDecision === "reject"
+                ? "border-red-200 bg-red-50 text-red-900"
+                : "border-sky-200 bg-sky-50 text-sky-900"
+          }`}>
+            <div>{selectedProfileApproval?.message}</div>
+            <div className="mt-1 text-xs opacity-80">
+              申请人：{actorLabel(selectedProfileApproval?.createdByName, selectedProfileApproval?.createdBy)}
+            </div>
+          </div>
+
+          {loadingProfileDetails && (
+            <div className="flex min-h-28 items-center justify-center rounded-md border bg-muted/20 text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />正在安全加载资料变更
+            </div>
+          )}
+          {profileDetailError && (
+            <div className="flex flex-col items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800 sm:flex-row sm:items-center">
+              <span>{profileDetailError}</span>
+              {selectedProfileApproval && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadProfileApprovalDetails(selectedProfileApproval)}
+                >
+                  <RefreshCw className="size-3.5" />重试
+                </Button>
+              )}
+            </div>
+          )}
+
+          {!loadingProfileDetails && !profileDetailError && (
+            <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
+              {Object.entries(groupedProfileChanges).length === 0 ? (
+                <div className="rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
+                  没有可显示的资料差异
+                </div>
+              ) : Object.entries(groupedProfileChanges).map(([section, changes]) => (
+                <section key={section} className="overflow-hidden rounded-md border" aria-label={section}>
+                  <div className="border-b bg-muted/40 px-3 py-2 text-sm font-semibold">{section}</div>
+                  <div className="divide-y">
+                    {changes.map((change) => {
+                      const attachment = change.afterAttachment;
+                      return (
+                        <div key={change.field} className="grid gap-2 px-3 py-3 text-sm md:grid-cols-[9rem_1fr_1fr] md:items-start">
+                          <div className="font-medium">
+                            {change.label}
+                            {change.sensitive && (
+                              <Badge variant="outline" className="ml-2 border-amber-200 text-[10px] text-amber-700">敏感</Badge>
+                            )}
+                          </div>
+                          {attachment ? (
+                            <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/30 px-3 py-2">
+                              <div className="min-w-0">
+                                <div className="truncate font-medium">{attachment.originalName || "资料附件"}</div>
+                                <div className="text-xs text-muted-foreground">
+                                  {[attachment.mime, formatAttachmentSize(attachment.size)].filter(Boolean).join(" · ")}
+                                </div>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void accessProfileAttachment(
+                                  attachment,
+                                  selectedProfileApproval?.notificationRole !== "requester"
+                                )}
+                              >
+                                {selectedProfileApproval?.notificationRole === "requester"
+                                  ? <ExternalLink className="size-3.5" />
+                                  : <Download className="size-3.5" />}
+                                {selectedProfileApproval?.notificationRole === "requester" ? "预览附件" : "下载核对"}
+                              </Button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="rounded-md bg-muted/30 px-3 py-2 text-muted-foreground">
+                                <div className="mb-0.5 text-[11px]">修改前</div>
+                                <div className="break-words whitespace-pre-wrap">{change.beforeValue || "未填写"}</div>
+                              </div>
+                              <div className="rounded-md bg-sky-50 px-3 py-2 text-sky-950">
+                                <div className="mb-0.5 text-[11px] text-sky-700">申请修改为</div>
+                                <div className="break-words whitespace-pre-wrap">{change.afterValue || "未填写"}</div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+
+          {profileDecision && (
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium" htmlFor="profile-approval-note">
+                审批说明{profileDecision === "reject" && <span className="ml-0.5 text-red-500">*</span>}
+              </label>
+              <Textarea
+                id="profile-approval-note"
+                rows={3}
+                maxLength={500}
+                value={profileNote}
+                onChange={(event) => setProfileNote(event.target.value)}
+                placeholder={profileDecision === "approve" ? "可填写核对说明" : "请说明需要修改的内容"}
+              />
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={processingProfileApproval}
+              onClick={() => setSelectedProfileApproval(null)}
+            >
+              {profileDecision ? "取消" : "关闭"}
+            </Button>
+            {profileDecision && (
+              <Button
+                variant={profileDecision === "approve" ? "default" : "destructive"}
+                disabled={
+                  processingProfileApproval ||
+                  loadingProfileDetails ||
+                  Boolean(profileDetailError) ||
+                  (profileDecision === "reject" && !profileNote.trim())
+                }
+                onClick={() => void processProfileApproval()}
+              >
+                {processingProfileApproval
+                  ? <Loader2 className="size-4 animate-spin" />
+                  : profileDecision === "approve"
+                    ? <CheckCircle2 className="size-4" />
+                    : <XCircle className="size-4" />}
+                {processingProfileApproval
+                  ? "处理中"
+                  : profileDecision === "approve"
+                    ? "批准并写入档案"
+                    : "确认驳回"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

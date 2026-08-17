@@ -1,4 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import {
+  PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS,
+  personnelSelfProfileSnapshot,
+} from "./personnel-profile-rules.mjs";
 
 export const PERSONNEL_SENSITIVE_FIELDS = [
   "idCardNo",
@@ -150,4 +154,27 @@ export function rewrapPersonnelSensitiveFields(person = {}, keyring) {
     next[field] = encryptPersonnelSensitiveValue(plaintext, { personnelId, field, keyring });
   }
   return next;
+}
+
+export function encryptPersonnelProfileProposalFields(profile = {}, personnelId, keyring) {
+  const snapshot = personnelSelfProfileSnapshot(profile);
+  const encrypted = encryptPersonnelSensitiveFields(snapshot, personnelId, keyring);
+  return { ...snapshot, ...encrypted };
+}
+
+export function decryptPersonnelProfileProposalFields(profile = {}, personnelId, keyring) {
+  const snapshot = personnelSelfProfileSnapshot(profile);
+  const decrypted = Object.fromEntries(PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS.map((field) => [
+    field,
+    decryptPersonnelSensitiveValue(profile?.[field], { personnelId, field, keyring }),
+  ]));
+  return { ...snapshot, ...decrypted };
+}
+
+export function rewrapPersonnelProfileProposalFields(profile = {}, personnelId, keyring) {
+  return encryptPersonnelProfileProposalFields(
+    decryptPersonnelProfileProposalFields(profile, personnelId, keyring),
+    personnelId,
+    keyring
+  );
 }

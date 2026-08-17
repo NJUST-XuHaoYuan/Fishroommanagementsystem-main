@@ -90,7 +90,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   paymentMethods: ["systemSettings"],
   shippingCarriers: ["systemSettings"],
   waterQualitySettings: ["systemSettings", "tankGroups"],
-  profile: ["personnel", "orders", "customers", "shipments"],
+  profile: [],
   permissions: ["personnel"],
   operationLogs: ["operationLogs"],
 };
@@ -263,11 +263,13 @@ function normalizeAuthAccountPermissionSummary(
 ): AuthAccountPermissionSummary | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const source = value as Record<string, unknown>;
+  const personnelId = String(source.personnelId ?? "").trim();
   const username = String(source.username ?? "").trim();
-  if (!username || username !== expectedUsername) return undefined;
+  if (!personnelId || !username || username !== expectedUsername) return undefined;
   const accessRole = source.accessRole === "admin" ? "admin" : source.accessRole === "staff" ? "staff" : null;
   if (!accessRole) return undefined;
   return {
+    personnelId,
     username,
     accessRole,
     accountEnabled: source.accountEnabled === true,
@@ -392,6 +394,18 @@ function normalizePersistedState(data: any, currentUser: User): Store {
           employmentStatus: resigned ? "resigned" : "active",
           resignedAt: typeof person.resignedAt === "string" ? person.resignedAt : undefined,
           gender: person.gender === "male" || person.gender === "female" || person.gender === "other" ? person.gender : "",
+          nativePlace: String(person.nativePlace ?? ""),
+          birthMonth: String(person.birthMonth ?? person.birthDate ?? "").slice(0, 7),
+          educationLevel: ["high_school_or_below", "college", "bachelor", "master", "doctorate"]
+            .includes(String(person.educationLevel ?? ""))
+            ? String(person.educationLevel) as Personnel["educationLevel"]
+            : "",
+          profileComplete: person.profileComplete === true,
+          missingProfileFields: Array.isArray(person.missingProfileFields)
+            ? person.missingProfileFields
+                .map((field) => String(field ?? "").trim())
+                .filter((field, fieldIndex, fields) => field && fields.indexOf(field) === fieldIndex)
+            : [],
           birthDate: String(person.birthDate ?? ""),
           department: String(person.department ?? ""),
           role: String(person.role ?? ""),
@@ -1361,8 +1375,25 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
+      let replacementUser: User = null;
       if (result.token && result.user) {
-        saveAuthSession(result.user, result.token, result.expiresAt);
+        const currentUser = stateRef.current.user;
+        const returnedUsername = String(result.user.username ?? "").trim();
+        const returnedRole = result.user.role === "admin" ? "admin" : "staff";
+        const retainedAccount = currentUser?.account && returnedUsername
+          ? {
+              ...currentUser.account,
+              username: returnedUsername,
+              accessRole: returnedRole,
+              accountEnabled: true,
+            }
+          : undefined;
+        replacementUser = userFromAuthMeResponse({
+          ...result,
+          account: result.account ?? retainedAccount,
+        }, currentUser);
+        if (!replacementUser) throw new Error("登录身份更新失败，请重新登录");
+        saveAuthSession(replacementUser, result.token, result.expiresAt);
       }
 
       setStateBase((current) => {
@@ -1373,7 +1404,7 @@ function AdminApp() {
             orders: Array.isArray(result.orders) ? result.orders : current.orders,
             operationLogs: withServerOperationLog(result.operationLog, current.operationLogs),
           },
-          current.user
+          replacementUser ?? current.user
         );
         lastSavedState.current = withoutUser(next);
         return next;

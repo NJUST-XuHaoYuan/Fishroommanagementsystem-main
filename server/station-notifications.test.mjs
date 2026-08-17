@@ -4,10 +4,12 @@ import {
   ensureApprovalNotifications,
   ensureCreditSaleNotification,
   ensureCreditSaleNotifications,
+  ensurePersonnelProfileApprovalNotifications,
   markNotificationsRead,
   notificationsForRecipient,
   resolveCreditSaleNotifications,
   resolveApprovalNotifications,
+  resolvePersonnelProfileApprovalNotifications,
 } from "./station-notifications.mjs";
 
 const request = {
@@ -227,4 +229,79 @@ test("one admin decision resolves every copy of an approval notification", () =>
   assert.equal(resolved.changed, true);
   assert.ok(resolved.notifications.every((notification) => notification.status === "completed"));
   assert.ok(resolved.notifications.every((notification) => notification.resolution === "approved"));
+});
+
+test("personnel profile approval creates separate approver and requester threads without profile values", () => {
+  const pending = ensurePersonnelProfileApprovalNotifications([], {
+    profileRequestId: "profile-1",
+    recipients: [{ username: "admin-a", name: "管理员A" }, { username: "admin-b", name: "管理员B" }],
+    requester: { username: "sales-a", name: "销售A" },
+    createdBy: "sales-a",
+    createdByName: "销售A",
+    createdAt: "2026-08-17T09:00:00.000Z",
+    changedFieldCount: 16,
+    notificationIds: ["notice-profile-a", "notice-profile-b"],
+    requesterNotificationId: "notice-profile-requester",
+    proposedProfile: { idCardNo: "must-not-leak" },
+  });
+  assert.equal(pending.notificationsCreated.length, 3);
+  assert.deepEqual(
+    pending.notifications.filter((item) => item.notificationRole === "approver")
+      .map((item) => item.recipientUsername).sort(),
+    ["admin-a", "admin-b"]
+  );
+  const requester = pending.notifications.find((item) => item.notificationRole === "requester");
+  assert.equal(requester.recipientUsername, "sales-a");
+  assert.equal(requester.readAt, "2026-08-17T09:00:00.000Z");
+  assert.equal(pending.notifications.some((item) => "proposedProfile" in item), false);
+});
+
+test("personnel profile resolution updates every copy and makes the requester result unread", () => {
+  const pending = ensurePersonnelProfileApprovalNotifications([], {
+    profileRequestId: "profile-2",
+    recipients: [{ username: "admin-a" }, { username: "admin-b" }],
+    requester: { username: "sales-a", name: "销售A" },
+    notificationIds: ["notice-a", "notice-b"],
+    requesterNotificationId: "notice-requester",
+  });
+  const resolved = resolvePersonnelProfileApprovalNotifications(pending.notifications, "profile-2", {
+    resolution: "rejected",
+    resolvedAt: "2026-08-17T10:00:00.000Z",
+    resolvedBy: "admin-a",
+    resolvedByName: "管理员A",
+    resolutionNote: "照片不清晰",
+  });
+  assert.equal(resolved.changed, true);
+  assert.ok(resolved.notifications.every((item) => item.status === "completed"));
+  assert.ok(resolved.notifications.every((item) => item.resolution === "rejected"));
+  const requester = resolved.notifications.find((item) => item.notificationRole === "requester");
+  assert.equal(requester.title, "人员资料修改已驳回");
+  assert.equal(requester.readAt, "");
+  const approvers = resolved.notifications.filter((item) => item.notificationRole === "approver");
+  assert.ok(approvers.every((item) => item.readAt === "2026-08-17T10:00:00.000Z"));
+});
+
+test("personnel profile approval adds a newly enabled administrator without duplicating existing threads", () => {
+  const first = ensurePersonnelProfileApprovalNotifications([], {
+    profileRequestId: "profile-2",
+    recipients: [{ username: "admin-a", name: "管理员甲" }],
+    requester: { username: "staff-a", name: "员工甲" },
+    notificationIds: ["notice-a"],
+    requesterNotificationId: "notice-requester",
+    changedFieldCount: 2,
+  });
+  const second = ensurePersonnelProfileApprovalNotifications(first.notifications, {
+    profileRequestId: "profile-2",
+    recipients: [
+      { username: "admin-a", name: "管理员甲" },
+      { username: "admin-b", name: "管理员乙" },
+    ],
+    requester: { username: "staff-a", name: "员工甲" },
+    notificationIds: ["unused", "notice-b"],
+    requesterNotificationId: "unused-requester",
+    changedFieldCount: 2,
+  });
+  assert.equal(second.changed, true);
+  assert.deepEqual(second.notificationsCreated.map((item) => item.id), ["notice-b"]);
+  assert.equal(second.notifications.filter((item) => item.profileRequestId === "profile-2").length, 3);
 });

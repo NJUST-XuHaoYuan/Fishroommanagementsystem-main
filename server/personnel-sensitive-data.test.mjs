@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   decryptPersonnelSensitiveFields,
   decryptPersonnelSensitiveValue,
+  decryptPersonnelProfileProposalFields,
   encryptPersonnelSensitiveFields,
   encryptPersonnelSensitiveValue,
+  encryptPersonnelProfileProposalFields,
   encryptedPersonnelSensitiveValueKid,
   parsePersonnelDataKeyring,
   rewrapPersonnelSensitiveFields,
@@ -83,4 +85,51 @@ test("keyring validation rejects malformed or incorrectly sized keys", () => {
   assert.throws(() => parsePersonnelDataKeyring("not-json"), /不是有效 JSON/);
   assert.throws(() => parsePersonnelDataKeyring(JSON.stringify({ activeKid: "a", keys: { a: "short" } })), /32 字节/);
   assert.throws(() => parsePersonnelDataKeyring(JSON.stringify({ activeKid: "missing", keys: { a: keyA } })), /不存在/);
+});
+
+test("pending personnel profile proposals encrypt identity and payroll values while keeping canonical attachment metadata", () => {
+  const profile = {
+    name: "张三",
+    gender: "male",
+    nativePlace: "江苏南京",
+    birthMonth: "1949-12",
+    educationLevel: "bachelor",
+    idCardNo: "11010519491231002X",
+    idCardFrontAttachment: {
+      id: "front",
+      kind: "id_card_front",
+      originalName: "身份证正面.jpg",
+      mime: "image/jpeg",
+      size: 1024,
+      storageKey: "must-not-leak",
+    },
+    idCardBackAttachment: { id: "back", kind: "id_card_back", originalName: "身份证反面.jpg", mime: "image/jpeg", size: 1024 },
+    educationProofAttachment: { id: "education", kind: "education_proof", originalName: "学历.jpg", mime: "image/jpeg", size: 1024 },
+    phone: "13800000000",
+    email: "zhang@example.com",
+    wechat: "zhang",
+    address: "南京市示例地址",
+    bankAccountName: "张三",
+    bankAccountNo: "6222021001116245",
+    bankName: "某银行南京支行",
+    futureSecret: "must-not-survive",
+  };
+  const encrypted = encryptPersonnelProfileProposalFields(profile, "person-1", keyringA);
+  for (const field of ["idCardNo", "bankAccountName", "bankAccountNo", "bankName"]) {
+    assert.notEqual(encrypted[field], profile[field]);
+    assert.equal(encryptedPersonnelSensitiveValueKid(encrypted[field]), "key-a");
+  }
+  assert.equal(encrypted.futureSecret, undefined);
+  assert.equal(encrypted.idCardFrontAttachment.storageKey, undefined);
+  const { futureSecret, ...knownProfile } = profile;
+  assert.deepEqual(decryptPersonnelProfileProposalFields(encrypted, "person-1", keyringA), {
+    ...knownProfile,
+    idCardFrontAttachment: {
+      id: "front",
+      kind: "id_card_front",
+      originalName: "身份证正面.jpg",
+      mime: "image/jpeg",
+      size: 1024,
+    },
+  });
 });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   backfillOrderContactPersonnelIds,
+  canViewPersonnelOperationLogs,
   hasPersonnelAccount,
   isPersonnelActiveProfile,
   isPersonnelAccountEnabled,
@@ -9,9 +10,16 @@ import {
   normalizePersonnelGender,
   normalizePersonnelIdCardNo,
   normalizePersonnelSensitiveFields,
+  missingPersonnelRecordFields,
   redactPersonnelForViewer,
   resolveActivePersonnelReference,
 } from "./personnel-rules.mjs";
+
+test("operation logs are server-projected only to enabled administrators", () => {
+  assert.equal(canViewPersonnelOperationLogs({ username: "admin", accessRole: "admin", accountEnabled: true }), true);
+  assert.equal(canViewPersonnelOperationLogs({ username: "staff", accessRole: "staff", accountEnabled: true }), false);
+  assert.equal(canViewPersonnelOperationLogs({ username: "admin", accessRole: "admin", accountEnabled: false }), false);
+});
 
 test("a personnel profile can exist without a system account", () => {
   const person = { name: "新员工", username: "", accountEnabled: false };
@@ -174,4 +182,64 @@ test("unknown future profile fields fail closed for staff and self projections",
   assert.equal(redactPersonnelForViewer(source, { canViewSensitive: true }).idCardNo, "11010519491231002X");
   assert.equal(redactPersonnelForViewer(source, { canViewSensitive: true }).bankAccountNo, "6222021001116245");
   assert.equal(redactPersonnelForViewer(source, { canViewSensitive: true }).futurePayrollSecret, undefined);
+});
+
+test("profile completeness covers self, employment and enabled account fields but remains private", () => {
+  const complete = {
+    id: "p-1",
+    personnelNo: "RY-0001",
+    name: "张三",
+    gender: "male",
+    nativePlace: "江苏南京",
+    birthMonth: "1949-12",
+    educationLevel: "bachelor",
+    idCardNo: "encrypted-id-card",
+    idCardFrontAttachment: { id: "front" },
+    idCardBackAttachment: { id: "back" },
+    educationProofAttachment: { id: "education" },
+    phone: "13800000000",
+    email: "zhang@example.com",
+    wechat: "zhang",
+    address: "南京市示例地址",
+    bankAccountName: "encrypted-name",
+    bankAccountNo: "encrypted-account",
+    bankName: "encrypted-bank",
+    department: "销售部",
+    role: "销售",
+    hireDate: "2026-01-01",
+    siteIds: ["nanjing"],
+    username: "zhang",
+    password: "scrypt$1$salt$hash",
+    accountEnabled: true,
+    accessRole: "staff",
+  };
+  assert.deepEqual(missingPersonnelRecordFields(complete), []);
+  assert.equal(redactPersonnelForViewer(complete).profileComplete, undefined);
+  const ownProjection = redactPersonnelForViewer(complete, { canViewPrivate: true, canViewAccount: true });
+  assert.equal(ownProjection.profileComplete, true);
+  assert.deepEqual(ownProjection.missingProfileFields, []);
+
+  const incomplete = { ...complete, department: "", siteIds: [], accountEnabled: false };
+  assert.deepEqual(missingPersonnelRecordFields(incomplete), ["department", "siteIds", "systemAccount"]);
+  const incompleteProjection = redactPersonnelForViewer(incomplete, { canViewPrivate: true });
+  assert.equal(incompleteProjection.profileComplete, false);
+  assert.deepEqual(incompleteProjection.missingProfileFields, ["department", "siteIds", "systemAccount"]);
+});
+
+test("sensitive projection includes only canonical identity, payroll and attachment metadata fields", () => {
+  const source = {
+    id: "p-1",
+    idCardNo: "encrypted-id",
+    idCardFrontAttachment: { id: "front", kind: "id_card_front" },
+    idCardBackAttachment: { id: "back", kind: "id_card_back" },
+    educationProofAttachment: { id: "education", kind: "education_proof" },
+    bankAccountName: "encrypted-name",
+    bankAccountNo: "encrypted-account",
+    bankName: "encrypted-bank",
+    privateAttachmentStoragePath: "/must/not/leak",
+  };
+  const projected = redactPersonnelForViewer(source, { canViewSensitive: true });
+  assert.equal(projected.idCardFrontAttachment.id, "front");
+  assert.equal(projected.educationProofAttachment.id, "education");
+  assert.equal(projected.privateAttachmentStoragePath, undefined);
 });

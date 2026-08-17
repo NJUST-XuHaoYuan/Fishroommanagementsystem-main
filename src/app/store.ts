@@ -30,6 +30,7 @@ export type ModulePermission = Record<PermissionAction, boolean>;
 export type PermissionSet = Record<PermissionModule, ModulePermission>;
 
 export type AuthAccountPermissionSummary = {
+  personnelId: string;
   username: string;
   accessRole: Role;
   accountEnabled: boolean;
@@ -609,6 +610,88 @@ export type Customer = {
   notes: string;
 };
 
+export type PersonnelProfileAttachmentKind =
+  | "id_card_front"
+  | "id_card_back"
+  | "education_proof";
+
+export type PersonnelProfileAttachment = {
+  id: string;
+  kind: PersonnelProfileAttachmentKind;
+  originalName?: string;
+  mime?: string;
+  size?: number;
+  uploadedAt?: string;
+};
+
+export type PersonnelEducationLevel =
+  | "high_school_or_below"
+  | "college"
+  | "bachelor"
+  | "master"
+  | "doctorate";
+
+export type PersonnelSelfProfileForm = {
+  name: string;
+  gender: "" | "male" | "female" | "other";
+  nativePlace: string;
+  birthMonth: string;
+  educationLevel: "" | PersonnelEducationLevel;
+  idCardNo: string;
+  idCardFrontAttachment: PersonnelProfileAttachment | null;
+  idCardBackAttachment: PersonnelProfileAttachment | null;
+  educationProofAttachment: PersonnelProfileAttachment | null;
+  phone: string;
+  email: string;
+  wechat: string;
+  address: string;
+  bankAccountName: string;
+  bankAccountNo: string;
+  bankName: string;
+};
+
+export type PersonnelEmploymentSummary = {
+  personnelNo?: string;
+  department?: string;
+  role?: string;
+  hireDate?: string;
+  siteIds?: string[];
+  employmentStatus?: "active" | "resigned";
+};
+
+export type PersonnelAccountSummary = {
+  personnelId?: string;
+  username?: string;
+  accountEnabled?: boolean;
+  accessRole?: Role;
+};
+
+export type PersonnelProfileRequestStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "superseded"
+  | "cancelled";
+
+export type PersonnelProfileRequest = {
+  id: string;
+  status: PersonnelProfileRequestStatus;
+  createdAt?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  resolutionNote?: string;
+  changedFields?: string[];
+};
+
+export type PersonnelSelfProfile = PersonnelSelfProfileForm & {
+  personnelNo?: string;
+  employment: PersonnelEmploymentSummary;
+  account: PersonnelAccountSummary;
+  profileRevision: string;
+  missingFields?: string[];
+};
+
 export type Personnel = {
   id: string;
   personnelNo?: string;
@@ -622,6 +705,17 @@ export type Personnel = {
   employmentStatus?: "active" | "resigned";
   resignedAt?: string;
   gender?: "" | "male" | "female" | "other";
+  nativePlace?: string;
+  birthMonth?: string;
+  educationLevel?: "" | PersonnelEducationLevel;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  idCardFrontAttachment?: PersonnelProfileAttachment | null;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  idCardBackAttachment?: PersonnelProfileAttachment | null;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  educationProofAttachment?: PersonnelProfileAttachment | null;
+  profileComplete?: boolean;
+  missingProfileFields?: string[];
   birthDate?: string;
   department?: string;
   role: string;

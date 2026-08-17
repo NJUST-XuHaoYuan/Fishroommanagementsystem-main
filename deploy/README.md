@@ -44,8 +44,8 @@ UPLOADS_DIR=/srv/fishroom/uploads
 
 - 会话密钥可用 `openssl rand -base64 48` 生成。
 - 人员敏感数据密钥必须单独用 `openssl rand -base64 32` 生成，不能复用会话密钥。
-- 身份证号、银行卡开户名、银行卡号、开户行使用 AES-256-GCM 字段级加密。
-- 密钥轮换时，先在 `keys` 中同时保留旧、新密钥，再切换 `activeKid`；首次升级启动会在事务中重新加密旧值。
+- 身份证号、银行卡开户名、银行卡号、开户行使用 AES-256-GCM 字段级加密；身份证正反面和学历证明图片按附件独立加密后保存在 `UPLOADS_DIR/.personnel-private`，只能通过鉴权接口访问。
+- 密钥轮换必须分阶段进行：先让所有实例和回滚配置同时持有旧、新密钥且保持旧 `activeKid`；再切换新 `activeKid` 并逐一重启。健康检查通过表示数据库字段和已登记私密附件均已完成重新加密。确认所有实例、附件及仍在保留期内的备份都完成过渡后，才能移除旧 `kid`。
 - `/srv/fishroom/config/production.env` 和真实密钥不得放入 Git、发版包、聊天记录或镜像层。
 - 普通升级必须继续使用这同一份生产配置，不能再次从 `deploy/.env.example` 创建或覆盖。
 - 已有数据库卷上不能随意更换 `POSTGRES_PASSWORD`；人员密钥轮换时不能删除任何仍用于历史数据的旧密钥。两者都只能按受控轮换流程修改。
@@ -79,7 +79,7 @@ docker compose \
 
 ## 4. 升级前备份并启动
 
-生产升级前先对数据库和 `UPLOADS_DIR` 指向的稳定上传目录做独立备份，并记录当前三个镜像 digest 作为回滚点。本源码包不携带生产数据或备份。升级时继续复用上一版的 `/srv/fishroom/config/production.env`，不要复制新版示例文件覆盖它。
+生产升级前先对数据库和 `UPLOADS_DIR` 指向的稳定上传目录做独立备份（该目录包含加密的人员证件与学历附件），并记录当前三个镜像 digest 作为回滚点。本源码包不携带生产数据或备份。升级时继续复用上一版的 `/srv/fishroom/config/production.env`，不要复制新版示例文件覆盖它。
 
 ```bash
 docker compose \
