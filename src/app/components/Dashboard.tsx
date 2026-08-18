@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, TankGroup, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Textarea } from "./ui/textarea";
-import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert } from "lucide-react";
+import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert, BadgeDollarSign } from "lucide-react";
 import { getInventoryOutStockIds, isPhysicallyInTank, normalizeInventoryId } from "../utils/inventory";
 import { toast } from "sonner";
-import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
+import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName, stockMatchesSite } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 import { getBillableShippingFee } from "../utils/orderFees";
 import { dashboardOrderAdjustmentTotals } from "../../../server/dashboard-sales-metrics.mjs";
+import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-fish-value.mjs";
 
 function todayDateString(): string {
   const now = new Date();
@@ -171,6 +172,9 @@ type DashboardSummary = {
   inTankSold: number;
   inTankSick: number;
   inTankNormal: number;
+  healthyFishStockValue?: number;
+  healthyFishStockCount?: number;
+  healthyFishUnpricedCount?: number;
   tankGroupCount: number;
   subTankCount: number;
   activeOrders: number;
@@ -186,6 +190,7 @@ type FocusMode = "species" | "product";
 type FocusData = {
   species: Species[];
   products: Product[];
+  tankGroups: TankGroup[];
   stock: StockItem[];
   orders: Order[];
   shipments: Shipment[];
@@ -968,7 +973,7 @@ export function Dashboard() {
   useEffect(() => {
     let cancelled = false;
     setFocusLoading(true);
-    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords,customers,personnel&lite=species", { headers: authJsonHeaders() })
+    fetch("/api/state/slice?keys=species,products,tankGroups,stock,orders,shipments,lossRecords,customers,personnel&lite=species", { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
@@ -977,6 +982,7 @@ export function Dashboard() {
         setFocusData({
           species: Array.isArray(data.species) ? data.species : [],
           products: Array.isArray(data.products) ? data.products : [],
+          tankGroups: Array.isArray(data.tankGroups) ? data.tankGroups : [],
           stock: Array.isArray(data.stock) ? data.stock : [],
           orders: Array.isArray(data.orders) ? data.orders : [],
           shipments: Array.isArray(data.shipments) ? data.shipments : [],
@@ -1452,6 +1458,7 @@ export function Dashboard() {
     const source: FocusData = {
       species: focusData?.species ?? dashboardSpecies,
       products: focusData?.products ?? dashboardProducts,
+      tankGroups: focusData?.tankGroups ?? dashboardTankGroups,
       stock: focusData?.stock ?? dashboardStock,
       orders: focusData?.orders ?? dashboardOrders,
       shipments: focusData?.shipments ?? dashboardShipments,
@@ -1462,12 +1469,14 @@ export function Dashboard() {
     };
     const scope = normalizeSiteScope(dashboardSiteId);
     if (scope === ALL_SITE_ID) return source;
+    const tankGroups = source.tankGroups.filter((group) => matchesSite(group, scope));
     const orders = source.orders.filter((order) => matchesSite(order, scope));
     const orderIds = new Set(orders.map((order) => order.id));
-    const stock = source.stock.filter((item) => matchesSite(item, scope));
+    const stock = source.stock.filter((item) => stockMatchesSite(item, scope, source.tankGroups));
     const stockIds = new Set(stock.map((item) => normalizeInventoryId(item.id)));
     return {
       ...source,
+      tankGroups,
       stock,
       inventoryProjection: {
         outStockIds: (source.inventoryProjection?.outStockIds ?? [])
@@ -1486,6 +1495,7 @@ export function Dashboard() {
     focusData,
     dashboardSpecies,
     dashboardProducts,
+    dashboardTankGroups,
     dashboardStock,
     dashboardOrders,
     dashboardShipments,
@@ -1494,6 +1504,50 @@ export function Dashboard() {
     dashboardPersonnel,
     dashboardInventoryProjection,
   ]);
+
+  const fallbackHealthyFishStockMetrics = useMemo(() => {
+    const fulfilledStockIds = getInventoryOutStockIds({
+      shipments: focusSource.shipments,
+      orders: focusSource.orders,
+      inventoryProjection: focusSource.inventoryProjection,
+    });
+    try {
+      return healthyFishInventoryMetrics({
+        stock: focusSource.stock,
+        products: focusSource.products,
+        species: focusSource.species,
+        outStockIds: fulfilledStockIds,
+      });
+    } catch (error) {
+      console.error("Failed to calculate healthy fish inventory value:", error);
+      return null;
+    }
+  }, [focusSource]);
+  const summaryHealthyFishStockValue = Number(summary?.healthyFishStockValue);
+  const summaryHealthyFishStockCount = Number(summary?.healthyFishStockCount);
+  const summaryHealthyFishUnpricedCount = Number(summary?.healthyFishUnpricedCount);
+  const summaryMatchesDashboardScope = normalizeSiteScope(summary?.siteId) === normalizeSiteScope(dashboardSiteId);
+  const summaryHealthyFishStockValueCents = Math.round((summaryHealthyFishStockValue + Number.EPSILON) * 100);
+  const hasValidSummaryHealthyFishMetrics = summaryMatchesDashboardScope &&
+    Number.isFinite(summaryHealthyFishStockValue) &&
+    summaryHealthyFishStockValue >= 0 &&
+    Number.isSafeInteger(summaryHealthyFishStockValueCents) &&
+    Number.isSafeInteger(summaryHealthyFishStockCount) &&
+    summaryHealthyFishStockCount >= 0 &&
+    Number.isSafeInteger(summaryHealthyFishUnpricedCount) &&
+    summaryHealthyFishUnpricedCount >= 0;
+  const healthyFishStockMetrics = hasValidSummaryHealthyFishMetrics
+    ? {
+        value: summaryHealthyFishStockValue,
+        count: summaryHealthyFishStockCount,
+        unpricedCount: summaryHealthyFishUnpricedCount,
+      }
+    : fallbackHealthyFishStockMetrics;
+  const healthyFishStockDescription = !healthyFishStockMetrics
+    ? "售价数据异常，暂无法安全计算"
+    : healthyFishStockMetrics.unpricedCount > 0
+      ? `按当前单鱼售价估算；${healthyFishStockMetrics.unpricedCount} 条未定价未计入`
+      : "按当前单鱼售价估算，不含已售和疾病鱼";
 
   const focusAnalysis = useMemo(() => {
     const products = focusSource.products;
@@ -1908,16 +1962,23 @@ export function Dashboard() {
   };
 
   const cards = [
-    { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote, color: "bg-emerald-500" },
-    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw, color: "bg-rose-500" },
-    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert, color: "bg-amber-500" },
-    { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck, color: "bg-indigo-500" },
-    { label: "在缸鱼类", value: inFishStock, icon: Fish, color: "bg-sky-500" },
-    { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch, color: "bg-emerald-500" },
-    { label: "疾病观察中", value: sick, icon: AlertTriangle, color: "bg-red-500" },
-    { label: "进行中订单", value: activeOrders, icon: ShoppingBag, color: "bg-orange-500" },
-    { label: "待发/运输中", value: pendingShipments, icon: Truck, color: "bg-purple-500" },
-    { label: "销售总额(¥)", value: totalRevenue.toFixed(0), icon: TrendingUp, color: "bg-teal-500" },
+    { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote },
+    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw },
+    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert },
+    { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck },
+    {
+      label: "库存健康鱼总价值",
+      value: healthyFishStockMetrics ? formatMoney(healthyFishStockMetrics.value) : "暂不可用",
+      description: healthyFishStockDescription,
+      icon: BadgeDollarSign,
+      className: "sm:col-span-2",
+    },
+    { label: "在缸鱼类", value: inFishStock, icon: Fish },
+    { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch },
+    { label: "疾病观察中", value: sick, icon: AlertTriangle },
+    { label: "进行中订单", value: activeOrders, icon: ShoppingBag },
+    { label: "待发/运输中", value: pendingShipments, icon: Truck },
+    { label: "销售总额(¥)", value: totalRevenue.toFixed(0), icon: TrendingUp },
   ];
 
   return (
@@ -1990,17 +2051,20 @@ export function Dashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
         {cards.map((c) => {
           const Icon = c.icon;
           return (
-            <Card key={c.label} className="fishroom-card fishroom-metric-card p-5 flex items-center gap-4">
-              <div className="fishroom-metric-icon size-12 rounded-xl flex items-center justify-center">
-                <Icon className="size-6" />
+            <Card key={c.label} className={`fishroom-card fishroom-metric-card flex items-center gap-4 p-5 ${c.className ?? ""}`}>
+              <div className="fishroom-metric-icon flex size-12 shrink-0 items-center justify-center rounded-xl">
+                <Icon aria-hidden="true" className="size-6" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="text-xs font-medium text-muted-foreground">{c.label}</div>
-                <div className="mt-1 text-2xl font-semibold tracking-normal">{c.value}</div>
+                <div className="mt-1 text-2xl font-semibold tracking-normal tabular-nums">{c.value}</div>
+                {c.description ? (
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">{c.description}</div>
+                ) : null}
               </div>
             </Card>
           );

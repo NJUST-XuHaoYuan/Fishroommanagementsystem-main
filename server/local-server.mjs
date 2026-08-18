@@ -109,6 +109,10 @@ import {
   shipmentPatchRequiresAssignmentValidation,
 } from "./shipment-inventory-integrity.mjs";
 import { dashboardOrderAdjustmentTotals } from "./dashboard-sales-metrics.mjs";
+import {
+  healthyFishInventoryMetrics,
+  isFishInventoryItem,
+} from "./dashboard-healthy-fish-value.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
   resolveShippingCarrier,
@@ -1174,28 +1178,6 @@ function parseFinanceDays(value) {
   return Math.min(MAX_FINANCE_DAYS, Math.max(MIN_FINANCE_DAYS, days));
 }
 
-function isFishCategory(category = "") {
-  if (/(活石|活性炭|吸附|滤材|耗材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(category)) return false;
-  if (category.includes("虾虎") || category.includes("鰕虎")) return true;
-  return !/(虾|蟹|螺|贝|海胆|珊瑚|海星|海葵)/.test(category);
-}
-
-function isFishInventoryItem(product = null, species = null) {
-  const commonNames = Array.isArray(species?.commonNames) ? species.commonNames : [];
-  const text = [
-    species?.category,
-    species?.name,
-    species?.scientificName,
-    ...commonNames,
-    product?.name,
-    product?.size,
-    product?.origin,
-    product?.notes,
-  ].filter(Boolean).join(" ");
-  if (/(耗材|活石|活石头|珊瑚|活性炭|吸附|滤材|器材|设备|材料|药|盐|饲料|鱼粮|试剂)/.test(text)) return false;
-  return isFishCategory(String(species?.category ?? text));
-}
-
 function buildLossRows(state = {}, productById = new Map(), speciesById = new Map()) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const lossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
@@ -1418,6 +1400,12 @@ function buildDashboardSummary(state = {}, options = {}) {
       const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
       return isFishInventoryItem(product, itemSpecies);
     });
+  const healthyFishInventory = healthyFishInventoryMetrics({
+    stock,
+    products,
+    species,
+    outStockIds: shippedIds,
+  });
   const todayPayments = orders.flatMap((order) =>
     (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
       isPaymentVerified(payment) && String(payment?.time ?? "").slice(0, 10) === today
@@ -1483,6 +1471,9 @@ function buildDashboardSummary(state = {}, options = {}) {
     inTankSold: inTankFishStock.filter((item) => item?.sold).length,
     inTankSick: inTankFishStock.filter((item) => !item?.sold && item?.status === "sick").length,
     inTankNormal: inTankFishStock.filter((item) => !item?.sold && item?.status !== "sick").length,
+    healthyFishStockValue: healthyFishInventory.value,
+    healthyFishStockCount: healthyFishInventory.count,
+    healthyFishUnpricedCount: healthyFishInventory.unpricedCount,
     tankGroupCount: tankGroups.length,
     subTankCount: tankGroups.reduce((count, group) => count + (Array.isArray(group?.subTanks) ? group.subTanks.length : 0), 0),
     activeOrders: orders.filter((order) => !["cancelled", "completed", "damaged"].includes(order?.status)).length,
