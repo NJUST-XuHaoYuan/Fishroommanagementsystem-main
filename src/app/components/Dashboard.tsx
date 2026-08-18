@@ -5,7 +5,7 @@ import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Textarea } from "./ui/textarea";
 import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert } from "lucide-react";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { getInventoryOutStockIds, isPhysicallyInTank, normalizeInventoryId } from "../utils/inventory";
 import { toast } from "sonner";
 import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
@@ -192,6 +192,10 @@ type FocusData = {
   lossRecords: StockLossRecord[];
   customers: Customer[];
   personnel: Personnel[];
+  inventoryProjection?: {
+    outStockIds: string[];
+    outDateByStockId?: Record<string, string>;
+  };
 };
 
 type FocusOption = {
@@ -979,6 +983,7 @@ export function Dashboard() {
           lossRecords: Array.isArray(data.lossRecords) ? data.lossRecords : [],
           customers: Array.isArray(data.customers) ? data.customers : [],
           personnel: Array.isArray(data.personnel) ? data.personnel : [],
+          inventoryProjection: data.inventoryProjection,
         });
       })
       .catch((error) => {
@@ -1007,7 +1012,12 @@ export function Dashboard() {
   const dashboardLossRecords = focusData?.lossRecords ?? (Array.isArray(state.lossRecords) ? state.lossRecords : []);
   const dashboardPersonnel = focusData?.personnel ?? (Array.isArray(state.personnel) ? state.personnel : []);
   const dashboardCustomers = focusData?.customers ?? (Array.isArray(state.customers) ? state.customers : []);
-  const shippedOutStockIds = getShippedOutStockIds(dashboardShipments);
+  const dashboardInventoryProjection = focusData?.inventoryProjection ?? state.inventoryProjection;
+  const shippedOutStockIds = getInventoryOutStockIds({
+    shipments: dashboardShipments,
+    orders: dashboardOrders,
+    inventoryProjection: dashboardInventoryProjection,
+  });
   const today = todayDateString();
   const todayDate = new Date(`${today}T00:00:00`);
 
@@ -1141,12 +1151,18 @@ export function Dashboard() {
     const current = lossDateByStockId.get(item.id);
     if (!current || itemLossDate < current) lossDateByStockId.set(item.id, itemLossDate);
   }
-  const shippedDateByStockId = new Map<string, string>();
+  const shippedDateByStockId = new Map<string, string>(
+    Object.entries(dashboardInventoryProjection?.outDateByStockId ?? {})
+      .map(([id, date]) => [normalizeInventoryId(id), String(date ?? "").slice(0, 10)] as const)
+      .filter(([id, date]) => Boolean(id) && /^\d{4}-\d{2}-\d{2}$/.test(date))
+  );
   for (const shipment of dashboardShipments) {
     if (shipment.status === "preparing") continue;
-    const date = String(shipment.shipDate ?? shipment.outboundDate ?? shipment.createdAt ?? "").slice(0, 10);
+    const date = String(shipment.outboundDate ?? shipment.shipDate ?? shipment.createdAt ?? "").slice(0, 10);
     if (!date) continue;
-    for (const stockItemId of shipment.itemStockIds ?? []) {
+    for (const rawStockItemId of shipment.itemStockIds ?? []) {
+      const stockItemId = normalizeInventoryId(rawStockItemId);
+      if (!stockItemId) continue;
       const current = shippedDateByStockId.get(stockItemId);
       if (!current || date < current) shippedDateByStockId.set(stockItemId, date);
     }
@@ -1169,7 +1185,7 @@ export function Dashboard() {
       if (!inDate || inDate > date) return false;
       const lossDate = lossDateByStockId.get(item.id);
       if (lossDate && lossDate < date) return false;
-      const shippedDate = shippedDateByStockId.get(item.id);
+      const shippedDate = shippedDateByStockId.get(normalizeInventoryId(item.id));
       if (shippedDate && shippedDate < date) return false;
       return true;
     }).length;
@@ -1440,21 +1456,44 @@ export function Dashboard() {
       orders: focusData?.orders ?? dashboardOrders,
       shipments: focusData?.shipments ?? dashboardShipments,
       lossRecords: focusData?.lossRecords ?? dashboardLossRecords,
+      customers: focusData?.customers ?? dashboardCustomers,
+      personnel: focusData?.personnel ?? dashboardPersonnel,
+      inventoryProjection: focusData?.inventoryProjection ?? dashboardInventoryProjection,
     };
     const scope = normalizeSiteScope(dashboardSiteId);
     if (scope === ALL_SITE_ID) return source;
     const orders = source.orders.filter((order) => matchesSite(order, scope));
     const orderIds = new Set(orders.map((order) => order.id));
     const stock = source.stock.filter((item) => matchesSite(item, scope));
-    const stockIds = new Set(stock.map((item) => item.id));
+    const stockIds = new Set(stock.map((item) => normalizeInventoryId(item.id)));
     return {
       ...source,
       stock,
+      inventoryProjection: {
+        outStockIds: (source.inventoryProjection?.outStockIds ?? [])
+          .filter((id) => stockIds.has(normalizeInventoryId(id))),
+        outDateByStockId: Object.fromEntries(
+          Object.entries(source.inventoryProjection?.outDateByStockId ?? {})
+            .filter(([id]) => stockIds.has(normalizeInventoryId(id)))
+        ),
+      },
       orders,
       shipments: source.shipments.filter((shipment) => matchesSite(shipment, scope) || orderIds.has(shipment.orderId)),
       lossRecords: source.lossRecords.filter((record) => matchesSite(record, scope) || stockIds.has(record.stockItemId)),
     };
-  }, [dashboardSiteId, focusData, dashboardSpecies, dashboardProducts, dashboardStock, dashboardOrders, dashboardShipments, dashboardLossRecords]);
+  }, [
+    dashboardSiteId,
+    focusData,
+    dashboardSpecies,
+    dashboardProducts,
+    dashboardStock,
+    dashboardOrders,
+    dashboardShipments,
+    dashboardLossRecords,
+    dashboardCustomers,
+    dashboardPersonnel,
+    dashboardInventoryProjection,
+  ]);
 
   const focusAnalysis = useMemo(() => {
     const products = focusSource.products;
@@ -1464,7 +1503,11 @@ export function Dashboard() {
     const shipments = focusSource.shipments;
     const focusProductById = new Map(products.map((product) => [product.id, product]));
     const focusSpeciesById = new Map(species.map((item) => [item.id, item]));
-    const shippedIds = getShippedOutStockIds(shipments);
+    const shippedIds = getInventoryOutStockIds({
+      shipments,
+      orders,
+      inventoryProjection: focusSource.inventoryProjection,
+    });
     const physicalStock = stock.filter((item) => isPhysicallyInTank(item, shippedIds));
     const physicalCountByProduct = new Map<string, number>();
     for (const item of physicalStock) {
@@ -1622,6 +1665,7 @@ export function Dashboard() {
       tankGroups: dashboardTankGroups,
       stock: dashboardStock,
       shipments: dashboardShipments,
+      inventoryProjection: dashboardInventoryProjection,
     };
     try {
       const response = await fetch("/api/state/slice?keys=species,products,tankGroups,stock,shipments&lite=species", { headers: authJsonHeaders() });
@@ -1634,6 +1678,7 @@ export function Dashboard() {
         tankGroups: Array.isArray(data.tankGroups) ? data.tankGroups : exportData.tankGroups,
         stock: Array.isArray(data.stock) ? data.stock : exportData.stock,
         shipments: Array.isArray(data.shipments) ? data.shipments : exportData.shipments,
+        inventoryProjection: data.inventoryProjection ?? exportData.inventoryProjection,
       };
     } catch (error) {
       console.error("Failed to load available fish list data:", error);
@@ -1656,7 +1701,10 @@ export function Dashboard() {
 
     const exportProductById = new Map(exportData.products.map((product) => [product.id, product]));
     const exportSpeciesById = new Map(exportData.species.map((species) => [species.id, species]));
-    const exportShippedOutStockIds = getShippedOutStockIds(exportData.shipments);
+    const exportShippedOutStockIds = getInventoryOutStockIds({
+      shipments: exportData.shipments,
+      inventoryProjection: exportData.inventoryProjection,
+    });
     const exportTankName = (subTankId?: string) => {
       if (!subTankId) return "—";
       for (const group of exportData.tankGroups) {

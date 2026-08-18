@@ -28,7 +28,7 @@ import {
   useStore,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
-import { getInventoryHiddenStockIds, isVisibleInStockInventory } from "../utils/inventory";
+import { getInventoryOutStockIds, isVisibleInStockInventory, normalizeInventoryId } from "../utils/inventory";
 import { orderItemKeepsInventory } from "../utils/stockOrders";
 import { matchesSite } from "../utils/sites";
 import { usePermission } from "../utils/permissions";
@@ -245,8 +245,8 @@ export function InventoryAdjustmentDialog() {
   const saveSequenceRef = useRef(0);
 
   const hiddenStockIds = useMemo(
-    () => getInventoryHiddenStockIds(state.shipments, state.orders),
-    [state.orders, state.shipments],
+    () => getInventoryOutStockIds(state),
+    [state.inventoryProjection?.outStockIds, state.orders, state.shipments],
   );
   const siteGroups = useMemo(
     () => state.tankGroups.filter((group) => !workSiteId || matchesSite(group, workSiteId)),
@@ -297,9 +297,7 @@ export function InventoryAdjustmentDialog() {
     return counts;
   }, [state.orders]);
 
-  const stockLockedByShipment = (id: string) => state.shipments.some((shipment) =>
-    shipment.status !== "preparing" && (shipment.itemStockIds ?? []).includes(id)
-  );
+  const stockLockedByShipment = (id: string) => hiddenStockIds.has(normalizeInventoryId(id));
   const stockLockedByProtectedOrder = (id: string) => state.orders.some((order) =>
     !["cancelled", "pending", "confirmed"].includes(order.status) &&
     order.items.some((item) => item.stockItemId === id && orderItemKeepsInventory(item))

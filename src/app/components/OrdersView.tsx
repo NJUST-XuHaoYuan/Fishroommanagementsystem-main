@@ -36,7 +36,7 @@ import {
   CircleDollarSign, UploadCloud,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
@@ -291,6 +291,7 @@ function applyOrderApiResult(
     order?: Store["orders"][number];
     shipment?: Store["shipments"][number];
     stock?: Store["stock"];
+    inventoryProjection?: Store["inventoryProjection"];
     operationLog?: Store["operationLogs"][number];
   },
   options: {
@@ -310,6 +311,7 @@ function applyOrderApiResult(
       orders: mergeApiRecord(orders, result.order),
       shipments: mergeApiRecord(shipments, result.shipment),
       stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
       operationLogs: mergeOperationLog(current, result.operationLog),
     };
   });
@@ -2383,7 +2385,7 @@ function ReportDamageDialog({
 
   const getProduct = (id: string) => state.products.find((product) => product.id === id);
   const getStockItem = (id: string) => state.stock.find((stock) => stock.id === id);
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
   const productSummary = (product?: Product) =>
     [
       product?.size ? `规格 ${product.size}` : "",
@@ -3233,7 +3235,7 @@ function StockPickerBioDialog({
   };
   const tankName = subTankName(item?.subTankId);
   const targetSubTanks = state.tankGroups.find((group) => group.id === targetGroupId)?.subTanks ?? [];
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
 
   const timeline = item
     ? [
@@ -5743,7 +5745,7 @@ function StockPickerDialog({
     return [...map.entries()];
   };
 
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
   const isAvail = (s: StockItem) =>
     !s.sold && !excludeIds.has(s.id) && isPhysicallyInTank(s, shippedOutStockIds);
   const unavailableReason = (s: StockItem) => {

@@ -129,6 +129,7 @@ function applyShipmentApiResult(
     shipments?: Store["shipments"];
     shipment?: Store["shipments"][number];
     stock?: Store["stock"];
+    inventoryProjection?: Store["inventoryProjection"];
     operationLog?: Store["operationLogs"][number];
   }
 ) {
@@ -139,6 +140,7 @@ function applyShipmentApiResult(
       orders: Array.isArray(result.orders) ? result.orders : current.orders,
       shipments: mergeShipmentRecord(shipments, result.shipment),
       stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
       operationLogs: mergeOperationLog(current, result.operationLog),
     };
   });

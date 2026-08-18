@@ -905,6 +905,11 @@ export function configuredPaymentMethod(
 
 export type Store = {
   user: User;
+  /** 服务端在权限裁剪前生成的只读库存履约投影，不属于可持久化业务状态。 */
+  inventoryProjection?: {
+    outStockIds: string[];
+    outDateByStockId?: Record<string, string>;
+  };
   systemSettings: SystemSettings;
   sites: Site[];
   personnel: Personnel[];

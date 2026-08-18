@@ -100,7 +100,16 @@ import {
   countsAsCompletionShipment,
   shipmentIsResolvedForCompletion,
 } from "./shipment-completion-rules.mjs";
+import {
+  assertActiveShipmentInventoryAssignment,
+  assertShipmentInventoryIdentityUnchanged,
+  inventoryProjectionForStock,
+  normalizeShipmentInventoryId,
+  projectedShippedOutStockIds,
+  shipmentPatchRequiresAssignmentValidation,
+} from "./shipment-inventory-integrity.mjs";
 import { dashboardOrderAdjustmentTotals } from "./dashboard-sales-metrics.mjs";
+import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
   resolveShippingCarrier,
   validateShippingCarrierSettings,
@@ -487,9 +496,25 @@ function stockMatchesAnyVisibleSite(state = {}, item = {}, visibleSiteIds = []) 
   return visibleSiteIds.some((siteId) => stockMatchesSite(state, item, siteId));
 }
 
+const trustedInventoryProjectionStates = new WeakSet();
+
+function stateWithInventoryProjection(state = {}, stock = state?.stock, overrides = {}) {
+  const next = {
+    ...state,
+    ...overrides,
+    inventoryProjection: inventoryProjectionForStock(state, stock, {
+      inheritProjection: trustedInventoryProjectionStates.has(state),
+    }),
+  };
+  trustedInventoryProjectionStates.add(next);
+  return next;
+}
+
 function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
   const scope = normalizeSiteScope(siteId);
-  if (scope === ALL_SITE_ID) return state;
+  if (scope === ALL_SITE_ID) {
+    return stateWithInventoryProjection(state);
+  }
   const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : []).filter((item) => matchesSite(item, scope));
   const subTankIds = new Set(tankGroups.flatMap((group) =>
     (Array.isArray(group?.subTanks) ? group.subTanks : []).map((tank) => String(tank?.id ?? "")).filter(Boolean)
@@ -498,8 +523,7 @@ function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
   const orderIds = new Set(orders.map((order) => String(order?.id ?? "")).filter(Boolean));
   const stock = (Array.isArray(state.stock) ? state.stock : []).filter((item) => stockMatchesSite(state, item, scope));
   const stockIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
-  return {
-    ...state,
+  return stateWithInventoryProjection(state, stock, {
     tankGroups,
     batches: (Array.isArray(state.batches) ? state.batches : []).filter((item) => matchesSite(item, scope)),
     stock,
@@ -522,14 +546,18 @@ function siteFilteredState(state = {}, siteId = ALL_SITE_ID) {
     shipments: (Array.isArray(state.shipments) ? state.shipments : []).filter((item) =>
       matchesSite(item, scope) || orderIds.has(String(item?.orderId ?? ""))
     ),
-  };
+  });
 }
 
 function siteVisibilityFilteredState(state = {}, account = {}) {
-  if (!account || account.accessRole === "admin") return state;
+  if (!account || account.accessRole === "admin") {
+    return stateWithInventoryProjection(state);
+  }
   const sites = getSitesFromState(state);
   const visibleSiteIds = visibleSiteIdsForAccount(account, state);
-  if (visibleSiteIds.length >= sites.length) return state;
+  if (visibleSiteIds.length >= sites.length) {
+    return stateWithInventoryProjection(state);
+  }
   const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : []).filter((item) =>
     matchesAnyVisibleSite(item, visibleSiteIds)
   );
@@ -544,8 +572,7 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
     stockMatchesAnyVisibleSite(state, item, visibleSiteIds)
   );
   const stockIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
-  return {
-    ...state,
+  return stateWithInventoryProjection(state, stock, {
     tankGroups,
     batches: (Array.isArray(state.batches) ? state.batches : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds)
@@ -570,6 +597,13 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
     shipments: (Array.isArray(state.shipments) ? state.shipments : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || orderIds.has(String(item?.orderId ?? ""))
     ),
+  });
+}
+
+function inventoryProjectionForResponse(state = {}, req = {}) {
+  return siteVisibilityFilteredState(state, req?.auth?.account).inventoryProjection ?? {
+    outStockIds: [],
+    outDateByStockId: {},
   };
 }
 
@@ -804,16 +838,15 @@ function buildStatePatch(current = {}, patch = {}, basePatch = {}, incomingLogs 
 }
 
 function shippedOutStockIds(state = {}) {
-  return new Set(
-    (Array.isArray(state.shipments) ? state.shipments : [])
-      .filter((shipment) => shipment?.status !== "preparing")
-      .flatMap((shipment) => Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [])
-      .map(String)
-  );
+  return projectedShippedOutStockIds({
+    shipments: state.shipments,
+    orders: state.orders,
+    inventoryProjection: trustedInventoryProjectionStates.has(state) ? state.inventoryProjection : {},
+  });
 }
 
 function isPhysicallyInTank(item, shippedIds) {
-  return item && !item.lost && !shippedIds.has(String(item.id));
+  return item && !item.lost && !shippedIds.has(normalizeShipmentInventoryId(item.id));
 }
 
 function isPublicMediaUrl(value) {
@@ -1217,13 +1250,20 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
     if (!current || itemLossDate < current) lossDateByStockId.set(stockId, itemLossDate);
   }
 
-  const shippedDateByStockId = new Map();
+  const shippedDateByStockId = new Map(
+    Object.entries(
+      state?.inventoryProjection?.outDateByStockId && typeof state.inventoryProjection.outDateByStockId === "object"
+        ? state.inventoryProjection.outDateByStockId
+        : {}
+    ).map(([id, date]) => [normalizeShipmentInventoryId(id), String(date ?? "").slice(0, 10)])
+      .filter(([id, date]) => id && /^\d{4}-\d{2}-\d{2}$/.test(date))
+  );
   for (const shipment of shipments) {
     if (!shipment || shipment.status === "preparing") continue;
-    const date = String(shipment.shipDate ?? shipment.outboundDate ?? shipment.createdAt ?? "").slice(0, 10);
+    const date = String(shipment.outboundDate ?? shipment.shipDate ?? shipment.createdAt ?? "").slice(0, 10);
     if (!date) continue;
     for (const rawId of Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds : []) {
-      const stockId = String(rawId ?? "");
+      const stockId = normalizeShipmentInventoryId(rawId);
       if (!stockId) continue;
       const current = shippedDateByStockId.get(stockId);
       if (!current || date < current) shippedDateByStockId.set(stockId, date);
@@ -4000,7 +4040,7 @@ function shipmentActiveStockIds(state = {}, excludeShipmentId = "") {
   for (const shipment of Array.isArray(state.shipments) ? state.shipments : []) {
     if (!shipment || String(shipment.id ?? "") === String(excludeShipmentId ?? "") || !shipmentBlocksInventory(shipment)) continue;
     for (const id of Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds : []) {
-      const stockId = String(id ?? "");
+      const stockId = normalizeShipmentInventoryId(id);
       if (stockId) ids.add(stockId);
     }
   }
@@ -5504,11 +5544,28 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    const relatedOrder = nextOrdersById.get(String(nextShipment.orderId ?? ""));
+    assertShipmentInventoryIdentityUnchanged(currentShipment, nextShipment, {
+      expectedSiteId: relatedOrder?.siteId,
+    });
+    const validateAssignment = shipmentPatchRequiresAssignmentValidation(
+      currentShipment,
+      nextShipment,
+      {
+        orders: currentOrders,
+        stock: current.stock,
+      },
+    );
+    if (validateAssignment) {
+      assertActiveShipmentInventoryAssignment(nextShipment, {
+        orders: nextOrders,
+        stock: next.stock,
+      });
+    }
     if (actualShippingFeeValuesDiffer(currentShipment.actualShippingFee, nextShipment.actualShippingFee)) {
       throw new Error("实际运费必须通过补录运费专用接口修改");
     }
     requireOrderPermissionForAuth(req, "update");
-    const relatedOrder = nextOrdersById.get(String(nextShipment.orderId ?? ""));
     if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
       throw new Error("已完成或已取消订单不能修改发货状态");
     }
@@ -8894,7 +8951,7 @@ async function handleApi(req, res, url) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       const message = String(body.message ?? "").trim();
-      const siteId = normalizeSiteScope(body.siteId ?? ALL_SITE_ID);
+      const requestedSiteId = normalizeSiteScope(body.siteId ?? ALL_SITE_ID);
       const operator = authenticatedOperator(req);
       const notifyFeishu = Boolean(body.notifyFeishu);
       if (!message) {
@@ -8903,9 +8960,17 @@ async function handleApi(req, res, url) {
       }
 
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const rawState = rows[0]?.data ?? {};
+      const account = req.auth?.account ?? {};
+      const siteId = resolveAssistantSiteScope({
+        requestedSiteId,
+        accessRole: account.accessRole,
+        visibleSiteIds: visibleSiteIdsForAccount(account, rawState),
+      });
+      const visibleState = siteVisibilityFilteredState(rawState, account);
       const result = await answerAssistantQuestion({
         message,
-        state: rows[0]?.data ?? {},
+        state: visibleState,
         siteId,
         source: "web",
       });
@@ -9046,8 +9111,10 @@ async function handleApi(req, res, url) {
       const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
       const lite = new Set(String(url.searchParams.get("lite") ?? "").split(",").map((item) => item.trim()).filter(Boolean));
       const data = sanitizeStateForResponse(rows[0]?.data ?? {}, req);
+      const picked = pickState(data, keys, { liteSpecies: lite.has("species") });
+      if (keys.includes("stock")) picked.inventoryProjection = data.inventoryProjection;
       sendJson(req, res, 200, {
-        data: pickState(data, keys, { liteSpecies: lite.has("species") }),
+        data: picked,
       });
     } catch (error) {
       sendJson(req, res, 400, { error: error.message });
@@ -9785,7 +9852,13 @@ async function handleApi(req, res, url) {
         }
       }
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
+      sendJson(req, res, 200, {
+        ok: true,
+        order: nextOrder,
+        orders: nextOrders,
+        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message });
@@ -9985,7 +10058,12 @@ async function handleApi(req, res, url) {
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
       if (currentOrder.status === "completed") {
         await client.query("ROLLBACK");
-        sendJson(req, res, 200, { ok: true, order: currentOrder, orders });
+        sendJson(req, res, 200, {
+          ok: true,
+          order: currentOrder,
+          orders,
+          inventoryProjection: inventoryProjectionForResponse(state, req),
+        });
         return;
       }
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能标记完成");
@@ -10019,7 +10097,13 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
+      sendJson(req, res, 200, {
+        ok: true,
+        order: nextOrder,
+        orders: nextOrders,
+        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "完成订单失败" });
@@ -10073,7 +10157,15 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, orders: nextOrders, shipments: nextShipments, stock: nextStock, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        stock: visibleNextState.stock,
+        inventoryProjection: visibleNextState.inventoryProjection,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message });
@@ -10168,6 +10260,10 @@ async function handleApi(req, res, url) {
         itemStockIds: selectedItemIds,
         ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
+      assertActiveShipmentInventoryAssignment(shipment, {
+        orders,
+        stock: state.stock,
+      });
       const paymentGate = shipmentPaymentGateForOrder(order, [
         ...shipments,
         shipment,
@@ -10212,7 +10308,15 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, shipment, orders: nextOrders, shipments: nextShipments, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        shipment,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        inventoryProjection: visibleNextState.inventoryProjection,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, error?.statusCode || 400, {
@@ -10362,11 +10466,13 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
         ok: true,
         shipment: updatedShipment,
-        orders: nextOrders,
-        shipments: nextShipments,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        inventoryProjection: visibleNextState.inventoryProjection,
         operationLog,
       });
     } catch (error) {
@@ -10665,7 +10771,15 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, orders: nextOrders, shipments: nextShipments, stock: nextStock, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        stock: visibleNextState.stock,
+        inventoryProjection: visibleNextState.inventoryProjection,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "取消出库失败" });
@@ -10757,7 +10871,11 @@ async function handleApi(req, res, url) {
         [stateId, JSON.stringify(nextState)]
       );
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, appliedOperationLogs });
+      sendJson(req, res, 200, {
+        ok: true,
+        appliedOperationLogs,
+        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { error: `Failed to patch PostgreSQL state: ${error.message}` });

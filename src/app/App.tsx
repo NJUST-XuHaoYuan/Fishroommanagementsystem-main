@@ -188,9 +188,19 @@ function scopedStoreForSite(state: Store, siteId: string): Store {
   const orders = state.orders.filter((item) => matchesSite(item, normalizedSiteId));
   const orderIds = new Set(orders.map((order) => order.id));
   const stock = state.stock.filter((item) => stockMatchesSite(state, item, normalizedSiteId));
-  const stockIds = new Set(stock.map((item) => item.id));
+  const stockIds = new Set(stock.map((item) => String(item.id).trim()));
+  const inventoryProjection = {
+    outStockIds: (state.inventoryProjection?.outStockIds ?? [])
+      .map((id) => String(id ?? "").trim())
+      .filter((id, index, ids) => id && stockIds.has(id) && ids.indexOf(id) === index),
+    outDateByStockId: Object.fromEntries(
+      Object.entries(state.inventoryProjection?.outDateByStockId ?? {})
+        .filter(([id]) => stockIds.has(String(id).trim()))
+    ),
+  };
   return {
     ...state,
+    inventoryProjection,
     sites: getSites(state),
     tankGroups,
     batches: state.batches.filter((item) => matchesSite(item, normalizedSiteId)),
@@ -673,7 +683,10 @@ function AdminApp() {
     patch: Partial<PersistedStore>,
     _operationLogs: OperationLog[] = [],
     basePatch: Partial<PersistedStore> = {}
-  ): Promise<{ appliedOperationLogs?: OperationLog[] }> => {
+  ): Promise<{
+    appliedOperationLogs?: OperationLog[];
+    inventoryProjection?: Store["inventoryProjection"];
+  }> => {
     const response = await fetch(`${API}/state/patch`, {
       method: "POST",
       headers: authJsonHeaders(),
@@ -713,8 +726,15 @@ function AdminApp() {
       lastSavedState.current = {
         ...(lastSavedState.current ?? currentStateToSave),
         ...patch,
+        inventoryProjection: result.inventoryProjection ?? currentStateToSave.inventoryProjection,
         operationLogs: currentStateToSave.operationLogs,
       };
+      if (result.inventoryProjection) {
+        setStateBase((current) => ({
+          ...current,
+          inventoryProjection: result.inventoryProjection,
+        }));
+      }
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
     } catch (error) {
@@ -755,6 +775,7 @@ function AdminApp() {
           {
             ...withoutUser(current),
             ...scopedStatePatch,
+            inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
             operationLogs: [
               ...(result.appliedOperationLogs ?? (Array.isArray(patchLogs) ? patchLogs : [])),
               ...(current.operationLogs ?? []),
@@ -817,6 +838,7 @@ function AdminApp() {
           {
             ...withoutUser(current),
             ...patch,
+            inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
             operationLogs: [...appliedLogs, ...(current.operationLogs ?? [])]
               .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
               .slice(0, MAX_OPERATION_LOGS),
@@ -1284,6 +1306,7 @@ function AdminApp() {
           ...current,
           orders: Array.isArray(result.orders) ? result.orders : current.orders,
           shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
+          inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
           operationLogs: result.operationLog
             ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
                 arr.findIndex((item) => item.id === log.id) === idx

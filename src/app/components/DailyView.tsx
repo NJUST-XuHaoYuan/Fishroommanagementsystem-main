@@ -19,7 +19,7 @@ import { StatusBadge, statusRingClass, statusFrameClass } from "./StatusIcon";
 import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, ChevronDown, Video, Download, ArrowRightLeft, AlertTriangle, Check, ClipboardList, FlaskConical, Truck, ExternalLink, Pencil, Trash2, Loader2, UploadCloud } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
@@ -143,7 +143,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   const today = todayDateString();
   const nowForRecord = nowDatetimeLocal();
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
   const canBatchSelect = permission.canCreate || permission.canUpdate || permission.canDelete;
   const product = (id: string) => state.products.find((p) => p.id === id);
   const priceBaselineByProduct = useMemo(

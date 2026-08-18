@@ -23,7 +23,7 @@ import {
 } from "./ui/alert-dialog";
 import { Plus, Pencil, Trash2, Search } from "lucide-react";
 import { toast } from "sonner";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 
@@ -39,7 +39,7 @@ export function TankGroupsView() {
   const [editSub, setEditSub] = useState<{ groupId: string; sub: SubTank } | null>(null);
   const [subOpen, setSubOpen] = useState(false);
   const [delSub, setDelSub] = useState<{ groupId: string; sub: SubTank } | null>(null);
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
 
   const filtered = state.tankGroups.filter(
     (g) => !q || g.name.includes(q) || g.location.includes(q)

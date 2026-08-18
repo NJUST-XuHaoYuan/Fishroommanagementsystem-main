@@ -20,7 +20,7 @@ import {
   ExternalLink, Pencil, ReceiptText,
 } from "lucide-react";
 import { toast } from "sonner";
-import { getInventoryHiddenStockIds, isVisibleInStockInventory } from "../utils/inventory";
+import { getInventoryOutStockIds, isVisibleInStockInventory, normalizeInventoryId } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
 import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
@@ -302,8 +302,8 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
 
   const today = new Date().toISOString().slice(0, 10);
   const inventoryHiddenStockIds = useMemo(
-    () => getInventoryHiddenStockIds(state.shipments, state.orders),
-    [state.shipments, state.orders],
+    () => getInventoryOutStockIds(state),
+    [state.inventoryProjection?.outStockIds, state.shipments, state.orders],
   );
   const productById = useMemo(
     () => new Map(state.products.map((p) => [p.id, p])),
@@ -374,9 +374,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
       order.items.some((item) => item.stockItemId === id && orderItemKeepsInventory(item))
     );
   const stockLockedByShipment = (id: string) =>
-    state.shipments.some((shipment) =>
-      shipment.status !== "preparing" && (shipment.itemStockIds ?? []).includes(id)
-    );
+    inventoryHiddenStockIds.has(normalizeInventoryId(id));
   const stockCannotDelete = (item: StockItem) =>
     stockLockedByProtectedOrder(item.id) || stockLockedByShipment(item.id);
   const stockDeleteLockReason = (item: StockItem) =>
