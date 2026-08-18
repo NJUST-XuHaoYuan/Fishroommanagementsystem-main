@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createLatestRequestCoordinator,
+  profileApprovalActionReady,
   profileApprovalDetailsReady,
   profileAttachmentChangeKind,
 } from "./notificationCenter.ts";
@@ -47,6 +48,31 @@ test("approval is ready only for the selected notification with non-empty loaded
     selectedNotificationId: "notification-a",
     loadedNotificationId: "",
     profileChanges: [{ field: "phone" }],
+  }), false);
+});
+
+test("profile approval action has no administrator-managed employment prerequisite", () => {
+  assert.equal(profileApprovalActionReady({
+    profileRequestId: "request-a",
+    decision: "approve",
+    detailsReady: true,
+  }), true);
+  assert.equal(profileApprovalActionReady({
+    profileRequestId: "request-a",
+    decision: "reject",
+    detailsReady: true,
+    note: "请补充证明",
+  }), true);
+  assert.equal(profileApprovalActionReady({
+    profileRequestId: "request-a",
+    decision: "reject",
+    detailsReady: true,
+    note: "",
+  }), false);
+  assert.equal(profileApprovalActionReady({
+    profileRequestId: "request-a",
+    decision: "approve",
+    detailsReady: false,
   }), false);
 });
 

@@ -70,6 +70,15 @@ test("accepts a complete valid profile", () => {
   assert.deepEqual(validatePersonnelSelfProfile(completeProfile()), {});
 });
 
+test("administrator-managed employment and account gaps do not block self-profile validation", () => {
+  assert.deepEqual(validatePersonnelSelfProfile({
+    ...completeProfile(),
+    personnelNo: "",
+    employment: { department: "", role: "", hireDate: "", siteIds: [] },
+    account: {},
+  }), {});
+});
+
 test("validates key identity, contact, month and bank formats", () => {
   const profile = {
     ...completeProfile(),

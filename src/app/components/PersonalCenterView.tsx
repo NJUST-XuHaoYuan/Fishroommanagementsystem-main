@@ -467,7 +467,7 @@ export function PersonalCenterView() {
     ];
     const employmentMissing = employmentRequirements.filter((value) => !value).length;
     const employmentStatus: SectionStatus = employmentMissing > 0
-      ? { label: `待管理员完善 ${employmentMissing} 项`, kind: "attention", complete: false }
+      ? { label: `管理员后续补充 ${employmentMissing} 项`, kind: "neutral", complete: false }
       : { label: "已登记", kind: "complete", complete: true };
     const accountAvailable = Boolean(profile.account.username || state.user?.username) && profile.account.accountEnabled !== false;
     return {
@@ -974,7 +974,7 @@ export function PersonalCenterView() {
 
               {activeSection === "employment" && (
                 <Card id="profile-employment-section" role="region" aria-labelledby="profile-section-title-employment" className="gap-5 p-4 sm:p-5">
-                  <SectionHeader titleId="profile-section-title-employment" title="任职与账号" description="以下内容由管理员维护；发现信息有误时，请联系管理员处理。" icon={<BriefcaseBusiness className="size-5" aria-hidden="true" />} iconClassName="bg-slate-100 text-slate-700" status={sectionStatuses.employment} label="只读" />
+                  <SectionHeader titleId="profile-section-title-employment" title="任职与账号" description="以下内容由管理员维护，可在本人资料审批后继续补充；发现信息有误时，请联系管理员处理。" icon={<BriefcaseBusiness className="size-5" aria-hidden="true" />} iconClassName="bg-slate-100 text-slate-700" status={sectionStatuses.employment} label="只读" />
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <ReadonlyItem label="人员工号">{profile.personnelNo || profile.employment.personnelNo}</ReadonlyItem>
                     <ReadonlyItem label="任职状态">{profile.employment.employmentStatus === "resigned" ? "已离职" : "在职"}</ReadonlyItem>
@@ -1023,7 +1023,7 @@ export function PersonalCenterView() {
                   {!pending && Object.keys(reviewErrors).length === 0 && (
                     <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900" role="status">
                       <CheckCircle2 className="mt-0.5 size-5 shrink-0" aria-hidden="true" />
-                      <div><div className="font-semibold">本人资料已检查完整</div><p className="mt-1 text-sm leading-6">确认内容无误后即可提交；任职与账号、密码不包含在本次审批中。</p></div>
+                      <div><div className="font-semibold">本人资料已检查完整</div><p className="mt-1 text-sm leading-6">确认内容无误后即可提交；任职与账号、密码不包含在本次审批中，管理员字段为空也不影响提交和批准。</p></div>
                     </div>
                   )}
 

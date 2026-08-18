@@ -113,6 +113,7 @@ import { validateImageUploadBuffer } from "./media-upload-rules.mjs";
 import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
 import { RecordIdConflictError, resolveCreateRecordId } from "./record-id-rules.mjs";
 import {
+  applyApprovedPersonnelSelfProfile,
   backfillOrderContactPersonnelIds,
   canViewPersonnelOperationLogs,
   hasPersonnelAccount,
@@ -8320,20 +8321,11 @@ async function handleApi(req, res, url) {
         const normalizedProposal = normalizePersonnelSelfProfile(canonicalProposal, { requireComplete: true });
         Object.assign(normalizedProposal, normalizePersonnelSensitiveFields(normalizedProposal));
         assertPersonnelSelfProfileComplete(normalizedProposal);
-        const overallCandidate = { ...target, ...normalizedProposal };
-        const missingOverall = missingPersonnelRecordFields(overallCandidate);
-        if (missingOverall.length > 0) {
-          throw new Error(`人员任职或账号档案尚不完整，管理员请先补全：${missingOverall.join("、")}`);
-        }
+        // This approval only applies fields owned by the employee. Employment
+        // and account fields belong to the administrator workflow, so their
+        // completeness must not block an otherwise valid self-profile change.
         const encryptedSensitive = encryptPersonnelSensitiveFields(normalizedProposal, target.id, personnelDataKeyring);
-        const nextPerson = { ...target };
-        for (const field of PERSONNEL_SELF_PROFILE_FIELDS) {
-          if (PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS.includes(field)) continue;
-          nextPerson[field] = normalizedProposal[field];
-        }
-        Object.assign(nextPerson, encryptedSensitive, {
-          profileRevision: profileRevisionForPersonnel(target) + 1,
-        });
+        const nextPerson = applyApprovedPersonnelSelfProfile(target, normalizedProposal, encryptedSensitive);
         nextPersonnel = personnel.map((person) => String(person?.id ?? "") === String(target.id) ? nextPerson : person);
         if (String(nextPerson.name ?? "") !== String(target.name ?? "")) {
           nextOrders = nextOrders.map((order) => {

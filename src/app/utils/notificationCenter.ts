@@ -83,3 +83,27 @@ export function profileApprovalDetailsReady({
     profileChanges.length > 0
   );
 }
+
+export function profileApprovalActionReady({
+  profileRequestId,
+  decision,
+  processing,
+  loadingDetails,
+  detailError,
+  detailsReady,
+  note,
+}: {
+  profileRequestId?: unknown;
+  decision?: unknown;
+  processing?: boolean;
+  loadingDetails?: boolean;
+  detailError?: unknown;
+  detailsReady?: boolean;
+  note?: unknown;
+}): boolean {
+  const normalizedDecision = String(decision ?? "").trim();
+  if (!String(profileRequestId ?? "").trim()) return false;
+  if (normalizedDecision !== "approve" && normalizedDecision !== "reject") return false;
+  if (processing || loadingDetails || Boolean(detailError) || !detailsReady) return false;
+  return normalizedDecision === "approve" || Boolean(String(note ?? "").trim());
+}

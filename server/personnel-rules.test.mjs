@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyApprovedPersonnelSelfProfile,
   backfillOrderContactPersonnelIds,
   canViewPersonnelOperationLogs,
   hasPersonnelAccount,
@@ -14,6 +15,7 @@ import {
   redactPersonnelForViewer,
   resolveActivePersonnelReference,
 } from "./personnel-rules.mjs";
+import { normalizePersonnelSelfProfile } from "./personnel-profile-rules.mjs";
 
 test("operation logs are server-projected only to enabled administrators", () => {
   assert.equal(canViewPersonnelOperationLogs({ username: "admin", accessRole: "admin", accountEnabled: true }), true);
@@ -224,6 +226,67 @@ test("profile completeness covers self, employment and enabled account fields bu
   const incompleteProjection = redactPersonnelForViewer(incomplete, { canViewPrivate: true });
   assert.equal(incompleteProjection.profileComplete, false);
   assert.deepEqual(incompleteProjection.missingProfileFields, ["department", "siteIds", "systemAccount"]);
+});
+
+test("approval applies a strict self-profile without changing incomplete administrator fields or account security", () => {
+  const accountSecurity = {
+    username: "zhangsan",
+    password: "scrypt$1$salt$hash",
+    accountEnabled: true,
+    accessRole: "staff",
+    visibleSiteIds: ["nanjing"],
+    permissions: { orders: { view: true, create: false, update: false, delete: false } },
+    sessionVersion: 7,
+  };
+  const target = {
+    id: "p-approval",
+    personnelNo: "RY-0099",
+    name: "旧姓名",
+    department: "",
+    role: "",
+    hireDate: "",
+    siteIds: [],
+    employmentStatus: "active",
+    profileRevision: 3,
+    ...accountSecurity,
+  };
+  const normalizedProposal = normalizePersonnelSelfProfile({
+    name: "张三",
+    gender: "male",
+    nativePlace: "江苏南京",
+    birthMonth: "1949-12",
+    educationLevel: "bachelor",
+    idCardNo: "11010519491231002X",
+    idCardFrontAttachment: { id: "front", kind: "id_card_front", originalName: "front.jpg", mime: "image/jpeg", size: 1024 },
+    idCardBackAttachment: { id: "back", kind: "id_card_back", originalName: "back.jpg", mime: "image/jpeg", size: 1024 },
+    educationProofAttachment: { id: "education", kind: "education_proof", originalName: "education.jpg", mime: "image/jpeg", size: 1024 },
+    phone: "13800000000",
+    email: "zhang@example.com",
+    wechat: "zhangsan",
+    address: "南京市示例地址",
+    bankAccountName: "张三",
+    bankAccountNo: "6222021001116245",
+    bankName: "中国工商银行南京支行",
+  }, { requireComplete: true });
+  const encryptedSensitiveFields = {
+    idCardNo: "enc$id-card",
+    bankAccountName: "enc$account-name",
+    bankAccountNo: "enc$account-no",
+    bankName: "enc$bank-name",
+  };
+
+  const approved = applyApprovedPersonnelSelfProfile(target, normalizedProposal, encryptedSensitiveFields);
+
+  assert.deepEqual({
+    department: approved.department,
+    role: approved.role,
+    hireDate: approved.hireDate,
+    siteIds: approved.siteIds,
+  }, { department: "", role: "", hireDate: "", siteIds: [] });
+  assert.deepEqual(Object.fromEntries(Object.keys(accountSecurity).map((field) => [field, approved[field]])), accountSecurity);
+  assert.equal(approved.profileRevision, 4);
+  assert.equal(target.profileRevision, 3);
+  assert.deepEqual(missingPersonnelRecordFields(approved), ["department", "role", "hireDate", "siteIds"]);
 });
 
 test("sensitive projection includes only canonical identity, payroll and attachment metadata fields", () => {

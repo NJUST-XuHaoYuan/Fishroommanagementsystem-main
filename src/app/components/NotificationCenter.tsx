@@ -28,6 +28,7 @@ import {
 import { authJsonHeaders } from "../utils/authSession";
 import {
   createLatestRequestCoordinator,
+  profileApprovalActionReady,
   profileApprovalDetailsReady,
   profileAttachmentChangeKind,
 } from "../utils/notificationCenter";
@@ -845,18 +846,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   };
 
   const processProfileApproval = async () => {
-    if (
-      !selectedProfileApproval?.profileRequestId ||
-      !profileDecision ||
-      processingProfileApproval ||
-      loadingProfileDetails ||
-      profileDetailError ||
-      !profileDetailsReady
-    ) return;
     if (profileDecision === "reject" && !profileNote.trim()) {
       toast.error("请填写驳回原因，便于申请人修改后重新提交");
       return;
     }
+    if (!profileActionReady) return;
     setProcessingProfileApproval(true);
     try {
       const response = await fetch("/api/personnel/profile-requests/decision", {
@@ -954,6 +948,15 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     selectedNotificationId: selectedProfileApproval?.id,
     loadedNotificationId: loadedProfileDetailNotificationId,
     profileChanges: selectedProfileApproval?.profileChanges,
+  });
+  const profileActionReady = profileApprovalActionReady({
+    profileRequestId: selectedProfileApproval?.profileRequestId,
+    decision: profileDecision,
+    processing: processingProfileApproval,
+    loadingDetails: loadingProfileDetails,
+    detailError: profileDetailError,
+    detailsReady: profileDetailsReady,
+    note: profileNote,
   });
 
   return (
@@ -1629,6 +1632,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             <div className="mt-1 text-xs opacity-80">
               申请人：{actorLabel(selectedProfileApproval?.createdByName, selectedProfileApproval?.createdBy)}
             </div>
+            {profileDecision === "approve" && (
+              <div className="mt-1 text-xs opacity-80">
+                本次只写入下方本人资料；部门、岗位、入职日期和工作区域可由管理员后续补充，不影响本次批准。
+              </div>
+            )}
           </div>
 
           {loadingProfileDetails && (
@@ -1758,13 +1766,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
             {profileDecision && (
               <Button
                 variant={profileDecision === "approve" ? "default" : "destructive"}
-                disabled={
-                  processingProfileApproval ||
-                  loadingProfileDetails ||
-                  Boolean(profileDetailError) ||
-                  !profileDetailsReady ||
-                  (profileDecision === "reject" && !profileNote.trim())
-                }
+                disabled={!profileActionReady}
                 onClick={() => void processProfileApproval()}
               >
                 {processingProfileApproval

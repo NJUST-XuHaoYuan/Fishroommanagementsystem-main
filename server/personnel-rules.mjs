@@ -1,4 +1,6 @@
 import {
+  PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS,
+  PERSONNEL_SELF_PROFILE_FIELDS,
   missingPersonnelProfileFields,
   normalizePersonnelBankAccountNo,
   normalizePersonnelIdCardNo,
@@ -146,6 +148,27 @@ export function normalizePersonnelSensitiveFields(input = {}) {
     bankAccountNo: normalizePersonnelBankAccountNo(source.bankAccountNo),
     bankName: normalizedSensitiveText(source.bankName, "开户行", 120),
   };
+}
+
+export function applyApprovedPersonnelSelfProfile(
+  person = {},
+  normalizedProfile = {},
+  encryptedSensitiveFields = {}
+) {
+  const nextPerson = { ...person };
+  for (const field of PERSONNEL_SELF_PROFILE_FIELDS) {
+    if (PERSONNEL_PROFILE_SENSITIVE_VALUE_FIELDS.includes(field)) {
+      if (!Object.prototype.hasOwnProperty.call(encryptedSensitiveFields, field)) {
+        throw new Error(`批准人员资料缺少已加密字段：${field}`);
+      }
+      nextPerson[field] = encryptedSensitiveFields[field];
+      continue;
+    }
+    nextPerson[field] = normalizedProfile[field];
+  }
+  const currentRevision = Number(person?.profileRevision ?? 0);
+  nextPerson.profileRevision = (Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? currentRevision : 0) + 1;
+  return nextPerson;
 }
 
 export function missingPersonnelRecordFields(person = {}) {
