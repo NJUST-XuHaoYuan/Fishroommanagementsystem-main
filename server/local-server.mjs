@@ -108,7 +108,14 @@ import {
   projectedShippedOutStockIds,
   shipmentPatchRequiresAssignmentValidation,
 } from "./shipment-inventory-integrity.mjs";
-import { dashboardOrderAdjustmentTotals } from "./dashboard-sales-metrics.mjs";
+import {
+  buildDashboardFinanceSeries,
+  buildDashboardFocusDetail,
+  buildDashboardFocusOptions,
+  buildDashboardLossSeries,
+  buildDashboardSalespersonSeries,
+  indexShipmentsByOrder,
+} from "./dashboard-summary-aggregates.mjs";
 import {
   healthyFishInventoryMetrics,
   isFishInventoryItem,
@@ -122,9 +129,42 @@ import {
   orderMinimumReturnFloorTotal,
   sickMinimumReturnExemption,
 } from "./order-pricing-rules.mjs";
-import { validateImageUploadBuffer } from "./media-upload-rules.mjs";
+import { isSupportedImageMime, validateImageUploadBuffer } from "./media-upload-rules.mjs";
 import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
-import { RecordIdConflictError, resolveCreateRecordId } from "./record-id-rules.mjs";
+import { resolveCreateRecordId } from "./record-id-rules.mjs";
+import {
+  resolveUniqueOrderMutationTarget,
+  resolveUniqueShipmentMutationTarget,
+} from "./order-shipment-mutation-targets.mjs";
+import { assertDailyLogSyncIdentity, planDailyLogSave } from "./daily-log-save-rules.mjs";
+import {
+  isSafePublicMediaMime,
+  publicMediaCacheMaxAgeSeconds,
+  publicMediaProxyPath,
+  verifyPublicMediaUrlToken,
+} from "./public-media-token.mjs";
+import {
+  planGenericStatePatchReadKeys,
+  planStateSliceDependencies,
+} from "./state-slice-planner.mjs";
+import {
+  BioRecordConflictError,
+  assertUniqueBioRecordIds,
+  bioRecordRequiredActions,
+  canAccessBioStockSite,
+  findUniqueBioStockItem,
+  maintenanceRequiredPermissions,
+  planBioRecordSave,
+} from "./bio-record-rules.mjs";
+import {
+  assertMaintenanceExpectedItems,
+  findMaintenanceMutationLog,
+  normalizeMaintenanceClientMutationId,
+  prepareMaintenanceMutation,
+  resolveMaintenanceDeltaByIds,
+  withMaintenanceTransaction,
+  withMaintenanceMutationMetadata,
+} from "./maintenance-save-rules.mjs";
 import {
   applyApprovedPersonnelSelfProfile,
   backfillOrderContactPersonnelIds,
@@ -138,9 +178,20 @@ import {
   resolveActivePersonnelReference,
 } from "./personnel-rules.mjs";
 import {
+  authoritativeStatePatchSiteId,
+  assertStatePatchEntityScope,
+  assertGenericStatePatchKeyAllowed,
   statePatchActionsForKey,
+  statePatchEntityDiff,
+  statePatchSiteBindingChanged,
   validateStatePatchShapes,
 } from "./state-patch-permission-rules.mjs";
+import {
+  assertStockMutationExpectation,
+  authoritativeStockMutationSiteId,
+  buildStockMutationExpectation,
+  validateStockMutationRelationships,
+} from "./stock-mutation-relationships.mjs";
 import {
   PERSONNEL_SENSITIVE_FIELDS,
   decryptPersonnelSensitiveFields,
@@ -214,11 +265,39 @@ const VIDEO_TRANSCODE_CONCURRENCY = Math.max(1, Math.floor(numberFromEnv(process
 const VIDEO_TRANSCODE_MAX_PENDING = Math.max(0, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_MAX_PENDING, 2)));
 const VIDEO_TRANSCODE_THREADS = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_THREADS, 1)));
 const VIDEO_TRANSCODE_MAX_EDGE = Math.max(720, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_MAX_EDGE, 1920)));
+const COS_REQUEST_TIMEOUT_MS = Math.min(
+  120_000,
+  Math.max(5_000, Math.floor(numberFromEnv(process.env.COS_REQUEST_TIMEOUT_MS, 30_000)))
+);
+const COS_UPLOAD_TIMEOUT_MS = Math.min(
+  15 * 60 * 1000,
+  Math.max(30_000, Math.floor(numberFromEnv(process.env.COS_UPLOAD_TIMEOUT_MS, 5 * 60 * 1000)))
+);
+const PUBLIC_MEDIA_LEASE_TIMEOUT_MS = COS_REQUEST_TIMEOUT_MS + 1_000;
 const videoTranscodeLimiter = createConcurrencyLimiter({
   concurrency: VIDEO_TRANSCODE_CONCURRENCY,
   maxPending: VIDEO_TRANSCODE_MAX_PENDING,
   queueFullMessage: "已有多个视频正在处理，请稍后重试",
 });
+const publicProjectionLimiter = createConcurrencyLimiter({
+  concurrency: 2,
+  maxPending: 16,
+  queueFullMessage: "公开鱼单查询繁忙，请稍后重试",
+});
+const publicImageMediaLimiter = createConcurrencyLimiter({
+  concurrency: 2,
+  maxPending: 32,
+  queueFullMessage: "公开图片加载繁忙，请稍后重试",
+});
+const publicVideoMediaLimiter = createConcurrencyLimiter({
+  concurrency: 1,
+  maxPending: 8,
+  queueFullMessage: "公开视频加载繁忙，请稍后重试",
+});
+const PUBLIC_PROJECTION_CACHE_TTL_MS = 5 * 60 * 1000;
+const PUBLIC_BIO_CACHE_MAX_ENTRIES = 2_000;
+const publicCatalogCache = new Map();
+const publicBioRecordsCache = new Map();
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -306,7 +385,6 @@ const STATE_PATCH_MODULE_LABELS = {
   orders: "订单管理",
   shipments: "发货管理",
 };
-const DISALLOWED_STATE_PATCH_KEYS = new Set(["personnel"]);
 const ADMIN_ONLY_STATE_PATCH_KEYS = new Set([
   "systemSettings",
   "sites",
@@ -322,7 +400,8 @@ const cosConfig = {
   publicBaseUrl: String(process.env.COS_PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
   prefix: String(process.env.COS_PREFIX || "fishroom").replace(/^\/+|\/+$/g, ""),
 };
-let cosClient;
+let cosDownloadClient;
+let cosUploadClient;
 
 const aiConfig = {
   apiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "",
@@ -375,7 +454,6 @@ const STATE_KEYS = [
   "customerSources",
 ];
 const STATE_KEY_SET = new Set(STATE_KEYS);
-
 const pgConfig = {
   host: process.env.PGHOST || "127.0.0.1",
   port: Number(process.env.PGPORT || 5432),
@@ -417,10 +495,20 @@ function acceptsGzip(req) {
 
 function sendJson(req, res, status, body, extraHeaders = {}) {
   const payload = Buffer.from(JSON.stringify(body));
+  res._logicalResponseBytes = payload.length;
+  const startedAt = req?._requestStartedAt;
+  const elapsedMs = typeof startedAt === "bigint"
+    ? Number(process.hrtime.bigint() - startedAt) / 1_000_000
+    : 0;
+  const timingHeaders = elapsedMs > 0 ? {
+    "Server-Timing": `app;dur=${elapsedMs.toFixed(1)}`,
+    "X-Response-Bytes": String(payload.length),
+  } : {};
   if (acceptsGzip(req) && payload.length > 1024) {
     res.writeHead(status, {
       ...jsonHeaders,
       ...extraHeaders,
+      ...timingHeaders,
       "Content-Encoding": "gzip",
       "Vary": "Accept-Encoding",
     });
@@ -430,7 +518,7 @@ function sendJson(req, res, status, body, extraHeaders = {}) {
     return;
   }
 
-  res.writeHead(status, { ...jsonHeaders, ...extraHeaders });
+  res.writeHead(status, { ...jsonHeaders, ...extraHeaders, ...timingHeaders });
   res.end(payload);
 }
 
@@ -483,6 +571,34 @@ function visibleSiteIdsForAccount(account = {}, state = {}) {
   if (account?.accessRole === "admin") return allSiteIds;
   const configuredIds = normalizeVisibleSiteIds(account?.visibleSiteIds, sites);
   return configuredIds;
+}
+
+function requireVisibleSiteForAuth(req, state = {}, siteId, message = "不能访问未授权场地的数据") {
+  const normalized = String(siteId ?? "").trim();
+  const siteMatches = (Array.isArray(state?.sites) ? state.sites : []).filter((site) =>
+    String(site?.id ?? "").trim() === normalized
+  );
+  if (normalized && siteMatches.length === 1 &&
+      visibleSiteIdsForAccount(req?.auth?.account, state).includes(normalized)) return normalized;
+  const error = new Error(message);
+  error.statusCode = 403;
+  error.code = "SITE_FORBIDDEN";
+  throw error;
+}
+
+// These helpers must only be called after the app_state row has been locked.
+// They fail closed on duplicate IDs before applying the authoritative order
+// site scope, so a visible duplicate can never authorize a hidden record.
+function resolveAuthorizedLockedOrderTarget(req, state = {}, orderId) {
+  const target = resolveUniqueOrderMutationTarget(state, orderId);
+  requireVisibleSiteForAuth(req, state, target.siteId, "不能操作未授权场地的订单");
+  return target;
+}
+
+function resolveAuthorizedLockedShipmentTarget(req, state = {}, shipmentId) {
+  const target = resolveUniqueShipmentMutationTarget(state, shipmentId);
+  requireVisibleSiteForAuth(req, state, target.siteId, "不能操作未授权场地的发货单");
+  return target;
 }
 
 function matchesAnyVisibleSite(item, visibleSiteIds = []) {
@@ -557,11 +673,7 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
   if (!account || account.accessRole === "admin") {
     return stateWithInventoryProjection(state);
   }
-  const sites = getSitesFromState(state);
   const visibleSiteIds = visibleSiteIdsForAccount(account, state);
-  if (visibleSiteIds.length >= sites.length) {
-    return stateWithInventoryProjection(state);
-  }
   const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : []).filter((item) =>
     matchesAnyVisibleSite(item, visibleSiteIds)
   );
@@ -609,6 +721,131 @@ function inventoryProjectionForResponse(state = {}, req = {}) {
     outStockIds: [],
     outDateByStockId: {},
   };
+}
+
+const GENERIC_PATCH_SITE_SCOPED_KEYS = new Set([
+  "tankGroups",
+  "batches",
+  "stock",
+  "lossRecords",
+  "logs",
+  "waterQualityRecords",
+  "checks",
+  "orders",
+  "shipments",
+]);
+
+function genericPatchRecordSiteId(state = {}, key = "", record = {}) {
+  const directSiteId = String(record?.siteId ?? "").trim();
+  if (key === "tankGroups" || key === "batches" || key === "orders") {
+    return authoritativeStatePatchSiteId(directSiteId, undefined);
+  }
+  if (key === "stock") {
+    const subTankId = String(record?.subTankId ?? "").trim();
+    const relationshipSites = subTankId
+      ? (Array.isArray(state.tankGroups) ? state.tankGroups : []).flatMap((group) =>
+          (Array.isArray(group?.subTanks) ? group.subTanks : [])
+            .filter((tank) => String(tank?.id ?? "") === subTankId)
+            .map(() => String(group?.siteId ?? "").trim())
+        )
+      : [];
+    return authoritativeStatePatchSiteId(directSiteId, relationshipSites);
+  }
+  if (key === "shipments") {
+    const orderId = String(record?.orderId ?? "").trim();
+    const relationshipSites = orderId
+      ? (Array.isArray(state.orders) ? state.orders : [])
+          .filter((item) => String(item?.id ?? "") === orderId)
+          .map((item) => String(item?.siteId ?? "").trim())
+      : [];
+    return authoritativeStatePatchSiteId(directSiteId, relationshipSites);
+  }
+  if (key === "lossRecords") {
+    const stockItemId = String(record?.stockItemId ?? "").trim();
+    const relationshipSites = stockItemId
+      ? (Array.isArray(state.stock) ? state.stock : [])
+          .filter((item) => String(item?.id ?? "") === stockItemId)
+          .map((item) => genericPatchRecordSiteId(state, "stock", item))
+      : [];
+    return authoritativeStatePatchSiteId(directSiteId, relationshipSites);
+  }
+  if (key === "waterQualityRecords") {
+    const tankGroupId = String(record?.tankGroupId ?? "").trim();
+    const relationshipSites = tankGroupId
+      ? (Array.isArray(state.tankGroups) ? state.tankGroups : [])
+          .filter((item) => String(item?.id ?? "") === tankGroupId)
+          .map((item) => String(item?.siteId ?? "").trim())
+      : [];
+    return authoritativeStatePatchSiteId(directSiteId, relationshipSites);
+  }
+  if (key === "logs" || key === "checks") {
+    const groups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
+    const tankGroupId = String(record?.tankGroupId ?? "").trim();
+    const subTankId = String(record?.subTankId ?? "").trim();
+    if (key === "checks" && !subTankId) return "";
+    const groupMatches = tankGroupId
+      ? groups.filter((group) => String(group?.id ?? "") === tankGroupId)
+      : [];
+    const subTankMatches = subTankId
+      ? groups.flatMap((group) =>
+          (Array.isArray(group?.subTanks) ? group.subTanks : [])
+            .filter((tank) => String(tank?.id ?? "") === subTankId)
+            .map(() => group)
+        )
+      : [];
+    let relationshipSites;
+    if (tankGroupId && subTankId) {
+      relationshipSites = groupMatches.length === 1 && subTankMatches.length === 1 && groupMatches[0] === subTankMatches[0]
+        ? [String(groupMatches[0]?.siteId ?? "").trim()]
+        : [];
+    } else if (tankGroupId) {
+      relationshipSites = groupMatches.map((group) => String(group?.siteId ?? "").trim());
+    } else if (subTankId) {
+      relationshipSites = subTankMatches.map((group) => String(group?.siteId ?? "").trim());
+    }
+    return authoritativeStatePatchSiteId(directSiteId, relationshipSites);
+  }
+  return authoritativeStatePatchSiteId(directSiteId, undefined);
+}
+
+function validateGenericStatePatchSiteScope(req, current = {}, next = {}, changedKeys = []) {
+  const isAdmin = req?.auth?.account?.accessRole === "admin";
+  const visibleSiteIds = isAdmin
+    ? new Set()
+    : new Set(visibleSiteIdsForAccount(req?.auth?.account, current).map(normalizeSiteId));
+  for (const key of changedKeys) {
+    if (!GENERIC_PATCH_SITE_SCOPED_KEYS.has(key)) continue;
+    const diff = statePatchEntityDiff(
+      Array.isArray(current[key]) ? current[key] : [],
+      Array.isArray(next[key]) ? next[key] : [],
+      key,
+    );
+    const nextById = new Map((Array.isArray(next[key]) ? next[key] : [])
+      .map((record) => [String(record?.id ?? ""), record]));
+    const recordSiteId = (record) => {
+      const sourceState = nextById.get(String(record?.id ?? "")) === record ? next : current;
+      return genericPatchRecordSiteId(sourceState, key, record);
+    };
+    const invalidRelationship =
+      diff.created.some((record) => !recordSiteId(record)) ||
+      diff.deleted.some((record) => !recordSiteId(record)) ||
+      diff.updated.some(({ before, after }) => !recordSiteId(before) || !recordSiteId(after));
+    if (invalidRelationship) {
+      const error = new Error("场地记录的关联对象不存在、不唯一或与记录场地不一致");
+      error.statusCode = 400;
+      error.code = "STATE_PATCH_SITE_RELATION_INVALID";
+      throw error;
+    }
+    if (diff.updated.some(({ before, after }) => statePatchSiteBindingChanged(key, before, after))) {
+      const error = new Error("场地、缸位及关联对象不能通过通用状态补丁变更，请使用对应专用功能");
+      error.statusCode = 400;
+      error.code = "STATE_PATCH_SITE_BINDING_IMMUTABLE";
+      throw error;
+    }
+    if (!isAdmin) {
+      assertStatePatchEntityScope(diff, (record) => visibleSiteIds.has(normalizeSiteId(recordSiteId(record))));
+    }
+  }
 }
 
 function refreshBatchStockCounts(batches = [], stock = []) {
@@ -876,7 +1113,7 @@ function publicCatalogMediaUrl(src) {
   const value = String(src ?? "").trim();
   if (!value) return "";
   return cosKeyFromUrl(value)
-    ? `/api/public/media/cos?url=${encodeURIComponent(value)}`
+    ? publicMediaProxyPath(value, { secret: authTokenSecret })
     : value;
 }
 
@@ -900,6 +1137,50 @@ function publicBioRecordPayload(record = {}, media = {}) {
     operator: String(record?.operator ?? ""),
     photos: (media.photos ?? publicMediaUrls(record?.photos, 6)).map(publicCatalogMediaUrl),
     videos: (media.videos ?? publicMediaUrls(record?.videos, 3)).map(publicCatalogMediaUrl),
+  };
+}
+
+function cachedPublicProjection(cache, key, revision, now = Date.now()) {
+  const entry = cache.get(key);
+  if (!entry || entry.revision !== String(revision ?? "") || entry.expiresAt <= now) {
+    if (entry) cache.delete(key);
+    return { hit: false, value: null };
+  }
+  // Refresh insertion order so the bounded map behaves as an LRU cache.
+  cache.delete(key);
+  cache.set(key, entry);
+  return { hit: true, value: entry.value };
+}
+
+function storePublicProjection(cache, key, revision, value, maxEntries) {
+  cache.delete(key);
+  cache.set(key, {
+    revision: String(revision ?? ""),
+    expiresAt: Date.now() + PUBLIC_PROJECTION_CACHE_TTL_MS,
+    value,
+  });
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+  return value;
+}
+
+function publicCatalogProjectionFromRow(row = {}) {
+  return {
+    sites: Array.isArray(row.sites) ? row.sites : [],
+    species: Array.isArray(row.species) ? row.species : [],
+    speciesCategories: Array.isArray(row.species_categories) ? row.species_categories : [],
+    speciesCategoryMajorMap: row.species_category_major_map && typeof row.species_category_major_map === "object"
+      ? row.species_category_major_map
+      : {},
+    products: Array.isArray(row.products) ? row.products : [],
+    tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+    stock: Array.isArray(row.stock) ? row.stock : [],
+    orders: Array.isArray(row.orders) ? row.orders : [],
+    shipments: Array.isArray(row.shipments) ? row.shipments : [],
+    bioRecords: Array.isArray(row.bio_records) ? row.bio_records : [],
   };
 }
 
@@ -932,8 +1213,25 @@ function normalizePublicCatalogCategoryMajorMap(categories = [], value = {}) {
   ]));
 }
 
+function uniqueNonEmptyEntityIds(items = []) {
+  const counts = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = String(item?.id ?? "").trim();
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, count]) => count === 1).map(([id]) => id));
+}
+
 function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
-  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
+  const normalizedState = normalizePickupShipmentsForState(state);
+  const sourceStock = Array.isArray(normalizedState.stock) ? normalizedState.stock : [];
+  const uniqueStockIds = uniqueNonEmptyEntityIds(sourceStock);
+  const scopedState = siteFilteredState({
+    ...normalizedState,
+    // A duplicated stock ID is ambiguous across sites. Exclude every copy from
+    // the public catalog instead of letting array order choose one identity.
+    stock: sourceStock.filter((item) => uniqueStockIds.has(String(item?.id ?? "").trim())),
+  }, siteId);
   const shippedIds = shippedOutStockIds(scopedState);
   const species = Array.isArray(scopedState.species) ? scopedState.species : [];
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
@@ -1044,11 +1342,23 @@ function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockIt
   const products = Array.isArray(scopedState.products) ? scopedState.products : [];
   const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const targetId = String(stockItemId ?? "").trim();
-  const item = stock.find((candidate) => String(candidate?.id ?? "") === targetId);
+  let item;
+  try {
+    item = findUniqueBioStockItem(stock, targetId);
+  } catch (error) {
+    if (error instanceof BioRecordConflictError) return null;
+    throw error;
+  }
   if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
   const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
   if (!product || product?.publicVisible === false) return null;
   const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  try {
+    assertUniqueBioRecordIds(records.filter((record) => String(record?.stockItemId ?? "") === targetId));
+  } catch (error) {
+    if (error instanceof BioRecordConflictError) return null;
+    throw error;
+  }
   return records
     .filter((record) => String(record?.stockItemId ?? "") === targetId)
     .sort((a, b) =>
@@ -1056,51 +1366,6 @@ function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockIt
       String(a?.id ?? "").localeCompare(String(b?.id ?? ""))
     )
     .map((record) => publicBioRecordPayload(record));
-}
-
-function publicCatalogAllowedMediaUrls(state = {}, siteId = ALL_SITE_ID) {
-  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
-  const shippedIds = shippedOutStockIds(scopedState);
-  const species = Array.isArray(scopedState.species) ? scopedState.species : [];
-  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
-  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
-  const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
-  const publicProductIds = new Set(
-    products
-      .filter((product) => product?.publicVisible !== false)
-      .map((product) => String(product?.id ?? ""))
-      .filter(Boolean)
-  );
-  const sellableStock = stock.filter((item) =>
-    !item?.sold &&
-    item?.status !== "sick" &&
-    isPhysicallyInTank(item, shippedIds) &&
-    publicProductIds.has(String(item?.productId ?? ""))
-  );
-  const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
-  const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
-  const availableProducts = products.filter((product) =>
-    product?.publicVisible !== false &&
-    sellableProductIds.has(String(product?.id ?? ""))
-  );
-  const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const allowed = new Set();
-  const add = (value) => {
-    const src = String(value ?? "").trim();
-    if (src && cosKeyFromUrl(src)) allowed.add(src);
-  };
-
-  availableProducts.forEach((product) => add(product?.imageUrl));
-  species
-    .filter((item) => speciesIds.has(String(item?.id ?? "")))
-    .forEach((item) => add(item?.imageUrl));
-  bioRecords
-    .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
-    .forEach((record) => {
-      publicMediaUrls(record?.photos, 6).forEach(add);
-      publicMediaUrls(record?.videos, 3).forEach(add);
-    });
-  return allowed;
 }
 
 function normalizePickupShipmentRecord(shipment = {}) {
@@ -1366,6 +1631,12 @@ function isValidDashboardSalesOrder(order = {}) {
   return order?.status !== "cancelled" && order?.status !== "damaged";
 }
 
+function isValidDashboardSalespersonOrder(order = {}) {
+  // A damaged order remains attributable to its salesperson; the amount
+  // helper already subtracts the damage refund/reship adjustment.
+  return order?.status !== "cancelled";
+}
+
 function isOfflinePickupDashboardOrder(order = {}, orderShipments = []) {
   const source = String(order?.source ?? "").trim();
   return source === "线下" ||
@@ -1385,12 +1656,9 @@ function buildDashboardSummary(state = {}, options = {}) {
   const tankGroups = Array.isArray(scopedState.tankGroups) ? scopedState.tankGroups : [];
   const orders = Array.isArray(scopedState.orders) ? scopedState.orders : [];
   const shipments = Array.isArray(scopedState.shipments) ? scopedState.shipments : [];
-  const shipmentsByOrderId = new Map();
-  for (const shipment of shipments) {
-    const orderId = String(shipment?.orderId ?? "");
-    if (!orderId) continue;
-    shipmentsByOrderId.set(orderId, [...(shipmentsByOrderId.get(orderId) ?? []), shipment]);
-  }
+  const personnel = Array.isArray(scopedState.personnel) ? scopedState.personnel : [];
+  const customers = Array.isArray(scopedState.customers) ? scopedState.customers : [];
+  const shipmentsByOrderId = indexShipmentsByOrder(shipments);
   const productById = new Map(products.map((product) => [product?.id, product]));
   const speciesById = new Map(species.map((item) => [item?.id, item]));
   const inTankFishStock = stock
@@ -1406,63 +1674,72 @@ function buildDashboardSummary(state = {}, options = {}) {
     species,
     outStockIds: shippedIds,
   });
-  const todayPayments = orders.flatMap((order) =>
-    (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
-      isPaymentVerified(payment) && String(payment?.time ?? "").slice(0, 10) === today
-    )
-  );
   const dailyDates = Array.from({ length: financeDays }, (_, index) =>
     addDaysToDateString(today, index - financeDays + 1)
   );
-  const dailyFinanceData = dailyDates.map((date) => {
-    const adjustments = dashboardOrderAdjustmentTotals(orders, shipments, date);
-    const payments = orders.flatMap((order) =>
-      (Array.isArray(order?.payments) ? order.payments : []).filter((payment) =>
-        isPaymentVerified(payment) && String(payment?.time ?? "").slice(0, 10) === date
-      )
-    );
-    const salesRows = orders
-      .filter((order) => isValidDashboardSalesOrder(order) && String(order?.date ?? "").slice(0, 10) === date)
-      .map((order) => {
-        const orderShipments = shipmentsByOrderId.get(String(order?.id ?? "")) ?? [];
-        return {
-          order,
-          orderShipments,
-          amount: Math.max(0, calcAmountDueForOrder(order, orderShipments)),
-        };
-      });
-    return {
-      date,
-      label: date.slice(5).replace("-", "/"),
-      received: payments
-        .filter((payment) => payment?.type !== "refund")
-        .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
-      refunded: adjustments.unshippedRefund,
-      unshippedRefund: adjustments.unshippedRefund,
-      shippedDamage: adjustments.shippedDamage,
-      orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
-      platformAmount: salesRows
-        .filter((row) => isPlatformOrderSource(row.order?.source))
-        .reduce((sum, row) => sum + row.amount, 0),
-      offlinePickupAmount: salesRows
-        .filter((row) => isOfflinePickupDashboardOrder(row.order, row.orderShipments))
-        .reduce((sum, row) => sum + row.amount, 0),
-      privateDomainAmount: salesRows
-        .filter((row) => String(row.order?.source ?? "").trim() === "私域线上")
-        .reduce((sum, row) => sum + row.amount, 0),
-    };
+  const dailyFinanceData = buildDashboardFinanceSeries({
+    dates: dailyDates,
+    orders,
+    shipments,
+    shipmentsByOrderId,
+    isPaymentVerified,
+    amountForOrder: calcAmountDueForOrder,
+    isPlatformOrderSource,
+    isValidSalesOrder: isValidDashboardSalesOrder,
+    isOfflinePickupOrder: isOfflinePickupDashboardOrder,
   });
-  const dailyLossData = buildDailyLossData(scopedState, dailyDates, productById, speciesById);
-  const todayAdjustments = dashboardOrderAdjustmentTotals(orders, shipments, today);
+  const dailyLossData = buildDashboardLossSeries({
+    dates: dailyDates,
+    stock,
+    lossRecords: scopedState.lossRecords,
+    shipments,
+    batches: scopedState.batches,
+    products,
+    species,
+    tankGroups,
+    inventoryProjection: scopedState.inventoryProjection,
+    isFishInventoryItem,
+    normalizeInventoryId: normalizeShipmentInventoryId,
+  });
+  const salesperson = buildDashboardSalespersonSeries({
+    dates: dailyDates,
+    orders,
+    shipmentsByOrderId,
+    personnel,
+    customers,
+    amountForOrder: calcAmountDueForOrder,
+    isPlatformOrderSource,
+    isPersonnelResigned,
+    isValidSalesOrder: isValidDashboardSalespersonOrder,
+    platformOrderDisplayName: (order) => `${orderSourceLabel(order?.source) || "平台"}订单${platformOrderNoForOrder(order) ? ` ${platformOrderNoForOrder(order)}` : ""}`,
+  });
+  const focusOptions = buildDashboardFocusOptions({ species, products, stock, outStockIds: shippedIds });
+  const defaultFocusOption = focusOptions.species[0] ?? focusOptions.product[0] ?? null;
+  const defaultFocusMode = focusOptions.species[0] ? "species" : "product";
+  const defaultFocus = defaultFocusOption
+    ? buildDashboardFocusDetail({
+        mode: defaultFocusMode,
+        id: defaultFocusOption.id,
+        today,
+        species,
+        products,
+        stock,
+        orders,
+        outStockIds: shippedIds,
+      })
+    : null;
+  const todayFinance = dailyFinanceData[dailyFinanceData.length - 1] ?? {
+    received: 0,
+    unshippedRefund: 0,
+    shippedDamage: 0,
+  };
 
   return {
     today,
-    todayReceived: todayPayments
-      .filter((payment) => payment?.type !== "refund")
-      .reduce((sum, payment) => sum + Number(payment?.amount || 0), 0),
-    todayUnshippedRefund: todayAdjustments.unshippedRefund,
-    todayShippedDamage: todayAdjustments.shippedDamage,
-    todayRefunded: todayAdjustments.unshippedRefund,
+    todayReceived: todayFinance.received,
+    todayUnshippedRefund: todayFinance.unshippedRefund,
+    todayShippedDamage: todayFinance.shippedDamage,
+    todayRefunded: todayFinance.unshippedRefund,
     todayShippedOut: shipments
       .filter((shipment) => shipment?.shipDate === today && shipment?.status !== "preparing")
       .reduce((sum, shipment) => sum + (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.length : 0), 0),
@@ -1485,6 +1762,10 @@ function buildDashboardSummary(state = {}, options = {}) {
     siteId,
     dailyFinanceData,
     dailyLossData,
+    dailySalespersonData: salesperson.dailySalespersonData,
+    salespersonOptions: salesperson.salespersonOptions,
+    focusOptions,
+    defaultFocus,
   };
 }
 
@@ -1796,9 +2077,7 @@ function validateStatePatchAuthorization(req, patch = {}) {
     if (!STATE_KEY_SET.has(key)) {
       throw new Error(`不支持的状态字段：${key}`);
     }
-    if (DISALLOWED_STATE_PATCH_KEYS.has(key)) {
-      throw new Error("人员账号和权限必须通过专用接口修改");
-    }
+    assertGenericStatePatchKeyAllowed(key);
     if (key === "operationLogs") throw new Error("操作日志不能通过通用状态接口修改");
     if (ADMIN_ONLY_STATE_PATCH_KEYS.has(key)) {
       requireAdminForAuth(req, key === "speciesCategories" || key === "speciesCategoryMajorMap"
@@ -3405,31 +3684,15 @@ function normalizeSubTank(subTank) {
   return normalized;
 }
 
-function normalizeDailyLog(log) {
-  const normalized = {
-    id: String(log?.id || uid("daily")),
-    siteId: normalizeSiteId(log?.siteId),
-    date: normalizeLocalDateTime(log?.date),
-    tankGroupId: String(log?.tankGroupId ?? "").trim(),
-    action: String(log?.action ?? "").trim(),
-    operator: String(log?.operator ?? "").trim(),
-    notes: String(log?.notes ?? "").trim(),
-  };
-  if (!normalized.date || !normalized.tankGroupId || !normalized.action || !normalized.operator) {
-    throw new Error("Daily log date, tankGroupId, action and operator are required");
-  }
-  if (normalized.date > nowDatetimeInChina()) throw new Error("养护日志时间不能晚于当前时间");
-  return normalized;
-}
-
 function pushOperationLog(operationLogs, operationLog) {
   return [operationLog, ...(Array.isArray(operationLogs) ? operationLogs : [])].slice(0, MAX_OPERATION_LOGS);
 }
 
 function normalizeStockItem(item) {
+  const requestedId = String(item?.id ?? "").trim();
   const normalized = {
     ...item,
-    id: String(item.id || uid("stock")),
+    id: requestedId || uid("stock"),
     siteId: normalizeSiteId(item.siteId),
     productId: String(item.productId ?? "").trim(),
     batchId: String(item.batchId ?? "").trim(),
@@ -3456,17 +3719,19 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
   const upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map(normalizeStockItem);
   const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
-    .map((id) => String(id ?? "").trim())
-    .filter(Boolean);
+    .map((id) => String(id ?? "").trim());
   if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
+  validateStockMutationRelationships(state, { upsert: upsertItems, deleteIds }, {
+    visibleSiteIds: options.visibleSiteIds,
+  });
 
   const upsertIds = upsertItems.map((item) => item.id);
   if (new Set(upsertIds).size !== upsertIds.length) throw new Error("入库记录编号重复，请刷新后重试");
   const deleteIdSet = new Set(deleteIds);
-  const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const existingIds = new Set(stock.map((item) => String(item?.id ?? "").trim()).filter(Boolean));
   const existingDeleteIds = new Set(
     stock
-      .map((item) => String(item?.id ?? ""))
+      .map((item) => String(item?.id ?? "").trim())
       .filter((id) => id && deleteIdSet.has(id))
   );
   if (deleteIdSet.size > 0 && existingDeleteIds.size !== deleteIdSet.size) {
@@ -3499,7 +3764,7 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   }
 
   const removedAt = new Date().toISOString();
-  const stockById = new Map(stock.map((item) => [String(item?.id ?? ""), item]));
+  const stockById = new Map(stock.map((item) => [String(item?.id ?? "").trim(), item]));
   const affectedOrderIds = new Set();
   const nextOrders = orders.map((order) => {
     if (!["pending", "confirmed"].includes(String(order?.status ?? ""))) return order;
@@ -3540,8 +3805,8 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   );
   const upsertById = new Map(upsertItems.map((item) => [item.id, item]));
   const changedStock = stock
-    .filter((item) => !deleteIdSet.has(String(item?.id ?? "")))
-    .map((item) => upsertById.get(String(item?.id ?? "")) ?? item);
+    .filter((item) => !deleteIdSet.has(String(item?.id ?? "").trim()))
+    .map((item) => upsertById.get(String(item?.id ?? "").trim()) ?? item);
   for (const item of upsertItems) {
     if (!existingIds.has(item.id)) changedStock.push(item);
   }
@@ -3839,7 +4104,27 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
   if (lateItems.length > 0) {
     details.push(`申请向创建已超过 48 小时的批次「${lateBatchLabels.join("、")}」补录 ${lateItems.length} 条库存`);
   }
-  const payload = { upsert: mutation.upsertItems, deleteIds: mutation.deleteIds };
+  const expectation = buildStockMutationExpectation(state, {
+    upsert: mutation.upsertItems,
+    deleteIds: mutation.deleteIds,
+  });
+  const changedItems = [
+    ...mutation.upsertItems,
+    ...mutation.deleteIds.map((stockId) => stockById.get(String(stockId ?? ""))).filter(Boolean),
+  ];
+  const changedSiteIds = [...new Set(changedItems.map((item) => authoritativeStockMutationSiteId(state, item)))];
+  if (changedSiteIds.length !== 1) {
+    const error = new Error("一次库存审批只能涉及一个场地，请按场地分别提交");
+    error.statusCode = 400;
+    error.code = "STOCK_APPROVAL_SITE_MIXED";
+    throw error;
+  }
+  const payload = {
+    upsert: mutation.upsertItems,
+    deleteIds: mutation.deleteIds,
+    siteId: changedSiteIds[0],
+    ...expectation,
+  };
   const stockDetails = buildStockChangeSnapshot({
     upsertItems: mutation.upsertItems,
     deleteIds: mutation.deleteIds,
@@ -3865,7 +4150,6 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
   const requestKey = createHash("sha256")
     .update(`${createdBy}\0${approvalAction}\0${stableJson(adjustmentSignature ?? stockDetails.signature)}`)
     .digest("hex");
-  const firstItem = lateItems[0] ?? updatedItems[0] ?? stockById.get(mutation.deleteIds[0]);
   return {
     approvalAction,
     title,
@@ -3882,7 +4166,7 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
     payload,
     stockDetails,
     requestKey,
-    siteId: normalizeSiteId(firstItem?.siteId ?? mutation.upsertItems[0]?.siteId),
+    siteId: changedSiteIds[0],
   };
 }
 
@@ -4934,6 +5218,9 @@ function paymentMethodAllowedForOrderSource(method, source) {
 function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
   const incomingSiteId = body.siteId === ALL_SITE_ID ? DEFAULT_SITE_ID : body.siteId;
   const siteId = normalizeSiteId(incomingSiteId ?? currentOrder?.siteId);
+  if (currentOrder && siteId !== normalizeSiteId(currentOrder.siteId)) {
+    throw new Error("订单所属场地不能修改；如需调整，请取消原订单后在正确场地重新创建");
+  }
   const date = String(body.date ?? currentOrder?.date ?? "").trim();
   if (!date) throw new Error("下单日期不能为空");
   if (date > todayInChina()) throw new Error("下单日期不能晚于今天");
@@ -5022,10 +5309,16 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
         excludeOrderId: currentOrder?.id ?? "",
       });
     }
-    const stockItem = (Array.isArray(state.stock) ? state.stock : []).find((stock) => String(stock?.id ?? "") === stockId);
+    const matchingStock = (Array.isArray(state.stock) ? state.stock : [])
+      .filter((stock) => String(stock?.id ?? "") === stockId);
+    if (matchingStock.length > 1) throw new Error(`库存鱼 ID 不唯一，订单暂不能修改：${stockId}`);
+    const stockItem = matchingStock[0];
     const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
       .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockId);
     if (!stockItem && !existingItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
+    if (stockItem && stockSiteId(state, stockItem) !== siteId) {
+      throw new Error("订单商品与所属场地不一致，请先移除错误场地的商品");
+    }
     const productId = String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim();
     const product = findProductById(state, productId);
     const inventoryRemovedAt = String(existingItem?.inventoryRemovedAt ?? "").trim();
@@ -5665,13 +5958,22 @@ function cosReady() {
   return Boolean(cosConfig.secretId && cosConfig.secretKey && cosConfig.bucket && cosConfig.region);
 }
 
-function getCosClient() {
+function getCosClient(purpose = "download") {
   if (!cosReady()) return null;
-  cosClient ??= new COS({
+  if (purpose === "upload") {
+    cosUploadClient ??= new COS({
+      SecretId: cosConfig.secretId,
+      SecretKey: cosConfig.secretKey,
+      Timeout: COS_UPLOAD_TIMEOUT_MS,
+    });
+    return cosUploadClient;
+  }
+  cosDownloadClient ??= new COS({
     SecretId: cosConfig.secretId,
     SecretKey: cosConfig.secretKey,
+    Timeout: COS_REQUEST_TIMEOUT_MS,
   });
-  return cosClient;
+  return cosDownloadClient;
 }
 
 function defaultCosBaseUrl() {
@@ -5705,56 +6007,131 @@ function cosKeyFromUrl(value) {
 }
 
 async function sendCosObject(req, res, key, cacheControl = "private, max-age=3600", options = {}) {
-  const client = getCosClient();
+  const client = getCosClient("download");
   if (!client) {
     sendJson(req, res, 503, { error: "COS is not configured" });
     return;
   }
   let releaseTranscodeSlot = null;
-  if (options.wechatVideo) {
-    try {
-      releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
-    } catch (error) {
-      sendJson(req, res, error?.statusCode || 503, { error: error.message || "视频处理中，请稍后重试" });
-      return;
+  let releasePublicMediaSlot = null;
+  let mediaOperationExpired = false;
+  const acquisitionAbort = new AbortController();
+  const abortAcquisition = () => acquisitionAbort.abort();
+  let abortListenersAttached = true;
+  const removeAbortListeners = () => {
+    if (!abortListenersAttached) return;
+    abortListenersAttached = false;
+    req.removeListener("aborted", abortAcquisition);
+    res.removeListener("close", abortAcquisition);
+  };
+  const releaseSlots = () => {
+    removeAbortListeners();
+    releaseTranscodeSlot?.();
+    releasePublicMediaSlot?.();
+  };
+  const expireMediaOperation = (reason) => {
+    const firstExpiration = !mediaOperationExpired;
+    mediaOperationExpired = true;
+    if (!acquisitionAbort.signal.aborted) acquisitionAbort.abort();
+    releaseSlots();
+    if (
+      firstExpiration && reason === "timeout" &&
+      !req.aborted && !res.destroyed && !res.headersSent
+    ) {
+      sendJson(req, res, 504, { error: "COS media request timed out" });
     }
+  };
+  req.once("aborted", abortAcquisition);
+  res.once("close", abortAcquisition);
+  try {
+    if (options.publicMedia) {
+      const inferredMime = String(mimeForExtension(extname(key)) ?? "");
+      const limiter = inferredMime.startsWith("video/")
+        ? publicVideoMediaLimiter
+        : publicImageMediaLimiter;
+      releasePublicMediaSlot = await limiter.acquire({
+        signal: acquisitionAbort.signal,
+        leaseTimeoutMs: PUBLIC_MEDIA_LEASE_TIMEOUT_MS,
+        onLeaseExpired: expireMediaOperation,
+      });
+    }
+    if (options.wechatVideo) {
+      releaseTranscodeSlot = await videoTranscodeLimiter.acquire({
+        signal: acquisitionAbort.signal,
+        onLeaseExpired: expireMediaOperation,
+      });
+    }
+  } catch (error) {
+    releaseSlots();
+    if (error?.name === "AbortError" || req.aborted || res.destroyed) return;
+    sendJson(req, res, error?.statusCode || 503, {
+      error: error.message || (options.publicMedia ? "公开媒体加载繁忙，请稍后重试" : "视频处理中，请稍后重试"),
+    });
+    return;
+  }
+  if (req.aborted || res.destroyed) {
+    mediaOperationExpired = true;
+    releaseSlots();
+    return;
   }
   client.getObject({
     Bucket: cosConfig.bucket,
     Region: cosConfig.region,
     Key: key,
   }, (error, data = {}) => {
+    if (mediaOperationExpired || req.aborted || res.destroyed) {
+      releaseSlots();
+      return;
+    }
     if (error) {
-      releaseTranscodeSlot?.();
+      releaseSlots();
       const status = Number(error.statusCode || error.status) || 502;
       sendJson(req, res, status === 404 ? 404 : 502, { error: "Failed to load COS object" });
       return;
     }
     const body = data.Body ?? Buffer.alloc(0);
-    const contentType = data.ContentType || mimeForExtension(extname(key));
+    let contentType = data.ContentType || mimeForExtension(extname(key));
+    if (options.publicMedia) {
+      contentType = safePublicMediaContentType(contentType, key);
+      if (!contentType) {
+        releaseSlots();
+        sendJson(req, res, 415, { error: "Unsupported public media type" }, {
+          "X-Content-Type-Options": "nosniff",
+        });
+        return;
+      }
+    }
+    const safeHeaders = options.publicMedia ? { "X-Content-Type-Options": "nosniff" } : {};
     if (options.wechatVideo && String(contentType).startsWith("video/")) {
       transcodeVideoToWechatMp4(body, contentType, { slotAcquired: true })
         .then((mp4Buffer) => {
+          if (mediaOperationExpired || req.aborted || res.destroyed) return;
+          res._logicalResponseBytes = mp4Buffer.length;
           res.writeHead(200, {
             "Content-Type": "video/mp4",
             "Content-Disposition": "inline; filename=\"wechat-video.mp4\"",
             "Cache-Control": cacheControl,
+            ...safeHeaders,
           });
           res.end(mp4Buffer);
         })
         .catch((transcodeError) => {
+          if (mediaOperationExpired || req.aborted || res.destroyed) return;
           console.warn(`Failed to transcode COS video ${key}: ${transcodeError.message}`);
           sendJson(req, res, 502, { error: "视频转码失败，请稍后重试" });
         })
-        .finally(() => releaseTranscodeSlot?.());
+        .finally(() => {
+          releaseSlots();
+        });
       return;
     }
-    releaseTranscodeSlot?.();
+    res._logicalResponseBytes = Buffer.byteLength(body);
     res.writeHead(200, {
       "Content-Type": contentType,
       "Cache-Control": cacheControl,
+      ...safeHeaders,
     });
-    res.end(body);
+    res.end(body, releaseSlots);
   });
 }
 
@@ -5783,6 +6160,26 @@ async function signedCosObjectUrl(key, queryString = "") {
 function imagePreviewQuery(widthValue) {
   const width = Math.min(1200, Math.max(80, Number(widthValue) || 360));
   return `imageMogr2/thumbnail/${Math.round(width)}x/quality/70/ignore-error/1`;
+}
+
+const SUPPORTED_VIDEO_MIMES = new Set([
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/x-m4v",
+  "video/3gpp",
+  "video/3gpp2",
+]);
+
+function normalizeMediaMime(value) {
+  return String(value ?? "").split(";", 1)[0].trim().toLowerCase();
+}
+
+function safePublicMediaContentType(contentType, key = "") {
+  const supplied = normalizeMediaMime(contentType);
+  if (isSafePublicMediaMime(supplied)) return supplied;
+  const inferred = normalizeMediaMime(mimeForExtension(extname(key)));
+  return isSafePublicMediaMime(inferred) ? inferred : "";
 }
 
 function prefixedCosKey(...parts) {
@@ -5885,7 +6282,7 @@ async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", optio
 }
 
 async function uploadBufferToCos(buffer, mime, key) {
-  const client = getCosClient();
+  const client = getCosClient("upload");
   if (!client) return null;
   await new Promise((resolvePromise, rejectPromise) => {
     client.putObject({
@@ -5915,8 +6312,16 @@ async function externalizeDataUrl(value) {
     : null;
   if (!match) return value;
 
-  const [, mime, encoded] = match;
+  const [, rawMime, encoded] = match;
+  const mime = normalizeMediaMime(rawMime);
   const buffer = Buffer.from(encoded, "base64");
+  if (isSupportedImageMime(mime)) {
+    validateImageUploadBuffer(buffer, mime);
+  } else if (!SUPPORTED_VIDEO_MIMES.has(mime)) {
+    const error = new Error("仅支持安全的图片或视频格式");
+    error.statusCode = 400;
+    throw error;
+  }
   const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 24);
   const ext = extensionForMime(mime);
   if (cosReady()) {
@@ -6108,8 +6513,8 @@ async function readRawBody(req, maxBytes = Number.POSITIVE_INFINITY) {
   return Buffer.concat(chunks);
 }
 
-async function readBody(req) {
-  const buffer = await readRawBody(req);
+async function readBody(req, maxBytes = Number.POSITIVE_INFINITY) {
+  const buffer = await readRawBody(req, maxBytes);
   return buffer.toString("utf8");
 }
 
@@ -6140,20 +6545,111 @@ async function backfillDefaultSites() {
 
     const currentSites = Array.isArray(state.sites) ? state.sites : [];
     const nextSites = getSitesFromState(state);
-    if (JSON.stringify(currentSites) === JSON.stringify(nextSites)) {
+    const siteSchemaVersion = Number(state._siteSchemaVersion ?? 0);
+    const withLegacyDefaultSite = (records) => (Array.isArray(records) ? records : []).map((record) =>
+      String(record?.siteId ?? "").trim()
+        ? record
+        : { ...record, siteId: DEFAULT_SITE_ID }
+    );
+    const nextTankGroups = siteSchemaVersion >= 4
+      ? state.tankGroups
+      : withLegacyDefaultSite(state.tankGroups);
+    const nextBatches = siteSchemaVersion >= 4
+      ? state.batches
+      : withLegacyDefaultSite(state.batches);
+    const knownSiteIds = new Set(nextSites.map((site) => String(site?.id ?? "").trim()).filter(Boolean));
+    const nextOrders = siteSchemaVersion >= 4
+      ? state.orders
+      : (Array.isArray(state.orders) ? state.orders : []).map((order) => {
+          if (String(order?.siteId ?? "").trim()) return order;
+          const relatedShipmentSites = new Set((Array.isArray(state.shipments) ? state.shipments : [])
+            .filter((shipment) => String(shipment?.orderId ?? "").trim() === String(order?.id ?? "").trim())
+            .map((shipment) => String(shipment?.siteId ?? "").trim())
+            .filter((siteId) => knownSiteIds.has(siteId)));
+          const relatedSiteId = relatedShipmentSites.size === 1 ? [...relatedShipmentSites][0] : "";
+          return { ...order, siteId: relatedSiteId || DEFAULT_SITE_ID };
+        });
+    const nextStock = siteSchemaVersion >= 4
+      ? state.stock
+      : (Array.isArray(state.stock) ? state.stock : []).map((item) => {
+          if (String(item?.siteId ?? "").trim()) return item;
+          const groupMatches = (Array.isArray(nextTankGroups) ? nextTankGroups : []).filter((group) =>
+            (Array.isArray(group?.subTanks) ? group.subTanks : [])
+              .some((tank) => String(tank?.id ?? "") === String(item?.subTankId ?? ""))
+          );
+          const batchMatches = (Array.isArray(nextBatches) ? nextBatches : []).filter((batch) =>
+            String(batch?.id ?? "") === String(item?.batchId ?? "")
+          );
+          const groupSiteId = groupMatches.length === 1 ? String(groupMatches[0]?.siteId ?? "").trim() : "";
+          const batchSiteId = batchMatches.length === 1 ? String(batchMatches[0]?.siteId ?? "").trim() : "";
+          const siteId = knownSiteIds.has(groupSiteId)
+            ? groupSiteId
+            : knownSiteIds.has(batchSiteId)
+              ? batchSiteId
+              : DEFAULT_SITE_ID;
+          return { ...item, siteId };
+        });
+    const nextShipments = siteSchemaVersion >= 4
+      ? state.shipments
+      : (Array.isArray(state.shipments) ? state.shipments : []).map((shipment) => {
+          if (String(shipment?.siteId ?? "").trim()) return shipment;
+          const orderMatches = (Array.isArray(nextOrders) ? nextOrders : []).filter((order) =>
+            String(order?.id ?? "").trim() === String(shipment?.orderId ?? "").trim()
+          );
+          const orderSiteId = orderMatches.length === 1 ? String(orderMatches[0]?.siteId ?? "").trim() : "";
+          return { ...shipment, siteId: orderSiteId || DEFAULT_SITE_ID };
+        });
+    const sitesChanged = JSON.stringify(currentSites) !== JSON.stringify(nextSites);
+    const scopedRecordsChanged = siteSchemaVersion < 4 && (
+      JSON.stringify(state.tankGroups ?? []) !== JSON.stringify(nextTankGroups ?? []) ||
+      JSON.stringify(state.batches ?? []) !== JSON.stringify(nextBatches ?? []) ||
+      JSON.stringify(state.orders ?? []) !== JSON.stringify(nextOrders ?? []) ||
+      JSON.stringify(state.stock ?? []) !== JSON.stringify(nextStock ?? []) ||
+      JSON.stringify(state.shipments ?? []) !== JSON.stringify(nextShipments ?? [])
+    );
+    if (!sitesChanged && !scopedRecordsChanged && siteSchemaVersion >= 4) {
       await client.query("ROLLBACK");
       return;
     }
 
     await client.query(
-      "UPDATE app_state SET data = jsonb_set(data, '{sites}', $2::jsonb, true), updated_at = now() WHERE id = $1",
-      [stateId, JSON.stringify(nextSites)]
+      `UPDATE app_state
+       SET data = jsonb_set(
+         jsonb_set(
+           jsonb_set(
+             jsonb_set(
+               jsonb_set(
+                 jsonb_set(
+                   jsonb_set(data, '{sites}', $2::jsonb, true),
+                   '{tankGroups}', $3::jsonb, true
+                 ),
+                 '{batches}', $4::jsonb, true
+               ),
+               '{orders}', $5::jsonb, true
+             ),
+             '{stock}', $6::jsonb, true
+           ),
+           '{shipments}', $7::jsonb, true
+         ),
+         '{_siteSchemaVersion}', '4'::jsonb, true
+       ), updated_at = now()
+       WHERE id = $1`,
+      [
+        stateId,
+        JSON.stringify(nextSites),
+        JSON.stringify(nextTankGroups ?? []),
+        JSON.stringify(nextBatches ?? []),
+        JSON.stringify(nextOrders ?? []),
+        JSON.stringify(nextStock ?? []),
+        JSON.stringify(nextShipments ?? []),
+      ]
     );
     await client.query("COMMIT");
-    console.log(`Backfilled default sites: ${nextSites.map((site) => site.name).join(", ")}`);
+    console.log(`Backfilled default sites and legacy site ownership: ${nextSites.map((site) => site.name).join(", ")}`);
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query("ROLLBACK").catch(() => undefined);
     console.error("Failed to backfill default sites:", error);
+    throw error;
   } finally {
     client.release();
   }
@@ -6465,13 +6961,82 @@ async function ensurePersonnelPrivateAttachmentLifecycleAndEncryption() {
 
 async function ensureSchema() {
   schemaReady ??= (async () => {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS app_state (
-        id TEXT PRIMARY KEY,
-        data JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
+    const revisionMigrationClient = await pool.connect();
+    try {
+      await revisionMigrationClient.query("BEGIN");
+      // Serialize concurrent new instances and hold the table exclusively from
+      // ALTER through trigger installation. Existing instances may finish an
+      // in-flight write before this lock, but no write can slip through the
+      // revision-less migration window or race the sequence alignment.
+      await revisionMigrationClient.query(
+        "SELECT pg_advisory_xact_lock(hashtext('fishroom'), hashtext('app_state_revision_v1'))"
+      );
+      await revisionMigrationClient.query("CREATE SEQUENCE IF NOT EXISTS app_state_revision_seq");
+      await revisionMigrationClient.query(`
+        CREATE TABLE IF NOT EXISTS app_state (
+          id TEXT PRIMARY KEY,
+          data JSONB NOT NULL,
+          revision BIGINT NOT NULL DEFAULT nextval('app_state_revision_seq'),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await revisionMigrationClient.query(`
+        ALTER TABLE app_state
+        ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT nextval('app_state_revision_seq')
+      `);
+      await revisionMigrationClient.query("LOCK TABLE app_state IN ACCESS EXCLUSIVE MODE");
+      await revisionMigrationClient.query("DROP TRIGGER IF EXISTS app_state_revision_trigger ON app_state");
+      await revisionMigrationClient.query(`
+        CREATE OR REPLACE FUNCTION bump_app_state_revision()
+        RETURNS trigger AS $$
+        BEGIN
+          IF TG_OP = 'UPDATE' OR NEW.revision IS NULL OR NEW.revision <= 0 THEN
+            NEW.revision := nextval('app_state_revision_seq');
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `);
+      await revisionMigrationClient.query(`
+        SELECT setval(
+          'app_state_revision_seq',
+          GREATEST(
+            (SELECT COALESCE(MAX(revision), 0) FROM app_state),
+            (SELECT last_value FROM app_state_revision_seq),
+            1
+          ),
+          true
+        )
+      `);
+      // Allocate a fresh marker while the table is locked so clients can
+      // reliably observe the completed migration even on an existing row.
+      await revisionMigrationClient.query(`
+        UPDATE app_state
+        SET revision = nextval('app_state_revision_seq')
+      `);
+      await revisionMigrationClient.query(`
+        SELECT setval(
+          'app_state_revision_seq',
+          GREATEST(
+            (SELECT COALESCE(MAX(revision), 0) FROM app_state),
+            (SELECT last_value FROM app_state_revision_seq),
+            1
+          ),
+          true
+        )
+      `);
+      await revisionMigrationClient.query(`
+        CREATE TRIGGER app_state_revision_trigger
+        BEFORE INSERT OR UPDATE ON app_state
+        FOR EACH ROW EXECUTE FUNCTION bump_app_state_revision()
+      `);
+      await revisionMigrationClient.query("COMMIT");
+    } catch (error) {
+      await revisionMigrationClient.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      revisionMigrationClient.release();
+    }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS finance_import_batches (
         id TEXT PRIMARY KEY,
@@ -6785,14 +7350,21 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { error: "Invalid COS media URL" });
         return;
       }
-      const siteId = url.searchParams.get("siteId") ?? ALL_SITE_ID;
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-      const allowedUrls = publicCatalogAllowedMediaUrls(rows[0]?.data ?? {}, siteId);
-      if (!allowedUrls.has(mediaUrl)) {
-        sendJson(req, res, 403, { error: "COS media is not public catalog content" });
+      const now = Date.now();
+      const expiresAt = url.searchParams.get("expires");
+      const validToken = verifyPublicMediaUrlToken({
+        mediaUrl,
+        expiresAt,
+        signature: url.searchParams.get("signature"),
+        secret: authTokenSecret,
+        now,
+      });
+      if (!validToken) {
+        sendJson(req, res, 403, { error: "Public media link is invalid or expired" });
         return;
       }
-      sendCosObject(req, res, key, "public, max-age=3600");
+      const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt, { now });
+      sendCosObject(req, res, key, `public, max-age=${maxAge}`, { publicMedia: true });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public media" });
     }
@@ -6800,30 +7372,217 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/public/catalog" && req.method === "GET") {
+    let releaseProjectionSlot = null;
     try {
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const requestedSiteId = normalizeSiteScope(url.searchParams.get("siteId") ?? ALL_SITE_ID);
+      const versionResult = await pool.query(
+        "SELECT revision::text AS version FROM app_state WHERE id = $1",
+        [stateId]
+      );
+      const observedRevision = String(versionResult.rows[0]?.version ?? "");
+      const cacheKey = requestedSiteId;
+      const cached = cachedPublicProjection(publicCatalogCache, cacheKey, observedRevision);
+      if (cached.hit) {
+        sendJson(req, res, 200, { ok: true, catalog: cached.value });
+        return;
+      }
+
+      releaseProjectionSlot = await publicProjectionLimiter.acquire();
+      const cachedAfterWait = cachedPublicProjection(publicCatalogCache, cacheKey, observedRevision);
+      if (cachedAfterWait.hit) {
+        sendJson(req, res, 200, { ok: true, catalog: cachedAfterWait.value });
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `WITH source AS MATERIALIZED (
+           SELECT data, revision::text AS version
+           FROM app_state
+           WHERE id = $1
+         )
+         SELECT
+           version,
+           data -> 'sites' AS sites,
+           data -> 'species' AS species,
+           data -> 'speciesCategories' AS species_categories,
+           data -> 'speciesCategoryMajorMap' AS species_category_major_map,
+           data -> 'products' AS products,
+           data -> 'tankGroups' AS tank_groups,
+           data -> 'stock' AS stock,
+           data -> 'orders' AS orders,
+           data -> 'shipments' AS shipments,
+           COALESCE((
+             SELECT jsonb_agg(record_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS records(record_item)
+             WHERE
+               CASE WHEN jsonb_typeof(record_item -> 'photos') = 'array'
+                 THEN jsonb_array_length(record_item -> 'photos') ELSE 0 END > 0
+               OR
+               CASE WHEN jsonb_typeof(record_item -> 'videos') = 'array'
+                 THEN jsonb_array_length(record_item -> 'videos') ELSE 0 END > 0
+           ), '[]'::jsonb) AS bio_records
+         FROM source`,
+        [stateId]
+      );
+      const row = rows[0] ?? {};
+      const catalog = buildPublicCatalog(
+        publicCatalogProjectionFromRow(row),
+        requestedSiteId
+      );
+      storePublicProjection(
+        publicCatalogCache,
+        cacheKey,
+        row.version,
+        catalog,
+        Math.max(8, getSitesFromState(publicCatalogProjectionFromRow(row)).length * 2)
+      );
       sendJson(req, res, 200, {
         ok: true,
-        catalog: buildPublicCatalog(rows[0]?.data ?? {}, url.searchParams.get("siteId") ?? ALL_SITE_ID),
+        catalog,
       });
     } catch (error) {
-      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public catalog" });
+      sendJson(req, res, Number(error?.statusCode ?? 500), {
+        ok: false,
+        error: error.message || "Failed to load public catalog",
+      });
+    } finally {
+      releaseProjectionSlot?.();
     }
     return;
   }
 
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") {
+    let releaseProjectionSlot = null;
     try {
       const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
       if (!stockItemId) {
         sendJson(req, res, 400, { ok: false, error: "stockItemId is required" });
         return;
       }
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-      const bioRecords = buildPublicBioRecordsForStock(
-        rows[0]?.data ?? {},
-        url.searchParams.get("siteId") ?? ALL_SITE_ID,
-        stockItemId
+      const requestedSiteId = normalizeSiteScope(url.searchParams.get("siteId") ?? ALL_SITE_ID);
+      const versionResult = await pool.query(
+        "SELECT revision::text AS version FROM app_state WHERE id = $1",
+        [stateId]
+      );
+      const observedRevision = String(versionResult.rows[0]?.version ?? "");
+      const cacheKey = `${requestedSiteId}:${stockItemId}`;
+      const cached = cachedPublicProjection(publicBioRecordsCache, cacheKey, observedRevision);
+      if (cached.hit) {
+        if (!cached.value) {
+          sendJson(req, res, 404, { ok: false, error: "Stock item is not public" });
+        } else {
+          sendJson(req, res, 200, { ok: true, bioRecords: cached.value });
+        }
+        return;
+      }
+
+      releaseProjectionSlot = await publicProjectionLimiter.acquire();
+      const cachedAfterWait = cachedPublicProjection(publicBioRecordsCache, cacheKey, observedRevision);
+      if (cachedAfterWait.hit) {
+        if (!cachedAfterWait.value) {
+          sendJson(req, res, 404, { ok: false, error: "Stock item is not public" });
+        } else {
+          sendJson(req, res, 200, { ok: true, bioRecords: cachedAfterWait.value });
+        }
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `WITH source AS MATERIALIZED (
+           SELECT data, revision::text AS version
+           FROM app_state
+           WHERE id = $1
+         ),
+         target_stock AS MATERIALIZED (
+           SELECT stock_item
+           FROM source,
+             LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stock_rows(stock_item)
+           WHERE stock_item ->> 'id' = $2
+         ),
+         relevant_orders AS MATERIALIZED (
+           SELECT order_item
+           FROM source,
+             LATERAL jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS order_rows(order_item)
+           WHERE EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(order_item -> 'items') = 'array'
+                 THEN order_item -> 'items' ELSE '[]'::jsonb END
+             ) AS order_items(item)
+             WHERE item ->> 'stockItemId' = $2
+           )
+         )
+         SELECT
+           version,
+           data -> 'sites' AS sites,
+           COALESCE((
+             SELECT jsonb_agg(group_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(group_item)
+             WHERE EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(group_item -> 'subTanks') = 'array'
+                   THEN group_item -> 'subTanks' ELSE '[]'::jsonb END
+               ) AS sub_tanks(sub_tank)
+               WHERE sub_tank ->> 'id' = (
+                 SELECT stock_item ->> 'subTankId' FROM target_stock LIMIT 1
+               )
+             )
+           ), '[]'::jsonb) AS tank_groups,
+           COALESCE((
+             SELECT jsonb_agg(product_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'products', '[]'::jsonb)) AS product_rows(product_item)
+             WHERE product_item ->> 'id' = (
+               SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
+             )
+           ), '[]'::jsonb) AS products,
+           COALESCE((SELECT jsonb_agg(order_item) FROM relevant_orders), '[]'::jsonb) AS orders,
+           COALESCE((
+             SELECT jsonb_agg(shipment_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'shipments', '[]'::jsonb)) AS shipment_rows(shipment_item)
+             WHERE shipment_item ->> 'orderId' IN (
+               SELECT order_item ->> 'id' FROM relevant_orders
+             ) OR EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(shipment_item -> 'itemStockIds') = 'array'
+                   THEN shipment_item -> 'itemStockIds' ELSE '[]'::jsonb END
+               ) AS shipment_stock_ids(stock_id)
+               WHERE stock_id = $2
+             )
+           ), '[]'::jsonb) AS shipments,
+           (SELECT count(*)::int FROM target_stock) AS stock_item_count,
+           (SELECT stock_item FROM target_stock LIMIT 1) AS stock_item,
+           COALESCE((
+             SELECT jsonb_agg(record_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS bio_rows(record_item)
+             WHERE record_item ->> 'stockItemId' = $2
+           ), '[]'::jsonb) AS bio_records
+         FROM source`,
+        [stateId, stockItemId]
+      );
+      const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
+      const stockItem = rows[0]?.stock_item && typeof rows[0].stock_item === "object"
+        ? rows[0].stock_item
+        : null;
+      const projectedState = {
+        sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+        tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
+        products: Array.isArray(rows[0]?.products) ? rows[0].products : [],
+        orders: Array.isArray(rows[0]?.orders) ? rows[0].orders : [],
+        shipments: Array.isArray(rows[0]?.shipments) ? rows[0].shipments : [],
+        stock: stockItemCount === 1 && stockItem ? [stockItem] : [],
+        bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
+      };
+      const bioRecords = stockItemCount === 1
+        ? buildPublicBioRecordsForStock(projectedState, requestedSiteId, stockItemId)
+        : null;
+      storePublicProjection(
+        publicBioRecordsCache,
+        cacheKey,
+        rows[0]?.version,
+        bioRecords,
+        PUBLIC_BIO_CACHE_MAX_ENTRIES
       );
       if (!bioRecords) {
         sendJson(req, res, 404, { ok: false, error: "Stock item is not public" });
@@ -6831,7 +7590,12 @@ async function handleApi(req, res, url) {
       }
       sendJson(req, res, 200, { ok: true, bioRecords });
     } catch (error) {
-      sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public bio records" });
+      sendJson(req, res, Number(error?.statusCode ?? 500), {
+        ok: false,
+        error: error.message || "Failed to load public bio records",
+      });
+    } finally {
+      releaseProjectionSlot?.();
     }
     return;
   }
@@ -8671,9 +9435,7 @@ async function handleApi(req, res, url) {
           token: replacementSession.token,
           expiresAt: replacementSession.expiresAt,
         } : {}),
-      }, replacementSession ? {
-        "Set-Cookie": authCookieHeader(replacementSession.token, replacementSession.expiresAt),
-      } : {});
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "保存人员失败" });
@@ -8923,7 +9685,7 @@ async function handleApi(req, res, url) {
           token: replacementSession.token,
           expiresAt: replacementSession.expiresAt,
         } : {}),
-      }, replacementSession ? { "Set-Cookie": authCookieHeader(replacementSession.token, replacementSession.expiresAt) } : {});
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       sendJson(req, res, 400, { ok: false, error: error.message || "修改密码失败" });
@@ -8995,8 +9757,8 @@ async function handleApi(req, res, url) {
     let releaseTranscodeSlot = null;
     try {
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
-      const isImage = mime.startsWith("image/");
-      const isVideo = mime.startsWith("video/");
+      const isImage = isSupportedImageMime(mime);
+      const isVideo = SUPPORTED_VIDEO_MIMES.has(mime);
       if (!isImage && !isVideo) {
         sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
         return;
@@ -9075,8 +9837,37 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-summary" && req.method === "GET") {
-    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-    const data = siteVisibilityFilteredState(rows[0]?.data ?? {}, req.auth?.account);
+    const { rows } = await pool.query(
+      `SELECT
+         data -> 'sites' AS sites,
+         data -> 'species' AS species,
+         data -> 'products' AS products,
+         data -> 'tankGroups' AS tank_groups,
+         data -> 'batches' AS batches,
+         data -> 'stock' AS stock,
+         data -> 'lossRecords' AS loss_records,
+         data -> 'orders' AS orders,
+         data -> 'shipments' AS shipments,
+         data -> 'customers' AS customers,
+         data -> 'personnel' AS personnel
+       FROM app_state
+       WHERE id = $1`,
+      [stateId]
+    );
+    const row = rows[0] ?? {};
+    const data = siteVisibilityFilteredState({
+      sites: Array.isArray(row.sites) ? row.sites : [],
+      species: Array.isArray(row.species) ? row.species : [],
+      products: Array.isArray(row.products) ? row.products : [],
+      tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+      batches: Array.isArray(row.batches) ? row.batches : [],
+      stock: Array.isArray(row.stock) ? row.stock : [],
+      lossRecords: Array.isArray(row.loss_records) ? row.loss_records : [],
+      orders: Array.isArray(row.orders) ? row.orders : [],
+      shipments: Array.isArray(row.shipments) ? row.shipments : [],
+      customers: Array.isArray(row.customers) ? row.customers : [],
+      personnel: Array.isArray(row.personnel) ? row.personnel : [],
+    }, req.auth?.account);
     sendJson(req, res, 200, {
       summary: buildDashboardSummary(data, {
         financeDays: url.searchParams.get("financeDays") ?? url.searchParams.get("days"),
@@ -9086,9 +9877,69 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/dashboard-focus" && req.method === "GET") {
+    const mode = url.searchParams.get("mode") === "product" ? "product" : "species";
+    const focusId = String(url.searchParams.get("id") ?? "").trim();
+    if (!focusId) {
+      sendJson(req, res, 400, { error: "Missing dashboard focus id" });
+      return;
+    }
+    const { rows } = await pool.query(
+      `SELECT
+         data -> 'sites' AS sites,
+         data -> 'species' AS species,
+         data -> 'products' AS products,
+         data -> 'tankGroups' AS tank_groups,
+         data -> 'stock' AS stock,
+         data -> 'orders' AS orders,
+         data -> 'shipments' AS shipments
+       FROM app_state
+       WHERE id = $1`,
+      [stateId]
+    );
+    const row = rows[0] ?? {};
+    const visibleState = siteVisibilityFilteredState({
+      sites: Array.isArray(row.sites) ? row.sites : [],
+      species: Array.isArray(row.species) ? row.species : [],
+      products: Array.isArray(row.products) ? row.products : [],
+      tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+      stock: Array.isArray(row.stock) ? row.stock : [],
+      orders: Array.isArray(row.orders) ? row.orders : [],
+      shipments: Array.isArray(row.shipments) ? row.shipments : [],
+    }, req.auth?.account);
+    const scopedState = siteFilteredState(
+      visibleState,
+      url.searchParams.get("siteId") ?? ALL_SITE_ID
+    );
+    const focus = buildDashboardFocusDetail({
+      mode,
+      id: focusId,
+      today: todayInChina(),
+      species: scopedState.species,
+      products: scopedState.products,
+      stock: scopedState.stock,
+      orders: scopedState.orders,
+      outStockIds: shippedOutStockIds(scopedState),
+    });
+    if (!focus) {
+      sendJson(req, res, 404, { error: "Dashboard focus item not found" });
+      return;
+    }
+    sendJson(req, res, 200, { focus });
+    return;
+  }
+
   if (url.pathname === "/api/state" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
     sendJson(req, res, 200, { data: sanitizeStateForResponse(rows[0]?.data ?? null, req) });
+    return;
+  }
+
+  if (url.pathname === "/api/state/version" && req.method === "GET") {
+    const { rows } = await pool.query("SELECT revision::text AS version FROM app_state WHERE id = $1", [stateId]);
+    sendJson(req, res, 200, {
+      version: rows[0]?.version ?? null,
+    }, { "Cache-Control": "no-store, private" });
     return;
   }
 
@@ -9099,13 +9950,23 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { error: "Missing state slice keys" });
         return;
       }
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const plan = planStateSliceDependencies(keys);
+      const columns = plan.queryKeys
+        .map((key) => `data -> '${key}' AS "${key}"`)
+        .join(",\n           ");
+      const { rows } = await pool.query(
+        `SELECT revision::text AS version,\n           ${columns}\n         FROM app_state\n         WHERE id = $1`,
+        [stateId]
+      );
       const lite = new Set(String(url.searchParams.get("lite") ?? "").split(",").map((item) => item.trim()).filter(Boolean));
-      const data = sanitizeStateForResponse(rows[0]?.data ?? {}, req);
-      const picked = pickState(data, keys, { liteSpecies: lite.has("species") });
+      const row = rows[0] ?? {};
+      const projectedState = Object.fromEntries(plan.queryKeys.map((key) => [key, row[key] ?? null]));
+      const data = sanitizeStateForResponse(projectedState, req);
+      const picked = pickState(data, plan.requestedKeys, { liteSpecies: lite.has("species") });
       if (keys.includes("stock")) picked.inventoryProjection = data.inventoryProjection;
       sendJson(req, res, 200, {
         data: picked,
+        version: row.version ?? null,
       });
     } catch (error) {
       sendJson(req, res, 400, { error: error.message });
@@ -9114,21 +9975,330 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/bio-records" && req.method === "GET") {
-    const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
-    if (!stockItemId) {
-      sendJson(req, res, 400, { error: "Missing stockItemId" });
-      return;
+    try {
+      const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
+      if (!stockItemId) throw new Error("缺少库存鱼编号");
+      const { rows } = await pool.query(
+        `WITH source AS MATERIALIZED (
+           SELECT data
+           FROM app_state
+           WHERE id = $1
+         ),
+         target_stock AS MATERIALIZED (
+           SELECT stock_item
+           FROM source,
+             LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stock_rows(stock_item)
+           WHERE stock_item ->> 'id' = $2
+         )
+         SELECT
+           data -> 'sites' AS sites,
+           data -> 'tankGroups' AS tank_groups,
+           (SELECT count(*)::int FROM target_stock) AS stock_item_count,
+           (SELECT stock_item FROM target_stock LIMIT 1) AS stock_item,
+           COALESCE((
+             SELECT jsonb_agg(record_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS bio_rows(record_item)
+             WHERE record_item ->> 'stockItemId' = $2
+           ), '[]'::jsonb) AS bio_records
+         FROM source`,
+        [stateId, stockItemId]
+      );
+      const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
+      if (stockItemCount > 1) {
+        throw new BioRecordConflictError("库存鱼 ID 不唯一，无法安全查看", {
+          code: "BIO_STOCK_ID_CONFLICT",
+        });
+      }
+      const stockItem = rows[0]?.stock_item && typeof rows[0].stock_item === "object"
+        ? rows[0].stock_item
+        : null;
+      const state = {
+        sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+        tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
+        bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
+        stock: stockItem ? [stockItem] : [],
+      };
+      const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+      const stockSiteId = stockItem ? normalizeSiteId(
+        findSubTank(state, stockItem.subTankId)?.group?.siteId ?? stockItem.siteId
+      ) : "";
+      const canAccessStock = stockItem && canAccessBioStockSite({
+        account: req.auth?.account,
+        visibleSiteIds,
+        stockSiteId,
+      });
+      if (!stockItem || !canAccessStock) {
+        sendJson(req, res, 404, { ok: false, error: "生物不存在或无权查看" });
+        return;
+      }
+      assertUniqueBioRecordIds(state.bioRecords);
+      sendJson(req, res, 200, {
+        ok: true,
+        bioRecords: state.bioRecords,
+        stockItem,
+      });
+    } catch (error) {
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "养殖记录加载失败",
+        ...(error?.code ? { code: error.code } : {}),
+      });
     }
-    const { rows } = await pool.query(
-      "SELECT data -> 'bioRecords' AS bio_records, data -> 'stock' AS stock FROM app_state WHERE id = $1",
-      [stateId]
-    );
-    const bioRecords = Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [];
-    const stock = Array.isArray(rows[0]?.stock) ? rows[0].stock : [];
-    sendJson(req, res, 200, {
-      bioRecords: bioRecords.filter((record) => String(record?.stockItemId ?? "") === stockItemId),
-      stockItem: stock.find((item) => String(item?.id ?? "") === stockItemId) ?? null,
-    });
+    return;
+  }
+
+  if (url.pathname === "/api/bio-records/save" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const rawBody = JSON.parse(await readBody(req, 2 * 1024 * 1024) || "{}");
+      const action = String(rawBody?.action ?? "").trim();
+      for (const requiredAction of bioRecordRequiredActions(action, { includesRecord: Boolean(rawBody?.record) })) {
+        requireModulePermissionForAuth(req, "daily", requiredAction);
+      }
+
+      const body = {
+        ...rawBody,
+        ...(rawBody?.record ? { record: await externalizeDataUrls(rawBody.record) } : {}),
+      };
+      const stockItemId = String(body?.stockItemId ?? "").trim();
+      if (!stockItemId) throw new Error("缺少库存鱼编号");
+      const targetRecordId = String(
+        action === "create" || (action === "saveDetails" && body?.record)
+          ? body?.record?.id
+          : body?.recordId
+      ).trim();
+
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `SELECT
+           data -> 'sites' AS sites,
+           data -> 'tankGroups' AS tank_groups,
+           stock_target.stock_item_count,
+           stock_target.stock_item,
+           record_target.bio_records,
+           ($4::boolean AND (
+             EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(data -> 'shipments', '[]'::jsonb)) AS shipment_rows(shipment_item)
+               WHERE COALESCE(shipment_item ->> 'status', '') <> 'preparing'
+                 AND EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements_text(COALESCE(shipment_item -> 'itemStockIds', '[]'::jsonb)) AS shipment_stock(stock_id)
+                   WHERE btrim(shipment_stock.stock_id) = $2
+                 )
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS order_rows(order_item)
+               WHERE order_item ->> 'status' = 'completed'
+                 AND EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements(COALESCE(order_item -> 'items', '[]'::jsonb)) AS order_stock(order_stock_item)
+                   WHERE btrim(COALESCE(order_stock_item ->> 'stockItemId', '')) = $2
+                     AND btrim(COALESCE(order_stock_item ->> 'inventoryRemovedAt', '')) = ''
+                 )
+             )
+           )) AS stock_is_out
+         FROM app_state
+         CROSS JOIN LATERAL (
+           SELECT
+             count(*)::int AS stock_item_count,
+             (jsonb_agg(stock_row.stock_item ORDER BY stock_row.ordinality) -> 0) AS stock_item
+           FROM jsonb_array_elements(COALESCE(app_state.data -> 'stock', '[]'::jsonb))
+             WITH ORDINALITY AS stock_row(stock_item, ordinality)
+           WHERE btrim(COALESCE(stock_row.stock_item ->> 'id', '')) = $2
+         ) AS stock_target
+         CROSS JOIN LATERAL (
+           SELECT COALESCE(jsonb_agg(record_row.record_item ORDER BY record_row.ordinality), '[]'::jsonb) AS bio_records
+           FROM jsonb_array_elements(COALESCE(app_state.data -> 'bioRecords', '[]'::jsonb))
+             WITH ORDINALITY AS record_row(record_item, ordinality)
+           WHERE $3 <> '' AND btrim(COALESCE(record_row.record_item ->> 'id', '')) = $3
+         ) AS record_target
+         WHERE id = $1
+         FOR UPDATE`,
+        [stateId, stockItemId, targetRecordId, ["create", "saveDetails"].includes(action)]
+      );
+      const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
+      if (stockItemCount > 1) {
+        throw new BioRecordConflictError("库存鱼 ID 不唯一，无法安全处理", {
+          code: "BIO_STOCK_ID_CONFLICT",
+        });
+      }
+      const projectedStockItem = rows[0]?.stock_item && typeof rows[0].stock_item === "object"
+        ? rows[0].stock_item
+        : null;
+      const state = {
+        sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+        tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
+        stock: projectedStockItem ? [projectedStockItem] : [],
+        bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
+      };
+      const storedStockItem = findUniqueBioStockItem(state.stock, stockItemId);
+      const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+      const storedStockSiteId = storedStockItem ? normalizeSiteId(
+        findSubTank(state, storedStockItem.subTankId)?.group?.siteId ?? storedStockItem.siteId
+      ) : "";
+      const canAccessStock = storedStockItem && canAccessBioStockSite({
+        account: req.auth?.account,
+        visibleSiteIds,
+        stockSiteId: storedStockSiteId,
+      });
+      if (!storedStockItem || !canAccessStock) {
+        const error = new Error("生物不存在或无权操作");
+        error.statusCode = 404;
+        throw error;
+      }
+      const authoritativeSiteId = normalizeSiteId(
+        findSubTank(state, storedStockItem.subTankId)?.group?.siteId ?? storedStockItem.siteId
+      );
+      const stockItem = { ...storedStockItem, siteId: authoritativeSiteId };
+      const plan = planBioRecordSave({
+        action,
+        stockItem,
+        records: state.bioRecords,
+        record: body?.record,
+        recordId: body?.recordId,
+        expectedRecord: body?.expectedRecord,
+        details: body?.details,
+        expectedDetails: body?.expectedDetails,
+        operator: authenticatedOperator(req),
+        now: nowDatetimeInChina(),
+      });
+
+      if (["create", "saveDetails"].includes(action) && !plan.idempotent &&
+          (storedStockItem.lost || Boolean(rows[0]?.stock_is_out))) {
+        throw new Error("已损耗或已发货的鱼不能新增记录或修改信息");
+      }
+
+      if (plan.idempotent) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, {
+          ok: true,
+          idempotent: true,
+          ...(action === "saveDetails" ? { stockItem: plan.stockItem } : {}),
+          ...(plan.record ? { bioRecord: plan.record } : {}),
+        });
+        return;
+      }
+
+      const operationParts = [];
+      if (plan.changedKeys.includes("stock")) operationParts.push("修改鱼的信息");
+      if (action === "create" || (action === "saveDetails" && plan.record)) operationParts.push("新增观察/治疗记录");
+      if (action === "updateTime") operationParts.push("修改观察/治疗记录时间");
+      if (action === "delete") operationParts.push("删除观察/治疗记录");
+      const operationLog = {
+        id: uid("log"),
+        time: new Date().toISOString(),
+        operator: authenticatedOperator(req),
+        module: "日常管理",
+        action: action === "delete" ? "删除记录" : action === "create" ? "添加记录" : "修改记录",
+        detail: `${operationParts.join("并")}（库存鱼 ${stockItemId}${plan.record?.date ? `，${plan.record.date}` : ""}）`,
+      };
+      let dataExpression = "data";
+      const updateValues = [stateId];
+      const bindValue = (value) => {
+        updateValues.push(value);
+        return `$${updateValues.length}`;
+      };
+      if (plan.changedKeys.includes("stock")) {
+        const stockIdParam = bindValue(stockItemId);
+        const stockItemParam = bindValue(JSON.stringify(plan.stockItem));
+        dataExpression = `jsonb_set(
+          ${dataExpression},
+          '{stock}',
+          (
+            SELECT COALESCE(jsonb_agg(
+              CASE WHEN btrim(COALESCE(stock_row.stock_item ->> 'id', '')) = ${stockIdParam} THEN ${stockItemParam}::jsonb ELSE stock_row.stock_item END
+              ORDER BY stock_row.ordinality
+            ), '[]'::jsonb)
+            FROM jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb))
+              WITH ORDINALITY AS stock_row(stock_item, ordinality)
+          ),
+          true
+        )`;
+      }
+      if (plan.changedKeys.includes("bioRecords")) {
+        const recordIdParam = bindValue(targetRecordId);
+        if (action === "delete") {
+          dataExpression = `jsonb_set(
+            ${dataExpression},
+            '{bioRecords}',
+            (
+              SELECT COALESCE(jsonb_agg(record_row.record_item ORDER BY record_row.ordinality), '[]'::jsonb)
+              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
+                WITH ORDINALITY AS record_row(record_item, ordinality)
+              WHERE btrim(COALESCE(record_row.record_item ->> 'id', '')) <> ${recordIdParam}
+            ),
+            true
+          )`;
+        } else if (action === "updateTime") {
+          const recordParam = bindValue(JSON.stringify(plan.record));
+          dataExpression = `jsonb_set(
+            ${dataExpression},
+            '{bioRecords}',
+            (
+              SELECT COALESCE(jsonb_agg(
+                CASE WHEN btrim(COALESCE(record_row.record_item ->> 'id', '')) = ${recordIdParam} THEN ${recordParam}::jsonb ELSE record_row.record_item END
+                ORDER BY record_row.ordinality
+              ), '[]'::jsonb)
+              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
+                WITH ORDINALITY AS record_row(record_item, ordinality)
+            ),
+            true
+          )`;
+        } else {
+          const recordParam = bindValue(JSON.stringify(plan.record));
+          dataExpression = `jsonb_set(
+            ${dataExpression},
+            '{bioRecords}',
+            COALESCE(data -> 'bioRecords', '[]'::jsonb) || jsonb_build_array(${recordParam}::jsonb),
+            true
+          )`;
+        }
+      }
+      const operationLogParam = bindValue(JSON.stringify(operationLog));
+      const maxExistingOperationLogsParam = bindValue(Math.max(0, MAX_OPERATION_LOGS - 1));
+      dataExpression = `jsonb_set(
+        ${dataExpression},
+        '{operationLogs}',
+        (
+          SELECT COALESCE(jsonb_agg(entries.entry ORDER BY entries.position), '[]'::jsonb)
+          FROM (
+            SELECT ${operationLogParam}::jsonb AS entry, 0::bigint AS position
+            UNION ALL
+            SELECT operation_row.operation_item, operation_row.ordinality
+            FROM jsonb_array_elements(COALESCE(data -> 'operationLogs', '[]'::jsonb))
+              WITH ORDINALITY AS operation_row(operation_item, ordinality)
+            WHERE operation_row.ordinality <= ${maxExistingOperationLogsParam}
+          ) AS entries
+        ),
+        true
+      )`;
+      await client.query(
+        `UPDATE app_state
+         SET data = ${dataExpression}, updated_at = now()
+         WHERE id = $1`,
+        updateValues
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, {
+        ok: true,
+        ...(plan.changedKeys.includes("stock") ? { stockItem: plan.stockItem } : {}),
+        ...(plan.record ? { bioRecord: plan.record } : {}),
+        ...(plan.deletedRecordId ? { deletedRecordId: plan.deletedRecordId } : {}),
+        operationLog,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      const status = Number(error?.statusCode ?? (error instanceof BioRecordConflictError ? 409 : 400));
+      sendJson(req, res, status, {
+        ok: false,
+        error: error.message || "生物记录保存失败",
+        ...(error?.code ? { code: error.code } : {}),
+      });
+    } finally {
+      client.release();
+    }
     return;
   }
 
@@ -9207,10 +10377,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
-      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在或不属于当前账户可见场地");
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, orderId);
       if (["completed", "cancelled"].includes(String(currentOrder.status ?? ""))) {
         throw new Error("该订单当前状态不能申请赊销审批");
       }
@@ -9228,7 +10395,8 @@ async function handleApi(req, res, url) {
         existingApprovedAmount + 0.005 >= requiredOutstandingAmount
       ) {
         await client.query("COMMIT");
-        sendJson(req, res, 200, { ok: true, alreadyAllowed: true, order: currentOrder, orders });
+        const visibleState = siteVisibilityFilteredState(state, req.auth?.account);
+        sendJson(req, res, 200, { ok: true, alreadyAllowed: true, order: currentOrder, orders: visibleState.orders });
         return;
       }
       const approvalGate = {
@@ -9246,13 +10414,14 @@ async function handleApi(req, res, url) {
           JSON.stringify(approved.nextState),
         ]);
         await client.query("COMMIT");
+        const visibleNextState = siteVisibilityFilteredState(approved.nextState, req.auth?.account);
         sendJson(req, res, 200, {
           ok: true,
           autoApproved: true,
           creditSaleRequestId: approved.creditSaleRequestId,
           outstandingAmount: requiredOutstandingAmount,
           order: approved.nextOrder,
-          orders: approved.nextOrders,
+          orders: visibleNextState.orders,
           operationLog: approved.operationLog,
           message: "你是订单负责人，本次赊销申请已自动通过，可以继续发货",
         });
@@ -9302,7 +10471,11 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "发起赊销审批失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "发起赊销审批失败",
+      });
     } finally {
       client.release();
     }
@@ -9313,7 +10486,6 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     try {
       const body = JSON.parse(await readBody(req) || "{}");
-      const compactResponse = body.responseMode === "compact";
       const orderId = String(body.orderId ?? "").trim();
       const note = String(body.note ?? "").trim().slice(0, 500);
       if (!orderId) throw new Error("缺少订单信息，请刷新后重试");
@@ -9321,10 +10493,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
-      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在或不属于当前账户可见场地");
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, orderId);
       if (["completed", "cancelled"].includes(String(currentOrder.status ?? ""))) {
         throw new Error("该订单当前状态不能确认赊销");
       }
@@ -9353,12 +10522,13 @@ async function handleApi(req, res, url) {
           ]);
         }
         await client.query("COMMIT");
+        const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
         sendJson(req, res, 200, {
           ok: true,
           alreadyAllowed: true,
           allowance: gate.status,
           order: currentOrder,
-          ...(!compactResponse ? { orders } : {}),
+          orders: visibleNextState.orders,
           ...stationNotificationPayloadForAuth(nextState, req, 500),
         });
         return;
@@ -9389,11 +10559,12 @@ async function handleApi(req, res, url) {
           ]);
         }
         await client.query("COMMIT");
+        const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
         sendJson(req, res, 200, {
           ok: true,
           alreadyVerified: true,
           order: currentOrder,
-          ...(!compactResponse ? { orders } : {}),
+          orders: visibleNextState.orders,
           ...stationNotificationPayloadForAuth(nextState, req, 500),
         });
         return;
@@ -9406,16 +10577,21 @@ async function handleApi(req, res, url) {
         JSON.stringify(approved.nextState),
       ]);
       await client.query("COMMIT");
+      const visibleNextState = siteVisibilityFilteredState(approved.nextState, req.auth?.account);
       sendJson(req, res, 200, {
         ok: true,
         order: approved.nextOrder,
-        ...(!compactResponse ? { orders: approved.nextOrders } : {}),
+        orders: visibleNextState.orders,
         ...stationNotificationPayloadForAuth(approved.nextState, req, 500),
         operationLog: approved.operationLog,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "确认赊销失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "确认赊销失败",
+      });
     } finally {
       client.release();
     }
@@ -9434,6 +10610,7 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
+      requireVisibleSiteForAuth(req, state, orderInput.siteId, "不能在未授权场地创建订单");
       const orderId = resolveCreateRecordId({
         records: state.orders,
         requestedId: body.id,
@@ -9467,7 +10644,15 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order, orders: nextOrders, stock: nextStock, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        order,
+        orders: visibleNextState.orders,
+        stock: visibleNextState.stock,
+        inventoryProjection: visibleNextState.inventoryProjection,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       console.warn(`[orders/create] ${error.message}`);
@@ -9495,9 +10680,17 @@ async function handleApi(req, res, url) {
       requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? body.id ?? "");
-      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
+      const orderMatches = orders.filter((order) => String(order?.id ?? "") === orderId);
+      if (orderMatches.length > 1) {
+        const error = new Error("订单 ID 不唯一，请先修复数据后再操作");
+        error.statusCode = 409;
+        error.code = "ORDER_ID_NOT_UNIQUE";
+        throw error;
+      }
+      const currentOrder = orderMatches[0];
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑");
+      requireVisibleSiteForAuth(req, state, currentOrder.siteId, "不能修改未授权场地的订单");
 
       const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder);
       const nextItemIds = new Set(nextOrderInput.items.map((item) => item.stockItemId));
@@ -9548,11 +10741,23 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, stock: nextStock, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        order: nextOrder,
+        orders: visibleNextState.orders,
+        stock: visibleNextState.stock,
+        inventoryProjection: visibleNextState.inventoryProjection,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       console.warn(`[orders/update] ${error.message}`);
-      sendJson(req, res, 400, { ok: false, error: error.message });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+      });
     } finally {
       client.release();
     }
@@ -9636,11 +10841,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const currentOrder = orders.find((order) => String(order?.id ?? "") === String(body.orderId ?? ""));
-      if (!currentOrder || !(siteVisibilityFilteredState(state, req.auth?.account).orders ?? []).some((order) => order.id === currentOrder.id)) {
-        throw new Error("订单不存在或当前账户不可见");
-      }
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
       if (req.auth?.account?.accessRole !== "admin" && !isCreditSaleOrderOwner(state.personnel, currentOrder, operator)) {
         throw new Error("只有订单负责人可以登记本单现金收款");
       }
@@ -9686,10 +10887,15 @@ async function handleApi(req, res, url) {
         JSON.stringify(nextState),
       ]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextState.orders, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: visibleNextState.orders, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "现金收款登记失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "现金收款登记失败",
+      });
     } finally {
       client.release();
     }
@@ -9716,11 +10922,8 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireModulePermissionForAuth(req, "finance", permissionAction);
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const orderId = String(body.orderId ?? "");
-      const visibleOrders = financeSiteScope(state, req.auth?.account, ALL_SITE_ID).state.orders ?? [];
-      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      const orderId = String(currentOrder.id ?? "");
 
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       let nextPayments = currentPayments;
@@ -9843,16 +11046,21 @@ async function handleApi(req, res, url) {
         }
       }
       await client.query("COMMIT");
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
         ok: true,
         order: nextOrder,
-        orders: nextOrders,
-        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+        orders: visibleNextState.orders,
+        inventoryProjection: visibleNextState.inventoryProjection,
         operationLog,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+      });
     } finally {
       client.release();
     }
@@ -9869,11 +11077,8 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "update");
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const orderId = String(body.orderId ?? "").trim();
-      const visibleOrders = siteVisibilityFilteredState(state, req.auth?.account).orders ?? [];
-      const currentOrder = visibleOrders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在或当前账户不可见");
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      const orderId = String(currentOrder.id ?? "");
       if (orderHasActuallyShipped(state.shipments, currentOrder.id)) {
         throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
       }
@@ -9925,10 +11130,15 @@ async function handleApi(req, res, url) {
         JSON.stringify(nextState),
       ]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: visibleNextState.orders, operationLog });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "退款登记失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "退款登记失败",
+      });
     } finally {
       client.release();
     }
@@ -9945,13 +11155,12 @@ async function handleApi(req, res, url) {
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "update");
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const orderId = String(body.orderId ?? "");
+      const requestedOrderId = String(body.orderId ?? "").trim();
       const stockItemId = String(body.stockItemId ?? "").trim();
-      if (!orderId || !stockItemId) throw new Error("缺少订单或商品信息");
+      if (!requestedOrderId || !stockItemId) throw new Error("缺少订单或商品信息");
 
-      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      const orderId = String(currentOrder.id ?? "");
       if (currentOrder.status === "completed") throw new Error("已完成订单不能退商品");
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能退商品");
 
@@ -10023,10 +11232,21 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: nextOrders, stock: nextStock, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        order: nextOrder,
+        orders: visibleNextState.orders,
+        stock: visibleNextState.stock,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "退商品失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "退商品失败",
+      });
     } finally {
       client.release();
     }
@@ -10043,17 +11263,17 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const orderId = String(body.orderId ?? "").trim();
-      const currentOrder = orders.find((order) => String(order?.id ?? "") === orderId);
-      if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      const requestedOrderId = String(body.orderId ?? "").trim();
+      const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      const orderId = String(currentOrder.id ?? "");
       if (currentOrder.status === "completed") {
         await client.query("ROLLBACK");
+        const visibleState = siteVisibilityFilteredState(state, req.auth?.account);
         sendJson(req, res, 200, {
           ok: true,
           order: currentOrder,
-          orders,
-          inventoryProjection: inventoryProjectionForResponse(state, req),
+          orders: visibleState.orders,
+          inventoryProjection: visibleState.inventoryProjection,
         });
         return;
       }
@@ -10088,16 +11308,21 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
         ok: true,
         order: nextOrder,
-        orders: nextOrders,
-        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+        orders: visibleNextState.orders,
+        inventoryProjection: visibleNextState.inventoryProjection,
         operationLog,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "完成订单失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "完成订单失败",
+      });
     } finally {
       client.release();
     }
@@ -10113,10 +11338,9 @@ async function handleApi(req, res, url) {
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
       requireOrderPermissionForAuth(req, "delete");
-      const orderId = String(body.orderId ?? "");
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const order = orders.find((item) => String(item?.id ?? "") === orderId);
-      if (!order) throw new Error("订单不存在，请刷新后重试");
+      const requestedOrderId = String(body.orderId ?? "").trim();
+      const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      const orderId = String(order.id ?? "");
       if (Array.isArray(order.payments) && order.payments.length > 0) throw new Error("该订单已有收款记录，不能删除");
 
       const nextOrders = orders.filter((item) => String(item?.id ?? "") !== orderId);
@@ -10159,7 +11383,11 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+      });
     } finally {
       client.release();
     }
@@ -10175,17 +11403,10 @@ async function handleApi(req, res, url) {
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
-      const orders = Array.isArray(state.orders) ? state.orders : [];
       const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const orderId = String(body.orderId ?? "");
-      const matchingOrders = orders.filter((item) => String(item?.id ?? "") === orderId);
-      if (matchingOrders.length === 0) throw new Error("订单不存在，请刷新后重试");
-      if (matchingOrders.length !== 1) {
-        throw new RecordIdConflictError("订单 ID 不唯一，无法安全出库，请联系管理员处理", {
-          code: "ORDER_ID_NOT_UNIQUE",
-        });
-      }
-      const [order] = matchingOrders;
+      const requestedOrderId = String(body.orderId ?? "").trim();
+      const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      const orderId = String(order.id ?? "");
       if (order.status === "completed" || order.status === "cancelled") throw new Error("该订单当前状态不能出库");
       const shipmentId = resolveCreateRecordId({
         records: shipments,
@@ -10379,11 +11600,11 @@ async function handleApi(req, res, url) {
       const rawBody = JSON.parse(await readBody(req) || "{}");
       const body = await externalizeDataUrls(rawBody);
       const operator = authenticatedOperator(req);
-      const shipmentId = String(body.shipmentId ?? "").trim();
+      const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const packingProof = Array.isArray(body.packingProof)
         ? body.packingProof.map((item) => String(item ?? "")).filter(Boolean)
         : [];
-      if (!shipmentId) throw new Error("缺少发货单信息，请刷新后重试");
+      if (!requestedShipmentId) throw new Error("缺少发货单信息，请刷新后重试");
       if (packingProof.length < 2) throw new Error("请至少上传 2 张打包凭证");
 
       await client.query("BEGIN");
@@ -10391,14 +11612,10 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
 
-      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
-      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      const shipmentId = String(shipment.id ?? "");
       if (shipment.status !== "outbound") throw new Error("只有已出库的发货单可以确认发货");
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
-      if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed") throw new Error("已完成订单不能再确认发货");
       if (order.status === "cancelled") throw new Error("已取消订单不能再确认发货");
 
@@ -10468,7 +11685,11 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "确认发货失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "确认发货失败",
+      });
     } finally {
       client.release();
     }
@@ -10485,18 +11706,20 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
 
-      const shipmentId = String(body.shipmentId ?? "").trim();
-      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
-      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
-      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
-      if (!order) throw new Error("订单不存在，请刷新后重试");
+      const requestedShipmentId = String(body.shipmentId ?? "").trim();
+      const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      const shipmentId = String(shipment.id ?? "");
       if (order.status === "completed") throw new Error("已完成订单不能再确认签收");
       if (order.status === "cancelled") throw new Error("已取消订单不能再确认签收");
       if (shipment.status === "delivered") {
         await client.query("ROLLBACK");
-        sendJson(req, res, 200, { ok: true, shipment, orders, shipments });
+        const visibleState = siteVisibilityFilteredState(state, req.auth?.account);
+        sendJson(req, res, 200, {
+          ok: true,
+          shipment,
+          orders: visibleState.orders,
+          shipments: visibleState.shipments,
+        });
         return;
       }
       const shippingFeeMode = normalizeShippingFeeMode(order.shippingFeeMode, order.source);
@@ -10532,10 +11755,21 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, shipment: nextShipment, orders: nextOrders, shipments: nextShipments, operationLog });
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+      sendJson(req, res, 200, {
+        ok: true,
+        shipment: nextShipment,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        operationLog,
+      });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "确认签收失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "确认签收失败",
+      });
     } finally {
       client.release();
     }
@@ -10553,19 +11787,15 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
 
-      const shipmentId = String(body.shipmentId ?? "").trim();
+      const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const resolution = String(body.resolution ?? "").trim();
       if (!["refund", "reship"].includes(resolution)) throw new Error("发货报损必须选择退款或补发处理方式");
-      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
-      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      const shipmentId = String(shipment.id ?? "");
       if (shipment.shipMethod === "pickup") throw new Error("上门自取订单不可报损");
       if (!shipmentHasActuallyShipped(shipment)) {
         throw new Error("发货单尚未确认发货，不能报损退款或补发");
       }
-      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
-      if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed") throw new Error("已完成订单不能再报损");
       if (order.status === "cancelled") throw new Error("已取消订单不能再报损");
 
@@ -10693,18 +11923,23 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
       await client.query("COMMIT");
+      const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
         ok: true,
         shipment: nextShipment,
         order: nextOrder,
-        orders: nextOrders,
-        shipments: nextShipments,
-        stock: nextStock,
+        orders: visibleNextState.orders,
+        shipments: visibleNextState.shipments,
+        stock: visibleNextState.stock,
         operationLog,
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "发货报损失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "发货报损失败",
+      });
     } finally {
       client.release();
     }
@@ -10721,18 +11956,13 @@ async function handleApi(req, res, url) {
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       requireOrderPermissionForAuth(req, "update");
 
-      const shipmentId = String(body.shipmentId ?? "").trim();
-      if (!shipmentId) throw new Error("缺少发货单信息");
-      const shipments = Array.isArray(state.shipments) ? state.shipments : [];
-      const shipment = shipments.find((item) => String(item?.id ?? "") === shipmentId);
-      if (!shipment) throw new Error("发货单不存在，请刷新后重试");
+      const requestedShipmentId = String(body.shipmentId ?? "").trim();
+      const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      const shipmentId = String(shipment.id ?? "");
       if (shipment.status !== "outbound" && shipment.status !== "shipped") {
         throw new Error("只有已出库或运输中的发货单可以取消");
       }
 
-      const orders = Array.isArray(state.orders) ? state.orders : [];
-      const order = orders.find((item) => String(item?.id ?? "") === String(shipment.orderId ?? ""));
-      if (!order) throw new Error("订单不存在，请刷新后重试");
       if (order.status === "completed") throw new Error("已完成订单不能取消发货");
 
       const nextShipments = shipments.filter((item) => String(item?.id ?? "") !== shipmentId);
@@ -10773,7 +12003,11 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "取消出库失败" });
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "取消出库失败",
+      });
     } finally {
       client.release();
     }
@@ -10781,9 +12015,9 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/state/patch" && req.method === "POST") {
-    const client = await pool.connect();
+    let client = null;
     try {
-      const body = await readBody(req);
+      const body = await readBody(req, 16 * 1024 * 1024);
 	      const parsed = JSON.parse(body);
 	      const rawPatch = parsed?.patch && typeof parsed.patch === "object" ? parsed.patch : {};
 	      validateStatePatchAuthorization(req, rawPatch);
@@ -10817,9 +12051,22 @@ async function handleApi(req, res, url) {
 	      if (Array.isArray(parsed?.operationLogs) && parsed.operationLogs.length > 0) {
 	        throw new Error("操作日志只能由服务端生成");
 	      }
+	      client = await pool.connect();
 	      await client.query("BEGIN");
-	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-	      const current = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+	      const projectedKeys = planGenericStatePatchReadKeys(Object.keys(rawPatch));
+	      const projectedColumns = projectedKeys
+	        .map((key) => `data -> '${key}' AS "${key}"`)
+	        .join(",\n                 ");
+	      const { rows } = await client.query(
+	        `SELECT ${projectedColumns}
+	         FROM app_state
+	         WHERE id = $1
+	         FOR UPDATE`,
+	        [stateId]
+	      );
+	      if (!rows[0]) throw new Error("系统状态不存在");
+	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
+	      const current = normalizePickupShipmentsForState(persistedCurrent);
 	      if (Array.isArray(rawPatch.shipments)) {
 	        const currentShipments = new Map((Array.isArray(current.shipments) ? current.shipments : [])
 	          .map((shipment) => [String(shipment?.id ?? ""), shipment]));
@@ -10843,35 +12090,70 @@ async function handleApi(req, res, url) {
 	      validateStatePatchActions(req, current, validationState, Object.keys(rawPatch));
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
+	      validateGenericStatePatchSiteScope(req, current, validationState, Object.keys(rawPatch));
 	      const patch = await externalizeDataUrls(rawPatch);
 	      if (Object.prototype.hasOwnProperty.call(patch, "batches") && Array.isArray(patch.batches)) {
 	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
 	      }
 	      const stateWithoutLogs = buildStatePatch(current, patch, basePatch, [], req);
 	      const appliedOperationLogs = statePatchOperationLogs(req, current, stateWithoutLogs, Object.keys(patch));
-	      const nextState = {
-	        ...stateWithoutLogs,
-	        operationLogs: mergeOperationLogsForGenericPost(current.operationLogs, appliedOperationLogs),
-	      };
+	      // Audit history is deliberately not selected into Node for every small
+	      // generic edit. Append the new server-generated entries in PostgreSQL
+	      // below, while keeping the in-memory candidate limited to validation
+	      // dependencies and actually patched fields.
+	      const nextState = { ...stateWithoutLogs };
+	      delete nextState.operationLogs;
 
-	      await client.query(
-        `INSERT INTO app_state (id, data, updated_at)
-         VALUES ($1, $2::jsonb, now())
-         ON CONFLICT (id)
-         DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-        [stateId, JSON.stringify(nextState)]
+      const persistedKeys = STATE_KEYS.filter((key) =>
+        key !== "operationLogs" &&
+        Object.prototype.hasOwnProperty.call(nextState, key) &&
+        stableJson(persistedCurrent[key]) !== stableJson(nextState[key])
       );
+      if (persistedKeys.length > 0 || appliedOperationLogs.length > 0) {
+        let dataExpression = "data";
+        const updateValues = [stateId];
+        for (const key of persistedKeys) {
+          updateValues.push(JSON.stringify(nextState[key] ?? null));
+          dataExpression = `jsonb_set(${dataExpression}, '{${key}}', $${updateValues.length}::jsonb, true)`;
+        }
+        if (appliedOperationLogs.length > 0) {
+          updateValues.push(JSON.stringify(appliedOperationLogs));
+          const operationLogsParameter = `$${updateValues.length}`;
+          dataExpression = `jsonb_set(
+            ${dataExpression},
+            '{operationLogs}',
+            COALESCE((
+              SELECT jsonb_agg(entry.value ORDER BY entry.ordinality)
+              FROM (
+                SELECT value, ordinality
+                FROM jsonb_array_elements(
+                  ${operationLogsParameter}::jsonb || COALESCE(data -> 'operationLogs', '[]'::jsonb)
+                ) WITH ORDINALITY
+                LIMIT ${MAX_OPERATION_LOGS}
+              ) AS entry
+            ), '[]'::jsonb),
+            true
+          )`;
+        }
+        await client.query(
+          `UPDATE app_state
+           SET data = ${dataExpression}, updated_at = now()
+           WHERE id = $1`,
+          updateValues
+        );
+      }
       await client.query("COMMIT");
+      const projectionChanged = Object.keys(patch).some((key) => key === "orders" || key === "shipments");
       sendJson(req, res, 200, {
         ok: true,
         appliedOperationLogs,
-        inventoryProjection: inventoryProjectionForResponse(nextState, req),
+        ...(projectionChanged ? { inventoryProjection: inventoryProjectionForResponse(nextState, req) } : {}),
       });
     } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { error: `Failed to patch PostgreSQL state: ${error.message}` });
+      await client?.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), { error: `Failed to patch PostgreSQL state: ${error.message}` });
     } finally {
-      client.release();
+      client?.release();
     }
     return;
   }
@@ -10905,15 +12187,49 @@ async function handleApi(req, res, url) {
         const payload = approvalRequest.payload && typeof approvalRequest.payload === "object"
           ? approvalRequest.payload
           : {};
-        if (approvalRequest.approvalAction === "add_stock_to_old_batch") {
-          const existingIds = new Set((Array.isArray(state.stock) ? state.stock : [])
-            .map((item) => String(item?.id ?? ""))
-            .filter(Boolean));
-          if ((Array.isArray(payload.upsert) ? payload.upsert : []).some((item) => existingIds.has(String(item?.id ?? "")))) {
-            throw new Error("待补录库存中已有记录存在，请驳回后让发起人重新提交");
+        assertStockMutationExpectation(state, payload);
+        const creatorUsername = String(approvalRequest.createdBy ?? "").trim();
+        const creatorMatches = (Array.isArray(state.personnel) ? state.personnel : []).filter((person) =>
+          String(person?.username ?? "").trim() === creatorUsername
+        );
+        if (creatorMatches.length !== 1 || isPersonnelResigned(creatorMatches[0]) ||
+            !isPersonnelAccountEnabled(creatorMatches[0])) {
+          const error = new Error("申请人的账号已停用、离职或身份不唯一，请驳回该申请");
+          error.statusCode = 409;
+          error.code = "STOCK_APPROVAL_CREATOR_INACTIVE";
+          throw error;
+        }
+        const creator = creatorMatches[0];
+        const expectedOperations = Object.values(payload.expectedOperations ?? {});
+        for (const action of ["create", "update", "delete"]) {
+          if (expectedOperations.includes(action) && !hasModulePermission(creator, "stockIn", action)) {
+            const error = new Error("申请人的库存权限已被撤销，请驳回该申请");
+            error.statusCode = 409;
+            error.code = "STOCK_APPROVAL_PERMISSION_REVOKED";
+            throw error;
           }
         }
-        mutation = applyStockMutationToState(state, payload, resolvedBy, { operationLog: null });
+        const approvalSiteId = String(approvalRequest.siteId ?? "").trim();
+        if (!approvalSiteId || approvalSiteId !== String(payload.siteId ?? "").trim() ||
+            (Array.isArray(state.sites) ? state.sites : []).filter((site) =>
+              String(site?.id ?? "").trim() === approvalSiteId
+            ).length !== 1) {
+          const error = new Error("审批关联的场地已变化或不存在，请驳回后重新提交");
+          error.statusCode = 409;
+          error.code = "STOCK_APPROVAL_SITE_STALE";
+          throw error;
+        }
+        const creatorVisibleSiteIds = visibleSiteIdsForAccount(creator, state);
+        if (!creatorVisibleSiteIds.includes(approvalSiteId)) {
+          const error = new Error("申请人已无权操作该场地，请驳回该申请");
+          error.statusCode = 409;
+          error.code = "STOCK_APPROVAL_SITE_REVOKED";
+          throw error;
+        }
+        mutation = applyStockMutationToState(state, payload, resolvedBy, {
+          operationLog: null,
+          visibleSiteIds: creatorVisibleSiteIds,
+        });
         stateAfterMutation = mutation.nextState;
       }
 
@@ -11012,7 +12328,11 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "库存审批处理失败" });
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "库存审批处理失败",
+      });
     } finally {
       client.release();
     }
@@ -11022,6 +12342,15 @@ async function handleApi(req, res, url) {
 			  if (url.pathname === "/api/stock/save" && req.method === "POST") {
 			    try {
 			      const rawChange = JSON.parse(await readBody(req) || "{}");
+		      if (!rawChange?.expectedOperations || typeof rawChange.expectedOperations !== "object" ||
+		          Array.isArray(rawChange.expectedOperations) ||
+		          !rawChange?.expectedBefore || typeof rawChange.expectedBefore !== "object" ||
+		          Array.isArray(rawChange.expectedBefore)) {
+		        const error = new Error("页面版本已更新，请刷新页面后重新操作库存");
+		        error.statusCode = 409;
+		        error.code = "CLIENT_REFRESH_REQUIRED";
+		        throw error;
+		      }
 		      const rawUpsert = Array.isArray(rawChange?.upsert) ? rawChange.upsert : [];
 		      const rawDeleteIds = Array.isArray(rawChange?.deleteIds) ? rawChange.deleteIds : [];
 	      const adjustmentContext = rawChange?.adjustmentContext?.kind === "inventory_adjustment"
@@ -11061,8 +12390,20 @@ async function handleApi(req, res, url) {
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
-	        const existingIds = new Set(stock.map((item) => String(item?.id ?? "")).filter(Boolean));
-	        const rawUpsertIds = rawUpsert.map((item) => String(item?.id ?? "")).filter(Boolean);
+	        if (rawUpsert.some((item) => !String(item?.id ?? "").trim())) {
+	          const error = new Error("库存记录必须包含明确且非空的编号");
+	          error.statusCode = 400;
+	          error.code = "STOCK_ID_REQUIRED";
+	          throw error;
+	        }
+	        if (rawUpsert.some((item) => !String(item?.siteId ?? "").trim())) {
+	          const error = new Error("库存记录必须明确选择场地");
+	          error.statusCode = 400;
+	          error.code = "STOCK_SITE_REQUIRED";
+	          throw error;
+	        }
+	        const existingIds = new Set(stock.map((item) => String(item?.id ?? "").trim()).filter(Boolean));
+	        const rawUpsertIds = rawUpsert.map((item) => String(item?.id ?? "").trim()).filter(Boolean);
 	        if (adjustmentContext?.hasExactSelection) {
 	          if (!adjustmentContext.siteId || adjustmentContext.siteId === ALL_SITE_ID) {
 	            throw new Error("盘库调整必须选择具体场地");
@@ -11109,14 +12450,21 @@ async function handleApi(req, res, url) {
 	          );
 	          if (invalidAddition) throw new Error("盘库增加项中的场地、缸位、商品或批次已变化，请重新核对");
 	        }
-	        const hasCreates = rawUpsert.some((item) => !existingIds.has(String(item?.id ?? "")));
+	        const hasCreates = rawUpsert.some((item) => {
+	          const requestedId = String(item?.id ?? "").trim();
+	          return !requestedId || !existingIds.has(requestedId);
+	        });
 	        const hasUpdates = rawUpsertIds.some((id) => existingIds.has(id));
 	        if (rawDeleteIds.length > 0) requireModulePermissionForAuth(req, "stockIn", "delete");
 	        if (hasCreates) requireModulePermissionForAuth(req, "stockIn", "create");
 	        if (hasUpdates) requireModulePermissionForAuth(req, "stockIn", "update");
 
 	        const externalizedChange = await externalizeDataUrls(rawChange);
-	        const mutation = applyStockMutationToState(state, externalizedChange, operator, { operationLog: null });
+	        assertStockMutationExpectation(state, externalizedChange);
+	        const mutation = applyStockMutationToState(state, externalizedChange, operator, {
+            operationLog: null,
+            visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+          });
 		        const approvalPlan = stockApprovalPlan(state, mutation, req, adjustmentContext);
 		        if (approvalPlan) {
 	          const recipients = activeAdminRecipients(state);
@@ -11261,13 +12609,22 @@ async function handleApi(req, res, url) {
           [stateId, JSON.stringify(nextState)]
         );
         await client.query("COMMIT");
+        const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
+        const visibleOrderIds = new Set((Array.isArray(visibleNextState.orders) ? visibleNextState.orders : [])
+          .map((order) => String(order?.id ?? "")));
+        const visibleShipmentIds = new Set((Array.isArray(visibleNextState.shipments) ? visibleNextState.shipments : [])
+          .map((shipment) => String(shipment?.id ?? "")));
+        const visibleOrderUpdates = mutation.orderUpdates
+          .filter((order) => visibleOrderIds.has(String(order?.id ?? "")));
+        const visibleShipmentUpdates = mutation.shipmentUpdates
+          .filter((shipment) => visibleShipmentIds.has(String(shipment?.id ?? "")));
         sendJson(req, res, 200, {
           ok: true,
-          stock: mutation.stock,
-          batches: mutation.batches,
-          orderUpdates: mutation.orderUpdates,
-          shipmentUpdates: mutation.shipmentUpdates,
-          affectedOrderCount: mutation.affectedOrderCount,
+          stock: visibleNextState.stock,
+          batches: visibleNextState.batches,
+          orderUpdates: visibleOrderUpdates,
+          shipmentUpdates: visibleShipmentUpdates,
+          affectedOrderCount: visibleOrderUpdates.length,
           operationLog,
         });
       } catch (error) {
@@ -11277,24 +12634,29 @@ async function handleApi(req, res, url) {
         client.release();
       }
     } catch (error) {
-      sendJson(req, res, 400, { error: error.message });
+	      sendJson(req, res, Number(error?.statusCode ?? 400), {
+	        ...(error?.code ? { code: error.code } : {}),
+	        error: error.message,
+	      });
 	    }
 	    return;
 	  }
 
 		  if (url.pathname === "/api/maintenance/save" && req.method === "POST") {
 		    try {
-		      const body = await readBody(req);
-		      const rawChange = JSON.parse(body);
-		      const rawMode = String(rawChange?.mode ?? "");
-		      if (rawMode === "record") requireModulePermissionForAuth(req, "daily", "create");
-		      else if (rawMode === "move") requireModulePermissionForAuth(req, "daily", "update");
-		      else if (rawMode === "status") requireModulePermissionForAuth(req, "daily", "update");
-		      else if (rawMode === "loss") requireModulePermissionForAuth(req, "lossRecords", "create");
+			      const body = await readBody(req, 4 * 1024 * 1024);
+			      const rawChange = JSON.parse(body);
+			      const rawMode = String(rawChange?.mode ?? "");
+			      for (const permission of maintenanceRequiredPermissions(rawMode)) {
+			        requireModulePermissionForAuth(req, permission.module, permission.action);
+			      }
+			      normalizeMaintenanceClientMutationId(rawChange?.clientMutationId);
+			      const externalizedChange = await externalizeDataUrls(rawChange);
+			      const preparedMutation = prepareMaintenanceMutation(externalizedChange);
 		      const {
 		        mode,
 	        itemIds = [],
-	        stockItemId,
+	        expectedItems = [],
 	        targetSubTankId,
 	        targetStatus,
 	        moveDate,
@@ -11306,34 +12668,85 @@ async function handleApi(req, res, url) {
 	        lossDate,
 	        lossReason = "",
 	        lossProof = [],
-		      } = await externalizeDataUrls(rawChange);
+		      } = preparedMutation.change;
 	      const operator = authenticatedOperator(req);
-	      if (!mode) {
-	        sendJson(req, res, 400, { error: "Missing maintenance save mode" });
-	        return;
-	      }
 
 	      const client = await pool.connect();
 	      try {
-	        await client.query("BEGIN");
+	        const responseBody = await withMaintenanceTransaction(client, async () => {
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
 	        const bioRecords = Array.isArray(state.bioRecords) ? state.bioRecords : [];
 	        const lossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
-	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-	        let nextStock = stock;
-	        let nextBioRecords = bioRecords;
-	        let nextLossRecords = lossRecords;
-	        let nextBatches = state.batches;
-	        let operationLog;
+		        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+		        const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+		        const canAccessSite = (siteId) => canAccessBioStockSite({
+		          account: req.auth?.account,
+		          visibleSiteIds,
+		          stockSiteId: normalizeSiteId(siteId),
+		        });
+		        const stockSiteId = (item) => normalizeSiteId(
+		          findSubTank(state, item?.subTankId)?.group?.siteId ?? item?.siteId
+		        );
+		        const requireVisibleStockItems = (items) => {
+		          if ((Array.isArray(items) ? items : []).every((item) => canAccessSite(stockSiteId(item)))) return;
+		          const error = new Error("不能操作未授权场地的库存鱼");
+		          error.statusCode = 403;
+		          throw error;
+		        };
+		        const requestedIdSet = new Set(itemIds.map((id) => String(id)));
+		        const requestedItems = stock.filter((item) => requestedIdSet.has(String(item?.id ?? "")));
+		        if (requestedItems.length !== requestedIdSet.size) {
+		          const error = new Error("部分库存鱼不存在或已被删除，请刷新后重试");
+		          error.statusCode = mode === "record" ? 400 : 409;
+		          error.code = mode === "record" ? "MAINTENANCE_ITEM_NOT_FOUND" : "MAINTENANCE_STALE";
+		          throw error;
+		        }
+		        requireVisibleStockItems(requestedItems);
+
+		        // The row lock serializes concurrent double-clicks. Idempotency is
+		        // checked before CAS because an exact retry necessarily observes the
+		        // state already changed by its first committed attempt.
+		        const priorMutation = findMaintenanceMutationLog({
+		          operationLogs,
+		          operator,
+		          clientMutationId: preparedMutation.clientMutationId,
+		          digest: preparedMutation.digest,
+		        });
+		        if (priorMutation) {
+		          const priorDelta = resolveMaintenanceDeltaByIds(state, priorMutation.deltaIds);
+		          return {
+		            ok: true,
+		            idempotent: true,
+		            ...priorDelta,
+		            operationLog: priorMutation.operationLog,
+		          };
+		        }
+
+		        assertMaintenanceExpectedItems({
+		          mode,
+		          itemIds,
+		          expectedItems,
+		          currentItems: stock,
+		        });
+		        let nextStock = stock;
+		        let nextBioRecords = bioRecords;
+		        let nextLossRecords = lossRecords;
+		        let nextBatches = state.batches;
+		        let operationLog;
+		        let stockUpdates = [];
+		        let batchUpdates = [];
+		        let bioRecordUpdates = [];
+		        let lossRecordUpdates = [];
 
 	        if (mode === "record") {
 	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
 	          const idSet = new Set(requestedIds);
 	          if (idSet.size === 0) throw new Error("请选择要维护记录的鱼");
-	          const targetItems = stock.filter((item) => idSet.has(String(item.id)));
-	          if (targetItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          const targetItems = stock.filter((item) => idSet.has(String(item.id)));
+		          if (targetItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          requireVisibleStockItems(targetItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能添加维护记录");
@@ -11350,7 +12763,7 @@ async function handleApi(req, res, url) {
 	          }
 	          const records = targetItems.map((item) => ({
 	            id: uid("bio"),
-	            siteId: normalizeSiteId(item.siteId),
+		            siteId: stockSiteId(item),
 	            stockItemId: item.id,
 	            date,
 	            text,
@@ -11359,7 +12772,8 @@ async function handleApi(req, res, url) {
 	            sourceType: "manual",
 	            operator,
 	          }));
-	          nextBioRecords = [...bioRecords, ...records];
+		          nextBioRecords = [...bioRecords, ...records];
+		          bioRecordUpdates = records;
 	          operationLog = {
 	            id: uid("log"),
 	            time: new Date().toISOString(),
@@ -11370,34 +12784,44 @@ async function handleApi(req, res, url) {
 	          };
 	        } else if (mode === "move") {
 	          const targetId = String(targetSubTankId ?? "");
-	          const targetTank = findSubTank(state, targetId);
-	          if (!targetTank) throw new Error("目标子缸不存在或已被删除");
-	          const targetSiteId = normalizeSiteId(targetTank.group?.siteId);
+		          const targetTank = findSubTank(state, targetId);
+		          if (!targetTank) throw new Error("目标子缸不存在或已被删除");
+		          const targetSiteId = normalizeSiteId(targetTank.group?.siteId);
+		          if (!canAccessSite(targetSiteId)) {
+		            const error = new Error("不能移入未授权场地的缸位");
+		            error.statusCode = 403;
+		            throw error;
+		          }
 	          const targetName = subTankDisplayName(state, targetId);
 	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
 	          const idSet = new Set(requestedIds);
 	          if (idSet.size === 0) throw new Error("请选择要移缸的鱼");
 	          const shippedIds = shippedOutStockIds(state);
-	          const movingItems = stock.filter((item) => idSet.has(item.id));
-	          if (movingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          const movingItems = stock.filter((item) => idSet.has(item.id));
+		          if (movingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          requireVisibleStockItems(movingItems);
 	          const invalidItem = movingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能移缸");
 	          if (movingItems.every((item) => item.subTankId === targetId)) throw new Error("目标子缸与当前子缸相同");
 	          const notes = String(moveNotes ?? "").trim();
-	          const date = String(moveDate ?? new Date().toISOString().slice(0, 10)).trim();
+	          const date = String(moveDate || todayInChina()).trim();
 	          const moveRecords = movingItems.map((item) => ({
 	            id: uid("bio"),
 	            siteId: targetSiteId,
 	            stockItemId: item.id,
 	            date,
-	            text: `移缸：${subTankDisplayName(state, item.subTankId)} → ${targetName}${notes ? `。备注：${notes}` : ""}`,
-	            photos: [],
-	            videos: [],
+		            text: `移缸：${subTankDisplayName(state, item.subTankId)} → ${targetName}${notes ? `。备注：${notes}` : ""}`,
+		            photos: [],
+		            videos: [],
+		            sourceType: "manual",
+		            operator,
 	          }));
 	          nextStock = stock.map((item) =>
 	            idSet.has(item.id) ? { ...item, siteId: targetSiteId, subTankId: targetId } : item
 	          );
-	          nextBioRecords = [...bioRecords, ...moveRecords];
+		          nextBioRecords = [...bioRecords, ...moveRecords];
+		          stockUpdates = nextStock.filter((item) => idSet.has(String(item.id)));
+		          bioRecordUpdates = moveRecords;
 	          operationLog = {
 	            id: uid("log"),
 	            time: new Date().toISOString(),
@@ -11410,8 +12834,9 @@ async function handleApi(req, res, url) {
 	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
 	          const idSet = new Set(requestedIds);
 	          if (idSet.size === 0) throw new Error("请选择要设置状态的鱼");
-	          const targetItems = stock.filter((item) => idSet.has(String(item.id)));
-	          if (targetItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          const targetItems = stock.filter((item) => idSet.has(String(item.id)));
+		          if (targetItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          requireVisibleStockItems(targetItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能设置状态");
@@ -11423,7 +12848,7 @@ async function handleApi(req, res, url) {
 	          const date = todayInChina();
 	          const statusRecords = changedItems.map((item) => ({
 	            id: uid("bio"),
-	            siteId: normalizeSiteId(item.siteId),
+		            siteId: stockSiteId(item),
 	            stockItemId: item.id,
 	            date,
 	            text: `状态调整：${statusLabels[item.status] ?? item.status ?? "未知"} → ${statusLabels[nextStatus]}`,
@@ -11435,7 +12860,10 @@ async function handleApi(req, res, url) {
 	          nextStock = stock.map((item) =>
 	            idSet.has(String(item.id)) ? { ...item, status: nextStatus } : item
 	          );
-	          nextBioRecords = [...bioRecords, ...statusRecords];
+		          nextBioRecords = [...bioRecords, ...statusRecords];
+		          const changedIdSet = new Set(changedItems.map((item) => String(item.id)));
+		          stockUpdates = nextStock.filter((item) => changedIdSet.has(String(item.id)));
+		          bioRecordUpdates = statusRecords;
 	          operationLog = {
 	            id: uid("log"),
 	            time: new Date().toISOString(),
@@ -11445,13 +12873,12 @@ async function handleApi(req, res, url) {
 	            detail: `批量设置状态 ${targetItems.length} 条为「${statusLabels[nextStatus]}」`,
 	          };
 	        } else if (mode === "loss") {
-	          const requestedLossIds = Array.isArray(itemIds) && itemIds.length > 0
-	            ? itemIds.map((id) => String(id))
-	            : [String(stockItemId ?? "")].filter(Boolean);
+	          const requestedLossIds = itemIds.map((id) => String(id));
 	          const idSet = new Set(requestedLossIds);
 	          if (idSet.size === 0) throw new Error("请选择要损耗的鱼");
-	          const losingItems = stock.filter((item) => idSet.has(String(item.id)));
-	          if (losingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          const losingItems = stock.filter((item) => idSet.has(String(item.id)));
+		          if (losingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
+		          requireVisibleStockItems(losingItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = losingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
 	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能重复损耗");
@@ -11467,7 +12894,7 @@ async function handleApi(req, res, url) {
 	          const lossBioRecords = losingItems.map((item) => {
 	            const relatedOrder = findActiveOrderForStock(state, item.id);
 	            const text = `损耗${reason ? `：${reason}` : ""}${relatedOrder ? `。关联订单：${relatedOrder.orderNo}，请在订单详情中退商品并按实际情况填写退款金额` : ""}`;
-	            return { id: uid("bio"), siteId: normalizeSiteId(item.siteId), stockItemId: item.id, date, text, photos: proof, videos: [] };
+		            return { id: uid("bio"), siteId: stockSiteId(item), stockItemId: item.id, date, text, photos: proof, videos: [], sourceType: "manual", operator };
 	          });
 	          const lossRecordRows = losingItems.map((item) => {
 	            const sourceTank = findSubTank(state, item.subTankId);
@@ -11476,7 +12903,7 @@ async function handleApi(req, res, url) {
 	              : `已删除缸位（${item.subTankId || "无缸位ID"}）`;
 	            return {
 	              id: uid("loss"),
-	              siteId: normalizeSiteId(item.siteId),
+		              siteId: stockSiteId(item),
 	              stockItemId: item.id,
 	              date,
 	              reason,
@@ -11497,7 +12924,13 @@ async function handleApi(req, res, url) {
 	          );
 	          nextBatches = refreshBatchStockCounts(state.batches, nextStock);
 	          nextBioRecords = [...bioRecords, ...lossBioRecords];
-	          nextLossRecords = [...lossRecords, ...lossRecordRows];
+		          nextLossRecords = [...lossRecords, ...lossRecordRows];
+		          stockUpdates = nextStock.filter((item) => idSet.has(String(item.id)));
+		          const affectedBatchIds = new Set(losingItems.map((item) => String(item.batchId ?? "")));
+		          batchUpdates = (Array.isArray(nextBatches) ? nextBatches : [])
+		            .filter((batch) => affectedBatchIds.has(String(batch?.id ?? "")));
+		          bioRecordUpdates = lossBioRecords;
+		          lossRecordUpdates = lossRecordRows;
 	          operationLog = {
 	            id: uid("log"),
 	            time: new Date().toISOString(),
@@ -11510,35 +12943,54 @@ async function handleApi(req, res, url) {
 	          throw new Error("Unsupported maintenance save mode");
 	        }
 
-	        const nextState = {
-	          ...state,
-	          stock: nextStock,
-	          batches: nextBatches,
-	          bioRecords: nextBioRecords,
-	          lossRecords: nextLossRecords,
-	          operationLogs: pushOperationLog(operationLogs, operationLog),
-	        };
-	        await client.query(
-	          "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
-	          [stateId, JSON.stringify(nextState)]
-	        );
-	        await client.query("COMMIT");
-	        sendJson(req, res, 200, {
-	          ok: true,
-	          stock: nextStock,
-	          batches: nextBatches,
-	          bioRecords: nextBioRecords,
-	          lossRecords: nextLossRecords,
-	          operationLog,
+		        operationLog = withMaintenanceMutationMetadata(operationLog, {
+		          clientMutationId: preparedMutation.clientMutationId,
+		          digest: preparedMutation.digest,
+		          delta: {
+		            stockUpdates,
+		            batchUpdates,
+		            bioRecordUpdates,
+		            lossRecordUpdates,
+		          },
+		        });
+		        const nextOperationLogs = pushOperationLog(operationLogs, operationLog);
+		        let dataExpression = "data";
+		        const updateValues = [stateId];
+		        const setJsonKey = (key, value) => {
+		          updateValues.push(JSON.stringify(value));
+		          dataExpression = `jsonb_set(${dataExpression}, '{${key}}', $${updateValues.length}::jsonb, true)`;
+		        };
+		        if (stockUpdates.length > 0) setJsonKey("stock", nextStock);
+		        if (batchUpdates.length > 0) setJsonKey("batches", nextBatches);
+		        if (bioRecordUpdates.length > 0) setJsonKey("bioRecords", nextBioRecords);
+		        if (lossRecordUpdates.length > 0) setJsonKey("lossRecords", nextLossRecords);
+		        setJsonKey("operationLogs", nextOperationLogs);
+		        await client.query(
+		          `UPDATE app_state
+		           SET data = ${dataExpression}, updated_at = now()
+		           WHERE id = $1`,
+		          updateValues
+		        );
+		        return {
+		          ok: true,
+		          idempotent: false,
+		          stockUpdates,
+		          batchUpdates,
+		          bioRecordUpdates,
+		          lossRecordUpdates,
+		          operationLog,
+		        };
 	        });
-	      } catch (error) {
-	        await client.query("ROLLBACK");
-	        throw error;
+	        sendJson(req, res, 200, responseBody);
 	      } finally {
 	        client.release();
 	      }
-	    } catch (error) {
-	      sendJson(req, res, 400, { error: `Failed to save maintenance action: ${error.message}` });
+		    } catch (error) {
+		      sendJson(req, res, Number(error?.statusCode ?? 400), {
+		        ok: false,
+		        code: String(error?.code ?? "MAINTENANCE_SAVE_FAILED"),
+		        error: `Failed to save maintenance action: ${error.message}`,
+		      });
 	    }
 	    return;
 	  }
@@ -11720,113 +13172,287 @@ async function handleApi(req, res, url) {
 	    return;
 	  }
 
-	  if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
-		    try {
-		      const body = await readBody(req);
-		      const rawChange = JSON.parse(body);
-		      const { log, deleteId } = await externalizeDataUrls(rawChange);
-		      const operator = authenticatedOperator(req);
-	      if (!log && !deleteId) {
-	        sendJson(req, res, 400, { error: "No daily log change provided" });
-	        return;
-	      }
+      if (url.pathname === "/api/daily-logs/save" && req.method === "POST") {
+        const client = await pool.connect();
+        try {
+          const rawChange = await externalizeDataUrls(JSON.parse(await readBody(req) || "{}"));
+          const preparedChange = rawChange?.log && typeof rawChange.log === "object"
+            ? { ...rawChange, log: { ...rawChange.log, id: String(rawChange.log.id ?? "").trim() || uid("daily") } }
+            : rawChange;
+          const targetId = String(preparedChange?.deleteId ?? preparedChange?.log?.id ?? "").trim();
+          if (!targetId) throw new Error("缺少养护日志编号");
 
-	      const client = await pool.connect();
-	      try {
-	        await client.query("BEGIN");
-	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-	        const state = rows[0]?.data ?? {};
-	        const logs = Array.isArray(state.logs) ? state.logs : [];
-		        const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
-		        const bioRecords = Array.isArray(state.bioRecords) ? state.bioRecords : [];
-		        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-		        if (deleteId) {
-		          requireModulePermissionForAuth(req, "daily", "delete");
-		        } else {
-		          const logId = String(log?.id ?? "").trim();
-		          const exists = logId && logs.some((item) => String(item?.id ?? "") === logId);
-		          requireModulePermissionForAuth(req, "daily", exists ? "update" : "create");
-		        }
-		        let nextLogs = logs;
-	        let nextBioRecords = bioRecords;
-	        let operationLog;
+          await client.query("BEGIN");
+          const { rows } = await client.query(
+            `SELECT
+               data -> 'sites' AS sites,
+               data -> 'tankGroups' AS tank_groups,
+               COALESCE((
+                 SELECT jsonb_agg(log_row.log_item ORDER BY log_row.ordinality)
+                 FROM jsonb_array_elements(COALESCE(app_state.data -> 'logs', '[]'::jsonb))
+                   WITH ORDINALITY AS log_row(log_item, ordinality)
+                 WHERE btrim(COALESCE(log_row.log_item ->> 'id', '')) = $2
+               ), '[]'::jsonb) AS matching_logs
+             FROM app_state
+             WHERE id = $1
+             FOR UPDATE`,
+            [stateId, targetId]
+          );
+          const projectedState = {
+            sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+            tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
+          };
+          const plan = planDailyLogSave({
+            change: preparedChange,
+            matchingLogs: Array.isArray(rows[0]?.matching_logs) ? rows[0].matching_logs : [],
+            tankGroups: projectedState.tankGroups,
+            operator: authenticatedOperator(req),
+            now: nowDatetimeInChina(),
+          });
+          requireModulePermissionForAuth(req, "daily", plan.mode === "delete" ? "delete" : plan.mode === "update" ? "update" : "create");
+          if (plan.current) {
+            requireVisibleSiteForAuth(req, projectedState, plan.currentSiteId, "不能修改未授权场地的养护日志");
+          }
+          requireVisibleSiteForAuth(req, projectedState, plan.siteId, "不能修改未授权场地的养护日志");
+          if (plan.mode === "update" && plan.currentSiteId !== plan.siteId) {
+            const error = new Error("不能通过修改养护日志变更所属场地");
+            error.statusCode = 409;
+            error.code = "DAILY_LOG_SITE_CHANGE_FORBIDDEN";
+            throw error;
+          }
 
-	        if (deleteId) {
-	          const targetId = String(deleteId);
-	          const target = logs.find((item) => item.id === targetId);
-	          if (!target) throw new Error("养护日志不存在或已被删除");
-	          const targetGroupId = target.tankGroupId || tankGroups.find((group) =>
-	            Array.isArray(group.subTanks) && group.subTanks.some((tank) => tank.id === target.subTankId)
-	          )?.id;
-	          const groupName = tankGroups.find((group) => group.id === targetGroupId)?.name ?? "未知缸组";
-	          nextLogs = logs.filter((item) => item.id !== targetId);
-	          nextBioRecords = bioRecords.filter((record) =>
-	            !(record?.sourceType === "dailyLog" && String(record?.sourceLogId ?? "") === targetId)
-	          );
-	          operationLog = {
-	            id: uid("log"),
-	            time: new Date().toISOString(),
-	            operator,
-	            module: "日常管理",
-	            action: "删除记录",
-	            detail: `删除养护日志「${target.action}」（${target.date}，缸组：${groupName}/${targetGroupId || "未知"}）`,
-	          };
-		        } else {
-		          const normalizedLog = normalizeDailyLog(log);
-		          normalizedLog.operator = operator;
-		          const group = tankGroups.find((item) => item.id === normalizedLog.tankGroupId);
-	          if (!group) throw new Error("缸组不存在或已被删除");
-	          const previousLog = logs.find((item) => item.id === normalizedLog.id) ?? null;
-	          const exists = !!previousLog;
-	          const synced = syncDailyLogToBioRecords(
-	            { ...state, logs, bioRecords },
-	            bioRecords,
-	            normalizedLog,
-	            previousLog
-	          );
-	          const logToStore = synced.log;
-	          nextBioRecords = synced.bioRecords;
-	          nextLogs = exists
-	            ? logs.map((item) => item.id === normalizedLog.id ? logToStore : item)
-	            : [...logs, logToStore];
-	          operationLog = {
-	            id: uid("log"),
-	            time: new Date().toISOString(),
-	            operator,
-	            module: "日常管理",
-	            action: exists ? "修改记录" : "添加记录",
-	            detail: `${exists ? "修改" : "新增"}养护日志「${normalizedLog.action}」（${normalizedLog.date}，缸组：${group.name}/${group.id}，操作员：${normalizedLog.operator}，同步 ${synced.syncedCount} 条鱼）`,
-	          };
-	        }
+          const currentGroupId = plan.current ? dailyLogGroupId(projectedState, plan.current) : "";
+          const groupChanged = Boolean(plan.current && currentGroupId !== String(plan.log?.tankGroupId ?? ""));
+          const preserveSyncedStockIds = Boolean(
+            plan.mode === "update" && !groupChanged && Array.isArray(plan.current?.syncedStockItemIds)
+          );
+          const preservedStockIds = preserveSyncedStockIds
+            ? plan.current.syncedStockItemIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+            : [];
+          const targetGroup = plan.log
+            ? projectedState.tankGroups.find((group) => String(group?.id ?? "").trim() === String(plan.log.tankGroupId ?? "").trim())
+            : null;
+          const targetSubTankIds = Array.isArray(targetGroup?.subTanks)
+            ? targetGroup.subTanks.map((tank) => String(tank?.id ?? "").trim()).filter(Boolean)
+            : [];
+          if (plan.log) {
+            const targetSubTankIdSet = new Set(targetSubTankIds);
+            const ambiguousTargetSubTank = targetSubTankIds.some((subTankId) => {
+              let matches = 0;
+              for (const group of projectedState.tankGroups) {
+                matches += (Array.isArray(group?.subTanks) ? group.subTanks : [])
+                  .filter((tank) => String(tank?.id ?? "").trim() === subTankId)
+                  .length;
+              }
+              return matches !== 1;
+            });
+            if (targetSubTankIdSet.size !== targetSubTankIds.length || ambiguousTargetSubTank) {
+              const error = new Error("缸位 ID 不唯一，无法安全同步养护日志");
+              error.statusCode = 409;
+              error.code = "DAILY_LOG_SYNC_ID_CONFLICT";
+              throw error;
+            }
+          }
+          const { rows: syncRows } = await client.query(
+            `WITH outbound_stock_ids AS MATERIALIZED (
+               SELECT DISTINCT btrim(stock_id.value) AS stock_id
+               FROM app_state source,
+                    jsonb_array_elements(COALESCE(source.data -> 'shipments', '[]'::jsonb)) AS shipment(item),
+                    jsonb_array_elements_text(COALESCE(shipment.item -> 'itemStockIds', '[]'::jsonb)) AS stock_id(value)
+               WHERE source.id = $1
+                 AND COALESCE(shipment.item ->> 'status', '') <> 'preparing'
+                 AND btrim(stock_id.value) <> ''
+               UNION
+               SELECT DISTINCT btrim(order_item.item ->> 'stockItemId') AS stock_id
+               FROM app_state source,
+                    jsonb_array_elements(COALESCE(source.data -> 'orders', '[]'::jsonb)) AS order_row(item),
+                    jsonb_array_elements(COALESCE(order_row.item -> 'items', '[]'::jsonb)) AS order_item(item)
+               WHERE source.id = $1
+                 AND COALESCE(order_row.item ->> 'status', '') = 'completed'
+                 AND btrim(COALESCE(order_item.item ->> 'inventoryRemovedAt', '')) = ''
+                 AND btrim(COALESCE(order_item.item ->> 'stockItemId', '')) <> ''
+             )
+             SELECT
+               COALESCE((
+                 SELECT jsonb_agg(stock_row.item ORDER BY stock_row.ordinality)
+                 FROM app_state source,
+                      jsonb_array_elements(COALESCE(source.data -> 'stock', '[]'::jsonb))
+                        WITH ORDINALITY AS stock_row(item, ordinality)
+                 WHERE source.id = $1
+                   AND (
+                     ($3::boolean AND btrim(COALESCE(stock_row.item ->> 'id', '')) = ANY($4::text[]))
+                     OR
+                     (NOT $3::boolean
+                       AND btrim(COALESCE(stock_row.item ->> 'subTankId', '')) = ANY($5::text[])
+                       AND lower(COALESCE(stock_row.item ->> 'lost', 'false')) <> 'true'
+                       AND NOT EXISTS (
+                         SELECT 1 FROM outbound_stock_ids outbound
+                         WHERE outbound.stock_id = btrim(COALESCE(stock_row.item ->> 'id', ''))
+                       )
+                     )
+                   )
+               ), '[]'::jsonb) AS target_stock,
+               COALESCE((
+                 SELECT jsonb_agg(bio_row.item ORDER BY bio_row.ordinality)
+                 FROM app_state source,
+                      jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb))
+                        WITH ORDINALITY AS bio_row(item, ordinality)
+                 WHERE source.id = $1
+                   AND COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
+                   AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
+               ), '[]'::jsonb) AS existing_bio_records`,
+            [stateId, targetId, preserveSyncedStockIds, preservedStockIds, targetSubTankIds]
+          );
+          const targetStock = Array.isArray(syncRows[0]?.target_stock) ? syncRows[0].target_stock : [];
+          const existingBioRecords = Array.isArray(syncRows[0]?.existing_bio_records) ? syncRows[0].existing_bio_records : [];
+          const existingBioByStockId = new Map(existingBioRecords.map((record) => [String(record?.stockItemId ?? ""), record]));
+          const bioRecordUpdates = plan.log
+            ? targetStock.map((item) => syncedDailyLogRecord(
+                { ...projectedState, stock: targetStock },
+                plan.log,
+                item,
+                existingBioByStockId.get(String(item?.id ?? "")) ?? null,
+                groupChanged
+              ))
+            : [];
+          const deletedBioRecordIds = existingBioRecords
+            .map((record) => String(record?.id ?? "").trim())
+            .filter(Boolean);
+          const storedLog = plan.log
+            ? {
+                ...plan.log,
+                syncedStockItemIds: targetStock.map((item) => String(item?.id ?? "").trim()).filter(Boolean),
+                syncedAt: new Date().toISOString(),
+              }
+            : null;
+          const checkedStockIds = targetStock.map((item) => String(item?.id ?? "").trim()).filter(Boolean);
+          const checkedBioIds = [...new Set([
+            ...existingBioRecords.map((record) => String(record?.id ?? "").trim()),
+            ...bioRecordUpdates.map((record) => String(record?.id ?? "").trim()),
+          ].filter(Boolean))];
+          const { rows: identityRows } = await client.query(
+            `SELECT
+               COALESCE((
+                 SELECT jsonb_object_agg(stock_id, stock_count)
+                 FROM (
+                   SELECT btrim(COALESCE(stock_row.item ->> 'id', '')) AS stock_id, count(*)::int AS stock_count
+                   FROM app_state source,
+                        jsonb_array_elements(COALESCE(source.data -> 'stock', '[]'::jsonb)) AS stock_row(item)
+                   WHERE source.id = $1
+                     AND btrim(COALESCE(stock_row.item ->> 'id', '')) = ANY($2::text[])
+                   GROUP BY btrim(COALESCE(stock_row.item ->> 'id', ''))
+                 ) counts
+               ), '{}'::jsonb) AS stock_id_counts,
+               COALESCE((
+                 SELECT jsonb_agg(bio_row.item)
+                 FROM app_state source,
+                      jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb)) AS bio_row(item)
+                 WHERE source.id = $1
+                   AND btrim(COALESCE(bio_row.item ->> 'id', '')) = ANY($3::text[])
+               ), '[]'::jsonb) AS global_bio_records`,
+            [stateId, checkedStockIds, checkedBioIds]
+          );
+          assertDailyLogSyncIdentity({
+            targetStock,
+            existingBioRecords,
+            bioRecordUpdates,
+            globalStockIdCounts: identityRows[0]?.stock_id_counts ?? {},
+            globalBioRecords: identityRows[0]?.global_bio_records ?? [],
+          });
 
-	        const nextState = {
-	          ...state,
-	          logs: nextLogs,
-	          bioRecords: nextBioRecords,
-	          operationLogs: pushOperationLog(operationLogs, operationLog),
-	        };
-	        await client.query(
-	          "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
-	          [stateId, JSON.stringify(nextState)]
-	        );
-	        await client.query("COMMIT");
-	        sendJson(req, res, 200, {
-	          ok: true,
-	          logs: nextLogs,
-	          bioRecords: nextBioRecords,
-	          operationLog,
-	        });
-	      } catch (error) {
-	        await client.query("ROLLBACK");
-	        throw error;
-	      } finally {
-	        client.release();
-	      }
-	    } catch (error) {
-	      sendJson(req, res, 400, { error: `Failed to save daily logs: ${error.message}` });
-	    }
-	    return;
-	  }
+          const operationLog = {
+            id: uid("log"),
+            time: new Date().toISOString(),
+            operator: authenticatedOperator(req),
+            module: "日常管理",
+            action: plan.mode === "delete" ? "删除记录" : plan.mode === "update" ? "修改记录" : "添加记录",
+            detail: `${plan.operationDetail}${plan.log ? `，同步 ${bioRecordUpdates.length} 条鱼` : ""}`,
+          };
+          await client.query(
+            `UPDATE app_state
+             SET data = jsonb_set(
+               jsonb_set(
+                 jsonb_set(
+                   data,
+                   '{logs}',
+                   CASE $6::text
+                   WHEN 'create' THEN COALESCE(data -> 'logs', '[]'::jsonb) || jsonb_build_array($3::jsonb)
+                   WHEN 'update' THEN (
+                     SELECT COALESCE(jsonb_agg(
+                       CASE WHEN btrim(COALESCE(log_row.log_item ->> 'id', '')) = $2 THEN $3::jsonb ELSE log_row.log_item END
+                       ORDER BY log_row.ordinality
+                     ), '[]'::jsonb)
+                     FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
+                       WITH ORDINALITY AS log_row(log_item, ordinality)
+                   )
+                   ELSE (
+                     SELECT COALESCE(jsonb_agg(log_row.log_item ORDER BY log_row.ordinality), '[]'::jsonb)
+                     FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
+                       WITH ORDINALITY AS log_row(log_item, ordinality)
+                     WHERE btrim(COALESCE(log_row.log_item ->> 'id', '')) <> $2
+                   )
+                   END,
+                   true
+                 ),
+                 '{bioRecords}',
+                 COALESCE((
+                   SELECT jsonb_agg(bio_row.item ORDER BY bio_row.ordinality)
+                   FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
+                     WITH ORDINALITY AS bio_row(item, ordinality)
+                   WHERE NOT (
+                     COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
+                     AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
+                   )
+                 ), '[]'::jsonb) || $7::jsonb,
+                 true
+               ),
+               '{operationLogs}',
+               (
+                 SELECT COALESCE(jsonb_agg(entries.entry ORDER BY entries.position), '[]'::jsonb)
+                 FROM (
+                   SELECT $4::jsonb AS entry, 0::bigint AS position
+                   UNION ALL
+                   SELECT operation_row.operation_item, operation_row.ordinality
+                   FROM jsonb_array_elements(COALESCE(data -> 'operationLogs', '[]'::jsonb))
+                     WITH ORDINALITY AS operation_row(operation_item, ordinality)
+                   WHERE operation_row.ordinality <= $5
+                 ) AS entries
+               ),
+               true
+             ),
+             updated_at = now()
+             WHERE id = $1`,
+            [
+              stateId,
+              targetId,
+              JSON.stringify(storedLog),
+              JSON.stringify(operationLog),
+              Math.max(0, MAX_OPERATION_LOGS - 1),
+              plan.mode,
+              JSON.stringify(bioRecordUpdates),
+            ]
+          );
+          await client.query("COMMIT");
+          sendJson(req, res, 200, {
+            ok: true,
+            ...(storedLog ? { changedLog: storedLog } : {}),
+            ...(plan.deletedLogId ? { deletedLogId: plan.deletedLogId } : {}),
+            bioRecordUpdates,
+            deletedBioRecordIds,
+            operationLog,
+          });
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          sendJson(req, res, Number(error?.statusCode ?? 400), {
+            ok: false,
+            error: error.message || "养护日志保存失败",
+            ...(error?.code ? { code: error.code } : {}),
+          });
+        } finally {
+          client.release();
+        }
+        return;
+      }
 
       if (url.pathname === "/api/water-quality/settings/save" && req.method === "POST") {
         const client = await pool.connect();
@@ -12202,16 +13828,27 @@ async function serveUpload(req, res, url) {
   try {
     const fileStat = await stat(finalPath);
     if (!fileStat.isFile()) throw new Error("Not a file");
-    const contentType = mimeTypes[extname(finalPath)] || mimeForExtension(extname(finalPath));
+    const contentType = safePublicMediaContentType(
+      mimeTypes[extname(finalPath)] || mimeForExtension(extname(finalPath)),
+      finalPath
+    );
+    if (!contentType) {
+      sendJson(req, res, 415, { error: "Unsupported upload media type" }, {
+        "X-Content-Type-Options": "nosniff",
+      });
+      return;
+    }
     if (url.searchParams.get("wechatVideo") === "1" && contentType.startsWith("video/")) {
       let releaseTranscodeSlot = null;
       try {
         releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
         const mp4Buffer = await transcodeVideoToWechatMp4(await readFile(finalPath), contentType, { slotAcquired: true });
+        res._logicalResponseBytes = mp4Buffer.length;
         res.writeHead(200, {
           "Content-Type": "video/mp4",
           "Content-Disposition": "inline; filename=\"wechat-video.mp4\"",
           "Cache-Control": "public, max-age=3600",
+          "X-Content-Type-Options": "nosniff",
         });
         res.end(mp4Buffer);
       } catch (error) {
@@ -12222,9 +13859,11 @@ async function serveUpload(req, res, url) {
       }
       return;
     }
+    res._logicalResponseBytes = fileStat.size;
     res.writeHead(200, {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=31536000, immutable",
+      "Cache-Control": "public, max-age=600",
+      "X-Content-Type-Options": "nosniff",
     });
     createReadStream(finalPath).pipe(res);
   } catch {
@@ -12282,6 +13921,25 @@ function scheduleAutomaticOrderTransitions() {
 }
 
 const server = createServer(async (req, res) => {
+  req._requestStartedAt = process.hrtime.bigint();
+  const socketBytesAtStart = Number(res.socket?.bytesWritten ?? 0);
+  res.once("finish", () => {
+    if (req._slowRequestLogged || typeof req._requestStartedAt !== "bigint") return;
+    const elapsedMs = Number(process.hrtime.bigint() - req._requestStartedAt) / 1_000_000;
+    if (elapsedMs < 750) return;
+    req._slowRequestLogged = true;
+    const path = String(req.url ?? "").split("?", 1)[0];
+    const requestBytes = Number(req.headers?.["content-length"] ?? 0);
+    const logicalResponseBytes = Number(res._logicalResponseBytes);
+    const responseBytes = Number.isFinite(logicalResponseBytes)
+      ? Math.max(0, logicalResponseBytes)
+      : Math.max(0, Number(res.socket?.bytesWritten ?? 0) - socketBytesAtStart);
+    console.warn(
+      `[slow-api] method=${req.method ?? ""} path=${path} status=${res.statusCode} ` +
+      `durationMs=${elapsedMs.toFixed(1)} requestBytes=${Number.isFinite(requestBytes) ? requestBytes : 0} ` +
+      `responseBytes=${responseBytes}`
+    );
+  });
   const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   try {
     if (url.pathname.startsWith("/api/")) {

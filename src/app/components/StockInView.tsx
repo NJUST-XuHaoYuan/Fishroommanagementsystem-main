@@ -286,9 +286,17 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StockItem | null>(null);
+  const [editingBaseline, setEditingBaseline] = useState<StockItem | null>(null);
   const [del, setDel] = useState<StockItem | null>(null);
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[]>([]);
-  const [saveConfirm, setSaveConfirm] = useState<{ stockItems: StockItem[]; qty: number; isEdit: boolean } | null>(null);
+  const [bulkDeleteExpectedBefore, setBulkDeleteExpectedBefore] = useState<Record<string, StockItem>>({});
+  const [saveConfirm, setSaveConfirm] = useState<{
+    stockItems: StockItem[];
+    qty: number;
+    isEdit: boolean;
+    expectedOperations: Record<string, "create" | "update">;
+    expectedBefore: Record<string, StockItem>;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [linkedStockItem, setLinkedStockItem] = useState<StockItem | null>(null);
 
@@ -461,8 +469,13 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     }
     setEditing({
       ...item,
+      lossProof: Array.isArray(item.lossProof) ? [...item.lossProof] : item.lossProof,
       commissionRate: 0,
     });
+    setEditingBaseline(item.id ? {
+      ...item,
+      lossProof: Array.isArray(item.lossProof) ? [...item.lossProof] : item.lossProof,
+    } : null);
     setFromSubTank(subTankMode);
     setQuantity("1");
     const gid = item.subTankId
@@ -545,13 +558,29 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     }
     const qty = fromSubTank && !editing.id ? parsedQty : 1;
     const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: 0 }, qty);
-    setSaveConfirm({ stockItems, qty, isEdit: Boolean(editing.id) });
+    if (editing.id && (!editingBaseline || editingBaseline.id !== editing.id)) {
+      return toast.error("库存原始数据已失效，请关闭后重新打开");
+    }
+    setSaveConfirm({
+      stockItems,
+      qty,
+      isEdit: Boolean(editing.id),
+      expectedOperations: Object.fromEntries(stockItems.map((item) => [
+        item.id,
+        editing.id ? "update" : "create",
+      ])),
+      expectedBefore: editing.id && editingBaseline ? { [editing.id]: editingBaseline } : {},
+    });
   };
 
   const confirmSave = async () => {
     if (!saveConfirm || saving) return;
     setSaving(true);
-    const result = await saveStockChange({ upsert: saveConfirm.stockItems });
+    const result = await saveStockChange({
+      upsert: saveConfirm.stockItems,
+      expectedOperations: saveConfirm.expectedOperations,
+      expectedBefore: saveConfirm.expectedBefore,
+    });
     setSaving(false);
     if (!result.ok) {
       toast.error(result.error || "保存失败，请重试");
@@ -575,7 +604,11 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     if (stockCannotDelete(del)) return toast.error(stockDeleteLockReason(del));
     const linkedOrderCount = pendingOrdersForStockIds([del.id]).length;
     setSaving(true);
-    const result = await saveStockChange({ deleteIds: [del.id] });
+    const result = await saveStockChange({
+      deleteIds: [del.id],
+      expectedOperations: { [del.id]: "delete" },
+      expectedBefore: { [del.id]: del },
+    });
     setSaving(false);
     if (!result.ok) {
       toast.error(result.error || "删除失败，请重试");
@@ -663,6 +696,13 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     });
     if (ids.length === 0) return toast.error("请选择要删除的入库记录");
     setBulkDeleteIds(ids);
+    setBulkDeleteExpectedBefore(Object.fromEntries(ids.flatMap((id) => {
+      const item = state.stock.find((stock) => stock.id === id);
+      return item ? [[id, {
+        ...item,
+        lossProof: Array.isArray(item.lossProof) ? [...item.lossProof] : item.lossProof,
+      } as StockItem] as const] : [];
+    })));
   };
 
   const confirmBulkDelete = async () => {
@@ -670,7 +710,11 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     if (bulkDeleteIds.length === 0 || saving) return;
     const linkedOrderCount = pendingOrdersForStockIds(bulkDeleteIds).length;
     setSaving(true);
-    const result = await saveStockChange({ deleteIds: bulkDeleteIds });
+    const result = await saveStockChange({
+      deleteIds: bulkDeleteIds,
+      expectedOperations: Object.fromEntries(bulkDeleteIds.map((id) => [id, "delete"])),
+      expectedBefore: bulkDeleteExpectedBefore,
+    });
     setSaving(false);
     if (!result.ok) {
       toast.error(result.error || "批量删除失败，请重试");
@@ -679,6 +723,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     if (result.pendingApproval) {
       setSelectedIds(new Set());
       setBulkDeleteIds([]);
+      setBulkDeleteExpectedBefore({});
       setSelectMode(false);
       toast.success(result.message || "批量删除申请已提交管理员审批");
       return;
@@ -690,6 +735,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     });
     const count = bulkDeleteIds.length;
     setBulkDeleteIds([]);
+    setBulkDeleteExpectedBefore({});
     setSelectMode(false);
     toast.success(
       linkedOrderCount > 0
@@ -1534,7 +1580,12 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={bulkDeleteIds.length > 0} onOpenChange={(o) => !o && setBulkDeleteIds([])}>
+      <AlertDialog open={bulkDeleteIds.length > 0} onOpenChange={(o) => {
+        if (!o) {
+          setBulkDeleteIds([]);
+          setBulkDeleteExpectedBefore({});
+        }
+      }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>批量删除入库记录</AlertDialogTitle>

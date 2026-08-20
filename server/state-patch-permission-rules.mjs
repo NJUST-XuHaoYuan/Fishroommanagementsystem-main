@@ -28,6 +28,18 @@ export const PLAIN_OBJECT_STATE_KEYS = new Set([
   "speciesCategoryMajorMap",
 ]);
 
+export const DEDICATED_STATE_PATCH_KEYS = new Set(["personnel", "bioRecords", "stock"]);
+
+export function assertGenericStatePatchKeyAllowed(key) {
+  if (!DEDICATED_STATE_PATCH_KEYS.has(key)) return key;
+  const message = key === "bioRecords"
+    ? "生物记录必须通过专用接口修改"
+    : key === "stock"
+    ? "库存记录必须通过库存或日常维护专用接口修改"
+    : "人员账号和权限必须通过专用接口修改";
+  throw new Error(message);
+}
+
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") {
@@ -110,6 +122,79 @@ function idCollectionActions(current, next) {
   }
   if (actions.size === 0) actions.add("update");
   return ["create", "update", "delete"].filter((action) => actions.has(action));
+}
+
+export function statePatchEntityDiff(currentValue, nextValue, key = "集合") {
+  validateIdCollection(key, currentValue);
+  validateIdCollection(key, nextValue);
+  const currentById = new Map(currentValue.map((item) => [objectId(item), item]));
+  const nextById = new Map(nextValue.map((item) => [objectId(item), item]));
+  const created = [];
+  const updated = [];
+  const deleted = [];
+
+  for (const [id, after] of nextById) {
+    const before = currentById.get(id);
+    if (!before) created.push(after);
+    else if (stable(before) !== stable(after)) updated.push({ before, after });
+  }
+  for (const [id, before] of currentById) {
+    if (!nextById.has(id)) deleted.push(before);
+  }
+  return { created, updated, deleted };
+}
+
+export function assertStatePatchEntityScope(diff, isVisible) {
+  if (typeof isVisible !== "function") throw new TypeError("场地权限检查器格式不正确");
+  const unauthorized =
+    (Array.isArray(diff?.created) ? diff.created : []).some((record) => !isVisible(record)) ||
+    (Array.isArray(diff?.deleted) ? diff.deleted : []).some((record) => !isVisible(record)) ||
+    (Array.isArray(diff?.updated) ? diff.updated : []).some(({ before, after }) =>
+      !isVisible(before) || !isVisible(after)
+    );
+  if (!unauthorized) return diff;
+  const error = new Error("不能修改未授权场地的数据");
+  error.statusCode = 403;
+  error.code = "STATE_PATCH_SITE_FORBIDDEN";
+  throw error;
+}
+
+/**
+ * Resolve the authoritative site for a site-scoped record. If the record has
+ * a relationship field, callers pass every matching parent's site id. Exactly
+ * one parent must resolve, and a denormalized direct siteId must agree with it.
+ * `undefined` means this record has no relationship field to validate.
+ */
+export function authoritativeStatePatchSiteId(directSiteId, relationshipSiteIds) {
+  const direct = String(directSiteId ?? "").trim();
+  if (relationshipSiteIds === undefined) return direct;
+  if (!Array.isArray(relationshipSiteIds) || relationshipSiteIds.length !== 1) return "";
+  const related = String(relationshipSiteIds[0] ?? "").trim();
+  if (!related || (direct && direct !== related)) return "";
+  return related;
+}
+
+const IMMUTABLE_SITE_BINDING_FIELDS = Object.freeze({
+  tankGroups: ["siteId"],
+  batches: ["siteId"],
+  stock: ["siteId", "subTankId", "batchId"],
+  lossRecords: ["siteId", "stockItemId"],
+  logs: ["siteId", "tankGroupId", "subTankId"],
+  waterQualityRecords: ["siteId", "tankGroupId"],
+  checks: ["siteId", "tankGroupId", "subTankId"],
+  orders: ["siteId"],
+  shipments: ["siteId", "orderId", "shipMethod"],
+});
+
+/** Site ownership and relationship fields may only be assigned at creation.
+ * Re-parenting persisted data requires a dedicated route that can migrate all
+ * dependent records atomically.
+ */
+export function statePatchSiteBindingChanged(key, before = {}, after = {}) {
+  const fields = IMMUTABLE_SITE_BINDING_FIELDS[key] ?? [];
+  return fields.some((field) =>
+    String(before?.[field] ?? "").trim() !== String(after?.[field] ?? "").trim()
+  );
 }
 
 function valueListActions(current, next) {

@@ -687,6 +687,17 @@ export function InventoryAdjustmentDialog() {
     return {
       ...(upsert.length > 0 ? { upsert } : {}),
       ...(removeStockIds.length > 0 ? { deleteIds: removeStockIds } : {}),
+      expectedOperations: Object.fromEntries([
+        ...upsert.map((item) => [item.id, "create"] as const),
+        ...removeStockIds.map((id) => [id, "delete"] as const),
+      ]),
+      expectedBefore: Object.fromEntries(removeStockIds.flatMap((id) => {
+        const item = visibleStockById.get(id);
+        return item ? [[id, {
+          ...item,
+          lossProof: Array.isArray(item.lossProof) ? [...item.lossProof] : item.lossProof,
+        } as StockItem] as const] : [];
+      })),
       adjustmentContext: {
         kind: "inventory_adjustment",
         draftId: draft?.id,

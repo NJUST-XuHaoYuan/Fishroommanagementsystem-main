@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, DailyLog, Order, Shipment, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
+import { useStore, BioRecord, DailyLog, MaintenanceSaveResult, Order, Shipment, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -20,7 +20,7 @@ import { Search, Fish, Camera, Clock, PackageCheck, ShoppingBag, X, Plus, Chevro
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { toast } from "sonner";
 import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
-import { usePermission } from "../utils/permissions";
+import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
@@ -33,6 +33,15 @@ import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
+  beginMaintenanceRequest,
+  createMaintenanceClientMutationId,
+  finishMaintenanceRequest,
+  isMaintenanceRequestInFlight,
+  maintenanceMutationTicket,
+  maintenanceStockExpectedSnapshot,
+  type MaintenanceMutationTicket,
+} from "../utils/maintenanceMutation";
+import {
   formatBioRecordTime,
   isoToDatetimeLocal,
   minDatetimeForDate,
@@ -41,6 +50,17 @@ import {
 } from "../utils/localDateTime";
 
 type RecordDraft = { date: string; text: string; photos: string[]; videos: string[] };
+
+function expectedBioRecord(record: BioRecord) {
+  return {
+    id: record.id,
+    stockItemId: record.stockItemId,
+    date: record.date,
+    text: record.text,
+    photos: [...(record.photos ?? [])],
+    videos: [...(record.videos ?? [])],
+  };
+}
 
 function todayDateString(): string {
   return nowDatetimeLocal().slice(0, 10);
@@ -54,8 +74,9 @@ type DailyViewProps = {
 };
 
 export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder }: DailyViewProps = {}) {
-  const { state, setState, saveStateTransform, saveDailyLog, saveMaintenanceAction } = useStore();
+  const { state, setState, saveBioRecordChange, saveDailyLog, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
+  const lossPermission = usePermission("lossRecords");
   const [q, setQ] = useState("");
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
@@ -95,6 +116,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [confirmTimeChangeOpen, setConfirmTimeChangeOpen] = useState(false);
   const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
   const [recordActionSaving, setRecordActionSaving] = useState(false);
+  const newRecordIdRef = useRef(uid());
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
 
@@ -140,11 +162,18 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [lossProof, setLossProof] = useState<string[]>([]);
   const [lossSaving, setLossSaving] = useState(false);
   const lossPhotoRef = useRef<HTMLInputElement>(null);
+  const maintenanceTicketRef = useRef<MaintenanceMutationTicket | null>(null);
+  const maintenanceRequestInFlightRef = useRef(false);
 
   const today = todayDateString();
   const nowForRecord = nowDatetimeLocal();
   const shippedOutStockIds = getInventoryOutStockIds(state);
-  const canBatchSelect = permission.canCreate || permission.canUpdate || permission.canDelete;
+  const canRegisterLoss = canRegisterMaintenanceLoss(permission.canDelete, lossPermission.canCreate);
+  const requireLossPermissions = () => requireMaintenanceLossPermissions(
+    () => permission.requirePermission("delete"),
+    () => lossPermission.requirePermission("create"),
+  );
+  const canBatchSelect = permission.canCreate || permission.canUpdate || canRegisterLoss;
   const product = (id: string) => state.products.find((p) => p.id === id);
   const priceBaselineByProduct = useMemo(
     () => buildStockPriceBaselines(
@@ -506,12 +535,14 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setTargetGroupId(defaultGroup?.id ?? "");
     setTargetSubTankId("");
     setMoveNotes("");
+    maintenanceTicketRef.current = null;
     setBioOpen(false);
     setMoveOpen(true);
   };
 
   const submitMove = async () => {
     if (!permission.requirePermission("update")) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (moveItemIds.length === 0) return toast.error("请选择要移缸的鱼");
     if (!targetSubTankId) return toast.error("请选择目标子缸");
     if (movingItems.length > 0 && movingItems.every((item) => item.subTankId === targetSubTankId))
@@ -521,16 +552,27 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     );
     if (!targetGroup) return toast.error("目标子缸不存在或已被删除");
     if (!confirmWrite("移缸", `将移动 ${moveItemIds.length} 条鱼到目标子缸。`)) return;
-    setMoveSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "move",
-      itemIds: moveItemIds,
+    const change = {
+      mode: "move" as const,
+      itemIds: movingItems.map((item) => item.id),
+      expectedItems: movingItems.map(maintenanceStockExpectedSnapshot),
       targetSubTankId,
       moveDate: today,
       moveNotes: moveNotes.trim(),
-    });
-    setMoveSaving(false);
-    if (!ok) return toast.error("移缸保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setMoveSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setMoveSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "移缸保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     setMoveOpen(false);
     setSelectedIds(new Set());
     setSelectMode(false);
@@ -546,25 +588,38 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     if (validIds.length === 0) return toast.error("请选择要设置状态的鱼");
     setBatchStatusItemIds(validIds);
     setBatchTargetStatus("healthy");
+    maintenanceTicketRef.current = null;
     setBioOpen(false);
     setBatchStatusOpen(true);
   };
 
   const submitBatchStatus = async () => {
     if (!permission.requirePermission("update")) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (batchStatusItems.length === 0) return toast.error("请选择要设置状态的鱼");
     const statusLabel = statusMeta[batchTargetStatus].label;
     const changedCount = batchStatusItems.filter((item) => item.status !== batchTargetStatus).length;
     if (changedCount === 0) return toast.error(`所选鱼已经全部是${statusLabel}状态`);
     if (!confirmWrite("批量状态", `将 ${batchStatusItems.length} 条鱼设置为「${statusLabel}」状态。`)) return;
-    setBatchStatusSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "status",
+    const change = {
+      mode: "status" as const,
       itemIds: batchStatusItems.map((item) => item.id),
+      expectedItems: batchStatusItems.map(maintenanceStockExpectedSnapshot),
       targetStatus: batchTargetStatus,
-    });
-    setBatchStatusSaving(false);
-    if (!ok) return toast.error("状态保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setBatchStatusSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setBatchStatusSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "状态保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     setBatchStatusOpen(false);
     setBatchStatusItemIds([]);
     setSelectedIds(new Set());
@@ -581,6 +636,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     if (validIds.length === 0) return toast.error("请选择要维护记录的鱼");
     setBatchRecordItemIds(validIds);
     setBatchRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    maintenanceTicketRef.current = null;
     setBioOpen(false);
     setBatchRecordOpen(true);
   };
@@ -617,6 +673,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   const submitBatchRecord = async () => {
     if (!permission.requirePermission("create")) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (batchRecordItems.length === 0) return toast.error("请选择要维护记录的鱼");
     if (!batchRecord.date) return toast.error("请选择记录时间");
     const recordTime = normalizeBioRecordTime(batchRecord.date);
@@ -627,17 +684,27 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
       return toast.error("请填写记录内容或上传照片/视频");
     }
     if (!confirmWrite("批量维护", `将给 ${batchRecordItems.length} 条鱼添加同一条观察/治疗记录。`)) return;
-    setBatchRecordSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "record",
+    const change = {
+      mode: "record" as const,
       itemIds: batchRecordItems.map((item) => item.id),
       recordDate: recordTime,
       recordText: batchRecord.text.trim(),
       recordPhotos: batchRecord.photos,
       recordVideos: batchRecord.videos,
-    });
-    setBatchRecordSaving(false);
-    if (!ok) return toast.error("保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setBatchRecordSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setBatchRecordSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     setBatchRecordOpen(false);
     setBatchRecordItemIds([]);
     setBatchRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
@@ -647,7 +714,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   };
 
   const openLossDialog = (ids: string | string[]) => {
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
     const validIds = Array.from(new Set(Array.isArray(ids) ? ids : [ids])).filter((id) => {
       const item = stockItem(id);
       return item && isPhysicallyInTank(item, shippedOutStockIds);
@@ -657,6 +724,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setLossDate(today);
     setLossReason("");
     setLossProof([]);
+    maintenanceTicketRef.current = null;
     setBioOpen(false);
     setLossOpen(true);
   };
@@ -677,7 +745,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   };
 
   const submitLoss = async () => {
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (lossItems.length === 0) return toast.error("请选择要报损的鱼");
     if (!lossDate) return toast.error("请选择损耗日期");
     if (lossDate > today) return toast.error("损耗日期不能晚于今天");
@@ -685,16 +754,27 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     if (lossProof.length === 0) return toast.error("请上传损耗照片凭证");
     const reason = lossReason.trim();
     if (!confirmWrite("登记损耗", `损耗后 ${lossItems.length} 条鱼会从在缸库存中移除，并生成损耗记录。`)) return;
-    setLossSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "loss",
+    const change = {
+      mode: "loss" as const,
       itemIds: lossItems.map((item) => item.id),
+      expectedItems: lossItems.map(maintenanceStockExpectedSnapshot),
       lossDate,
       lossReason: reason,
       lossProof,
-    });
-    setLossSaving(false);
-    if (!ok) return toast.error("损耗保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setLossSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setLossSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "损耗保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     setLossOpen(false);
     setLossItemIds([]);
     setLossProof([]);
@@ -749,6 +829,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setBioCode(item.code ?? "");
     setBioNotes(item.notes ?? "");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     setEditingRecordId(null);
     setEditingRecordTime("");
     setBioOpen(true);
@@ -923,27 +1004,33 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     )) return;
     const normalizedPrice = Number(price.toFixed(2));
     const pendingRecord = savePendingRecord
-      ? bioRecordFromDraft(newRecord, { id: uid(), stockItemId: bioItemId, date: pendingRecordTime })
+      ? bioRecordFromDraft(newRecord, { id: newRecordIdRef.current, stockItemId: bioItemId, date: pendingRecordTime })
       : null;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      stock: latest.stock.map((x) => {
-        if (x.id !== bioItemId) return x;
-        const currentPrice = Number(x.basePrice ?? 0);
-        return {
-          ...x,
-          status: bioStatus,
-          basePrice: normalizedPrice,
-          priceOverridden: Math.abs(normalizedPrice - currentPrice) > 0.005 ? true : x.priceOverridden,
-          code: bioCode.trim(),
-          notes: bioNotes,
-        };
-      }),
-      bioRecords: pendingRecord ? [...latest.bioRecords, pendingRecord] : latest.bioRecords,
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const currentItem = stockItem(bioItemId);
+    if (!currentItem) return toast.error("生物不存在，请刷新后重试");
+    setRecordActionSaving(true);
+    const result = await saveBioRecordChange({
+      action: "saveDetails",
+      stockItemId: bioItemId,
+      details: {
+        status: bioStatus,
+        basePrice: normalizedPrice,
+        code: bioCode.trim(),
+        notes: bioNotes,
+      },
+      expectedDetails: {
+        status: currentItem.status,
+        basePrice: currentItem.basePrice,
+        code: currentItem.code ?? "",
+        notes: currentItem.notes ?? "",
+      },
+      ...(pendingRecord ? { record: expectedBioRecord(pendingRecord) } : {}),
+    });
+    setRecordActionSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     if (pendingRecord) {
       setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+      newRecordIdRef.current = uid();
     }
     setBioOpen(false);
     toast.success(pendingRecord ? "鱼的信息和观察记录已更新" : "鱼的信息已更新");
@@ -965,22 +1052,21 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
       return;
     }
     if (!confirmWrite("新增", "将新增一条观察/治疗记录。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: [
-        ...latest.bioRecords,
-        {
-          id: uid(),
-          stockItemId: bioItemId,
-          date: recordTime,
-          text: newRecord.text,
-          photos: newRecord.photos,
-          videos: newRecord.videos,
-        },
-      ],
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const pendingRecord = bioRecordFromDraft(newRecord, {
+      id: newRecordIdRef.current,
+      stockItemId: bioItemId,
+      date: recordTime,
+    });
+    setRecordActionSaving(true);
+    const result = await saveBioRecordChange({
+      action: "create",
+      stockItemId: bioItemId,
+      record: expectedBioRecord(pendingRecord),
+    });
+    setRecordActionSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     toast.success("记录已添加");
   };
 
@@ -1010,14 +1096,19 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     const recordTime = normalizeBioRecordTime(editingRecordTime);
     if (!recordTime) return;
     setRecordActionSaving(true);
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.map((record) =>
-        record.id === editingRecordId ? { ...record, date: recordTime } : record
-      ),
-    }));
+    if (!editingRecord) {
+      setRecordActionSaving(false);
+      return toast.error("记录不存在，请刷新后重试");
+    }
+    const result = await saveBioRecordChange({
+      action: "updateTime",
+      stockItemId: bioItemId,
+      recordId: editingRecordId,
+      record: { date: recordTime },
+      expectedRecord: expectedBioRecord(editingRecord),
+    });
     setRecordActionSaving(false);
-    if (!ok) return toast.error("保存失败，请重试");
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setConfirmTimeChangeOpen(false);
     setEditingRecordId(null);
     setEditingRecordTime("");
@@ -1031,13 +1122,16 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   const confirmDeleteBioRecord = async () => {
     if (!deletingRecordId) return;
+    if (!bioItemId || !deletingRecord) return toast.error("记录不存在，请刷新后重试");
     setRecordActionSaving(true);
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.filter((record) => record.id !== deletingRecordId),
-    }));
+    const result = await saveBioRecordChange({
+      action: "delete",
+      stockItemId: bioItemId,
+      recordId: deletingRecordId,
+      expectedRecord: expectedBioRecord(deletingRecord),
+    });
     setRecordActionSaving(false);
-    if (!ok) return toast.error("删除失败，请重试");
+    if (!result.ok) return toast.error(result.error || "删除失败，请重试");
     if (editingRecordId === deletingRecordId) {
       setEditingRecordId(null);
       setEditingRecordTime("");
@@ -1246,7 +1340,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                       移到子缸
                     </Button>
                   )}
-                  {permission.canDelete && (
+                  {canRegisterLoss && (
                     <Button
                       type="button"
                       size="sm"
@@ -1622,7 +1716,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
       <Dialog
         open={bioOpen}
         onOpenChange={(open) => {
-          if (!open && recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+          if (!open && (recordMediaUploading || recordActionSaving)) return toast.info("请等待当前保存完成");
           setBioOpen(open);
         }}
       >
@@ -2037,9 +2131,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   onChange={(e) => setNewRecord((p) => ({ ...p, text: e.target.value }))}
                 />
               </div>
-              <Button variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading} className="w-full self-end sm:w-auto">
-                {recordMediaUploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                {recordMediaUploading ? "媒体上传中…" : "添加观察/治疗记录"}
+              <Button variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading || recordActionSaving} className="w-full self-end sm:w-auto">
+                {recordMediaUploading || recordActionSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                {recordMediaUploading ? "媒体上传中…" : recordActionSaving ? "保存中…" : "添加观察/治疗记录"}
               </Button>
 	            </div>
 	            )}
@@ -2048,16 +2142,16 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		          <DialogFooter className="flex-col pt-3 border-t shrink-0 gap-2 sm:flex-row sm:flex-wrap sm:items-center">
 		            <div className="flex w-full flex-wrap items-center gap-2 sm:mr-auto sm:w-auto">
 		              {permission.canUpdate && bioItem && (
-		                <Button variant="outline" disabled={recordMediaUploading} onClick={() => openMoveDialog([bioItem.id])}>
+		                <Button variant="outline" disabled={recordMediaUploading || recordActionSaving} onClick={() => openMoveDialog([bioItem.id])}>
 		                  <ArrowRightLeft className="size-4 mr-1" />
 		                  移缸
 		                </Button>
 		              )}
-		              {permission.canDelete && bioItem && (
+		              {canRegisterLoss && bioItem && (
 		                <Button
 		                  variant="outline"
 		                  className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
-		                  disabled={recordMediaUploading}
+		                  disabled={recordMediaUploading || recordActionSaving}
 		                  onClick={() => openLossDialog(bioItem.id)}
 		                >
 		                  <AlertTriangle className="size-4 mr-1" />
@@ -2065,10 +2159,10 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		                </Button>
 		              )}
 		            </div>
-		            <Button variant="outline" disabled={recordMediaUploading} onClick={() => setBioOpen(false)}>关闭</Button>
+		            <Button variant="outline" disabled={recordMediaUploading || recordActionSaving} onClick={() => setBioOpen(false)}>关闭</Button>
 		            {permission.canUpdate && (
-                  <Button disabled={recordMediaUploading} onClick={saveBio}>
-                    {hasBioRecordDraftContent(newRecord) ? "保存信息和记录" : "保存信息"}
+                  <Button disabled={recordMediaUploading || recordActionSaving} onClick={saveBio}>
+                    {recordActionSaving ? "保存中…" : hasBioRecordDraftContent(newRecord) ? "保存信息和记录" : "保存信息"}
                   </Button>
                 )}
 		          </DialogFooter>

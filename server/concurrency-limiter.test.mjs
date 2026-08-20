@@ -36,3 +36,59 @@ test("release is idempotent", async () => {
   release();
   assert.deepEqual(limiter.status(), { active: 0, pending: 0, concurrency: 1, maxPending: 0 });
 });
+
+test("a queued request can be cancelled without consuming a future slot", async () => {
+  const limiter = createConcurrencyLimiter({ concurrency: 1, maxPending: 2 });
+  const releaseFirst = await limiter.acquire();
+  const controller = new AbortController();
+  const queued = limiter.acquire({ signal: controller.signal });
+  assert.equal(limiter.status().pending, 1);
+  controller.abort();
+  await assert.rejects(queued, (error) => error?.name === "AbortError");
+  assert.equal(limiter.status().pending, 0);
+  releaseFirst();
+  const releaseNext = await limiter.acquire();
+  releaseNext();
+  assert.equal(limiter.status().active, 0);
+});
+
+test("disconnecting an active request releases its slot for the next request", async () => {
+  const limiter = createConcurrencyLimiter({ concurrency: 1, maxPending: 1 });
+  const controller = new AbortController();
+  let expirationReason = "";
+  const releaseFirst = await limiter.acquire({
+    signal: controller.signal,
+    onLeaseExpired: (reason) => {
+      expirationReason = reason;
+    },
+  });
+  const queued = limiter.acquire();
+
+  controller.abort();
+  const releaseNext = await queued;
+  assert.equal(expirationReason, "aborted");
+  assert.deepEqual(limiter.status(), { active: 1, pending: 0, concurrency: 1, maxPending: 1 });
+
+  releaseFirst();
+  releaseNext();
+  assert.equal(limiter.status().active, 0);
+});
+
+test("a never-finishing active operation times out and cannot strand the limiter", async () => {
+  const limiter = createConcurrencyLimiter({ concurrency: 1, maxPending: 1 });
+  let expirationReason = "";
+  await limiter.acquire({
+    leaseTimeoutMs: 10,
+    onLeaseExpired: (reason) => {
+      expirationReason = reason;
+    },
+  });
+  const queued = limiter.acquire();
+
+  const releaseNext = await queued;
+  assert.equal(expirationReason, "timeout");
+  assert.deepEqual(limiter.status(), { active: 1, pending: 0, concurrency: 1, maxPending: 1 });
+
+  releaseNext();
+  assert.equal(limiter.status().active, 0);
+});

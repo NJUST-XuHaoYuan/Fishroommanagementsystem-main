@@ -1,14 +1,88 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  authoritativeStatePatchSiteId,
+  assertGenericStatePatchKeyAllowed,
   ID_COLLECTION_STATE_KEYS,
   PLAIN_OBJECT_STATE_KEYS,
   VALUE_LIST_STATE_KEYS,
   statePatchActionsForKey,
+  assertStatePatchEntityScope,
+  statePatchEntityDiff,
+  statePatchSiteBindingChanged,
   statePatchActionsForValue,
   validateStatePatchShapes,
   validateStatePatchValueShape,
 } from "./state-patch-permission-rules.mjs";
+
+test("requires bio records, personnel and stock to use dedicated APIs", () => {
+  assert.throws(() => assertGenericStatePatchKeyAllowed("bioRecords"), /生物记录必须通过专用接口/);
+  assert.throws(() => assertGenericStatePatchKeyAllowed("personnel"), /人员账号和权限必须通过专用接口/);
+  assert.throws(() => assertGenericStatePatchKeyAllowed("stock"), /库存记录必须通过库存或日常维护专用接口/);
+  assert.equal(assertGenericStatePatchKeyAllowed("orders"), "orders");
+});
+
+test("site ownership and relationship bindings cannot be re-parented by generic patch", () => {
+  assert.equal(statePatchSiteBindingChanged("orders", { siteId: "nanjing" }, { siteId: "beijing" }), true);
+  assert.equal(statePatchSiteBindingChanged(
+    "checks",
+    { siteId: "nanjing", subTankId: "tank-a" },
+    { siteId: "nanjing", subTankId: "tank-b" },
+  ), true);
+  assert.equal(statePatchSiteBindingChanged(
+    "waterQualityRecords",
+    { siteId: "nanjing", tankGroupId: "group-a", notes: "before" },
+    { siteId: "nanjing", tankGroupId: "group-a", notes: "after" },
+  ), false);
+});
+
+test("entity diff returns the exact records that require site authorization", () => {
+  const before = [
+    { id: "keep", siteId: "nanjing", status: "healthy" },
+    { id: "update", siteId: "nanjing", status: "healthy" },
+    { id: "delete", siteId: "nanjing", status: "healthy" },
+  ];
+  const after = [
+    before[0],
+    { ...before[1], status: "sick" },
+    { id: "create", siteId: "nanjing", status: "healthy" },
+  ];
+  assert.deepEqual(statePatchEntityDiff(before, after, "stock"), {
+    created: [after[2]],
+    updated: [{ before: before[1], after: after[1] }],
+    deleted: [before[2]],
+  });
+});
+
+test("site scope checks both sides of updates and fails closed", () => {
+  const diff = statePatchEntityDiff(
+    [{ id: "fish-1", siteId: "nanjing" }],
+    [{ id: "fish-1", siteId: "jiangyin" }],
+    "stock",
+  );
+  assert.throws(
+    () => assertStatePatchEntityScope(diff, (record) => record.siteId === "nanjing"),
+    (error) => error?.statusCode === 403 && error?.code === "STATE_PATCH_SITE_FORBIDDEN",
+  );
+  assert.doesNotThrow(() => assertStatePatchEntityScope(
+    statePatchEntityDiff(
+      [{ id: "fish-1", siteId: "nanjing", status: "healthy" }],
+      [{ id: "fish-1", siteId: "nanjing", status: "sick" }],
+      "stock",
+    ),
+    (record) => record.siteId === "nanjing",
+  ));
+});
+
+test("relationship site is authoritative and rejects spoofed or ambiguous direct sites", () => {
+  assert.equal(authoritativeStatePatchSiteId("nanjing", undefined), "nanjing");
+  assert.equal(authoritativeStatePatchSiteId("", ["beijing"]), "beijing");
+  assert.equal(authoritativeStatePatchSiteId("beijing", ["beijing"]), "beijing");
+  assert.equal(authoritativeStatePatchSiteId("nanjing", ["beijing"]), "");
+  assert.equal(authoritativeStatePatchSiteId("nanjing", []), "");
+  assert.equal(authoritativeStatePatchSiteId("nanjing", ["nanjing", "nanjing"]), "");
+  assert.equal(authoritativeStatePatchSiteId("nanjing", [""]), "");
+});
 
 test("declares the state shapes used by the generic patch endpoint", () => {
   assert.equal(ID_COLLECTION_STATE_KEYS.has("species"), true);

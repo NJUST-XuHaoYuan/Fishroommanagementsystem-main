@@ -183,6 +183,10 @@ type DashboardSummary = {
   financeDays?: number;
   dailyFinanceData: DailyFinancePoint[];
   dailyLossData?: DailyLossPoint[];
+  dailySalespersonData?: DailySalespersonPoint[];
+  salespersonOptions?: Array<{ name: string; orderCount: number; amount: number }>;
+  focusOptions?: Record<FocusMode, FocusOption[]>;
+  defaultFocus?: FocusDetail | null;
 };
 
 type FocusMode = "species" | "product";
@@ -221,6 +225,31 @@ type FocusProductRow = {
   lost: number;
   salesCount: number;
   salesAmount: number;
+};
+
+type FocusMetrics = {
+  salesCount: number;
+  salesAmount: number;
+  salesCount30: number;
+  salesAmount30: number;
+  averageTurnoverDays: number;
+  turnoverSampleCount: number;
+  currentAverageAgeDays: number;
+  estimatedClearDays: number | null;
+  inTank: number;
+  sellable: number;
+  soldInTank: number;
+  sick: number;
+  lost: number;
+  totalStock: number;
+  lossRate: number;
+};
+
+type FocusDetail = {
+  mode: FocusMode;
+  id: string;
+  metrics: FocusMetrics;
+  productRows: FocusProductRow[];
 };
 
 function financeMetricValue(point: DailyFinancePoint, key: DailyFinanceMetricKey): number {
@@ -932,8 +961,13 @@ export function Dashboard() {
   const [focusMode, setFocusMode] = useState<FocusMode>("species");
   const [focusSearch, setFocusSearch] = useState("");
   const [focusId, setFocusId] = useState("");
-  const [focusData, setFocusData] = useState<FocusData | null>(null);
+  const [focusDetail, setFocusDetail] = useState<FocusDetail | null>(null);
   const [focusLoading, setFocusLoading] = useState(false);
+  const [focusError, setFocusError] = useState("");
+  const [focusRetry, setFocusRetry] = useState(0);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
+  const [summaryRetry, setSummaryRetry] = useState(0);
   const sites = getSites(state);
   const configuredFishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
     ? state.systemSettings.fishListFooterText
@@ -947,6 +981,10 @@ export function Dashboard() {
   }, [activeSiteId]);
   useEffect(() => {
     let cancelled = false;
+    setSummaryLoading(true);
+    setSummaryError("");
+    setSummary(null);
+    setFocusDetail(null);
     setHoveredFinanceIndex(null);
     setHoveredSalespersonIndex(null);
     setSelectedSalespersonPoint(null);
@@ -962,63 +1000,78 @@ export function Dashboard() {
           setFinanceDays((current) => normalizeFinanceDays(Number(nextSummary.financeDays) || current));
         }
         setSummary(nextSummary);
-      })
-      .catch((error) => {
-        if (!cancelled) console.error("Failed to load dashboard summary:", error);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [financeDays, dashboardSiteId]);
-  useEffect(() => {
-    let cancelled = false;
-    setFocusLoading(true);
-    fetch("/api/state/slice?keys=species,products,tankGroups,stock,orders,shipments,lossRecords,customers,personnel&lite=species", { headers: authJsonHeaders() })
-      .then((response) => response.json().then((result) => ({ response, result })))
-      .then(({ response, result }) => {
-        if (cancelled) return;
-        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-        const data = result.data ?? {};
-        setFocusData({
-          species: Array.isArray(data.species) ? data.species : [],
-          products: Array.isArray(data.products) ? data.products : [],
-          tankGroups: Array.isArray(data.tankGroups) ? data.tankGroups : [],
-          stock: Array.isArray(data.stock) ? data.stock : [],
-          orders: Array.isArray(data.orders) ? data.orders : [],
-          shipments: Array.isArray(data.shipments) ? data.shipments : [],
-          lossRecords: Array.isArray(data.lossRecords) ? data.lossRecords : [],
-          customers: Array.isArray(data.customers) ? data.customers : [],
-          personnel: Array.isArray(data.personnel) ? data.personnel : [],
-          inventoryProjection: data.inventoryProjection,
-        });
+        if (!focusId && nextSummary?.defaultFocus) {
+          setFocusMode(nextSummary.defaultFocus.mode === "product" ? "product" : "species");
+          setFocusId(String(nextSummary.defaultFocus.id ?? ""));
+          setFocusDetail(nextSummary.defaultFocus);
+          setFocusError("");
+        }
       })
       .catch((error) => {
         if (!cancelled) {
-          console.error("Failed to load focus dashboard data:", error);
-          setFocusData(null);
+          console.error("Failed to load dashboard summary:", error);
+          setSummary(null);
+          setSummaryError("概览数据加载失败，请重试");
         }
       })
       .finally(() => {
-        if (!cancelled) setFocusLoading(false);
+        if (!cancelled) setSummaryLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [financeDays, dashboardSiteId, summaryRetry]);
   useEffect(() => {
     if (fishListSettingsOpen) setFishListFooterDraft(fishListFooterText);
   }, [fishListSettingsOpen, fishListFooterText]);
-  const dashboardSpecies = focusData?.species ?? (Array.isArray(state.species) ? state.species : []);
-  const dashboardProducts = focusData?.products ?? (Array.isArray(state.products) ? state.products : []);
-  const dashboardBatches = Array.isArray(state.batches) ? state.batches : [];
-  const dashboardTankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
-  const dashboardStock = focusData?.stock ?? (Array.isArray(state.stock) ? state.stock : []);
-  const dashboardOrders = focusData?.orders ?? (Array.isArray(state.orders) ? state.orders : []);
-  const dashboardShipments = focusData?.shipments ?? (Array.isArray(state.shipments) ? state.shipments : []);
-  const dashboardLossRecords = focusData?.lossRecords ?? (Array.isArray(state.lossRecords) ? state.lossRecords : []);
-  const dashboardPersonnel = focusData?.personnel ?? (Array.isArray(state.personnel) ? state.personnel : []);
-  const dashboardCustomers = focusData?.customers ?? (Array.isArray(state.customers) ? state.customers : []);
-  const dashboardInventoryProjection = focusData?.inventoryProjection ?? state.inventoryProjection;
+  useEffect(() => {
+    if (!focusId) {
+      setFocusDetail(null);
+      setFocusError("");
+      return;
+    }
+    if (focusDetail?.mode === focusMode && focusDetail.id === focusId) return;
+    const controller = new AbortController();
+    setFocusLoading(true);
+    setFocusError("");
+    fetch(
+      `/api/dashboard-focus?mode=${encodeURIComponent(focusMode)}&id=${encodeURIComponent(focusId)}&siteId=${encodeURIComponent(dashboardSiteId)}`,
+      { headers: authJsonHeaders(), signal: controller.signal }
+    )
+      .then((response) => response.json().then((result) => ({ response, result })))
+      .then(({ response, result }) => {
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        setFocusDetail(result.focus ?? null);
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") {
+          console.error("Failed to load dashboard focus detail:", error);
+          setFocusDetail(null);
+          setFocusError("关注数据加载失败，请重新选择后重试");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setFocusLoading(false);
+      });
+    return () => controller.abort();
+  }, [dashboardSiteId, focusDetail, focusId, focusMode, focusRetry]);
+  const focusData: FocusData | null = null;
+  // Dashboard data is served as compact aggregates. Do not reuse large arrays
+  // left in the shared store after navigating from another page: doing so
+  // would re-run the old D x N fallback calculations before the summary wins.
+  // The empty fallback only keeps the first render deterministic while the
+  // compact request is in flight. Fish-list export loads its data on demand.
+  const dashboardSpecies: Species[] = [];
+  const dashboardProducts: Product[] = [];
+  const dashboardBatches: PurchaseBatch[] = [];
+  const dashboardTankGroups: TankGroup[] = [];
+  const dashboardStock: StockItem[] = [];
+  const dashboardOrders: Order[] = [];
+  const dashboardShipments: Shipment[] = [];
+  const dashboardLossRecords: StockLossRecord[] = [];
+  const dashboardPersonnel: Personnel[] = [];
+  const dashboardCustomers: Customer[] = [];
+  const dashboardInventoryProjection = { outStockIds: [] as string[], outDateByStockId: {} as Record<string, string> };
   const shippedOutStockIds = getInventoryOutStockIds({
     shipments: dashboardShipments,
     orders: dashboardOrders,
@@ -1265,101 +1318,26 @@ export function Dashboard() {
       : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
-  const salesScope = normalizeSiteScope(dashboardSiteId);
-  const scopedSalesOrders = dashboardOrders.filter((order) =>
-    order.status !== "cancelled" && (salesScope === ALL_SITE_ID || matchesSite(order, salesScope))
-  );
-  const scopedSalesOrderIds = new Set(scopedSalesOrders.map((order) => order.id));
-	  const scopedSalesShipments = dashboardShipments.filter((shipment) =>
-	    salesScope === ALL_SITE_ID || matchesSite(shipment, salesScope) || scopedSalesOrderIds.has(shipment.orderId)
-	  );
-	  const resignedSalespersonNames = new Set(
-	    dashboardPersonnel
-	      .filter((person) => isPersonnelResigned(person))
-	      .map((person) => normalizeSalespersonName(person.name || person.username))
-	      .filter(Boolean)
-	  );
-	  const salespersonOptions = (() => {
-	    const seen = new Set<string>();
-	    const options: Array<{ name: string; person?: Personnel; orderCount: number; amount: number }> = [];
-	    const addOption = (name: string, person?: Personnel) => {
-	      const normalized = normalizeSalespersonName(name);
-	      if (!normalized || resignedSalespersonNames.has(normalized)) return;
-	      if (seen.has(normalized)) return;
-      seen.add(normalized);
-      const personOrders = scopedSalesOrders.filter((order) => normalizeSalespersonName(order.contactPerson) === normalized);
-      options.push({
-        name: normalized,
-        person,
-        orderCount: personOrders.length,
-        amount: personOrders.reduce((sum, order) => sum + calcOrderDealAmount(order, scopedSalesShipments), 0),
-      });
-	    };
-	    dashboardPersonnel
-	      .filter((person) => String(person.name ?? "").trim() && !isPersonnelResigned(person))
-	      .forEach((person) => addOption(person.name, person));
-    scopedSalesOrders.forEach((order) => addOption(order.contactPerson));
-    return options.sort((a, b) =>
-      b.amount - a.amount ||
-      b.orderCount - a.orderCount ||
-      a.name.localeCompare(b.name, "zh-Hans-CN")
-    );
-  })();
+  const salespersonOptions = Array.isArray(summary?.salespersonOptions)
+    ? summary.salespersonOptions
+    : [];
   const selectedSalespersonNames = salespersonOptions
     .map((option) => option.name)
     .filter((name) => selectedSalespeople.size === 0 || selectedSalespeople.has(name));
   const selectedSalespersonSet = new Set(selectedSalespersonNames);
-  const dailySalespersonData: DailySalespersonPoint[] = dailyFinanceData.map((financePoint) => {
-    const rowsByPerson = new Map<string, DailySalespersonBreakdown>();
-    const ordersForDate = scopedSalesOrders.filter((order) => String(order.date ?? "").slice(0, 10) === financePoint.date);
-    for (const order of ordersForDate) {
-	      const salesperson = normalizeSalespersonName(order.contactPerson);
-	      if (resignedSalespersonNames.has(salesperson)) continue;
-	      if (!selectedSalespersonSet.has(salesperson)) continue;
-      const amount = calcOrderDealAmount(order, scopedSalesShipments);
-      const customer = customerById.get(order.customerId);
-      const detail: DailySalespersonOrderDetail = {
-        orderId: order.id,
-        orderNo: order.orderNo,
-        customerName: customer?.name ?? (
-          isPlatformOrderSource(order.source)
-            ? platformOrderDisplayName(order)
-            : order.customerId || "未关联客户"
-        ),
-        contactPerson: salesperson,
-        amount,
-        itemCount: order.items?.length ?? 0,
-        status: ORDER_STATUS_TEXT[order.status] ?? order.status,
-        notes: order.notes ?? "",
+  const dailySalespersonData: DailySalespersonPoint[] = (Array.isArray(summary?.dailySalespersonData)
+    ? summary.dailySalespersonData
+    : []).map((point) => {
+      const breakdowns = (Array.isArray(point.breakdowns) ? point.breakdowns : [])
+        .filter((row) => selectedSalespersonSet.has(row.salesperson));
+      return {
+        ...point,
+        total: Number(breakdowns.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2)),
+        orderCount: breakdowns.reduce((sum, row) => sum + Number(row.orderCount || 0), 0),
+        itemCount: breakdowns.reduce((sum, row) => sum + Number(row.itemCount || 0), 0),
+        breakdowns,
       };
-      const current = rowsByPerson.get(salesperson) ?? {
-        salesperson,
-        amount: 0,
-        orderCount: 0,
-        itemCount: 0,
-        orders: [],
-      };
-      current.amount = Number((current.amount + amount).toFixed(2));
-      current.orderCount += 1;
-      current.itemCount += detail.itemCount;
-      current.orders.push(detail);
-      rowsByPerson.set(salesperson, current);
-    }
-    const breakdowns = [...rowsByPerson.values()]
-      .map((row) => ({
-        ...row,
-        orders: row.orders.sort((a, b) => b.amount - a.amount || a.orderNo.localeCompare(b.orderNo, "zh-Hans-CN")),
-      }))
-      .sort((a, b) => b.amount - a.amount || a.salesperson.localeCompare(b.salesperson, "zh-Hans-CN"));
-    return {
-      date: financePoint.date,
-      label: financePoint.label,
-      total: Number(breakdowns.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
-      orderCount: breakdowns.reduce((sum, row) => sum + row.orderCount, 0),
-      itemCount: breakdowns.reduce((sum, row) => sum + row.itemCount, 0),
-      breakdowns,
-    };
-  });
+    });
   const maxSalespersonValue = Math.max(
     1,
     ...dailySalespersonData.flatMap((point) => point.breakdowns.map((row) => row.amount))
@@ -1550,6 +1528,19 @@ export function Dashboard() {
       : "按当前单鱼售价估算，不含已售和疾病鱼";
 
   const focusAnalysis = useMemo(() => {
+    const compactOptions = Array.isArray(summary?.focusOptions?.[focusMode])
+      ? summary.focusOptions[focusMode]
+      : null;
+    if (compactOptions) {
+      const selectedOption = compactOptions.find((option) => option.id === focusId) ?? null;
+      const detailMatches = focusDetail?.mode === focusMode && focusDetail.id === focusId;
+      return {
+        options: compactOptions,
+        selectedOption,
+        metrics: detailMatches ? focusDetail.metrics : null,
+        productRows: detailMatches ? focusDetail.productRows : [] as FocusProductRow[],
+      };
+    }
     const products = focusSource.products;
     const species = focusSource.species;
     const stock = focusSource.stock;
@@ -1684,7 +1675,7 @@ export function Dashboard() {
       },
       productRows,
     };
-  }, [focusSource, focusMode, focusId, today, todayDate]);
+  }, [focusDetail, focusId, focusMode, focusSource, summary, today, todayDate]);
 
   useEffect(() => {
     if (focusAnalysis.options.length === 0) {
@@ -2024,6 +2015,18 @@ export function Dashboard() {
         </div>
       </div>
       </div>
+      {summaryError ? (
+        <div className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
+          <span>{summaryError}</span>
+          <Button type="button" variant="outline" size="sm" onClick={() => setSummaryRetry((value) => value + 1)}>
+            重新加载
+          </Button>
+        </div>
+      ) : summaryLoading ? (
+        <div className="rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground" role="status">
+          正在加载经营概览…
+        </div>
+      ) : null}
       <Dialog open={fishListSettingsOpen} onOpenChange={setFishListSettingsOpen}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -2152,8 +2155,17 @@ export function Dashboard() {
 
           <div className="min-w-0">
             {!focusMetrics ? (
-              <div className="fishroom-card rounded-xl px-4 py-8 text-center text-sm text-muted-foreground">
-                {focusLoading ? "正在加载关注看板数据..." : "请选择要关注的商品或物种"}
+              <div className={`fishroom-card rounded-xl px-4 py-8 text-center text-sm ${focusError ? "text-red-700" : "text-muted-foreground"}`} role={focusError ? "alert" : "status"}>
+                <div>{focusLoading ? "正在加载关注看板数据..." : focusError || "请选择要关注的商品或物种"}</div>
+                {focusError && !focusLoading ? (
+                  <button
+                    type="button"
+                    className="mt-3 rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                    onClick={() => setFocusRetry((value) => value + 1)}
+                  >
+                    重新加载
+                  </button>
+                ) : null}
               </div>
             ) : (
               <div className="grid gap-4">

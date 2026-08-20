@@ -1,7 +1,7 @@
 import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
-  useStore, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
-  Customer, CustomerType, Personnel, ShipmentStatus, Store, TankGroup, uid,
+  useStore, BioRecord, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
+  Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
   configuredOrderPackagingFee, ShippingFeeMode,
@@ -37,7 +37,7 @@ import {
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
 import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
-import { usePermission } from "../utils/permissions";
+import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
@@ -63,6 +63,15 @@ import {
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
+import {
+  beginMaintenanceRequest,
+  createMaintenanceClientMutationId,
+  finishMaintenanceRequest,
+  isMaintenanceRequestInFlight,
+  maintenanceMutationTicket,
+  maintenanceStockExpectedSnapshot,
+  type MaintenanceMutationTicket,
+} from "../utils/maintenanceMutation";
 import {
   getBillableShippingFee,
   hasActualShippingFee,
@@ -523,6 +532,17 @@ function todayDateString(): string {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
+}
+
+function expectedBioRecord(record: BioRecord) {
+  return {
+    id: record.id,
+    stockItemId: record.stockItemId,
+    date: record.date,
+    text: record.text,
+    photos: [...(record.photos ?? [])],
+    videos: [...(record.videos ?? [])],
+  };
 }
 
 function orderNoSequence(orderNo: string): number {
@@ -3121,8 +3141,9 @@ function StockPickerBioDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const { state, setState, saveStateTransform, saveMaintenanceAction } = useStore();
+  const { state, setState, saveBioRecordChange, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
+  const lossPermission = usePermission("lossRecords");
   const today = todayDateString();
   const nowForRecord = nowDatetimeLocal();
   const photoRef = useRef<HTMLInputElement>(null);
@@ -3148,6 +3169,8 @@ function StockPickerBioDialog({
   } = useRecordMediaUpload(setNewRecord, permission.canCreate);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
+  const [bioSaving, setBioSaving] = useState(false);
+  const newRecordIdRef = useRef(uid());
   const [targetGroupId, setTargetGroupId] = useState("");
   const [targetSubTankId, setTargetSubTankId] = useState("");
   const [moveNotes, setMoveNotes] = useState("");
@@ -3156,8 +3179,15 @@ function StockPickerBioDialog({
   const [lossReason, setLossReason] = useState("");
   const [lossProof, setLossProof] = useState<string[]>([]);
   const [lossSaving, setLossSaving] = useState(false);
+  const maintenanceTicketRef = useRef<MaintenanceMutationTicket | null>(null);
+  const maintenanceRequestInFlightRef = useRef(false);
 
   const item = stockItemId ? state.stock.find((stock) => stock.id === stockItemId) : null;
+  const canRegisterLoss = canRegisterMaintenanceLoss(permission.canDelete, lossPermission.canCreate);
+  const requireLossPermissions = () => requireMaintenanceLossPermissions(
+    () => permission.requirePermission("delete"),
+    () => lossPermission.requirePermission("create"),
+  );
   const product = item ? state.products.find((entry) => entry.id === item.productId) : undefined;
   const batch = item ? state.batches.find((entry) => entry.id === item.batchId) : undefined;
   const order = item
@@ -3175,6 +3205,7 @@ function StockPickerBioDialog({
     setBioCode(item.code ?? "");
     setBioNotes(item.notes ?? "");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     setEditingRecordId(null);
     setEditingRecordTime("");
     setActionMode("detail");
@@ -3184,6 +3215,7 @@ function StockPickerBioDialog({
     setLossDate(today);
     setLossReason("");
     setLossProof([]);
+    maintenanceTicketRef.current = null;
   }, [open, item?.id, item?.status, item?.notes, today]);
 
   useEffect(() => {
@@ -3250,6 +3282,7 @@ function StockPickerBioDialog({
             text: record.text,
             photos: record.photos ?? [],
             videos: record.videos ?? [],
+            sourceType: record.sourceType,
           })),
         ...(order ? [{ type: "sold" as const, date: order.date, orderNo: order.orderNo }] : []),
       ].sort((a, b) => a.date.localeCompare(b.date))
@@ -3284,18 +3317,21 @@ function StockPickerBioDialog({
         : "将保存鱼的状态、编号和备注。",
     )) return;
     const pendingRecord = savePendingRecord
-      ? bioRecordFromDraft(newRecord, { id: uid(), stockItemId: item.id, date: pendingRecordTime })
+      ? bioRecordFromDraft(newRecord, { id: newRecordIdRef.current, stockItemId: item.id, date: pendingRecordTime })
       : null;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      stock: latest.stock.map((stock) =>
-        stock.id === item.id ? { ...stock, status: bioStatus, code: bioCode.trim(), notes: bioNotes } : stock
-      ),
-      bioRecords: pendingRecord ? [...latest.bioRecords, pendingRecord] : latest.bioRecords,
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "saveDetails",
+      stockItemId: item.id,
+      details: { status: bioStatus, code: bioCode.trim(), notes: bioNotes },
+      expectedDetails: { status: item.status, code: item.code ?? "", notes: item.notes ?? "" },
+      ...(pendingRecord ? { record: expectedBioRecord(pendingRecord) } : {}),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     if (pendingRecord) {
       setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+      newRecordIdRef.current = uid();
     }
     toast.success(pendingRecord ? "状态和观察记录已更新" : "状态已更新");
   };
@@ -3313,22 +3349,21 @@ function StockPickerBioDialog({
       return toast.error("请填写记录内容或上传照片/视频");
     }
     if (!confirmWrite("新增", "将新增一条观察记录。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: [
-        ...latest.bioRecords,
-        {
-          id: uid(),
-          stockItemId: item.id,
-          date: recordTime,
-          text: newRecord.text,
-          photos: newRecord.photos,
-          videos: newRecord.videos,
-        },
-      ],
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const pendingRecord = bioRecordFromDraft(newRecord, {
+      id: newRecordIdRef.current,
+      stockItemId: item.id,
+      date: recordTime,
+    });
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "create",
+      stockItemId: item.id,
+      record: expectedBioRecord(pendingRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     toast.success("记录已添加");
   };
 
@@ -3347,13 +3382,18 @@ function StockPickerBioDialog({
     const minTime = minDatetimeForDate(item.inDate);
     if (minTime && recordTime < minTime) return toast.error("记录时间不能早于入库日期");
     if (!confirmWrite("修改", "将修改这条观察记录的记录时间。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.map((record) =>
-        record.id === editingRecordId ? { ...record, date: recordTime } : record
-      ),
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const currentRecord = state.bioRecords.find((record) => record.id === editingRecordId);
+    if (!currentRecord) return toast.error("记录不存在，请刷新后重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "updateTime",
+      stockItemId: item.id,
+      recordId: editingRecordId,
+      record: { date: recordTime },
+      expectedRecord: expectedBioRecord(currentRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setEditingRecordId(null);
     setEditingRecordTime("");
     toast.success("记录时间已更新");
@@ -3362,11 +3402,18 @@ function StockPickerBioDialog({
   const deleteBioRecord = async (recordId: string) => {
     if (!permission.requirePermission("delete")) return;
     if (!confirmWrite("删除", "将删除这条观察记录。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.filter((record) => record.id !== recordId),
-    }));
-    if (!ok) return toast.error("删除失败，请重试");
+    if (!item) return toast.error("生物不存在，请刷新后重试");
+    const currentRecord = state.bioRecords.find((record) => record.id === recordId);
+    if (!currentRecord) return toast.error("记录不存在，请刷新后重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "delete",
+      stockItemId: item.id,
+      recordId,
+      expectedRecord: expectedBioRecord(currentRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "删除失败，请重试");
     toast.success("记录已删除");
   };
 
@@ -3380,37 +3427,51 @@ function StockPickerBioDialog({
     setTargetGroupId(defaultGroup?.id ?? "");
     setTargetSubTankId("");
     setMoveNotes("");
+    maintenanceTicketRef.current = null;
     setActionMode("move");
   };
 
   const submitMove = async () => {
     if (!item) return;
     if (!permission.requirePermission("update")) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (!targetSubTankId) return toast.error("请选择目标子缸");
     if (item.subTankId === targetSubTankId) return toast.error("目标子缸与当前子缸相同");
     if (!confirmWrite("移缸", `将移动「${product?.name ?? item.productId}」到目标子缸。`)) return;
-    setMoveSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "move",
+    const change = {
+      mode: "move" as const,
       itemIds: [item.id],
+      expectedItems: [maintenanceStockExpectedSnapshot(item)],
       targetSubTankId,
       moveDate: today,
       moveNotes: moveNotes.trim(),
-    });
-    setMoveSaving(false);
-    if (!ok) return toast.error("移缸保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setMoveSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setMoveSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "移缸保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     toast.success("已移缸");
     onOpenChange(false);
   };
 
   const openLossDialog = () => {
     if (!item) return;
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
     if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("该鱼已不在当前库存中，不能登记损耗");
     setLossDate(today);
     setLossReason("");
     setLossProof([]);
+    maintenanceTicketRef.current = null;
     setActionMode("loss");
   };
 
@@ -3437,22 +3498,34 @@ function StockPickerBioDialog({
 
   const submitLoss = async () => {
     if (!item) return;
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (!lossDate) return toast.error("请选择损耗日期");
     if (lossDate > today) return toast.error("损耗日期不能晚于今天");
     if (lossDate < item.inDate) return toast.error("损耗日期不能早于入库日期");
     if (lossProof.length === 0) return toast.error("请上传损耗照片凭证");
     if (!confirmWrite("登记损耗", "损耗后该鱼会从缸位视图和可售库存中移除，并生成损耗记录。")) return;
-    setLossSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "loss",
-      stockItemId: item.id,
+    const change = {
+      mode: "loss" as const,
+      itemIds: [item.id],
+      expectedItems: [maintenanceStockExpectedSnapshot(item)],
       lossDate,
       lossReason: lossReason.trim(),
       lossProof,
-    });
-    setLossSaving(false);
-    if (!ok) return toast.error("损耗保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setLossSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setLossSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "损耗保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     if (order) {
       toast.success(`已登记损耗；请到订单 ${order.orderNo} 中移除该商品，需要退款时在订单详情登记`);
     } else {
@@ -3466,7 +3539,7 @@ function StockPickerBioDialog({
     <Dialog
       open={open && actionMode === "detail"}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+        if (!nextOpen && (recordMediaUploading || bioSaving)) return toast.info("请等待当前保存完成");
         onOpenChange(nextOpen);
       }}
     >
@@ -3563,7 +3636,7 @@ function StockPickerBioDialog({
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {event.type === "record" && editingRecordId === event.id ? (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && editingRecordId === event.id ? (
                             <div className="flex items-center gap-1">
                               <PreciseDateTimeInput
                                 min={minDatetimeForDate(item.inDate)}
@@ -3572,13 +3645,13 @@ function StockPickerBioDialog({
                                 onChange={setEditingRecordTime}
                                 className="w-full sm:w-72 [&_input]:h-7 [&_input]:text-xs"
                               />
-                              <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
-                              <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
+                              <button type="button" disabled={bioSaving} onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline disabled:opacity-50">{bioSaving ? "保存中…" : "保存"}</button>
+                              <button type="button" disabled={bioSaving} onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline disabled:opacity-50">取消</button>
                             </div>
                           ) : (
                             <span className="text-xs text-muted-foreground">{formatBioRecordTime(event.date)}</span>
                           )}
-                          {event.type === "record" && permission.canUpdate && editingRecordId !== event.id && (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canUpdate && editingRecordId !== event.id && (
                             <button
                               type="button"
                               onClick={() => startEditBioRecordTime(event.id, event.date)}
@@ -3588,8 +3661,8 @@ function StockPickerBioDialog({
                               改时间
                             </button>
                           )}
-                          {event.type === "record" && permission.canDelete && (
-                            <button type="button" onClick={() => deleteBioRecord(event.id)} className="text-xs text-red-400 hover:text-red-600" title="删除记录">
+                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canDelete && (
+                            <button type="button" disabled={bioSaving} onClick={() => deleteBioRecord(event.id)} className="text-xs text-red-400 hover:text-red-600 disabled:opacity-50" title="删除记录">
                               <X className="size-3" />
                             </button>
                           )}
@@ -3675,7 +3748,7 @@ function StockPickerBioDialog({
                   <div className="grid gap-2">
                     <Label className="text-xs">照片</Label>
                     <input ref={photoRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { void uploadRecordPhotos(event.target.files); event.target.value = ""; }} />
-                    <Button type="button" variant="outline" size="sm" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的图片" onClick={() => photoRef.current?.click()}>
+                    <Button type="button" variant="outline" size="sm" disabled={recordMediaUploading || bioSaving} title="也可直接粘贴剪贴板中的图片" onClick={() => photoRef.current?.click()}>
                       <Camera className="size-4" /> 上传照片
                     </Button>
 	                  </div>
@@ -3683,7 +3756,7 @@ function StockPickerBioDialog({
 	                    <Label className="text-xs">视频</Label>
 	                    <div className="flex items-center gap-2">
 	                      <input ref={videoRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} multiple className="hidden" onChange={(event) => { void uploadRecordVideos(event.target.files); event.target.value = ""; }} />
-	                      <Button type="button" variant="outline" size="sm" className="flex-1" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的视频" onClick={() => videoRef.current?.click()}>
+	                      <Button type="button" variant="outline" size="sm" className="flex-1" disabled={recordMediaUploading || bioSaving} title="也可直接粘贴剪贴板中的视频" onClick={() => videoRef.current?.click()}>
 	                        <Video className="size-4" /> 上传视频
 	                      </Button>
 	                    </div>
@@ -3713,9 +3786,9 @@ function StockPickerBioDialog({
                   <Label className="text-xs">记录内容</Label>
                   <Textarea rows={2} placeholder="填写观察内容、用药记录等..." value={newRecord.text} onChange={(event) => setNewRecord((prev) => ({ ...prev, text: event.target.value }))} />
                 </div>
-                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading} className="self-end">
-                  {recordMediaUploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {recordMediaUploading ? "媒体上传中…" : "添加此记录"}
+                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading || bioSaving} className="self-end">
+                  {recordMediaUploading || bioSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {recordMediaUploading ? "媒体上传中…" : bioSaving ? "保存中…" : "添加此记录"}
                 </Button>
               </div>
             )}
@@ -3727,16 +3800,16 @@ function StockPickerBioDialog({
         <DialogFooter className="shrink-0 border-t pt-2">
           <div className="mr-auto flex items-center gap-2">
             {permission.canUpdate && item && (
-              <Button variant="outline" disabled={recordMediaUploading} onClick={openMoveDialog}>
+              <Button variant="outline" disabled={recordMediaUploading || bioSaving} onClick={openMoveDialog}>
                 <ArrowRightLeft className="mr-1 size-4" />
                 移缸
               </Button>
             )}
-            {permission.canDelete && item && (
+            {canRegisterLoss && item && (
               <Button
                 variant="outline"
                 className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                disabled={recordMediaUploading}
+                disabled={recordMediaUploading || bioSaving}
                 onClick={openLossDialog}
               >
                 <AlertTriangle className="mr-1 size-4" />
@@ -3744,10 +3817,10 @@ function StockPickerBioDialog({
               </Button>
             )}
           </div>
-          <Button variant="outline" disabled={recordMediaUploading} onClick={() => onOpenChange(false)}>关闭</Button>
+          <Button variant="outline" disabled={recordMediaUploading || bioSaving} onClick={() => onOpenChange(false)}>关闭</Button>
           {permission.canUpdate && item && (
-            <Button disabled={recordMediaUploading} onClick={saveBio}>
-              {hasBioRecordDraftContent(newRecord) ? "保存状态和记录" : "保存状态"}
+            <Button disabled={recordMediaUploading || bioSaving} onClick={saveBio}>
+              {bioSaving ? "保存中…" : hasBioRecordDraftContent(newRecord) ? "保存状态和记录" : "保存状态"}
             </Button>
           )}
         </DialogFooter>

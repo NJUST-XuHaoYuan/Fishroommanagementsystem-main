@@ -64,6 +64,21 @@ export function permissionStateForUser(user: User): {
   };
 }
 
+/** Registering a maintenance loss mutates both daily stock and loss records. */
+export function canRegisterMaintenanceLoss(
+  canDeleteDaily: boolean,
+  canCreateLossRecord: boolean,
+): boolean {
+  return canDeleteDaily && canCreateLossRecord;
+}
+
+export function requireMaintenanceLossPermissions(
+  requireDailyDelete: () => boolean,
+  requireLossRecordCreate: () => boolean,
+): boolean {
+  return requireDailyDelete() && requireLossRecordCreate();
+}
+
 export function usePermission(module: PermissionModule) {
   const { state } = useStore();
   const { isAdmin, permissions } = permissionStateForUser(state.user);

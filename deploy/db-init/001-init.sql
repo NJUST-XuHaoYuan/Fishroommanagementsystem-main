@@ -1,8 +1,61 @@
+BEGIN;
+
+SELECT pg_advisory_xact_lock(hashtext('fishroom'), hashtext('app_state_revision_v1'));
+
+CREATE SEQUENCE IF NOT EXISTS app_state_revision_seq;
+
 CREATE TABLE IF NOT EXISTS app_state (
   id TEXT PRIMARY KEY,
   data JSONB NOT NULL,
+  revision BIGINT NOT NULL DEFAULT nextval('app_state_revision_seq'),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE app_state
+  ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT nextval('app_state_revision_seq');
+
+LOCK TABLE app_state IN ACCESS EXCLUSIVE MODE;
+
+DROP TRIGGER IF EXISTS app_state_revision_trigger ON app_state;
+
+CREATE OR REPLACE FUNCTION bump_app_state_revision()
+RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' OR NEW.revision IS NULL OR NEW.revision <= 0 THEN
+    NEW.revision := nextval('app_state_revision_seq');
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT setval(
+  'app_state_revision_seq',
+  GREATEST(
+    (SELECT COALESCE(MAX(revision), 0) FROM app_state),
+    (SELECT last_value FROM app_state_revision_seq),
+    1
+  ),
+  true
+);
+
+UPDATE app_state
+SET revision = nextval('app_state_revision_seq');
+
+SELECT setval(
+  'app_state_revision_seq',
+  GREATEST(
+    (SELECT COALESCE(MAX(revision), 0) FROM app_state),
+    (SELECT last_value FROM app_state_revision_seq),
+    1
+  ),
+  true
+);
+
+CREATE TRIGGER app_state_revision_trigger
+BEFORE INSERT OR UPDATE ON app_state
+FOR EACH ROW EXECUTE FUNCTION bump_app_state_revision();
+
+COMMIT;
 
 CREATE TABLE IF NOT EXISTS finance_import_batches (
   id TEXT PRIMARY KEY,

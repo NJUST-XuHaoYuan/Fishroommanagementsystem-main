@@ -18,7 +18,11 @@ registerHooks({
   },
 });
 
-const { permissionStateForUser } = await import("./permissions.ts");
+const {
+  canRegisterMaintenanceLoss,
+  permissionStateForUser,
+  requireMaintenanceLossPermissions,
+} = await import("./permissions.ts");
 
 const permissionModules = [
   "species", "products", "tankGroups", "batches", "stockIn", "daily",
@@ -104,4 +108,29 @@ test("staff account administration stays denied even for a legacy permission bit
   });
 
   assert.equal(result.permissions.accounts.update, false);
+});
+
+test("maintenance loss UI requires both daily delete and loss-record create", () => {
+  assert.equal(canRegisterMaintenanceLoss(true, true), true);
+  assert.equal(canRegisterMaintenanceLoss(true, false), false);
+  assert.equal(canRegisterMaintenanceLoss(false, true), false);
+  assert.equal(canRegisterMaintenanceLoss(false, false), false);
+});
+
+test("maintenance loss submit gate checks both permission modules", () => {
+  const checked = [];
+  const allowed = requireMaintenanceLossPermissions(
+    () => { checked.push("daily.delete"); return true; },
+    () => { checked.push("lossRecords.create"); return true; },
+  );
+  assert.equal(allowed, true);
+  assert.deepEqual(checked, ["daily.delete", "lossRecords.create"]);
+
+  let lossCreateChecked = false;
+  const denied = requireMaintenanceLossPermissions(
+    () => false,
+    () => { lossCreateChecked = true; return true; },
+  );
+  assert.equal(denied, false);
+  assert.equal(lossCreateChecked, false);
 });

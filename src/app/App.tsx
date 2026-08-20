@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, DailyLog, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, StockStatus, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelAccountEnabled, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
+import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, BioRecordSaveChange, BioRecordSaveResult, DailyLog, MaintenanceSaveChange, MaintenanceSaveResult, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelAccountEnabled, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import type { AuthAccountPermissionSummary } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
@@ -29,6 +29,8 @@ import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession, saveAuthSession } from "./utils/authSession";
 import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
+import { changedObjectKeys, hasStateVersionChanged, isCurrentStateRequest, latestStateVersion, mapArrayCopyOnWrite } from "./utils/stateMutation";
+import { maintenanceSaveFailure } from "./utils/maintenanceMutation";
 
 const API = "/api";
 const MAX_OPERATION_LOGS = 10000;
@@ -59,6 +61,13 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
 type PersistedStore = Omit<Store, "user">;
 type PersistedKey = keyof PersistedStore;
 type StateLoadOptions = { force?: boolean; showLoading?: boolean; liteSpecies?: boolean };
+type SaveStatus = "idle" | "saving" | "saved" | "error";
+type MutationSession = {
+  generation: number;
+  userKey: string;
+  authSessionKey: string;
+  statusSequence: number;
+};
 type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily" | "notifications">;
 type OpenOrderRequest = {
   orderId: string;
@@ -82,10 +91,10 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   tankGroups: ["tankGroups", "stock", "shipments"],
   batches: ["batches", "stock", "orders", "shipments"],
   stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
-  daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "bioRecords", "personnel"],
+  daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
-  orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "bioRecords", "personnel"],
+  orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "personnel"],
   finance: ["sites", "systemSettings"],
   paymentMethods: ["systemSettings"],
   shippingCarriers: ["systemSettings"],
@@ -163,10 +172,10 @@ function fillMissingSiteFields<T extends Partial<PersistedStore>>(data: T, siteI
   const next: any = { ...data };
   SITE_SCOPED_KEYS.forEach((key) => {
     if (!Array.isArray(next[key])) return;
-    next[key] = next[key].map((item: Record<string, unknown>) => ({
-      ...item,
-      siteId: normalizeSiteId(item.siteId ?? normalizedSiteId),
-    }));
+    next[key] = mapArrayCopyOnWrite(next[key], (item: Record<string, unknown>) => {
+      const nextSiteId = normalizeSiteId(item.siteId ?? normalizedSiteId);
+      return item.siteId === nextSiteId ? item : { ...item, siteId: nextSiteId };
+    });
   });
   return next;
 }
@@ -500,10 +509,14 @@ function userDependencyKey(user: User): string {
   return [user.username, user.role, ...(user.visibleSiteIds ?? [])].join("|");
 }
 
+function authSessionDependencyKey(): string {
+  const session = getValidAuthSession();
+  if (!session) return "";
+  return [session.username, session.role, session.expiresAt, session.token ?? ""].join("\0");
+}
+
 function findChangedKeys(before: PersistedStore, after: PersistedStore): PersistedKey[] {
-  return PERSISTED_KEYS.filter((key) =>
-    JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)
-  );
+  return changedObjectKeys(before, after, PERSISTED_KEYS);
 }
 
 function mergeOperationLogs(
@@ -521,6 +534,19 @@ function mergeOperationLogs(
       return true;
     })
     .slice(0, MAX_OPERATION_LOGS);
+}
+
+function mergeIdUpdates<T extends { id: string }>(current: T[], updates: unknown): T[] {
+  if (!Array.isArray(updates) || updates.length === 0) return current;
+  const normalizedUpdates = updates.filter((item): item is T =>
+    Boolean(item && typeof item === "object" && String((item as { id?: unknown }).id ?? "").trim())
+  );
+  if (normalizedUpdates.length === 0) return current;
+  const updateById = new Map(normalizedUpdates.map((item) => [String(item.id), item]));
+  const existingIds = new Set(current.map((item) => String(item.id)));
+  const merged = mapArrayCopyOnWrite(current, (item) => updateById.get(String(item.id)) ?? item);
+  const additions = normalizedUpdates.filter((item) => !existingIds.has(String(item.id)));
+  return additions.length > 0 ? [...merged, ...additions] : merged;
 }
 
 function withServerOperationLog(log: OperationLog | undefined, currentLogs: OperationLog[] = []): OperationLog[] {
@@ -557,10 +583,12 @@ function AdminApp() {
   const [loading, setLoading] = useState(true);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [stateLoading, setStateLoading] = useState(false);
+  const [stateLoadError, setStateLoadError] = useState("");
+  const [stateLoadAttempt, setStateLoadAttempt] = useState(0);
   const [viewLoading, setViewLoading] = useState(false);
   const [loadedKeys, setLoadedKeys] = useState<Set<PersistedKey>>(() => new Set());
   const [openOrderRequest, setOpenOrderRequest] = useState<OpenOrderRequest | null>(null);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [activeSiteId, setActiveSiteIdBase] = useState(() => {
     try {
       return normalizeSiteId(window.localStorage.getItem("fishroom-active-site"));
@@ -569,22 +597,107 @@ function AdminApp() {
     }
   });
   const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const saveStatusTimerRef = useRef<number | null>(null);
   const saveAbort = useRef<AbortController | null>(null);
+  const bioSaveInFlight = useRef(false);
   const stateLoadStarted = useRef(false);
   const lastSavedState = useRef<PersistedStore | null>(null);
   const persistQueue = useRef<Promise<void>>(Promise.resolve());
   const stateRef = useRef(state);
   const saveStatusRef = useRef(saveStatus);
   const refreshInProgress = useRef(false);
+  const versionCheckInProgress = useRef(false);
+  const stateVersionRef = useRef("");
+  const stateRequestEpochRef = useRef(0);
+  const stateRequestSequenceRef = useRef(0);
+  const stateKeyRequestSequenceRef = useRef<Map<PersistedKey, number>>(new Map());
+  const stateRequestControllersRef = useRef<Set<AbortController>>(new Set());
+  const viewLoadingRequestRef = useRef(0);
+  const pageLoadRequestRef = useRef(0);
+  const mutationSessionGenerationRef = useRef(0);
+  const mutationStatusSequenceRef = useRef(0);
+  const loadedViewRef = useRef<ViewKey | null>(null);
   const orderRequestSequence = useRef(0);
   const loadedKeysRef = useRef<Set<PersistedKey>>(new Set());
   const viewRef = useRef(view);
   const currentUserKey = userDependencyKey(state.user);
+  const currentUserKeyRef = useRef(currentUserKey);
+  const previousUserKeyRef = useRef(currentUserKey);
+  currentUserKeyRef.current = currentUserKey;
   const permissionSummaryReady = !state.user || state.user.role === "admin" || Boolean(
     state.user.account?.accountEnabled &&
     state.user.account.username === state.user.username &&
     state.user.account.accessRole === state.user.role
   );
+
+  const invalidateStateReadRequests = () => {
+    stateRequestEpochRef.current += 1;
+    stateRequestControllersRef.current.forEach((controller) => controller.abort());
+    stateRequestControllersRef.current.clear();
+    stateKeyRequestSequenceRef.current.clear();
+    versionCheckInProgress.current = false;
+    viewLoadingRequestRef.current = 0;
+    setViewLoading(false);
+  };
+
+  const beginMutation = (): MutationSession => {
+    mutationStatusSequenceRef.current += 1;
+    if (saveStatusTimerRef.current !== null) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+    const mutationSession = {
+      generation: mutationSessionGenerationRef.current,
+      userKey: currentUserKeyRef.current,
+      authSessionKey: authSessionDependencyKey(),
+      statusSequence: mutationStatusSequenceRef.current,
+    };
+    invalidateStateReadRequests();
+    saveStatusRef.current = "saving";
+    setSaveStatus("saving");
+    return mutationSession;
+  };
+
+  const isMutationSessionCurrent = (session: MutationSession, user = stateRef.current.user) =>
+    isCurrentStateRequest(
+      session.userKey,
+      userDependencyKey(user),
+      session.generation,
+      mutationSessionGenerationRef.current,
+    ) && Boolean(session.authSessionKey) && session.authSessionKey === authSessionDependencyKey() &&
+    session.statusSequence === mutationStatusSequenceRef.current;
+
+  const settleMutation = (
+    session: MutationSession,
+    status: Exclude<SaveStatus, "saving">,
+    idleAfterMs = 0,
+  ) => {
+    if (!isMutationSessionCurrent(session)) return false;
+    if (saveStatusTimerRef.current !== null) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+    saveStatusRef.current = status;
+    setSaveStatus(status);
+    if (idleAfterMs > 0) {
+      saveStatusTimerRef.current = window.setTimeout(() => {
+        if (!isMutationSessionCurrent(session)) return;
+        saveStatusTimerRef.current = null;
+        saveStatusRef.current = "idle";
+        setSaveStatus("idle");
+      }, idleAfterMs);
+    }
+    return true;
+  };
+
+  const setStateForMutation = (
+    session: MutationSession,
+    updater: (current: Store) => Store,
+  ) => {
+    setStateBase((current) => isMutationSessionCurrent(session, current.user)
+      ? updater(current)
+      : current);
+  };
 
   const setActiveSiteId: Dispatch<SetStateAction<string>> = (value) => {
     setActiveSiteIdBase((current) => {
@@ -626,22 +739,59 @@ function AdminApp() {
       ? uniqueKeys
       : uniqueKeys.filter((key) => !loadedKeysRef.current.has(key));
     if (keysToFetch.length === 0) return true;
-    if (!stateRef.current.user) return false;
+    const requestedUserKey = currentUserKeyRef.current;
+    if (!requestedUserKey || !stateRef.current.user) return false;
 
-    if (options.showLoading) setViewLoading(true);
+    const requestEpoch = stateRequestEpochRef.current;
+    const requestSequence = ++stateRequestSequenceRef.current;
+    const controller = new AbortController();
+    stateRequestControllersRef.current.add(controller);
+    keysToFetch.forEach((key) => stateKeyRequestSequenceRef.current.set(key, requestSequence));
+
+    if (options.showLoading) {
+      viewLoadingRequestRef.current = requestSequence;
+      setViewLoading(true);
+    }
     try {
       const query = encodeURIComponent(keysToFetch.join(","));
       const lite = options.liteSpecies && keysToFetch.includes("species") ? "&lite=species" : "";
-      const response = await fetch(`${API}/state/slice?keys=${query}${lite}`, { headers: authJsonHeaders() });
+      const response = await fetch(`${API}/state/slice?keys=${query}${lite}`, {
+        headers: authJsonHeaders(),
+        signal: controller.signal,
+      });
       const result = await response.json();
+      const requestIsCurrent = () => isCurrentStateRequest(
+        requestedUserKey,
+        currentUserKeyRef.current,
+        requestEpoch,
+        stateRequestEpochRef.current
+      );
+      if (!requestIsCurrent()) return false;
       if (!response.ok) {
         const error = new Error(result.error || `HTTP ${response.status}`);
         (error as Error & { status?: number }).status = response.status;
         throw error;
       }
-      const data = result.data ?? {};
+      const currentKeys = keysToFetch.filter((key) =>
+        stateKeyRequestSequenceRef.current.get(key) === requestSequence
+      );
+      if (currentKeys.length === 0) return false;
+      const responseData = result.data ?? {};
+      stateVersionRef.current = latestStateVersion(stateVersionRef.current, result.version);
       setStateBase((current) => {
-        if (!current.user) return current;
+        const keysStillCurrent = currentKeys.filter((key) =>
+          stateKeyRequestSequenceRef.current.get(key) === requestSequence
+        );
+        if (
+          !requestIsCurrent() ||
+          keysStillCurrent.length === 0 ||
+          !current.user ||
+          userDependencyKey(current.user) !== requestedUserKey
+        ) return current;
+        const data = Object.fromEntries(keysStillCurrent.map((key) => [key, responseData[key]]));
+        if (keysStillCurrent.includes("stock") && responseData.inventoryProjection) {
+          data.inventoryProjection = responseData.inventoryProjection;
+        }
         const normalized = normalizePersistedState(
           { ...withoutUser(current), ...data },
           current.user
@@ -650,16 +800,31 @@ function AdminApp() {
         return normalized;
       });
       setLoadedKeys((current) => {
+        if (!requestIsCurrent()) return current;
+        const keysStillCurrent = currentKeys.filter((key) =>
+          stateKeyRequestSequenceRef.current.get(key) === requestSequence
+        );
+        if (keysStillCurrent.length === 0) return current;
         const next = new Set(current);
-        keysToFetch.forEach((key) => next.add(key));
+        keysStillCurrent.forEach((key) => next.add(key));
         loadedKeysRef.current = next;
         return next;
       });
       return true;
     } catch (error) {
+      if ((error as Error)?.name === "AbortError") return false;
       console.error("Failed to load state slice:", error);
-      if ((error as Error & { status?: number })?.status === 401) {
+      if (
+        (error as Error & { status?: number })?.status === 401 &&
+        isCurrentStateRequest(
+          requestedUserKey,
+          currentUserKeyRef.current,
+          requestEpoch,
+          stateRequestEpochRef.current
+        )
+      ) {
         clearAuthSession();
+        invalidateStateReadRequests();
         stateLoadStarted.current = false;
         lastSavedState.current = null;
         loadedKeysRef.current = new Set<PersistedKey>();
@@ -669,7 +834,11 @@ function AdminApp() {
       }
       return false;
     } finally {
-      if (options.showLoading) setViewLoading(false);
+      stateRequestControllersRef.current.delete(controller);
+      if (options.showLoading && viewLoadingRequestRef.current === requestSequence) {
+        viewLoadingRequestRef.current = 0;
+        setViewLoading(false);
+      }
     }
   };
 
@@ -709,7 +878,7 @@ function AdminApp() {
       : currentStateToSave.operationLogs.length > 0;
     if (changedKeys.length === 0 && !hasNewLogs) return;
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const patch = changedKeys.reduce<Partial<PersistedStore>>((acc, key) => {
         (acc as any)[key] = currentStateToSave[key];
@@ -723,6 +892,7 @@ function AdminApp() {
         ? mergeOperationLogs([], currentStateToSave.operationLogs, baseline.operationLogs)
         : currentStateToSave.operationLogs;
       const result = await postStatePatch(patch, logs, basePatch);
+      if (!isMutationSessionCurrent(mutationSession)) return;
       lastSavedState.current = {
         ...(lastSavedState.current ?? currentStateToSave),
         ...patch,
@@ -730,17 +900,15 @@ function AdminApp() {
         operationLogs: currentStateToSave.operationLogs,
       };
       if (result.inventoryProjection) {
-        setStateBase((current) => ({
+        setStateForMutation(mutationSession, (current) => ({
           ...current,
           inventoryProjection: result.inventoryProjection,
         }));
       }
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
     } catch (error) {
       console.error("Failed to save manual change:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
     }
   };
 
@@ -761,7 +929,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const { operationLogs: patchLogs, ...statePatch } = patch;
       const scopedStatePatch = fillMissingSiteFields(statePatch, activeSiteId);
@@ -770,7 +938,7 @@ function AdminApp() {
         return acc;
       }, {});
       const result = await postStatePatch(scopedStatePatch, Array.isArray(patchLogs) ? patchLogs : [], basePatch);
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = normalizePersistedState(
           {
             ...withoutUser(current),
@@ -788,13 +956,11 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save patch:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -808,7 +974,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const currentPersisted = withoutUser(stateRef.current);
       const transformed = fillMissingSiteFields(transform(currentPersisted), activeSiteId);
@@ -817,8 +983,7 @@ function AdminApp() {
       const nextWithUser = { ...transformed, user: state.user } as Store;
       const logs = buildOperationLogs(previousWithUser, nextWithUser, changedKeys);
       if (changedKeys.length === 0 && logs.length === 0) {
-        setSaveStatus("saved");
-        setTimeout(() => setSaveStatus("idle"), 2000);
+        settleMutation(mutationSession, "saved", 2000);
         return true;
       }
 
@@ -832,7 +997,7 @@ function AdminApp() {
       }, {});
       const result = await postStatePatch(patch, logs, basePatch);
 
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const appliedLogs = result.appliedOperationLogs ?? logs;
         const next = normalizePersistedState(
           {
@@ -848,13 +1013,11 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save transformed state:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -866,7 +1029,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/products/upsert`, {
         method: "POST",
@@ -880,7 +1043,7 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = {
           ...current,
           products: Array.isArray(result.products) ? result.products : current.products,
@@ -894,20 +1057,18 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save product:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
 
 	  const deleteProduct = async (productId: string): Promise<ProductDeleteResult> => {
 	    clearTimeout(saveTimer.current);
-	    setSaveStatus("saving");
+	    const mutationSession = beginMutation();
 	    try {
 	      const response = await fetch(`${API}/products/delete`, {
 	        method: "POST",
@@ -916,8 +1077,7 @@ function AdminApp() {
 	      });
 	      const result = await response.json().catch(() => ({}));
 	      if (!response.ok || !result.ok) {
-	        setSaveStatus("error");
-	        setTimeout(() => setSaveStatus("idle"), 3000);
+	        settleMutation(mutationSession, "error", 3000);
 	        return {
 	          ok: false,
 	          error: result.error || `HTTP ${response.status}`,
@@ -925,7 +1085,7 @@ function AdminApp() {
 	        };
 	      }
 
-	      setStateBase((current) => {
+	      setStateForMutation(mutationSession, (current) => {
 	        const next = {
 	          ...current,
 	          products: Array.isArray(result.products) ? result.products : current.products,
@@ -939,8 +1099,7 @@ function AdminApp() {
 	        lastSavedState.current = withoutUser(next);
 	        return next;
 	      });
-	      setSaveStatus("saved");
-	      setTimeout(() => setSaveStatus("idle"), 2000);
+	      settleMutation(mutationSession, "saved", 2000);
 	      return {
 	        ok: true,
 	        mode: result.mode,
@@ -949,8 +1108,7 @@ function AdminApp() {
 	      };
 	    } catch (error) {
 	      console.error("Failed to delete product:", error);
-	      setSaveStatus("error");
-	      setTimeout(() => setSaveStatus("idle"), 3000);
+	      settleMutation(mutationSession, "error", 3000);
 	      return { ok: false, error: error instanceof Error ? error.message : "删除商品失败，请重试" };
 	    }
 	  };
@@ -964,7 +1122,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/stock/save`, {
         method: "POST",
@@ -979,7 +1137,7 @@ function AdminApp() {
       });
       const result = await response.json();
       if (result.duplicateConfirmationRequired === true) {
-        setSaveStatus("idle");
+        settleMutation(mutationSession, "idle");
         return {
           ok: false,
           error: String(result.error ?? "短时间内已提交过相同调整"),
@@ -990,7 +1148,7 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const orderUpdates = new Map<string, Store["orders"][number]>(
           (Array.isArray(result.orderUpdates) ? result.orderUpdates : [])
             .map((order: Store["orders"][number]) => [order.id, order] as const)
@@ -1022,8 +1180,7 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return {
         ok: true,
         pendingApproval: result.pendingApproval === true,
@@ -1032,8 +1189,7 @@ function AdminApp() {
       };
     } catch (error) {
       console.error("Failed to save stock:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
 	      const message = error instanceof Error ? error.message : "保存失败，请重试";
 	      return {
 	        ok: false,
@@ -1042,19 +1198,14 @@ function AdminApp() {
 	    }
 	  };
 
-	  const saveMaintenanceAction = async (change:
-	    | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
-	    | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }
-	    | { mode: "status"; itemIds: string[]; targetStatus: StockStatus }
-	    | { mode: "loss"; stockItemId?: string; itemIds?: string[]; lossDate: string; lossReason?: string; lossProof: string[] }
-	  ): Promise<boolean> => {
+		  const saveMaintenanceAction = async (change: MaintenanceSaveChange): Promise<MaintenanceSaveResult> => {
 	    clearTimeout(saveTimer.current);
 	    if (saveAbort.current) {
 	      saveAbort.current.abort();
 	      saveAbort.current = null;
 	    }
 
-	    setSaveStatus("saving");
+	    const mutationSession = beginMutation();
 	    try {
 	      const response = await fetch(`${API}/maintenance/save`, {
 	        method: "POST",
@@ -1064,18 +1215,33 @@ function AdminApp() {
 	          operator: state.user?.username ?? "system",
 	        }),
 	      });
-	      const result = await response.json();
-	      if (!response.ok || !result.ok) {
-	        throw new Error(result.error || `HTTP ${response.status}`);
-	      }
+		      const result = await response.json().catch(() => ({}));
+		      if (!response.ok || !result.ok) {
+		        const failure = maintenanceSaveFailure(
+		          result.error || `HTTP ${response.status}`,
+		          response.status,
+		          result.code,
+		        );
+		        console.error("Failed to save maintenance action:", failure.error);
+		        settleMutation(mutationSession, "error", 3000);
+		        return failure;
+		      }
 
-	      setStateBase((current) => {
+	      setStateForMutation(mutationSession, (current) => {
 	        const next = {
 	          ...current,
-	          stock: Array.isArray(result.stock) ? result.stock : current.stock,
-	          batches: Array.isArray(result.batches) ? result.batches : current.batches,
-	          bioRecords: Array.isArray(result.bioRecords) ? result.bioRecords : current.bioRecords,
-	          lossRecords: Array.isArray(result.lossRecords) ? result.lossRecords : current.lossRecords,
+	          stock: Array.isArray(result.stockUpdates)
+	            ? mergeIdUpdates(current.stock, result.stockUpdates)
+	            : Array.isArray(result.stock) ? result.stock : current.stock,
+	          batches: Array.isArray(result.batchUpdates)
+	            ? mergeIdUpdates(current.batches, result.batchUpdates)
+	            : Array.isArray(result.batches) ? result.batches : current.batches,
+	          bioRecords: Array.isArray(result.bioRecordUpdates)
+	            ? mergeIdUpdates(current.bioRecords, result.bioRecordUpdates)
+	            : Array.isArray(result.bioRecords) ? result.bioRecords : current.bioRecords,
+	          lossRecords: Array.isArray(result.lossRecordUpdates)
+	            ? mergeIdUpdates(current.lossRecords, result.lossRecordUpdates)
+	            : Array.isArray(result.lossRecords) ? result.lossRecords : current.lossRecords,
 	          operationLogs: result.operationLog
 	            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
 	                arr.findIndex((item) => item.id === log.id) === idx
@@ -1085,16 +1251,88 @@ function AdminApp() {
 	        lastSavedState.current = withoutUser(next);
 	        return next;
 	      });
-	      setSaveStatus("saved");
-	      setTimeout(() => setSaveStatus("idle"), 2000);
-	      return true;
-	    } catch (error) {
-	      console.error("Failed to save maintenance action:", error);
-	      setSaveStatus("error");
-	      setTimeout(() => setSaveStatus("idle"), 3000);
-	      return false;
-	    }
+	      settleMutation(mutationSession, "saved", 2000);
+		      return { ok: true };
+		    } catch (error) {
+		      console.error("Failed to save maintenance action:", error);
+		      settleMutation(mutationSession, "error", 3000);
+		      return maintenanceSaveFailure(
+		        error instanceof Error ? error.message : "维护保存失败，请重试",
+		      );
+		    }
 	  };
+
+  const saveBioRecordChange = async (change: BioRecordSaveChange): Promise<BioRecordSaveResult> => {
+    if (bioSaveInFlight.current) {
+      return { ok: false, error: "生物记录正在保存，请稍候", conflict: true };
+    }
+    clearTimeout(saveTimer.current);
+    if (saveAbort.current) {
+      saveAbort.current.abort();
+      saveAbort.current = null;
+    }
+
+    bioSaveInFlight.current = true;
+    const mutationSession = beginMutation();
+    try {
+      const response = await fetch(`${API}/bio-records/save`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(change),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        const error = new Error(result.error || `HTTP ${response.status}`) as Error & { conflict?: boolean };
+        error.conflict = response.status === 409;
+        throw error;
+      }
+
+      setStateForMutation(mutationSession, (current) => {
+        const changedStockItem = result.stockItem && typeof result.stockItem === "object"
+          ? result.stockItem as StockItem
+          : null;
+        const changedBioRecord = result.bioRecord && typeof result.bioRecord === "object"
+          ? result.bioRecord
+          : null;
+        const deletedRecordId = String(result.deletedRecordId ?? "").trim();
+        let nextBioRecords = current.bioRecords;
+        if (changedBioRecord?.id) {
+          const exists = current.bioRecords.some((record) => record.id === changedBioRecord.id);
+          nextBioRecords = exists
+            ? current.bioRecords.map((record) => record.id === changedBioRecord.id ? changedBioRecord : record)
+            : [...current.bioRecords, changedBioRecord];
+        } else if (deletedRecordId) {
+          nextBioRecords = current.bioRecords.filter((record) => record.id !== deletedRecordId);
+        }
+        const next = {
+          ...current,
+          stock: changedStockItem
+            ? current.stock.map((item) => item.id === changedStockItem.id ? changedStockItem : item)
+            : current.stock,
+          bioRecords: nextBioRecords,
+          operationLogs: result.operationLog
+            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, index, all) =>
+                all.findIndex((item) => item.id === log.id) === index
+              ).slice(0, MAX_OPERATION_LOGS)
+            : current.operationLogs,
+        };
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      settleMutation(mutationSession, "saved", 2000);
+      return { ok: true };
+    } catch (error) {
+      console.error("Failed to save bio record:", error);
+      settleMutation(mutationSession, "error", 3000);
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "生物记录保存失败，请重试",
+        conflict: Boolean((error as Error & { conflict?: boolean })?.conflict),
+      };
+    } finally {
+      bioSaveInFlight.current = false;
+    }
+  };
 
 	  const saveTankGroupChange = async (change: {
 	    mode: "upsertGroup" | "deleteGroup" | "upsertSubTank" | "deleteSubTank";
@@ -1109,7 +1347,7 @@ function AdminApp() {
 	      saveAbort.current = null;
 	    }
 
-	    setSaveStatus("saving");
+	    const mutationSession = beginMutation();
 	    try {
 	      const response = await fetch(`${API}/tank-groups/save`, {
 	        method: "POST",
@@ -1125,7 +1363,7 @@ function AdminApp() {
 	        throw new Error(result.error || `HTTP ${response.status}`);
 	      }
 
-	      setStateBase((current) => {
+	      setStateForMutation(mutationSession, (current) => {
 	        const next = {
 	          ...current,
 	          tankGroups: Array.isArray(result.tankGroups) ? result.tankGroups : current.tankGroups,
@@ -1138,13 +1376,11 @@ function AdminApp() {
 	        lastSavedState.current = withoutUser(next);
 	        return next;
 	      });
-	      setSaveStatus("saved");
-	      setTimeout(() => setSaveStatus("idle"), 2000);
+	      settleMutation(mutationSession, "saved", 2000);
 	      return true;
 	    } catch (error) {
 	      console.error("Failed to save tank groups:", error);
-	      setSaveStatus("error");
-	      setTimeout(() => setSaveStatus("idle"), 3000);
+	      settleMutation(mutationSession, "error", 3000);
 	      return false;
 	    }
 	  };
@@ -1156,7 +1392,7 @@ function AdminApp() {
 	      saveAbort.current = null;
 	    }
 
-	    setSaveStatus("saving");
+	    const mutationSession = beginMutation();
 	    try {
 	      const response = await fetch(`${API}/daily-logs/save`, {
 	        method: "POST",
@@ -1171,11 +1407,32 @@ function AdminApp() {
 	        throw new Error(result.error || `HTTP ${response.status}`);
 	      }
 
-	      setStateBase((current) => {
-	        const next = {
-	          ...current,
-	          logs: Array.isArray(result.logs) ? result.logs : current.logs,
-	          bioRecords: Array.isArray(result.bioRecords) ? result.bioRecords : current.bioRecords,
+		      setStateForMutation(mutationSession, (current) => {
+		        const changedLog = result.changedLog && typeof result.changedLog === "object"
+		          ? result.changedLog as DailyLog
+		          : null;
+		        const deletedLogId = String(result.deletedLogId ?? "").trim();
+		        let nextLogs = current.logs;
+		        if (changedLog?.id) {
+		          nextLogs = current.logs.some((item) => item.id === changedLog.id)
+		            ? current.logs.map((item) => item.id === changedLog.id ? changedLog : item)
+		            : [...current.logs, changedLog];
+		        } else if (deletedLogId) {
+		          nextLogs = current.logs.filter((item) => item.id !== deletedLogId);
+		        }
+		        const deletedBioRecordIds = new Set(
+		          (Array.isArray(result.deletedBioRecordIds) ? result.deletedBioRecordIds : [])
+		            .map((id: unknown) => String(id ?? "").trim())
+		            .filter(Boolean)
+		        );
+		        const remainingBioRecords = current.bioRecords.filter((record) => !deletedBioRecordIds.has(record.id));
+		        const nextBioRecords = Array.isArray(result.bioRecordUpdates)
+		          ? mergeIdUpdates(remainingBioRecords, result.bioRecordUpdates)
+		          : remainingBioRecords;
+		        const next = {
+		          ...current,
+		          logs: nextLogs,
+		          bioRecords: nextBioRecords,
 	          operationLogs: result.operationLog
 	            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
 	                arr.findIndex((item) => item.id === log.id) === idx
@@ -1185,13 +1442,11 @@ function AdminApp() {
 	        lastSavedState.current = withoutUser(next);
 	        return next;
 	      });
-	      setSaveStatus("saved");
-	      setTimeout(() => setSaveStatus("idle"), 2000);
+	      settleMutation(mutationSession, "saved", 2000);
 	      return true;
 	    } catch (error) {
 	      console.error("Failed to save daily logs:", error);
-	      setSaveStatus("error");
-	      setTimeout(() => setSaveStatus("idle"), 3000);
+	      settleMutation(mutationSession, "error", 3000);
 		      return false;
 			    }
 			  };
@@ -1200,7 +1455,7 @@ function AdminApp() {
     parameters: WaterQualityParameterSetting[];
     assignments: WaterQualityTankGroupAssignment[];
   }): Promise<boolean> => {
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/water-quality/settings/save`, {
         method: "POST",
@@ -1209,7 +1464,7 @@ function AdminApp() {
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = {
           ...current,
           systemSettings: result.systemSettings && typeof result.systemSettings === "object"
@@ -1223,13 +1478,11 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save water quality settings:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -1238,7 +1491,7 @@ function AdminApp() {
     record?: WaterQualityRecord;
     deleteId?: string;
   }): Promise<boolean> => {
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/water-quality-records/save`, {
         method: "POST",
@@ -1247,7 +1500,7 @@ function AdminApp() {
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = {
           ...current,
           waterQualityRecords: Array.isArray(result.waterQualityRecords)
@@ -1260,13 +1513,11 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save water quality record:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -1286,7 +1537,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/shipments/outbound`, {
         method: "POST",
@@ -1301,7 +1552,7 @@ function AdminApp() {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
 
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = {
           ...current,
           orders: Array.isArray(result.orders) ? result.orders : current.orders,
@@ -1316,13 +1567,11 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save outbound shipment:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -1339,7 +1588,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/orders/payment`, {
         method: "POST",
@@ -1350,8 +1599,9 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
+      if (!isMutationSessionCurrent(mutationSession)) return false;
 
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = normalizePersistedState(
           {
             ...withoutUser(current),
@@ -1369,13 +1619,11 @@ function AdminApp() {
         loadedKeysRef.current = next;
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save order payment:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -1387,7 +1635,7 @@ function AdminApp() {
       saveAbort.current = null;
     }
 
-    setSaveStatus("saving");
+    const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}${path}`, {
         method: "POST",
@@ -1398,6 +1646,7 @@ function AdminApp() {
       if (!response.ok || !result.ok) {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
+      if (!isMutationSessionCurrent(mutationSession)) return false;
       let replacementUser: User = null;
       if (result.token && result.user) {
         const currentUser = stateRef.current.user;
@@ -1417,9 +1666,10 @@ function AdminApp() {
         }, currentUser);
         if (!replacementUser) throw new Error("登录身份更新失败，请重新登录");
         saveAuthSession(replacementUser, result.token, result.expiresAt);
+        mutationSession.authSessionKey = authSessionDependencyKey();
       }
 
-      setStateBase((current) => {
+      setStateForMutation(mutationSession, (current) => {
         const next = normalizePersistedState(
           {
             ...withoutUser(current),
@@ -1439,13 +1689,11 @@ function AdminApp() {
         loadedKeysRef.current = next;
         return next;
       });
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 2000);
+      settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save personnel mutation:", error);
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      settleMutation(mutationSession, "error", 3000);
       return false;
     }
   };
@@ -1480,6 +1728,63 @@ function AdminApp() {
       console.error("Failed to refresh business state:", error);
     } finally {
       refreshInProgress.current = false;
+    }
+  };
+
+  const refreshIfStateChanged = async () => {
+    if (
+      !stateRef.current.user ||
+      versionCheckInProgress.current ||
+      saveStatusRef.current === "saving" ||
+      hasActiveEditingSurface()
+    ) return;
+    const requestedUserKey = currentUserKeyRef.current;
+    const requestEpoch = stateRequestEpochRef.current;
+    if (!requestedUserKey) return;
+    const controller = new AbortController();
+    stateRequestControllersRef.current.add(controller);
+    versionCheckInProgress.current = true;
+    try {
+      const response = await fetch(`${API}/state/version`, {
+        headers: authJsonHeaders(),
+        signal: controller.signal,
+      });
+      const result = await response.json().catch(() => ({}));
+      const requestIsCurrent = isCurrentStateRequest(
+        requestedUserKey,
+        currentUserKeyRef.current,
+        requestEpoch,
+        stateRequestEpochRef.current
+      );
+      if (!requestIsCurrent) return;
+      if (!response.ok) {
+        if (response.status === 401) {
+          clearAuthSession();
+          invalidateStateReadRequests();
+          setStateBase((current) => userDependencyKey(current.user) === requestedUserKey
+            ? normalizePersistedState(EMPTY_PERSISTED_STATE, null)
+            : current);
+        }
+        return;
+      }
+      const version = String(result.version ?? "");
+      if (!hasStateVersionChanged(stateVersionRef.current, version)) return;
+      await refreshBusinessState();
+    } catch (error) {
+      if ((error as Error)?.name === "AbortError") return;
+      console.error("Failed to check state version:", error);
+    } finally {
+      stateRequestControllersRef.current.delete(controller);
+      if (
+        isCurrentStateRequest(
+          requestedUserKey,
+          currentUserKeyRef.current,
+          requestEpoch,
+          stateRequestEpochRef.current
+        )
+      ) {
+        versionCheckInProgress.current = false;
+      }
     }
   };
 
@@ -1569,12 +1874,35 @@ function AdminApp() {
   }, [isPublicSite, loading, currentUserKey, state.user?.account?.username]);
 
   useEffect(() => {
-    if (state.user) return;
+    const previousUserKey = previousUserKeyRef.current;
+    previousUserKeyRef.current = currentUserKey;
+    mutationSessionGenerationRef.current += 1;
+    mutationStatusSequenceRef.current += 1;
+    if (saveStatusTimerRef.current !== null) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+    saveStatusRef.current = "idle";
+    setSaveStatus("idle");
+    pageLoadRequestRef.current += 1;
+    invalidateStateReadRequests();
     stateLoadStarted.current = false;
+    loadedViewRef.current = null;
+    stateVersionRef.current = "";
     lastSavedState.current = null;
     loadedKeysRef.current = new Set<PersistedKey>();
     setLoadedKeys(new Set<PersistedKey>());
     setStateLoaded(false);
+    setStateLoadError("");
+    if (!state.user) {
+      setStateBase((current) => current.user
+        ? current
+        : normalizePersistedState(EMPTY_PERSISTED_STATE, null));
+    } else if (previousUserKey && previousUserKey !== currentUserKey) {
+      setStateBase((current) => userDependencyKey(current.user) === currentUserKey
+        ? normalizePersistedState(EMPTY_PERSISTED_STATE, current.user)
+        : current);
+    }
   }, [currentUserKey]);
 
   useEffect(() => {
@@ -1597,51 +1925,114 @@ function AdminApp() {
   // ── Load only the current page's business data after a successful login. ──
   useEffect(() => {
     if (!state.user || !permissionSummaryReady || stateLoaded || stateLoadStarted.current) return;
+    const requestedUserKey = currentUserKeyRef.current;
+    const requestEpoch = stateRequestEpochRef.current;
+    const requestId = ++pageLoadRequestRef.current;
+    let cancelled = false;
+    const requestIsCurrent = () => !cancelled &&
+      pageLoadRequestRef.current === requestId &&
+      isCurrentStateRequest(
+        requestedUserKey,
+        currentUserKeyRef.current,
+        requestEpoch,
+        stateRequestEpochRef.current,
+      );
     stateLoadStarted.current = true;
     setStateLoading(true);
+    setStateLoadError("");
     loadViewState(view, { force: true })
       .then((ok) => {
+        if (!requestIsCurrent()) return;
         if (!ok) throw new Error("Failed to load initial view state");
+        loadedViewRef.current = view;
         setStateLoaded(true);
       })
       .catch((e) => {
+        if (!requestIsCurrent()) return;
         console.error("Failed to load state:", e);
-        setStateLoaded(true);
+        loadedViewRef.current = null;
+        setStateLoadError("当前页面数据加载失败，请检查网络后重试。");
       })
-      .finally(() => setStateLoading(false));
-  }, [currentUserKey, permissionSummaryReady, stateLoaded]);
+      .finally(() => {
+        if (requestIsCurrent()) setStateLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserKey, permissionSummaryReady, stateLoaded, stateLoadAttempt]);
 
   useEffect(() => {
     if (!state.user || !stateLoaded) return;
     if (saveStatusRef.current === "saving") return;
-    void loadViewState(view, { force: true, showLoading: true });
-  }, [view, currentUserKey, stateLoaded]);
+    if (loadedViewRef.current === view) return;
+    const requestedView = view;
+    const requestedUserKey = currentUserKeyRef.current;
+    const requestEpoch = stateRequestEpochRef.current;
+    const requestId = ++pageLoadRequestRef.current;
+    let cancelled = false;
+    const requestIsCurrent = () => !cancelled &&
+      pageLoadRequestRef.current === requestId &&
+      viewRef.current === requestedView &&
+      isCurrentStateRequest(
+        requestedUserKey,
+        currentUserKeyRef.current,
+        requestEpoch,
+        stateRequestEpochRef.current,
+      );
+    setStateLoadError("");
+    void loadViewState(requestedView, { force: true, showLoading: true })
+      .then((ok) => {
+        if (!requestIsCurrent()) return;
+        if (!ok) throw new Error("Failed to load view state");
+        loadedViewRef.current = requestedView;
+      })
+      .catch((error) => {
+        if (!requestIsCurrent()) return;
+        console.error("Failed to load view state:", error);
+        setStateLoadError("当前页面数据加载失败，请检查网络后重试。");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, currentUserKey, stateLoaded, stateLoadAttempt, saveStatus]);
 
   useEffect(() => {
     if (!state.user || !stateLoaded) return;
     let lastRefreshAt = 0;
+    let refreshTimer = 0;
     const refreshIfDue = () => {
       const now = Date.now();
       if (now - lastRefreshAt < 5000) return;
       lastRefreshAt = now;
-      void refreshBusinessState();
+      void refreshIfStateChanged();
+    };
+    const scheduleRefresh = () => {
+      refreshTimer = window.setTimeout(async () => {
+        await refreshIfStateChanged();
+        scheduleRefresh();
+      }, 55_000 + Math.floor(Math.random() * 10_001));
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") refreshIfDue();
     };
     window.addEventListener("focus", refreshIfDue);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    const interval = window.setInterval(refreshIfDue, 60_000);
+    scheduleRefresh();
     return () => {
       window.removeEventListener("focus", refreshIfDue);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.clearInterval(interval);
+      window.clearTimeout(refreshTimer);
     };
   }, [currentUserKey, stateLoaded]);
 
   const setState: Dispatch<SetStateAction<Store>> = (value) => {
+    invalidateStateReadRequests();
     setStateBase((prev) => {
       const next = typeof value === "function" ? (value as (s: Store) => Store)(prev) : value;
+      if (!next.user) return normalizePersistedState(EMPTY_PERSISTED_STATE, null);
+      if (userDependencyKey(prev.user) !== userDependencyKey(next.user)) {
+        return normalizePersistedState(EMPTY_PERSISTED_STATE, next.user);
+      }
       return next;
     });
   };
@@ -1736,7 +2127,9 @@ function AdminApp() {
   const handleSetView = (nextView: ViewKey) => {
     if (nextView !== "orders") setOpenOrderRequest(null);
     if (nextView === viewRef.current) {
-      void loadViewState(nextView, { force: true, showLoading: true });
+      loadedViewRef.current = null;
+      setStateLoadError("");
+      setStateLoadAttempt((attempt) => attempt + 1);
       return;
     }
     setView(nextView);
@@ -1745,7 +2138,22 @@ function AdminApp() {
   const loadingView = viewLoading || Boolean(
     state.user && (!permissionSummaryReady || stateLoading || !stateLoaded)
   );
-  const viewContent = loadingView ? (
+  const viewContent = stateLoadError ? (
+    <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-4 text-center">
+      <div className="text-sm text-red-600">{stateLoadError}</div>
+      <button
+        type="button"
+        className="rounded-md border bg-white px-4 py-2 text-sm font-medium shadow-sm hover:bg-slate-50"
+        onClick={() => {
+          stateLoadStarted.current = false;
+          setStateLoadError("");
+          setStateLoadAttempt((attempt) => attempt + 1);
+        }}
+      >
+        重新加载
+      </button>
+    </div>
+  ) : loadingView ? (
     <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">
       正在加载当前页面数据…
     </div>
@@ -1760,7 +2168,7 @@ function AdminApp() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, deleteProduct, saveStockChange, saveMaintenanceAction, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, deleteProduct, saveStockChange, saveMaintenanceAction, saveBioRecordChange, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
         <PublicCatalogPage />
       ) : !state.user ? (
