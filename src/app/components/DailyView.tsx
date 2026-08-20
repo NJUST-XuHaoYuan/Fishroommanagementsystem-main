@@ -107,6 +107,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     dropZoneProps: recordMediaDropZoneProps,
     isDragging: recordMediaDragging,
     isUploading: recordMediaUploading,
+    uploadStatus: recordMediaUploadStatus,
     pasteFiles: pasteRecordMedia,
     uploadImages: uploadRecordPhotos,
     uploadVideos: uploadRecordVideos,
@@ -145,6 +146,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     videos: [],
   });
   const [batchRecordSaving, setBatchRecordSaving] = useState(false);
+  const [batchMediaUploading, setBatchMediaUploading] = useState(false);
+  const [batchMediaUploadStatus, setBatchMediaUploadStatus] = useState("");
   const batchPhotoRef = useRef<HTMLInputElement>(null);
   const batchVideoRef = useRef<HTMLInputElement>(null);
 
@@ -641,38 +644,53 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setBatchRecordOpen(true);
   };
 
-  const handleBatchPhotoUpload = (files: FileList | null) => {
+  const handleBatchPhotoUpload = async (files: FileList | null) => {
     if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
+    setBatchMediaUploading(true);
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); continue; }
       try {
         toast.info("照片原图上传中…");
-        const url = await uploadOriginalMedia(file);
+        const url = await uploadOriginalMedia(file, {
+          onProgress: ({ phase, percent }) => setBatchMediaUploadStatus(
+            phase === "processing" ? "图片保存中…" : `图片上传 ${percent}%`
+          ),
+        });
         setBatchRecord((prev) => ({ ...prev, photos: [...prev.photos, url] }));
         toast.success("照片已上传");
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "照片上传失败，请重试");
       }
-    });
+    }
+    setBatchMediaUploading(false);
+    setBatchMediaUploadStatus("");
   };
 
-  const handleBatchVideoUpload = (files: FileList | null) => {
+  const handleBatchVideoUpload = async (files: FileList | null) => {
     if (!files) return;
-    Array.from(files).forEach(async (file) => {
-      if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); return; }
+    setBatchMediaUploading(true);
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("video/")) { toast.error("请选择视频文件"); continue; }
       try {
         toast.info("视频原文件上传中…");
-        const url = await uploadOriginalMedia(file);
+        const url = await uploadOriginalMedia(file, {
+          onProgress: ({ phase, percent }) => setBatchMediaUploadStatus(
+            phase === "processing" ? "视频处理中…" : `视频上传 ${percent}%`
+          ),
+        });
         setBatchRecord((prev) => ({ ...prev, videos: [...prev.videos, url] }));
         toast.success("视频已上传");
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "视频上传失败，请重试");
       }
-    });
+    }
+    setBatchMediaUploading(false);
+    setBatchMediaUploadStatus("");
   };
 
   const submitBatchRecord = async () => {
     if (!permission.requirePermission("create")) return;
+    if (batchMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (batchRecordItems.length === 0) return toast.error("请选择要维护记录的鱼");
     if (!batchRecord.date) return toast.error("请选择记录时间");
@@ -2094,6 +2112,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	                      <Video className="size-4" /> 上传视频
 	                    </Button>
 	                  </div>
+	                  {recordMediaUploading && <p className="text-xs text-muted-foreground">{recordMediaUploadStatus || "媒体上传中…"}</p>}
 	                </div>
               </div>
               {newRecord.photos.length > 0 && (
@@ -2133,7 +2152,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
               </div>
               <Button variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading || recordActionSaving} className="w-full self-end sm:w-auto">
                 {recordMediaUploading || recordActionSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                {recordMediaUploading ? "媒体上传中…" : recordActionSaving ? "保存中…" : "添加观察/治疗记录"}
+                {recordMediaUploading ? (recordMediaUploadStatus || "媒体上传中…") : recordActionSaving ? "保存中…" : "添加观察/治疗记录"}
               </Button>
 	            </div>
 	            )}
@@ -2287,9 +2306,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	                    accept="image/*"
 	                    multiple
 	                    className="hidden"
-	                    onChange={(e) => { handleBatchPhotoUpload(e.target.files); e.target.value = ""; }}
+	                    onChange={(e) => { void handleBatchPhotoUpload(e.target.files); e.target.value = ""; }}
 	                  />
-	                  <Button type="button" variant="outline" size="sm" onClick={() => batchPhotoRef.current?.click()}>
+	                  <Button type="button" variant="outline" size="sm" disabled={batchMediaUploading} onClick={() => batchPhotoRef.current?.click()}>
 	                    <Camera className="size-4" /> 上传照片
 	                  </Button>
 		                  <input
@@ -2298,12 +2317,13 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		                    accept={ORIGINAL_VIDEO_ACCEPT}
 		                    multiple
 		                    className="hidden"
-		                    onChange={(e) => { handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
-		                  />
-		                  <Button type="button" variant="outline" size="sm" onClick={() => batchVideoRef.current?.click()}>
-		                    <Video className="size-4" /> 上传视频
-		                  </Button>
-		                </div>
+	                    onChange={(e) => { void handleBatchVideoUpload(e.target.files); e.target.value = ""; }}
+	                  />
+	                  <Button type="button" variant="outline" size="sm" disabled={batchMediaUploading} onClick={() => batchVideoRef.current?.click()}>
+	                    <Video className="size-4" /> 上传视频
+	                  </Button>
+	                </div>
+	                {batchMediaUploading && <p className="text-xs text-muted-foreground">{batchMediaUploadStatus || "媒体上传中…"}</p>}
 		              </div>
 	            </div>
 	            {batchRecord.photos.length > 0 && (
@@ -2345,9 +2365,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	            </div>
 	          </div>
 	          <DialogFooter className="pt-2 border-t shrink-0">
-	            <Button variant="outline" onClick={() => setBatchRecordOpen(false)} disabled={batchRecordSaving}>取消</Button>
-	            <Button onClick={submitBatchRecord} disabled={batchRecordSaving}>
-	              {batchRecordSaving ? "保存中…" : "确认添加"}
+	            <Button variant="outline" onClick={() => setBatchRecordOpen(false)} disabled={batchRecordSaving || batchMediaUploading}>取消</Button>
+	            <Button onClick={submitBatchRecord} disabled={batchRecordSaving || batchMediaUploading}>
+	              {batchMediaUploading ? (batchMediaUploadStatus || "媒体上传中…") : batchRecordSaving ? "保存中…" : "确认添加"}
 	            </Button>
 	          </DialogFooter>
 	        </DialogContent>

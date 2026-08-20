@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
@@ -10,6 +10,10 @@ import { promisify } from "node:util";
 import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
+import {
+  canFastRemuxWechatVideo,
+  normalizeVideoTranscodePreset,
+} from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
   ORDER_SOURCE_VALUES,
@@ -261,10 +265,14 @@ const MAX_VIDEO_UPLOAD_BYTES = numberFromEnv(process.env.MAX_VIDEO_UPLOAD_BYTES,
 const VIDEO_TRANSCODE_TIMEOUT_MS = numberFromEnv(process.env.VIDEO_TRANSCODE_TIMEOUT_MS, 5 * 60 * 1000);
 const TRANSCODE_VIDEO_UPLOADS = process.env.TRANSCODE_VIDEO_UPLOADS !== "false";
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
+const FFPROBE_PATH = process.env.FFPROBE_PATH || "ffprobe";
 const VIDEO_TRANSCODE_CONCURRENCY = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_CONCURRENCY, 1)));
 const VIDEO_TRANSCODE_MAX_PENDING = Math.max(0, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_MAX_PENDING, 2)));
 const VIDEO_TRANSCODE_THREADS = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_THREADS, 1)));
 const VIDEO_TRANSCODE_MAX_EDGE = Math.max(720, Math.floor(numberFromEnv(process.env.VIDEO_TRANSCODE_MAX_EDGE, 1920)));
+const VIDEO_TRANSCODE_PRESET = normalizeVideoTranscodePreset(process.env.VIDEO_TRANSCODE_PRESET);
+const VIDEO_UPLOAD_CONCURRENCY = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_CONCURRENCY, 3)));
+const VIDEO_UPLOAD_MAX_PENDING = Math.max(0, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_MAX_PENDING, 6)));
 const COS_REQUEST_TIMEOUT_MS = Math.min(
   120_000,
   Math.max(5_000, Math.floor(numberFromEnv(process.env.COS_REQUEST_TIMEOUT_MS, 30_000)))
@@ -278,6 +286,11 @@ const videoTranscodeLimiter = createConcurrencyLimiter({
   concurrency: VIDEO_TRANSCODE_CONCURRENCY,
   maxPending: VIDEO_TRANSCODE_MAX_PENDING,
   queueFullMessage: "已有多个视频正在处理，请稍后重试",
+});
+const videoUploadLimiter = createConcurrencyLimiter({
+  concurrency: VIDEO_UPLOAD_CONCURRENCY,
+  maxPending: VIDEO_UPLOAD_MAX_PENDING,
+  queueFullMessage: "视频上传任务较多，请稍后重试",
 });
 const publicProjectionLimiter = createConcurrencyLimiter({
   concurrency: 2,
@@ -507,8 +520,8 @@ function sendJson(req, res, status, body, extraHeaders = {}) {
   if (acceptsGzip(req) && payload.length > 1024) {
     res.writeHead(status, {
       ...jsonHeaders,
-      ...extraHeaders,
       ...timingHeaders,
+      ...extraHeaders,
       "Content-Encoding": "gzip",
       "Vary": "Accept-Encoding",
     });
@@ -518,7 +531,7 @@ function sendJson(req, res, status, body, extraHeaders = {}) {
     return;
   }
 
-  res.writeHead(status, { ...jsonHeaders, ...extraHeaders, ...timingHeaders });
+  res.writeHead(status, { ...jsonHeaders, ...timingHeaders, ...extraHeaders });
   res.end(payload);
 }
 
@@ -6224,15 +6237,59 @@ function mimeForExtension(ext) {
   return "application/octet-stream";
 }
 
-async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", options = {}) {
-  const releaseTranscodeSlot = options.slotAcquired ? null : await videoTranscodeLimiter.acquire();
-  let tempDir = "";
+async function probeVideoFile(inputPath) {
+  const { stdout } = await execFileAsync(FFPROBE_PATH, [
+    "-v",
+    "error",
+    "-print_format",
+    "json",
+    "-show_streams",
+    inputPath,
+  ], {
+    timeout: Math.min(VIDEO_TRANSCODE_TIMEOUT_MS, 30_000),
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  return JSON.parse(stdout || "{}");
+}
+
+async function prepareWechatVideoFile(inputPath, outputPath) {
+  let fastRemux = false;
   try {
-    tempDir = await mkdtemp(join(tmpdir(), "fishroom-video-"));
-    const inputPath = join(tempDir, `input${extensionForMime(sourceMime)}`);
-    const outputPath = join(tempDir, "wechat.mp4");
-    await writeFile(inputPath, buffer);
-    await execFileAsync(FFMPEG_PATH, [
+    fastRemux = canFastRemuxWechatVideo(await probeVideoFile(inputPath), VIDEO_TRANSCODE_MAX_EDGE);
+  } catch (error) {
+    console.warn(`Video probe failed; falling back to transcoding: ${error.message}`);
+  }
+
+  if (fastRemux) {
+    try {
+      await execFileAsync(FFMPEG_PATH, [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ], {
+        timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+      return { outputPath, mode: "remux" };
+    } catch (error) {
+      console.warn(`Fast video remux failed; falling back to transcoding: ${error.message}`);
+      await rm(outputPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  await execFileAsync(FFMPEG_PATH, [
       "-y",
       "-hide_banner",
       "-loglevel",
@@ -6252,7 +6309,7 @@ async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", optio
       "-threads:v",
       String(VIDEO_TRANSCODE_THREADS),
       "-preset",
-      "veryfast",
+      VIDEO_TRANSCODE_PRESET,
       "-crf",
       "23",
       "-vf",
@@ -6270,10 +6327,22 @@ async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", optio
       "-movflags",
       "+faststart",
       outputPath,
-    ], {
-      timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
-    });
+  ], {
+    timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024,
+  });
+  return { outputPath, mode: "transcode" };
+}
+
+async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", options = {}) {
+  const releaseTranscodeSlot = options.slotAcquired ? null : await videoTranscodeLimiter.acquire();
+  let tempDir = "";
+  try {
+    tempDir = await mkdtemp(join(tmpdir(), "fishroom-video-"));
+    const inputPath = join(tempDir, `input${extensionForMime(sourceMime)}`);
+    const outputPath = join(tempDir, "wechat.mp4");
+    await writeFile(inputPath, buffer);
+    await prepareWechatVideoFile(inputPath, outputPath);
     return await readFile(outputPath);
   } finally {
     if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -6297,6 +6366,53 @@ async function uploadBufferToCos(buffer, mime, key) {
     });
   });
   return objectUrlForKey(key);
+}
+
+async function uploadFileToCos(filePath, mime, key) {
+  const client = getCosClient("upload");
+  if (!client) return null;
+  const info = await stat(filePath);
+  await new Promise((resolvePromise, rejectPromise) => {
+    client.putObject({
+      Bucket: cosConfig.bucket,
+      Region: cosConfig.region,
+      Key: key,
+      Body: createReadStream(filePath),
+      ContentLength: info.size,
+      ContentType: mime || "application/octet-stream",
+    }, (error) => {
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    });
+  });
+  return objectUrlForKey(key);
+}
+
+async function shortFileHash(filePath) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest("hex").slice(0, 24);
+}
+
+async function storeOriginalMediaFile(filePath, mime) {
+  const hash = await shortFileHash(filePath);
+  const ext = extensionForMime(mime);
+  const typeFolder = mime.startsWith("video/") ? "videos" : "images";
+  const fileName = `${hash}${ext}`;
+  if (cosReady()) {
+    const cosUrl = await uploadFileToCos(
+      filePath,
+      mime,
+      prefixedCosKey("original", typeFolder, fileName)
+    );
+    if (cosUrl) return cosUrl;
+  }
+
+  const folder = join(uploadDir, "original", typeFolder);
+  const targetPath = join(folder, fileName);
+  await mkdir(folder, { recursive: true });
+  if (!existsSync(targetPath)) await copyFile(filePath, targetPath);
+  return `/uploads/original/${typeFolder}/${fileName}`;
 }
 
 function localUploadPathFromUrl(value) {
@@ -6511,6 +6627,42 @@ async function readRawBody(req, maxBytes = Number.POSITIVE_INFINITY) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+async function readRawBodyToFile(req, filePath, maxBytes = Number.POSITIVE_INFINITY) {
+  const declaredLength = Number(req.headers["content-length"] ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    const error = new Error("上传文件过大");
+    error.statusCode = 413;
+    throw error;
+  }
+
+  const handle = await open(filePath, "wx", 0o600);
+  let total = 0;
+  try {
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        const error = new Error("上传文件过大");
+        error.statusCode = 413;
+        throw error;
+      }
+      let offset = 0;
+      while (offset < chunk.length) {
+        const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset);
+        if (bytesWritten <= 0) throw new Error("上传文件写入失败");
+        offset += bytesWritten;
+      }
+    }
+    await handle.sync();
+    return total;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(filePath, { force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 async function readBody(req, maxBytes = Number.POSITIVE_INFINITY) {
@@ -9755,7 +9907,10 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/media/upload" && req.method === "POST") {
     let releaseTranscodeSlot = null;
+    let releaseVideoUploadSlot = null;
+    let videoTempDir = "";
     try {
+      const startedAt = Date.now();
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
       const isImage = isSupportedImageMime(mime);
       const isVideo = SUPPORTED_VIDEO_MIMES.has(mime);
@@ -9763,25 +9918,64 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
         return;
       }
-      if (isVideo && TRANSCODE_VIDEO_UPLOADS) {
-        releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
-      }
       const maxBytes = isVideo ? MAX_VIDEO_UPLOAD_BYTES : MAX_IMAGE_UPLOAD_BYTES;
-      const buffer = await readRawBody(req, maxBytes);
-      if (buffer.length === 0) {
+      let receivedBytes = 0;
+      let mediaUrl = "";
+      let storedMime = mime;
+      let storedBytes = 0;
+      let processingMode = "original";
+      let receiveFinishedAt = startedAt;
+      let processFinishedAt = startedAt;
+
+      if (isVideo) {
+        releaseVideoUploadSlot = await videoUploadLimiter.acquire();
+        videoTempDir = await mkdtemp(join(tmpdir(), "fishroom-video-upload-"));
+        const inputPath = join(videoTempDir, `input${extensionForMime(mime)}`);
+        receivedBytes = await readRawBodyToFile(req, inputPath, maxBytes);
+        receiveFinishedAt = Date.now();
+        if (receivedBytes > 0 && TRANSCODE_VIDEO_UPLOADS) {
+          releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
+          const processed = await prepareWechatVideoFile(inputPath, join(videoTempDir, "wechat.mp4"));
+          storedMime = "video/mp4";
+          processingMode = processed.mode;
+          processFinishedAt = Date.now();
+          storedBytes = (await stat(processed.outputPath)).size;
+          mediaUrl = await storeOriginalMediaFile(processed.outputPath, storedMime);
+        } else if (receivedBytes > 0) {
+          processFinishedAt = Date.now();
+          storedBytes = receivedBytes;
+          mediaUrl = await storeOriginalMediaFile(inputPath, storedMime);
+        }
+      } else {
+        const buffer = await readRawBody(req, maxBytes);
+        receivedBytes = buffer.length;
+        receiveFinishedAt = Date.now();
+        if (receivedBytes > 0) validateImageUploadBuffer(buffer, mime);
+        mediaUrl = receivedBytes > 0 ? await uploadOriginalMedia(buffer, mime) : "";
+        storedBytes = receivedBytes;
+        processFinishedAt = receiveFinishedAt;
+      }
+
+      if (receivedBytes === 0) {
         sendJson(req, res, 400, { ok: false, error: "上传文件为空" });
         return;
       }
-      if (isImage) validateImageUploadBuffer(buffer, mime);
-      const mediaUrl = await uploadOriginalMedia(buffer, mime, { slotAcquired: Boolean(releaseTranscodeSlot) });
-      const storedMime = isVideo && TRANSCODE_VIDEO_UPLOADS ? "video/mp4" : mime;
+      const finishedAt = Date.now();
+      const uploadTimingHeader = [
+          `receive;dur=${Math.max(0, receiveFinishedAt - startedAt)}`,
+          `process;dur=${Math.max(0, processFinishedAt - receiveFinishedAt)}`,
+          `store;dur=${Math.max(0, finishedAt - processFinishedAt)}`,
+          `total;dur=${Math.max(0, finishedAt - startedAt)}`,
+        ].join(", ");
       sendJson(req, res, 200, {
         ok: true,
         url: mediaUrl,
         mime: storedMime,
-        size: buffer.length,
+        size: receivedBytes,
+        storedSize: storedBytes,
+        processingMode,
         storage: cosReady() ? "cos" : "local",
-      });
+      }, { "Server-Timing": uploadTimingHeader });
     } catch (error) {
       const status = [400, 413, 503].includes(error?.statusCode) ? error.statusCode : 500;
       sendJson(req, res, status, {
@@ -9792,6 +9986,8 @@ async function handleApi(req, res, url) {
       });
     } finally {
       releaseTranscodeSlot?.();
+      releaseVideoUploadSlot?.();
+      if (videoTempDir) await rm(videoTempDir, { recursive: true, force: true }).catch(() => undefined);
     }
     return;
   }
@@ -10069,6 +10265,7 @@ async function handleApi(req, res, url) {
       ).trim();
 
       await client.query("BEGIN");
+      await client.query("SELECT 1 FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const { rows } = await client.query(
         `SELECT
            data -> 'sites' AS sites,
@@ -10114,8 +10311,7 @@ async function handleApi(req, res, url) {
              WITH ORDINALITY AS record_row(record_item, ordinality)
            WHERE $3 <> '' AND btrim(COALESCE(record_row.record_item ->> 'id', '')) = $3
          ) AS record_target
-         WHERE id = $1
-         FOR UPDATE`,
+         WHERE id = $1`,
         [stateId, stockItemId, targetRecordId, ["create", "saveDetails"].includes(action)]
       );
       const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
@@ -10290,11 +10486,13 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      const status = Number(error?.statusCode ?? (error instanceof BioRecordConflictError ? 409 : 400));
+      const databaseError = /^[0-9A-Z]{5}$/.test(String(error?.code ?? ""));
+      if (databaseError) console.error("Failed to save bio record:", error);
+      const status = Number(error?.statusCode ?? (error instanceof BioRecordConflictError ? 409 : databaseError ? 500 : 400));
       sendJson(req, res, status, {
         ok: false,
-        error: error.message || "生物记录保存失败",
-        ...(error?.code ? { code: error.code } : {}),
+        error: databaseError ? "记录保存失败，请稍后重试" : (error.message || "生物记录保存失败"),
+        ...(!databaseError && error?.code ? { code: error.code } : {}),
       });
     } finally {
       client.release();

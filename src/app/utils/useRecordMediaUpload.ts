@@ -46,6 +46,7 @@ export function useRecordMediaUpload<T extends RecordMediaDraft>(
 ) {
   const [pendingCount, setPendingCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
   const dragDepth = useRef(0);
 
   const uploadFiles = useCallback(async (
@@ -79,7 +80,13 @@ export function useRecordMediaUpload<T extends RecordMediaDraft>(
     let firstError = "";
     for (const { file, kind } of accepted) {
       try {
-        const url = await uploadOriginalMedia(file);
+        const url = await uploadOriginalMedia(file, {
+          onProgress: ({ phase, percent }) => {
+            setUploadStatus(phase === "processing"
+              ? (kind === "video" ? "视频处理中…" : "图片保存中…")
+              : `${kind === "video" ? "视频" : "图片"}上传 ${percent}%`);
+          },
+        });
         if (kind === "image") photos.push(url);
         else videos.push(url);
       } catch (error) {
@@ -103,6 +110,7 @@ export function useRecordMediaUpload<T extends RecordMediaDraft>(
       toast.error(failedCount === 1 ? firstError : `${failedCount} 个文件上传失败：${firstError}`);
     }
     setPendingCount((count) => Math.max(0, count - accepted.length));
+    setUploadStatus("");
   }, [setDraft]);
 
   const pasteFiles = useCallback((event: ReactClipboardEvent<HTMLElement>) => {
@@ -153,6 +161,7 @@ export function useRecordMediaUpload<T extends RecordMediaDraft>(
     dropZoneProps: { onDragEnter, onDragOver, onDragLeave, onDrop },
     isDragging,
     isUploading: pendingCount > 0,
+    uploadStatus,
     pasteFiles,
     uploadImages: (files: ArrayLike<File> | Iterable<File> | null) => uploadFiles(files, "image"),
     uploadVideos: (files: ArrayLike<File> | Iterable<File> | null) => uploadFiles(files, "video"),

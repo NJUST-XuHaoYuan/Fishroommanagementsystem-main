@@ -3163,6 +3163,7 @@ function StockPickerBioDialog({
     dropZoneProps: recordMediaDropZoneProps,
     isDragging: recordMediaDragging,
     isUploading: recordMediaUploading,
+    uploadStatus: recordMediaUploadStatus,
     pasteFiles: pasteRecordMedia,
     uploadImages: uploadRecordPhotos,
     uploadVideos: uploadRecordVideos,
@@ -3760,6 +3761,7 @@ function StockPickerBioDialog({
 	                        <Video className="size-4" /> 上传视频
 	                      </Button>
 	                    </div>
+	                    {recordMediaUploading && <p className="text-xs text-muted-foreground">{recordMediaUploadStatus || "媒体上传中…"}</p>}
 	                  </div>
 	                </div>
                 {newRecord.photos.length > 0 && (
@@ -3788,7 +3790,7 @@ function StockPickerBioDialog({
                 </div>
                 <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading || bioSaving} className="self-end">
                   {recordMediaUploading || bioSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {recordMediaUploading ? "媒体上传中…" : bioSaving ? "保存中…" : "添加此记录"}
+                  {recordMediaUploading ? (recordMediaUploadStatus || "媒体上传中…") : bioSaving ? "保存中…" : "添加此记录"}
                 </Button>
               </div>
             )}

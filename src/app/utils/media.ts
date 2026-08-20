@@ -88,7 +88,18 @@ export async function resolveMediaUrl(src?: string, options: ResolveMediaOptions
   return signedUrl;
 }
 
-export async function uploadOriginalMedia(file: File): Promise<string> {
+type MediaUploadProgress = {
+  phase: "uploading" | "processing";
+  loaded: number;
+  total: number;
+  percent: number;
+};
+
+type MediaUploadOptions = {
+  onProgress?: (progress: MediaUploadProgress) => void;
+};
+
+export async function uploadOriginalMedia(file: File, options: MediaUploadOptions = {}): Promise<string> {
   const mime = mediaMimeFromFile(file);
   if (!mime.startsWith("image/") && !mime.startsWith("video/")) {
     throw new Error("只支持上传图片或视频文件");
@@ -100,20 +111,48 @@ export async function uploadOriginalMedia(file: File): Promise<string> {
     );
   }
 
-  const response = await fetch("/api/media/upload", {
-    method: "POST",
-    headers: {
-      ...authHeaders(),
-      "Content-Type": mime,
-      "X-File-Name": encodeURIComponent(file.name),
-    },
-    body: file,
+  return new Promise<string>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/media/upload");
+    for (const [key, value] of Object.entries(authHeaders())) request.setRequestHeader(key, value);
+    request.setRequestHeader("Content-Type", mime);
+    request.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    request.timeout = mime.startsWith("video/") ? 10 * 60 * 1000 : 2 * 60 * 1000;
+    request.upload.onprogress = (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
+      const loaded = Math.min(event.loaded, total);
+      options.onProgress?.({
+        phase: "uploading",
+        loaded,
+        total,
+        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+      });
+    };
+    request.upload.onload = () => {
+      options.onProgress?.({
+        phase: "processing",
+        loaded: file.size,
+        total: file.size,
+        percent: 100,
+      });
+    };
+    request.onerror = () => reject(new Error("网络连接失败，请检查网络后重试"));
+    request.ontimeout = () => reject(new Error("上传或视频处理超时，请剪短后重试"));
+    request.onload = () => {
+      let data: any = {};
+      try {
+        data = JSON.parse(request.responseText || "{}");
+      } catch {
+        data = {};
+      }
+      if (request.status < 200 || request.status >= 300 || typeof data?.url !== "string") {
+        reject(new Error(data?.error || `HTTP ${request.status}`));
+        return;
+      }
+      resolve(data.url);
+    };
+    request.send(file);
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || typeof data?.url !== "string") {
-    throw new Error(data?.error || `HTTP ${response.status}`);
-  }
-  return data.url;
 }
 
 export function useResolvedMediaUrl(src?: string, options: ResolveMediaOptions = {}) {

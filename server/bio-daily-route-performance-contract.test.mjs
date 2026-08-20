@@ -32,6 +32,14 @@ test("daily-log save locks projected keys and incrementally preserves fish timel
 
 test("bio-record save never materializes full stock, history, order, shipment or audit arrays in Node", () => {
   const block = routeBlock("/api/bio-records/save");
+  const lockIndex = block.indexOf("SELECT 1 FROM app_state WHERE id = $1 FOR UPDATE");
+  const projectionIndex = block.indexOf("CROSS JOIN LATERAL");
+  assert.ok(lockIndex >= 0 && projectionIndex > lockIndex, "the row must be locked before running aggregate projections");
+  assert.doesNotMatch(
+    block,
+    /CROSS JOIN LATERAL[\s\S]*?WHERE id = \$1\s+FOR UPDATE/,
+    "PostgreSQL forbids FOR UPDATE on the aggregate projection query"
+  );
   for (const key of ["stock", "bioRecords", "orders", "shipments", "operationLogs"]) {
     assert.doesNotMatch(block, new RegExp(`data\\s*->\\s*'${key}'\\s+AS\\s+[a-z_]`, "i"));
   }
@@ -42,4 +50,15 @@ test("bio-record save never materializes full stock, history, order, shipment or
   assert.match(block, /jsonb_set\([\s\S]*?'\{operationLogs\}'/);
   assert.match(block, /bioRecord: plan\.record/);
   assert.match(block, /deletedRecordId: plan\.deletedRecordId/);
+});
+
+test("video upload streams first, queues processing second, and reports the processing mode", () => {
+  const block = routeBlock("/api/media/upload");
+  const receiveIndex = block.indexOf("readRawBodyToFile(req, inputPath, maxBytes)");
+  const queueIndex = block.indexOf("videoTranscodeLimiter.acquire()");
+  assert.ok(receiveIndex >= 0 && queueIndex > receiveIndex, "a queued transcode must not block the client from uploading bytes");
+  assert.match(block, /prepareWechatVideoFile/);
+  assert.match(block, /storeOriginalMediaFile/);
+  assert.match(block, /processingMode/);
+  assert.match(block, /Server-Timing/);
 });
