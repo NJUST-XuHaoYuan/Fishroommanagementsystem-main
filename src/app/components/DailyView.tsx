@@ -117,6 +117,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [confirmTimeChangeOpen, setConfirmTimeChangeOpen] = useState(false);
   const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
   const [recordActionSaving, setRecordActionSaving] = useState(false);
+  const [downloadingMediaKey, setDownloadingMediaKey] = useState("");
   const newRecordIdRef = useRef(uid());
   const photoRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
@@ -1956,22 +1957,39 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                           {(ev.videos ?? []).length > 0 && (
                             <div className="flex flex-wrap gap-2 mt-2">
                               {(ev.videos ?? []).map((src, vi) => (
-                                <div key={vi} className="group relative rounded border overflow-hidden" style={{ width: "120px" }}>
+                                <div key={vi} className="w-36 overflow-hidden rounded border bg-card">
                                   <MediaVideo src={src} className="w-full" controls />
                                   <button
                                     type="button"
+                                    disabled={Boolean(downloadingMediaKey)}
                                     onClick={async (e) => {
                                       e.stopPropagation();
+                                      const mediaKey = `${ev.id}:video:${vi}`;
+                                      if (downloadingMediaKey) return;
+                                      setDownloadingMediaKey(mediaKey);
                                       try {
-                                        await downloadMedia(src, `video-${vi + 1}.mp4`, { mediaType: "video" });
-                                      } catch {
-                                        toast.error("视频下载失败，请刷新后重试");
+                                        const result = await downloadMedia(src, `video-${vi + 1}.mp4`, {
+                                          mediaType: "video",
+                                          stockItemId: bioItem?.id ?? "",
+                                          recordId: ev.id,
+                                        });
+                                        toast.info(result.mode === "mobile-open"
+                                          ? "已打开下载页；如微信未开始下载，请点右上角在默认浏览器中打开"
+                                          : "视频下载已开始");
+                                      } catch (error) {
+                                        toast.error(error instanceof Error ? error.message : "视频下载失败，请刷新后重试");
+                                      } finally {
+                                        setDownloadingMediaKey("");
                                       }
                                     }}
-                                    className="absolute top-1 right-1 bg-black/60 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                                    title="下载视频"
+                                    className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 border-t bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-wait disabled:opacity-60"
+                                    title="保存视频"
+                                    aria-label={`保存第 ${vi + 1} 个视频`}
                                   >
-                                    <Download className="size-3.5 text-white" />
+                                    {downloadingMediaKey === `${ev.id}:video:${vi}`
+                                      ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                                      : <Download className="size-4" aria-hidden="true" />}
+                                    {downloadingMediaKey === `${ev.id}:video:${vi}` ? "准备中…" : "保存视频"}
                                   </button>
                                 </div>
                               ))}

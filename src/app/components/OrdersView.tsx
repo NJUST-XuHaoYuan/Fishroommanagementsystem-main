@@ -3171,6 +3171,7 @@ function StockPickerBioDialog({
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
   const [bioSaving, setBioSaving] = useState(false);
+  const [downloadingMediaKey, setDownloadingMediaKey] = useState("");
   const newRecordIdRef = useRef(uid());
   const [targetGroupId, setTargetGroupId] = useState("");
   const [targetSubTankId, setTargetSubTankId] = useState("");
@@ -3701,22 +3702,39 @@ function StockPickerBioDialog({
                           {event.videos.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.videos.map((src, videoIndex) => (
-                                <div key={videoIndex} className="group relative overflow-hidden rounded border" style={{ width: "120px" }}>
+                                <div key={videoIndex} className="w-36 overflow-hidden rounded border bg-card">
                                   <MediaVideo src={src} className="w-full" controls />
                                   <button
                                     type="button"
+                                    disabled={Boolean(downloadingMediaKey)}
                                     onClick={async (e) => {
                                       e.stopPropagation();
+                                      const mediaKey = `${event.id}:video:${videoIndex}`;
+                                      if (downloadingMediaKey) return;
+                                      setDownloadingMediaKey(mediaKey);
                                       try {
-                                        await downloadMedia(src, `video-${videoIndex + 1}.mp4`, { mediaType: "video" });
-                                      } catch {
-                                        toast.error("视频下载失败，请刷新后重试");
+                                        const result = await downloadMedia(src, `video-${videoIndex + 1}.mp4`, {
+                                          mediaType: "video",
+                                          stockItemId: item.id,
+                                          recordId: event.id,
+                                        });
+                                        toast.info(result.mode === "mobile-open"
+                                          ? "已打开下载页；如微信未开始下载，请点右上角在默认浏览器中打开"
+                                          : "视频下载已开始");
+                                      } catch (error) {
+                                        toast.error(error instanceof Error ? error.message : "视频下载失败，请刷新后重试");
+                                      } finally {
+                                        setDownloadingMediaKey("");
                                       }
                                     }}
-                                    className="absolute right-1 top-1 rounded bg-black/60 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
-                                    title="下载视频"
+                                    className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 border-t bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-wait disabled:opacity-60"
+                                    title="保存视频"
+                                    aria-label={`保存第 ${videoIndex + 1} 个视频`}
                                   >
-                                    <Download className="size-3.5 text-white" />
+                                    {downloadingMediaKey === `${event.id}:video:${videoIndex}`
+                                      ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                                      : <Download className="size-4" aria-hidden="true" />}
+                                    {downloadingMediaKey === `${event.id}:video:${videoIndex}` ? "准备中…" : "保存视频"}
                                   </button>
                                 </div>
                               ))}

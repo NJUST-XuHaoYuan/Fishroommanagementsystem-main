@@ -207,13 +207,86 @@ function triggerDownload(url: string, filename: string) {
 
 type DownloadMediaOptions = {
   mediaType?: "image" | "video";
+  stockItemId?: string;
+  recordId?: string;
 };
 
-export async function downloadMedia(src: string | undefined, filename: string, options: DownloadMediaOptions = {}) {
+export type MediaDownloadResult = {
+  mode: "download" | "mobile-open";
+};
+
+function prefersMobileVideoOpen() {
+  const userAgent = String(window.navigator?.userAgent ?? "");
+  const isDesktopModeIPad = window.navigator?.platform === "MacIntel" &&
+    Number(window.navigator?.maxTouchPoints ?? 0) > 1;
+  return /MicroMessenger|iPhone|iPad|iPod/i.test(userAgent) || isDesktopModeIPad;
+}
+
+function openMobileDownloadWindow() {
+  const downloadWindow = window.open("about:blank", "_blank");
+  if (!downloadWindow) return null;
+  downloadWindow.opener = null;
+  try {
+    downloadWindow.document.title = "正在准备视频";
+    downloadWindow.document.body.textContent = "正在准备视频，请稍候…";
+    downloadWindow.document.body.style.cssText = "font:16px/1.5 system-ui,sans-serif;padding:24px;color:#334155";
+  } catch {
+    // Some embedded browsers deny access to the provisional page; navigation still works.
+  }
+  return downloadWindow;
+}
+
+async function authorizedBioMediaDownloadUrl(
+  src: string,
+  filename: string,
+  options: DownloadMediaOptions,
+) {
+  const query = new URLSearchParams({
+    url: src,
+    filename,
+    mediaType: options.mediaType === "image" ? "image" : "video",
+    stockItemId: String(options.stockItemId ?? ""),
+    recordId: String(options.recordId ?? ""),
+  });
+  const response = await fetch(`/api/bio-records/media-download-url?${query.toString()}`, {
+    headers: authHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data?.url !== "string" || !data.url) {
+    throw new Error(data?.error || `HTTP ${response.status}`);
+  }
+  return data.url as string;
+}
+
+export async function downloadMedia(
+  src: string | undefined,
+  filename: string,
+  options: DownloadMediaOptions = {},
+): Promise<MediaDownloadResult> {
   if (!src) throw new Error("Missing media URL");
   if (src.startsWith("data:")) {
     triggerDownload(src, filename);
-    return;
+    return { mode: "download" };
+  }
+
+  if (options.stockItemId && options.recordId) {
+    const useMobileWindow = options.mediaType === "video" && prefersMobileVideoOpen();
+    const mobileWindow = useMobileWindow ? openMobileDownloadWindow() : null;
+    if (useMobileWindow && !mobileWindow) {
+      throw new Error("当前浏览器阻止打开下载页，请允许弹窗或在默认浏览器中打开后重试");
+    }
+    try {
+      const downloadUrl = await authorizedBioMediaDownloadUrl(src, filename, options);
+      if (mobileWindow && !mobileWindow.closed) {
+        mobileWindow.location.replace(downloadUrl);
+        return { mode: "mobile-open" };
+      }
+      triggerDownload(downloadUrl, filename);
+      return { mode: "download" };
+    } catch (error) {
+      mobileWindow?.close();
+      throw error;
+    }
   }
 
   const targetUrl = (() => {
@@ -240,4 +313,5 @@ export async function downloadMedia(src: string | undefined, filename: string, o
   } finally {
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   }
+  return { mode: "download" };
 }

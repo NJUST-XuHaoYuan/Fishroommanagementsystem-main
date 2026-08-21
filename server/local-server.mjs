@@ -6148,18 +6148,24 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
   });
 }
 
-async function signedCosObjectUrl(key, queryString = "") {
+async function signedCosObjectUrl(key, options = {}) {
   const client = getCosClient();
   if (!client) return "";
+  const normalizedOptions = typeof options === "string"
+    ? { queryString: options }
+    : (options && typeof options === "object" ? options : {});
   return await new Promise((resolvePromise, rejectPromise) => {
     const params = {
       Bucket: cosConfig.bucket,
       Region: cosConfig.region,
       Key: key,
       Sign: true,
-      Expires: 3600,
+      Expires: Math.min(3600, Math.max(60, Number(normalizedOptions.expires) || 3600)),
     };
-    if (queryString) params.QueryString = queryString;
+    if (normalizedOptions.queryString) params.QueryString = normalizedOptions.queryString;
+    if (normalizedOptions.query && typeof normalizedOptions.query === "object") {
+      params.Query = normalizedOptions.query;
+    }
     client.getObjectUrl(params, (error, data = {}) => {
       if (error) {
         rejectPromise(error);
@@ -6168,6 +6174,101 @@ async function signedCosObjectUrl(key, queryString = "") {
       resolvePromise(typeof data === "string" ? data : (data.Url || data.url || ""));
     });
   });
+}
+
+function mediaAttachmentDisposition(filename, fallbackExtension = ".bin") {
+  const safeName = sanitizeAttachmentFilename(filename || `fishroom-media${fallbackExtension}`);
+  const safeExtension = /^\.[a-z0-9]{1,8}$/i.test(extname(safeName))
+    ? extname(safeName).toLowerCase()
+    : fallbackExtension;
+  return `attachment; filename="fishroom-media${safeExtension}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
+
+function httpError(statusCode, message, code = "") {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  if (code) error.code = code;
+  return error;
+}
+
+async function requireBioRecordMediaDownloadAccess(req, {
+  stockItemId,
+  recordId,
+  mediaUrl,
+  mediaType,
+}) {
+  const { rows } = await pool.query(
+    `WITH source AS MATERIALIZED (
+       SELECT data
+       FROM app_state
+       WHERE id = $1
+     ),
+     target_stock AS MATERIALIZED (
+       SELECT stock_item
+       FROM source,
+         LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stock_rows(stock_item)
+       WHERE btrim(COALESCE(stock_item ->> 'id', '')) = $2
+     ),
+     target_record AS MATERIALIZED (
+       SELECT record_item
+       FROM source,
+         LATERAL jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS record_rows(record_item)
+       WHERE btrim(COALESCE(record_item ->> 'id', '')) = $3
+         AND btrim(COALESCE(record_item ->> 'stockItemId', '')) = $2
+     )
+     SELECT
+       data -> 'sites' AS sites,
+       data -> 'tankGroups' AS tank_groups,
+       (SELECT count(*)::int FROM target_stock) AS stock_item_count,
+       (SELECT stock_item FROM target_stock LIMIT 1) AS stock_item,
+       (SELECT count(*)::int FROM target_record) AS record_count,
+       (SELECT record_item FROM target_record LIMIT 1) AS record_item
+     FROM source`,
+    [stateId, stockItemId, recordId]
+  );
+  const row = rows[0] ?? {};
+  const stockItemCount = Number(row.stock_item_count ?? 0);
+  const recordCount = Number(row.record_count ?? 0);
+  if (stockItemCount > 1 || recordCount > 1) {
+    throw httpError(409, "媒体关联记录不唯一，无法安全下载", "BIO_MEDIA_REFERENCE_CONFLICT");
+  }
+  const stockItem = row.stock_item && typeof row.stock_item === "object" ? row.stock_item : null;
+  const record = row.record_item && typeof row.record_item === "object" ? row.record_item : null;
+  if (!stockItem || !record) throw httpError(404, "媒体不存在或无权下载");
+
+  const state = {
+    sites: Array.isArray(row.sites) ? row.sites : [],
+    tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+    stock: [stockItem],
+  };
+  const stockSubTankId = String(stockItem.subTankId ?? "").trim();
+  const matchingTankGroups = stockSubTankId
+    ? state.tankGroups.filter((group) =>
+        (Array.isArray(group?.subTanks) ? group.subTanks : [])
+          .some((tank) => String(tank?.id ?? "").trim() === stockSubTankId)
+      )
+    : [];
+  if (matchingTankGroups.length > 1) {
+    throw httpError(409, "库存鱼缸位关联不唯一，无法安全下载", "BIO_MEDIA_SITE_CONFLICT");
+  }
+  const directSiteId = String(stockItem.siteId ?? "").trim();
+  const tankSiteId = String(matchingTankGroups[0]?.siteId ?? "").trim();
+  if (tankSiteId && directSiteId && tankSiteId !== directSiteId) {
+    throw httpError(409, "库存鱼场地关联不一致，无法安全下载", "BIO_MEDIA_SITE_CONFLICT");
+  }
+  const stockSiteId = tankSiteId || directSiteId;
+  const matchingSites = state.sites.filter((site) => String(site?.id ?? "").trim() === stockSiteId);
+  if (!stockSiteId || matchingSites.length !== 1) {
+    throw httpError(404, "媒体不存在或无权下载");
+  }
+  const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+  if (!canAccessBioStockSite({ account: req.auth?.account, visibleSiteIds, stockSiteId })) {
+    throw httpError(404, "媒体不存在或无权下载");
+  }
+
+  const field = mediaType === "image" ? "photos" : "videos";
+  const referenced = Array.isArray(record[field]) && record[field].some((value) => String(value ?? "") === mediaUrl);
+  if (!referenced) throw httpError(404, "媒体不存在或无权下载");
 }
 
 function imagePreviewQuery(widthValue) {
@@ -10022,6 +10123,61 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, { url: signedUrl, expiresIn: 3600 });
     } catch (error) {
       sendJson(req, res, 502, { error: "Failed to sign COS media URL" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/bio-records/media-download-url" && req.method === "GET") {
+    try {
+      const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
+      const recordId = String(url.searchParams.get("recordId") ?? "").trim();
+      const mediaUrl = String(url.searchParams.get("url") ?? "").trim();
+      const mediaType = url.searchParams.get("mediaType") === "image" ? "image" : "video";
+      if (!stockItemId || !recordId || !mediaUrl) {
+        throw httpError(400, "下载参数不完整");
+      }
+      await requireBioRecordMediaDownloadAccess(req, {
+        stockItemId,
+        recordId,
+        mediaUrl,
+        mediaType,
+      });
+
+      const requestedName = sanitizeAttachmentFilename(
+        url.searchParams.get("filename") || (mediaType === "image" ? "fishroom-photo.jpg" : "fishroom-video.mp4")
+      );
+      const cosKey = cosKeyFromUrl(mediaUrl);
+      let downloadUrl = "";
+      let expiresIn = 0;
+      if (cosKey) {
+        downloadUrl = await signedCosObjectUrl(cosKey, {
+          expires: 5 * 60,
+          query: {
+            "response-content-disposition": mediaAttachmentDisposition(
+              requestedName,
+              mediaType === "image" ? ".jpg" : ".mp4"
+            ),
+          },
+        });
+        expiresIn = 5 * 60;
+      } else {
+        const localPath = localUploadPathFromUrl(mediaUrl);
+        if (!localPath) throw httpError(404, "媒体不存在或无权下载");
+        const localInfo = await stat(localPath).catch(() => null);
+        if (!localInfo?.isFile()) throw httpError(404, "媒体不存在或无权下载");
+        const params = new URLSearchParams({ download: "1", filename: requestedName });
+        downloadUrl = `${mediaUrl.split("?", 1)[0]}?${params.toString()}`;
+      }
+      if (!downloadUrl) throw httpError(503, "下载地址生成失败，请稍后重试");
+      sendJson(req, res, 200, { ok: true, url: downloadUrl, expiresIn }, {
+        "Cache-Control": "no-store, private",
+      });
+    } catch (error) {
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false,
+        error: error.message || "下载地址生成失败",
+        ...(error?.code ? { code: error.code } : {}),
+      });
     }
     return;
   }
@@ -14057,13 +14213,57 @@ async function serveUpload(req, res, url) {
       }
       return;
     }
-    res._logicalResponseBytes = fileStat.size;
-    res.writeHead(200, {
+    const download = url.searchParams.get("download") === "1";
+    const requestedName = download
+      ? sanitizeAttachmentFilename(url.searchParams.get("filename") || `fishroom-media${extname(finalPath)}`)
+      : "";
+    const rangeHeader = String(req.headers.range ?? "").trim();
+    let start = 0;
+    let end = fileStat.size - 1;
+    let status = 200;
+    if (rangeHeader) {
+      const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+      if (!match) {
+        res.writeHead(416, { "Content-Range": `bytes */${fileStat.size}`, "Accept-Ranges": "bytes" });
+        res.end();
+        return;
+      }
+      if (match[1]) start = Number(match[1]);
+      if (match[2]) end = Number(match[2]);
+      if (!match[1] && match[2]) {
+        const suffixLength = Number(match[2]);
+        start = Math.max(0, fileStat.size - suffixLength);
+        end = fileStat.size - 1;
+      }
+      if (
+        !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+        start < 0 || end < start || start >= fileStat.size
+      ) {
+        res.writeHead(416, { "Content-Range": `bytes */${fileStat.size}`, "Accept-Ranges": "bytes" });
+        res.end();
+        return;
+      }
+      end = Math.min(end, fileStat.size - 1);
+      status = 206;
+    }
+    const contentLength = Math.max(0, end - start + 1);
+    res._logicalResponseBytes = req.method === "HEAD" ? 0 : contentLength;
+    res.writeHead(status, {
       "Content-Type": contentType,
       "Cache-Control": "public, max-age=600",
       "X-Content-Type-Options": "nosniff",
+      "Accept-Ranges": "bytes",
+      "Content-Length": String(contentLength),
+      ...(status === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileStat.size}` } : {}),
+      ...(download ? {
+        "Content-Disposition": mediaAttachmentDisposition(requestedName, extname(finalPath) || ".bin"),
+      } : {}),
     });
-    createReadStream(finalPath).pipe(res);
+    if (req.method === "HEAD" || contentLength === 0) {
+      res.end();
+      return;
+    }
+    createReadStream(finalPath, { start, end }).pipe(res);
   } catch {
     sendJson(req, res, 404, { error: "Upload file not found" });
   }
