@@ -1,4 +1,7 @@
 const config = require("./config");
+const fallbackCatalog = require("./fallback-catalog");
+
+let lastCatalog = null;
 
 function trimSlash(value) {
   return String(value || "").replace(/\/+$/, "");
@@ -12,6 +15,25 @@ function getApiBaseUrl() {
 function getSiteId() {
   const app = typeof getApp === "function" ? getApp() : null;
   return app && app.globalData && app.globalData.siteId || config.siteId || "all";
+}
+
+function shouldUseFallbackImmediately() {
+  if (!/^http:\/\//i.test(getApiBaseUrl())) return false;
+  try {
+    const device = typeof wx.getDeviceInfo === "function"
+      ? wx.getDeviceInfo()
+      : wx.getSystemInfoSync();
+    return Boolean(device && device.platform && device.platform !== "devtools");
+  } catch (error) {
+    return false;
+  }
+}
+
+function getFallbackBioRecords(stockItemId) {
+  const catalog = lastCatalog || fallbackCatalog || {};
+  return Array.isArray(catalog.bioRecords)
+    ? catalog.bioRecords.filter((item) => String(item.stockItemId || "") === String(stockItemId || ""))
+    : [];
 }
 
 function buildUrl(path, params) {
@@ -52,16 +74,32 @@ function request(path, params) {
 }
 
 async function fetchCatalog() {
-  const data = await request("/api/public/catalog", { siteId: getSiteId() });
-  return data.catalog || data.data || data || {};
+  if (shouldUseFallbackImmediately() && fallbackCatalog && Array.isArray(fallbackCatalog.products)) {
+    lastCatalog = fallbackCatalog;
+    return fallbackCatalog;
+  }
+  try {
+    const data = await request("/api/public/catalog", { siteId: getSiteId() });
+    lastCatalog = data.catalog || data.data || data || {};
+    return lastCatalog;
+  } catch (error) {
+    if (!fallbackCatalog || !Array.isArray(fallbackCatalog.products)) throw error;
+    lastCatalog = fallbackCatalog;
+    return fallbackCatalog;
+  }
 }
 
 async function fetchBioRecords(stockItemId) {
-  const data = await request("/api/public/bio-records", {
-    siteId: getSiteId(),
-    stockItemId
-  });
-  return Array.isArray(data.bioRecords) ? data.bioRecords : [];
+  if (shouldUseFallbackImmediately()) return getFallbackBioRecords(stockItemId);
+  try {
+    const data = await request("/api/public/bio-records", {
+      siteId: getSiteId(),
+      stockItemId
+    });
+    return Array.isArray(data.bioRecords) ? data.bioRecords : [];
+  } catch (error) {
+    return getFallbackBioRecords(stockItemId);
+  }
 }
 
 module.exports = {

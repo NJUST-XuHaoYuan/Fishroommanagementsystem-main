@@ -35,6 +35,7 @@ function absoluteUrl(src) {
   const value = text(src);
   if (!value) return "";
   if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("/assets/")) return value;
   if (value.startsWith("/")) return `${getApiBaseUrl()}${value}`;
   return value;
 }
