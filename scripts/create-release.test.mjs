@@ -38,3 +38,16 @@ test("rejects macOS extended attributes stored in PAX headers", () => {
   ]);
   assert.throws(() => assertNoMacMetadataTarEntries(archive), /PAX/);
 });
+
+for (const [typeFlag, label] of [
+  ["1", "hard link"],
+  ["2", "symbolic link"],
+  ["3", "character device"],
+  ["4", "block device"],
+  ["6", "fifo"],
+]) {
+  test(`rejects ${label} archive entries`, () => {
+    const archive = tarArchive([{ name: `release/${label}`, typeFlag }]);
+    assert.throws(() => assertNoMacMetadataTarEntries(archive), /非普通文件或目录/);
+  });
+}

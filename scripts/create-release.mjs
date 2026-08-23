@@ -113,6 +113,9 @@ export function assertNoMacMetadataTarEntries(archiveBuffer) {
     if (!Number.isSafeInteger(size) || size < 0) {
       throw new Error(`发版包包含无法解析的 tar 条目：${entry || "<unknown>"}`);
     }
+    if (!["", "0", "5", "x", "g"].includes(typeFlag)) {
+      throw new Error(`发版包包含非普通文件或目录条目：${entry || "<unknown>"}（type=${typeFlag}）`);
+    }
     if (typeFlag === "x" || typeFlag === "g") {
       const payload = tarBuffer.subarray(offset + 512, offset + 512 + size).toString("utf8");
       if (/(?:SCHILY|LIBARCHIVE)\.(?:xattr|acl)\.|com\.apple\./i.test(payload)) {
