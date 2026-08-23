@@ -82,6 +82,8 @@ type Specimen = {
   hasRealPhoto: boolean;
   fallbackImage: string;
   price: number;
+  defaultPrice: number;
+  isSpecialPrice: boolean;
   size: string;
   daysInStore: number;
   statusLabel: string;
@@ -174,8 +176,9 @@ const premiumCategories: PremiumCategory[] = [
 
 const filterOptions = [
   { key: "all", label: "全部" },
-  { key: "quarantined", label: "入缸14天+" },
+  { key: "quarantined", label: "到货14天+" },
   { key: "eating", label: "已开口" },
+  { key: "special", label: "特价" },
 ];
 
 const normalizePublicBioRecords = (value: unknown): PublicBioRecord[] =>
@@ -386,6 +389,12 @@ function categoryForSpecies(species?: Species): PremiumCategory {
 
 function productPrice(product?: PublicProduct, stock?: PublicStockItem) {
   return Math.max(0, Number(stock?.basePrice || product?.defaultPrice || 0));
+}
+
+function specialPriceForProduct(product?: PublicProduct, stock?: PublicStockItem) {
+  const stockPrice = Math.max(0, Number(stock?.basePrice ?? 0));
+  const defaultPrice = Math.max(0, Number(product?.defaultPrice ?? 0));
+  return stockPrice > 0 && defaultPrice > 0 && stockPrice < defaultPrice;
 }
 
 function stockStatusLabel(status?: string) {
@@ -623,6 +632,8 @@ export function PublicCatalogPage() {
           hasRealPhoto: photo.hasRealPhoto,
           fallbackImage,
           price: productPrice(product, stock),
+          defaultPrice: Math.max(0, Number(product.defaultPrice ?? 0)),
+          isSpecialPrice: specialPriceForProduct(product, stock),
           size: product.size || "待确认",
           daysInStore,
           statusLabel: stockStatusLabel(stock?.status),
@@ -724,6 +735,7 @@ export function PublicCatalogPage() {
     if (filter === "all") return true;
     if (filter === "quarantined") return specimen.daysInStore >= 14;
     if (filter === "eating") return specimen.stock?.status === "feeding";
+    if (filter === "special") return specimen.isSpecialPrice;
     return true;
   });
 
@@ -1168,13 +1180,23 @@ export function PublicCatalogPage() {
                                 <div className="text-xs font-semibold text-[#1ee6ef]">{specimen.id}</div>
                                 <h4 className="mt-0.5 truncate text-sm font-semibold text-white">{specimen.product.name}</h4>
                               </div>
-                              <div className="shrink-0 text-sm font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
+                              <div className="shrink-0 text-right">
+                                {specimen.isSpecialPrice && (
+                                  <div className="mb-1 inline-flex border border-rose-300/35 bg-rose-500/12 px-1.5 py-0.5 text-[0.62rem] font-semibold text-rose-100">
+                                    特价
+                                  </div>
+                                )}
+                                <div className="text-sm font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</div>
+                                {specimen.isSpecialPrice && (
+                                  <div className="mt-0.5 text-[0.68rem] text-[#7893a6] line-through">{formatMoney(specimen.defaultPrice)}</div>
+                                )}
+                              </div>
                             </div>
                             <div className="mt-2.5 grid grid-cols-2 gap-x-2.5 gap-y-1.5 text-xs text-[#a9bfce]">
                               <SpecLine label="尺寸" value={specimen.size} />
                               <SpecLine label="状态" value={specimen.statusLabel} />
                               <SpecLine label="缸位" value={specimen.locationLabel} />
-                              <SpecLine label="入库" value={specimen.arrivalDate} />
+                              <SpecLine label="到货" value={specimen.arrivalDate} />
                             </div>
                           </div>
                         </button>
@@ -1516,7 +1538,11 @@ function SpecimenDetailPanel({
 
             <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
               <span className="text-sm text-[#d6c996]">售价</span>
-              <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+              <div className="text-right">
+                {specimen.isSpecialPrice && <div className="text-xs font-semibold text-rose-200">特价</div>}
+                <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+                {specimen.isSpecialPrice && <div className="text-xs text-[#91a8b8] line-through">{formatMoney(specimen.defaultPrice)}</div>}
+              </div>
             </div>
 
             <div className="mt-4 rounded-xl border border-[#1ee6ef]/20 bg-[#1ee6ef]/8 p-4">
@@ -1540,8 +1566,8 @@ function SpecimenDetailPanel({
             <div className="mt-4 grid grid-cols-2 gap-2.5 text-sm">
               <DetailTile label="尺寸" value={specimen.size} />
               <DetailTile label="状态" value={specimen.statusLabel} />
-              <DetailTile label="入库日期" value={specimen.arrivalDate} />
-              <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
+              <DetailTile label="到货日期" value={specimen.arrivalDate} />
+              <DetailTile label="到货天数" value={`${specimen.daysInStore} 天`} />
               <DetailTile label="缸位" value={specimen.locationLabel} />
               <DetailTile label="售价" value={formatMoney(specimen.price)} />
               <DetailTile label="产地" value={specimen.product.origin || "待确认"} />
@@ -1585,7 +1611,11 @@ function SpecimenDetailPanel({
 
       <div className="mt-5 flex items-center justify-between rounded-xl border border-[#d3b56f]/20 bg-[#d3b56f]/8 px-4 py-3">
         <span className="text-sm text-[#d6c996]">售价</span>
-        <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+        <div className="text-right">
+          {specimen.isSpecialPrice && <div className="text-xs font-semibold text-rose-200">特价</div>}
+          <span className="text-2xl font-semibold text-[#f3df9d]">{formatMoney(specimen.price)}</span>
+          {specimen.isSpecialPrice && <div className="text-xs text-[#91a8b8] line-through">{formatMoney(specimen.defaultPrice)}</div>}
+        </div>
       </div>
 
       <div className="mt-5 rounded-xl border border-[#1ee6ef]/20 bg-[#1ee6ef]/8 p-4">
@@ -1609,8 +1639,8 @@ function SpecimenDetailPanel({
       <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
         <DetailTile label="尺寸" value={specimen.size} />
         <DetailTile label="状态" value={specimen.statusLabel} />
-        <DetailTile label="入库日期" value={specimen.arrivalDate} />
-        <DetailTile label="入缸天数" value={`${specimen.daysInStore} 天`} />
+        <DetailTile label="到货日期" value={specimen.arrivalDate} />
+        <DetailTile label="到货天数" value={`${specimen.daysInStore} 天`} />
         <DetailTile label="缸位" value={specimen.locationLabel} />
         <DetailTile label="售价" value={formatMoney(specimen.price)} />
         <DetailTile label="产地" value={specimen.product.origin || "待确认"} />

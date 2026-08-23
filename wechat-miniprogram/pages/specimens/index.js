@@ -7,8 +7,9 @@ const {
 
 const filterOptions = [
   { key: "all", label: "全部" },
-  { key: "quarantined", label: "入缸14天+" },
-  { key: "feeding", label: "已开口" }
+  { key: "quarantined", label: "到货14天+" },
+  { key: "feeding", label: "已开口" },
+  { key: "special", label: "特价" }
 ];
 
 function decodeOption(value) {

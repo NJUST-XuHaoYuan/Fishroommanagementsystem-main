@@ -72,7 +72,11 @@
           <view class="specimen-info">
             <view class="specimen-top">
               <view class="specimen-code mono">{{item.displayCode}}</view>
-              <view class="specimen-price">{{item.priceText}}</view>
+              <view class="specimen-price-stack">
+                <view wx:if="{{item.isSpecialPrice}}" class="special-price-label">特价</view>
+                <view class="specimen-price">{{item.priceText}}</view>
+                <view wx:if="{{item.isSpecialPrice}}" class="specimen-original-price">{{item.defaultPriceText}}</view>
+              </view>
             </view>
             <view class="specimen-product">{{item.productName}}</view>
             <view class="specimen-attributes">
@@ -81,7 +85,7 @@
                 <text class="attribute-value">{{item.size}}</text>
               </view>
               <view class="attribute">
-                <text class="attribute-label">入库</text>
+                <text class="attribute-label">到货</text>
                 <text class="attribute-value">{{item.arrivalDate}}</text>
               </view>
             </view>

@@ -167,11 +167,11 @@ function normalizeCatalog(value) {
       subTankName: text(item.subTankName),
       tankLocation: text(item.tankLocation)
     })).filter((item) => item.id && item.productId),
-    bioRecords: asArray(catalog.bioRecords).map((item) => {
+    bioRecords: asArray(catalog.bioRecords).map((item, index) => {
       const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
       const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
       return {
-        id: text(item.id),
+        id: text(item.id) || `fallback-${text(item.stockItemId)}-${index}`,
         stockItemId: text(item.stockItemId),
         date: text(item.date),
         text: text(item.text),
@@ -252,7 +252,10 @@ function buildViewModel(catalog) {
     asArray(stockByProduct[product.id]).forEach((stock) => {
       const latestBio = latestBioByStock[stock.id];
       const image = firstPhoto(latestBio) || product.imageUrl || species.imageUrl || "";
-      const price = stock.basePrice || product.defaultPrice || 0;
+      const stockPrice = number(stock.basePrice);
+      const defaultPrice = number(product.defaultPrice);
+      const price = stockPrice || defaultPrice || 0;
+      const isSpecialPrice = stockPrice > 0 && defaultPrice > 0 && stockPrice < defaultPrice;
       specimens.push({
         id: stock.id,
         displayCode: stock.code || stock.id,
@@ -269,6 +272,9 @@ function buildViewModel(catalog) {
         image,
         price,
         priceText: formatMoney(price),
+        defaultPrice,
+        defaultPriceText: formatMoney(defaultPrice),
+        isSpecialPrice,
         status: stock.status || "healthy",
         statusText: statusLabel(stock.status),
         statusClass: stock.status === "feeding" ? "feeding" : stock.status === "sick" ? "sick" : "healthy",
@@ -424,6 +430,7 @@ function filterSpecimens(viewModel, selection, filterKey) {
     if (productId && item.productId !== productId) return false;
     if (filterKey === "quarantined") return item.daysInStore >= 14;
     if (filterKey === "feeding") return item.status === "feeding";
+    if (filterKey === "special") return item.isSpecialPrice;
     return true;
   });
 }
@@ -449,7 +456,7 @@ function normalizeTimeline(records, specimen) {
       videos: []
     });
   }
-  asArray(records).map((item) => {
+  asArray(records).map((item, index) => {
     const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
     const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
     const photoCount = Math.max(number(item.photoCount), photos.length);
@@ -465,7 +472,7 @@ function normalizeTimeline(records, specimen) {
     ]);
     const isDailyLog = item.sourceType === "dailyLog";
     return {
-      id: text(item.id),
+      id: text(item.id) || `fallback-${text(item.stockItemId) || text(specimen && specimen.id)}-${index}`,
       date: text(item.date),
       dateText: formatDateTime(item.date),
       title: isDailyLog ? "缸组养护" : "观察/治疗记录",

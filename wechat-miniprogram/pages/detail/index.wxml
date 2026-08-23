@@ -28,7 +28,11 @@
     <view class="identity-section">
       <view class="identity-top">
         <view class="display-code mono">{{specimen.displayCode}}</view>
-        <view class="price">{{specimen.priceText}}</view>
+        <view class="price-stack">
+          <view wx:if="{{specimen.isSpecialPrice}}" class="special-price-label">特价</view>
+          <view class="price">{{specimen.priceText}}</view>
+          <view wx:if="{{specimen.isSpecialPrice}}" class="original-price">{{specimen.defaultPriceText}}</view>
+        </view>
       </view>
       <view class="product-name">{{specimen.productName}}</view>
       <view class="taxonomy">
@@ -40,7 +44,7 @@
           <view class="status-dot"></view>
           <text>{{specimen.statusText}}</text>
         </view>
-        <view class="stay-days">在缸 {{specimen.daysInStore}} 天</view>
+        <view class="stay-days">到货 {{specimen.daysInStore}} 天</view>
       </view>
     </view>
 
@@ -54,7 +58,7 @@
         <text class="info-value">{{specimen.origin}}</text>
       </view>
       <view class="info-item">
-        <text class="info-label">入库日期</text>
+        <text class="info-label">到货日期</text>
         <text class="info-value">{{specimen.arrivalDate}}</text>
       </view>
       <view class="info-item">

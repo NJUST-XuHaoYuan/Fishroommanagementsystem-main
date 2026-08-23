@@ -218,11 +218,37 @@
 }
 
 .specimen-price {
-  flex: 0 0 auto;
   color: var(--price);
   font-size: 30rpx;
   font-weight: 780;
   line-height: 1.2;
+}
+
+.specimen-price-stack {
+  display: flex;
+  min-width: 104rpx;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3rpx;
+}
+
+.special-price-label {
+  padding: 3rpx 8rpx;
+  border: 1rpx solid #e2b2ab;
+  border-radius: 7rpx;
+  background: #fff1ef;
+  color: #ad3f32;
+  font-size: 18rpx;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.specimen-original-price {
+  color: #8a9490;
+  font-size: 19rpx;
+  line-height: 1.2;
+  text-decoration: line-through;
 }
 
 .specimen-product {

@@ -44,11 +44,36 @@
 }
 
 .price {
-  flex: 0 0 auto;
   color: var(--price);
   font-size: 38rpx;
   font-weight: 800;
   line-height: 1.2;
+}
+
+.price-stack {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4rpx;
+}
+
+.special-price-label {
+  padding: 4rpx 10rpx;
+  border: 1rpx solid #e2b2ab;
+  border-radius: 7rpx;
+  background: #fff1ef;
+  color: #ad3f32;
+  font-size: 19rpx;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.original-price {
+  color: #89938f;
+  font-size: 21rpx;
+  line-height: 1.2;
+  text-decoration: line-through;
 }
 
 .product-name {
