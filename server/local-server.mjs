@@ -747,6 +747,8 @@ function publicBioRecordText(value) {
 }
 
 function publicBioRecordPayload(record = {}, media = {}) {
+  const photos = media.photos ?? publicMediaUrls(record?.photos, 6);
+  const videos = media.videos ?? publicMediaUrls(record?.videos, 3);
   return {
     id: String(record?.id ?? ""),
     stockItemId: String(record?.stockItemId ?? ""),
@@ -755,9 +757,12 @@ function publicBioRecordPayload(record = {}, media = {}) {
     sourceType: String(record?.sourceType ?? ""),
     tankGroupName: String(record?.tankGroupName ?? ""),
     subTankName: String(record?.subTankName ?? ""),
+    tankLocation: String(record?.tankLocation ?? ""),
     operator: String(record?.operator ?? ""),
-    photos: (media.photos ?? publicMediaUrls(record?.photos, 6)).map(publicCatalogMediaUrl),
-    videos: (media.videos ?? publicMediaUrls(record?.videos, 3)).map(publicCatalogMediaUrl),
+    photoCount: photos.length,
+    videoCount: videos.length,
+    photos: photos.map(publicCatalogMediaUrl),
+    videos: videos.map(publicCatalogMediaUrl),
   };
 }
 

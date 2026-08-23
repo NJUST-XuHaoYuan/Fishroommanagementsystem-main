@@ -89,7 +89,12 @@
               <text class="timeline-date">{{item.dateText}}</text>
             </view>
             <view class="timeline-text">{{item.text}}</view>
-            <view wx:if="{{item.operator}}" class="timeline-operator">记录人：{{item.operator}}</view>
+            <view wx:if="{{item.contextText}}" class="timeline-context">{{item.contextText}}</view>
+            <view wx:if="{{item.operator}}" class="timeline-context">操作人：{{item.operator}}</view>
+            <view wx:if="{{item.mediaSummary}}" class="timeline-media-summary">
+              <text>媒体：{{item.mediaSummary}}</text>
+              <text wx:if="{{item.mediaUnavailable}}" class="timeline-media-state">原文件待在线加载</text>
+            </view>
             <scroll-view wx:if="{{item.photos.length}}" class="photo-scroll" scroll-x enhanced show-scrollbar="{{false}}">
               <image
                 wx:for="{{item.photos}}"

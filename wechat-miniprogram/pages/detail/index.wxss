@@ -318,10 +318,28 @@
   word-break: break-word;
 }
 
-.timeline-operator {
+.timeline-context {
   margin-top: 9rpx;
   color: #74807c;
   font-size: 22rpx;
+  line-height: 1.5;
+}
+
+.timeline-media-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10rpx 16rpx;
+  margin-top: 12rpx;
+  color: #42504c;
+  font-size: 22rpx;
+  font-weight: 680;
+  line-height: 1.5;
+}
+
+.timeline-media-state {
+  color: #8a6252;
+  font-weight: 500;
 }
 
 .photo-scroll {

@@ -64,6 +64,13 @@ function formatDate(value) {
   return raw.slice(0, 10);
 }
 
+function formatDateTime(value) {
+  const raw = text(value);
+  if (!raw) return "待确认";
+  const normalized = raw.replace("T", " ");
+  return normalized.length > 10 ? normalized.slice(0, 19) : normalized.slice(0, 10);
+}
+
 function daysSince(value) {
   const raw = text(value);
   if (!raw) return 0;
@@ -160,18 +167,25 @@ function normalizeCatalog(value) {
       subTankName: text(item.subTankName),
       tankLocation: text(item.tankLocation)
     })).filter((item) => item.id && item.productId),
-    bioRecords: asArray(catalog.bioRecords).map((item) => ({
-      id: text(item.id),
-      stockItemId: text(item.stockItemId),
-      date: text(item.date),
-      text: text(item.text),
-      sourceType: text(item.sourceType),
-      tankGroupName: text(item.tankGroupName),
-      subTankName: text(item.subTankName),
-      operator: text(item.operator),
-      photos: asArray(item.photos).map(absoluteUrl).filter(Boolean),
-      videos: asArray(item.videos).map(absoluteUrl).filter(Boolean)
-    })).filter((item) => item.stockItemId)
+    bioRecords: asArray(catalog.bioRecords).map((item) => {
+      const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
+      const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
+      return {
+        id: text(item.id),
+        stockItemId: text(item.stockItemId),
+        date: text(item.date),
+        text: text(item.text),
+        sourceType: text(item.sourceType),
+        tankGroupName: text(item.tankGroupName),
+        subTankName: text(item.subTankName),
+        tankLocation: text(item.tankLocation),
+        operator: text(item.operator),
+        photoCount: Math.max(number(item.photoCount), photos.length),
+        videoCount: Math.max(number(item.videoCount), videos.length),
+        photos,
+        videos
+      };
+    }).filter((item) => item.stockItemId)
   };
 }
 
@@ -435,16 +449,35 @@ function normalizeTimeline(records, specimen) {
       videos: []
     });
   }
-  asArray(records).map((item) => ({
-    id: text(item.id),
-    date: text(item.date),
-    dateText: formatDate(item.date),
-    title: item.sourceType === "dailyLog" ? "缸组养护" : "观察记录",
-    text: text(item.text) || "维护记录已同步",
-    photos: asArray(item.photos).map(absoluteUrl).filter(Boolean),
-    videos: asArray(item.videos).map(absoluteUrl).filter(Boolean),
-    operator: text(item.operator)
-  })).sort((a, b) => a.date.localeCompare(b.date)).forEach((item) => events.push(item));
+  asArray(records).map((item) => {
+    const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
+    const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
+    const photoCount = Math.max(number(item.photoCount), photos.length);
+    const videoCount = Math.max(number(item.videoCount), videos.length);
+    const mediaParts = [];
+    if (photoCount) mediaParts.push(`${photoCount} 张照片`);
+    if (videoCount) mediaParts.push(`${videoCount} 个视频`);
+    const mediaSummary = mediaParts.join(" · ");
+    const tankParts = unique([
+      text(item.tankLocation),
+      text(item.tankGroupName),
+      text(item.subTankName)
+    ]);
+    const isDailyLog = item.sourceType === "dailyLog";
+    return {
+      id: text(item.id),
+      date: text(item.date),
+      dateText: formatDateTime(item.date),
+      title: isDailyLog ? "缸组养护" : "观察/治疗记录",
+      text: text(item.text) || (mediaSummary ? `本次记录包含 ${mediaSummary}` : "本次记录未填写文字内容"),
+      contextText: tankParts.length ? `${isDailyLog ? "养护缸位" : "记录缸位"}：${tankParts.join(" / ")}` : "",
+      mediaSummary,
+      mediaUnavailable: photoCount > photos.length || videoCount > videos.length,
+      photos,
+      videos,
+      operator: text(item.operator)
+    };
+  }).sort((a, b) => a.date.localeCompare(b.date)).forEach((item) => events.push(item));
   return events;
 }
 

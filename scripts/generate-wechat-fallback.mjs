@@ -46,10 +46,18 @@ function compactBioRecord(record) {
     stockItemId: String(record?.stockItemId || ""),
     date: String(record?.date || "")
   };
-  for (const key of ["text", "sourceType", "tankGroupName", "subTankName", "operator"]) {
+  for (const key of ["text", "sourceType", "tankGroupName", "subTankName", "tankLocation", "operator"]) {
     const text = String(record?.[key] || "").trim();
     if (text) value[key] = text;
   }
+  const photoCount = Array.isArray(record?.photos)
+    ? record.photos.length
+    : Math.max(0, Number(record?.photoCount) || 0);
+  const videoCount = Array.isArray(record?.videos)
+    ? record.videos.length
+    : Math.max(0, Number(record?.videoCount) || 0);
+  if (photoCount) value.photoCount = photoCount;
+  if (videoCount) value.videoCount = videoCount;
   return value;
 }
 
