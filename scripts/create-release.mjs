@@ -93,7 +93,7 @@ function readTarHeaderString(buffer, start, length) {
   return buffer.subarray(start, start + length).toString("utf8").replace(/\0.*$/, "").trim();
 }
 
-function assertNoAppleDoubleTarEntries(archiveBuffer) {
+export function assertNoMacMetadataTarEntries(archiveBuffer) {
   const tarBuffer = gunzipSync(archiveBuffer);
   let offset = 0;
   while (offset + 512 <= tarBuffer.length) {
@@ -103,6 +103,7 @@ function assertNoAppleDoubleTarEntries(archiveBuffer) {
     const name = readTarHeaderString(header, 0, 100);
     const prefix = readTarHeaderString(header, 345, 155);
     const entry = prefix ? `${prefix}/${name}` : name;
+    const typeFlag = readTarHeaderString(header, 156, 1);
     if (entry.split("/").some((segment) => segment === "__MACOSX" || segment.startsWith("._"))) {
       throw new Error(`发版包包含 macOS AppleDouble 元数据：${entry}`);
     }
@@ -111,6 +112,12 @@ function assertNoAppleDoubleTarEntries(archiveBuffer) {
     const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
     if (!Number.isSafeInteger(size) || size < 0) {
       throw new Error(`发版包包含无法解析的 tar 条目：${entry || "<unknown>"}`);
+    }
+    if (typeFlag === "x" || typeFlag === "g") {
+      const payload = tarBuffer.subarray(offset + 512, offset + 512 + size).toString("utf8");
+      if (/(?:SCHILY|LIBARCHIVE)\.(?:xattr|acl)\.|com\.apple\./i.test(payload)) {
+        throw new Error(`发版包包含扩展属性 PAX 元数据：${entry || "<unknown>"}`);
+      }
     }
     offset += 512 + Math.ceil(size / 512) * 512;
   }
@@ -281,7 +288,7 @@ async function main() {
     await mkdir(workDir);
     const rawTar = join(workDir, "source.tar");
     await git("archive", "--format=tar", `--prefix=${prefix}/`, `--output=${rawTar}`, "HEAD", "--", ...ARCHIVE_PATHS);
-    await tar(["-xf", rawTar, "-C", workDir]);
+    await tar(["--no-xattrs", "-xf", rawTar, "-C", workDir]);
     const releaseRoot = join(workDir, prefix);
     const releaseEnv = releaseEnvironment({ revision, shortRevision, createdAt });
     await writeFile(join(releaseRoot, ".release-revision"), `${revision}\n`, { mode: 0o644 });
@@ -294,8 +301,8 @@ async function main() {
     await assertNoHighConfidenceSecrets(releaseRoot);
 
     const stagedArchivePath = join(stagingDir, archiveName);
-    await tar(["-czf", stagedArchivePath, "-C", workDir, prefix]);
-    assertNoAppleDoubleTarEntries(await readFile(stagedArchivePath));
+    await tar(["--no-xattrs", "-czf", stagedArchivePath, "-C", workDir, prefix]);
+    assertNoMacMetadataTarEntries(await readFile(stagedArchivePath));
     const { stdout: listingOutput } = await tar(["-tzf", stagedArchivePath], {
       maxBuffer: 20 * 1024 * 1024,
     });
@@ -327,7 +334,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.message || error}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error.message || error}\n`);
+    process.exitCode = 1;
+  });
+}
