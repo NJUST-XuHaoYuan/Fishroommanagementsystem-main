@@ -7,9 +7,7 @@ function getNavigationMetrics() {
   let windowInfo = {};
   let menuButton = {};
   try {
-    windowInfo = typeof wx.getWindowInfo === "function"
-      ? wx.getWindowInfo()
-      : wx.getSystemInfoSync();
+    windowInfo = wx.getWindowInfo();
   } catch (error) {
     windowInfo = {};
   }
