@@ -36,27 +36,30 @@ function stockIndex(records = []) {
   return byId;
 }
 
-function stockConcurrencySnapshot(item = {}) {
+export function stockConcurrencySnapshot(item = {}) {
   const optionalString = (value) => String(value ?? "");
   const legacySold = item?.status === "sold";
+  const normalizedStatus = legacySold || !["healthy", "feeding", "sick"].includes(item?.status)
+    ? "healthy"
+    : item.status;
   return {
     id: id(item?.id),
     siteId: id(item?.siteId),
     productId: id(item?.productId),
     batchId: id(item?.batchId),
     subTankId: id(item?.subTankId),
-    status: legacySold ? "healthy" : optionalString(item?.status),
+    status: normalizedStatus,
     sold: legacySold || Boolean(item?.sold),
     lost: Boolean(item?.lost),
-    lossDate: optionalString(item?.lossDate),
-    lossReason: optionalString(item?.lossReason),
+    lossDate: optionalString(item?.lossDate).trim(),
+    lossReason: optionalString(item?.lossReason).trim(),
     lossProof: (Array.isArray(item?.lossProof) ? item.lossProof : []).map(optionalString),
-    inDate: optionalString(item?.inDate),
+    inDate: id(item?.inDate),
     basePrice: Number(item?.basePrice ?? item?.cost ?? 0),
     priceOverridden: Boolean(item?.priceOverridden),
     commissionRate: Number(item?.commissionRate ?? 0),
-    code: optionalString(item?.code),
-    notes: optionalString(item?.notes),
+    code: id(item?.code),
+    notes: optionalString(item?.notes).trim(),
   };
 }
 

@@ -76,10 +76,12 @@ import {
   resolvePersonnelProfileApprovalNotifications,
 } from "./station-notifications.mjs";
 import {
-  buildStockDeletionSnapshot,
   buildStockChangeSnapshot,
   classifyStockMutationForApproval,
+  filterEffectiveStockMutation,
   preserveBatchCreationTimes,
+  stockApprovalDetailsForResponse,
+  stockApprovalReviewDetails,
   stockChangeAdjustmentSignature,
 } from "./stock-approval-rules.mjs";
 import {
@@ -3715,7 +3717,9 @@ function normalizeStockItem(item) {
     basePrice: Number(item.basePrice ?? 0),
     commissionRate: 0,
     code: String(item.code ?? "").trim(),
-    notes: String(item.notes ?? ""),
+    notes: String(item.notes ?? "").trim(),
+    lossDate: String(item.lossDate ?? "").trim(),
+    lossReason: String(item.lossReason ?? "").trim(),
     lossProof: Array.isArray(item.lossProof) ? item.lossProof : [],
   };
   if (!normalized.productId || !normalized.batchId || !normalized.subTankId || !normalized.inDate) {
@@ -4023,51 +4027,33 @@ function clearInventoryAdjustmentDraft(state = {}, username = "", draftId = "") 
 }
 
 function stockApprovalDetailsForRequest(state = {}, approvalRequest = {}) {
-  if (
-    ["stock_delete", "stock_change"].includes(approvalRequest?.stockDetails?.type) &&
-    Array.isArray(approvalRequest.stockDetails.items)
-  ) {
-    return approvalRequest.stockDetails;
-  }
-  const deleteIds = Array.isArray(approvalRequest?.payload?.deleteIds)
-    ? approvalRequest.payload.deleteIds
-    : [];
-  const upsertItems = Array.isArray(approvalRequest?.payload?.upsert)
-    ? approvalRequest.payload.upsert
-    : [];
-  if (upsertItems.length > 0) {
-    return buildStockChangeSnapshot({
-      upsertItems,
-      deleteIds,
-      stock: state.stock,
-      products: state.products,
-      species: state.species,
-      batches: state.batches,
-      tankGroups: state.tankGroups,
-      orders: state.orders,
-    });
-  }
-  if (deleteIds.length === 0) return null;
-  return buildStockDeletionSnapshot({
-    deleteIds,
-    stock: state.stock,
-    products: state.products,
-    species: state.species,
-    batches: state.batches,
-    tankGroups: state.tankGroups,
-    orders: state.orders,
-  });
+  const review = stockApprovalReviewDetails(approvalRequest, state);
+  return stockApprovalDetailsForResponse(review.stockDetails);
 }
 
 function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = null) {
   const isInventoryAdjustment = adjustmentContext?.kind === "inventory_adjustment";
+  const effectiveChange = filterEffectiveStockMutation({
+    stock: state.stock,
+    upsertItems: mutation.upsertItems,
+    deleteIds: mutation.deleteIds,
+  });
+  if (effectiveChange.upsertItems.length === 0 && effectiveChange.deleteIds.length === 0) {
+    const error = new Error("库存内容没有发生变化，无需保存或提交审批");
+    error.statusCode = 409;
+    error.code = "NO_STOCK_CHANGES";
+    throw error;
+  }
+  const effectiveUpsertItems = effectiveChange.upsertItems;
+  const effectiveDeleteIds = effectiveChange.deleteIds;
   const batchById = new Map((Array.isArray(state.batches) ? state.batches : [])
     .map((batch) => [String(batch?.id ?? ""), batch]));
   const classification = classifyStockMutationForApproval({
     isAdmin: req.auth?.account?.accessRole === "admin",
     existingIds: mutation.existingIds,
-    upsertItems: mutation.upsertItems,
-    deleteIds: mutation.deleteIds,
+    upsertItems: effectiveUpsertItems,
+    deleteIds: effectiveDeleteIds,
+    stock: state.stock,
     batches: Array.isArray(state.batches) ? state.batches : [],
   });
   const adjustmentRequiresApproval = isInventoryAdjustment && req.auth?.account?.accessRole !== "admin";
@@ -4080,7 +4066,7 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
   const lateBatchLabels = lateBatchIds
     .map((id) => String(batchById.get(id)?.batchNo ?? id))
     .filter(Boolean);
-  const deletedCodes = mutation.deleteIds
+  const deletedCodes = effectiveDeleteIds
     .map((id) => String(stockById.get(id)?.code ?? id).trim())
     .filter(Boolean);
   const updatedCodes = updatedItems
@@ -4108,7 +4094,7 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
   const details = [];
   if (hasDeletes) {
     const codeSummary = deletedCodes.slice(0, 6).join("、");
-    details.push(`申请删除 ${mutation.deleteIds.length} 条库存${codeSummary ? `（${codeSummary}${deletedCodes.length > 6 ? "等" : ""}）` : ""}`);
+    details.push(`申请删除 ${effectiveDeleteIds.length} 条库存${codeSummary ? `（${codeSummary}${deletedCodes.length > 6 ? "等" : ""}）` : ""}`);
   }
   if (updatedItems.length > 0) {
     const codeSummary = updatedCodes.slice(0, 6).join("、");
@@ -4118,12 +4104,12 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
     details.push(`申请向创建已超过 48 小时的批次「${lateBatchLabels.join("、")}」补录 ${lateItems.length} 条库存`);
   }
   const expectation = buildStockMutationExpectation(state, {
-    upsert: mutation.upsertItems,
-    deleteIds: mutation.deleteIds,
+    upsert: effectiveUpsertItems,
+    deleteIds: effectiveDeleteIds,
   });
   const changedItems = [
-    ...mutation.upsertItems,
-    ...mutation.deleteIds.map((stockId) => stockById.get(String(stockId ?? ""))).filter(Boolean),
+    ...effectiveUpsertItems,
+    ...effectiveDeleteIds.map((stockId) => stockById.get(String(stockId ?? ""))).filter(Boolean),
   ];
   const changedSiteIds = [...new Set(changedItems.map((item) => authoritativeStockMutationSiteId(state, item)))];
   if (changedSiteIds.length !== 1) {
@@ -4133,14 +4119,14 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
     throw error;
   }
   const payload = {
-    upsert: mutation.upsertItems,
-    deleteIds: mutation.deleteIds,
+    upsert: effectiveUpsertItems,
+    deleteIds: effectiveDeleteIds,
     siteId: changedSiteIds[0],
     ...expectation,
   };
   const stockDetails = buildStockChangeSnapshot({
-    upsertItems: mutation.upsertItems,
-    deleteIds: mutation.deleteIds,
+    upsertItems: effectiveUpsertItems,
+    deleteIds: effectiveDeleteIds,
     stock: state.stock,
     products: state.products,
     species: state.species,
@@ -8249,11 +8235,8 @@ async function handleApi(req, res, url) {
       if (notification.type === "stock_approval") {
         const approvalRequest = currentApprovalRequests(state)
           .find((request) => String(request?.id ?? "") === String(notification.approvalRequestId ?? ""));
-        const hasStoredDetails = ["stock_delete", "stock_change"].includes(approvalRequest?.stockDetails?.type) &&
-          Array.isArray(approvalRequest?.stockDetails?.items);
-        const hasLegacyPayload = (Array.isArray(approvalRequest?.payload?.deleteIds) && approvalRequest.payload.deleteIds.length > 0) ||
-          (Array.isArray(approvalRequest?.payload?.upsert) && approvalRequest.payload.upsert.length > 0);
-        if (!hasStoredDetails && hasLegacyPayload) {
+        const preliminaryReview = stockApprovalReviewDetails(approvalRequest, state);
+        if (preliminaryReview.reviewComplete && preliminaryReview.rebuiltFromPayload) {
           const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
           state = rows[0]?.data ?? state;
         }
@@ -12522,6 +12505,11 @@ async function handleApi(req, res, url) {
       const decision = body.decision === "approve" ? "approved" : body.decision === "reject" ? "rejected" : "";
       const note = String(body.note ?? "").trim().slice(0, 500);
       if (!requestId || !decision) throw new Error("请选择有效的审批操作");
+      if (decision === "rejected" && !note) {
+        const error = new Error("驳回库存审批时请填写处理说明");
+        error.code = "STOCK_APPROVAL_REJECTION_NOTE_REQUIRED";
+        throw error;
+      }
 
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
@@ -12541,6 +12529,13 @@ async function handleApi(req, res, url) {
         const payload = approvalRequest.payload && typeof approvalRequest.payload === "object"
           ? approvalRequest.payload
           : {};
+        const approvalReview = stockApprovalReviewDetails(approvalRequest, state);
+        if (!approvalReview.reviewComplete) {
+          const error = new Error("库存审批明细不完整或无法安全重建，请填写原因后驳回并让发起人重新提交");
+          error.statusCode = 409;
+          error.code = "STOCK_APPROVAL_REVIEW_INCOMPLETE";
+          throw error;
+        }
         assertStockMutationExpectation(state, payload);
         const creatorUsername = String(approvalRequest.createdBy ?? "").trim();
         const creatorMatches = (Array.isArray(state.personnel) ? state.personnel : []).filter((person) =>
@@ -12815,11 +12810,32 @@ async function handleApi(req, res, url) {
 
 	        const externalizedChange = await externalizeDataUrls(rawChange);
 	        assertStockMutationExpectation(state, externalizedChange);
-	        const mutation = applyStockMutationToState(state, externalizedChange, operator, {
+	        const mutationVisibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+	        const candidateMutation = applyStockMutationToState(state, externalizedChange, operator, {
             operationLog: null,
-            visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+            visibleSiteIds: mutationVisibleSiteIds,
           });
-		        const approvalPlan = stockApprovalPlan(state, mutation, req, adjustmentContext);
+	        const effectiveChange = filterEffectiveStockMutation({
+	          stock: state.stock,
+	          upsertItems: candidateMutation.upsertItems,
+	          deleteIds: candidateMutation.deleteIds,
+	        });
+	        if (effectiveChange.upsertItems.length === 0 && effectiveChange.deleteIds.length === 0) {
+	          const error = new Error("库存内容没有发生变化，无需保存或提交审批");
+	          error.statusCode = 409;
+	          error.code = "NO_STOCK_CHANGES";
+	          throw error;
+	        }
+	        const mutation = effectiveChange.upsertItems.length === candidateMutation.upsertItems.length
+	          ? candidateMutation
+	          : applyStockMutationToState(state, {
+	              upsert: effectiveChange.upsertItems,
+	              deleteIds: effectiveChange.deleteIds,
+	            }, operator, {
+	              operationLog: null,
+	              visibleSiteIds: mutationVisibleSiteIds,
+	            });
+	        const approvalPlan = stockApprovalPlan(state, mutation, req, adjustmentContext);
 		        if (approvalPlan) {
 	          const recipients = activeAdminRecipients(state);
 	          if (recipients.length === 0) throw new Error("当前没有可处理审批的在职管理员");

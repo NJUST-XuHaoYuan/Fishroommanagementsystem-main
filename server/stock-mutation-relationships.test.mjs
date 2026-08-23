@@ -5,6 +5,7 @@ import {
   assertStockMutationExpectation,
   authoritativeStockMutationSiteId,
   buildStockMutationExpectation,
+  stockConcurrencySnapshot,
   validateStockMutationRelationships,
 } from "./stock-mutation-relationships.mjs";
 
@@ -185,6 +186,44 @@ test("legacy stock display normalization does not create a false CAS conflict", 
   assert.equal(assertStockMutationExpectation(state, payload), true);
 });
 
+test("canonical stock snapshots align legacy sold/cost and blank default fields", () => {
+  const legacy = {
+    id: " stock-a ",
+    siteId: "nanjing",
+    productId: "product-a",
+    batchId: "batch-a",
+    subTankId: "tank-a",
+    status: "sold",
+    cost: 88,
+    lossDate: " ",
+    lossReason: "   ",
+    code: " ",
+    notes: "   ",
+  };
+  const displayed = {
+    id: "stock-a",
+    siteId: "nanjing",
+    productId: "product-a",
+    batchId: "batch-a",
+    subTankId: "tank-a",
+    status: "healthy",
+    sold: true,
+    lost: false,
+    lossDate: "",
+    lossReason: "",
+    lossProof: [],
+    inDate: "",
+    basePrice: 88,
+    priceOverridden: false,
+    commissionRate: 0,
+    code: "",
+    notes: "",
+  };
+
+  assert.deepEqual(stockConcurrencySnapshot(legacy), stockConcurrencySnapshot(displayed));
+  assert.equal(stockConcurrencySnapshot({ ...displayed, status: undefined }).status, "healthy");
+});
+
 test("the stock save route enforces client CAS before applying and filters its response", () => {
   const start = localServerSource.indexOf('if (url.pathname === "/api/stock/save"');
   const end = localServerSource.indexOf('\n\t\t  if (url.pathname === "/api/maintenance/save"', start);
@@ -194,6 +233,56 @@ test("the stock save route enforces client CAS before applying and filters its r
   const expectationIndex = route.indexOf("assertStockMutationExpectation(state, externalizedChange)");
   const applyIndex = route.indexOf("applyStockMutationToState(state, externalizedChange");
   assert.ok(expectationIndex >= 0 && applyIndex > expectationIndex);
+  const noChangesIndex = route.indexOf('error.code = "NO_STOCK_CHANGES"');
+  const approvalPlanIndex = route.indexOf("stockApprovalPlan(state, mutation");
+  const requestIndex = route.indexOf("ensureApprovalNotifications(");
+  const writeIndex = route.indexOf("UPDATE app_state");
+  assert.ok(noChangesIndex > applyIndex && approvalPlanIndex > noChangesIndex && requestIndex > approvalPlanIndex);
+  assert.ok(writeIndex > noChangesIndex);
   assert.match(route, /siteVisibilityFilteredState\(nextState, req\.auth\?\.account\)/);
   assert.doesNotMatch(route, /stock:\s*mutation\.stock/);
+});
+
+test("stock approval requests bind payload, CAS expectation and snapshot to effective changes", () => {
+  const start = localServerSource.indexOf("function stockApprovalPlan(");
+  const end = localServerSource.indexOf("\nfunction findSubTank(", start);
+  assert.ok(start >= 0 && end > start);
+  const plan = localServerSource.slice(start, end);
+
+  assert.match(plan, /const effectiveChange = filterEffectiveStockMutation\(/);
+  assert.match(plan, /error\.code = "NO_STOCK_CHANGES"/);
+  assert.match(plan, /buildStockMutationExpectation\(state, \{\s*upsert: effectiveUpsertItems,\s*deleteIds: effectiveDeleteIds,/);
+  assert.match(plan, /const payload = \{\s*upsert: effectiveUpsertItems,\s*deleteIds: effectiveDeleteIds,/);
+  assert.match(plan, /buildStockChangeSnapshot\(\{\s*upsertItems: effectiveUpsertItems,\s*deleteIds: effectiveDeleteIds,/);
+});
+
+test("stock detail and approval decisions share the canonical review-completeness gate", () => {
+  const detailStart = localServerSource.indexOf("function stockApprovalDetailsForRequest(");
+  const detailEnd = localServerSource.indexOf("\nfunction stockApprovalPlan(", detailStart);
+  assert.ok(detailStart >= 0 && detailEnd > detailStart);
+  const detail = localServerSource.slice(detailStart, detailEnd);
+  assert.match(detail, /stockApprovalReviewDetails\(approvalRequest, state\)/);
+  assert.match(detail, /stockApprovalDetailsForResponse\(review\.stockDetails\)/);
+
+  const decisionStart = localServerSource.indexOf('if (url.pathname === "/api/approvals/stock"');
+  const decisionEnd = localServerSource.indexOf('if (url.pathname === "/api/stock/save"', decisionStart);
+  assert.ok(decisionStart >= 0 && decisionEnd > decisionStart);
+  const decisionRoute = localServerSource.slice(decisionStart, decisionEnd);
+  const reviewIndex = decisionRoute.indexOf("stockApprovalReviewDetails(approvalRequest, state)");
+  const expectationIndex = decisionRoute.indexOf("assertStockMutationExpectation(state, payload)");
+  assert.ok(reviewIndex >= 0 && expectationIndex > reviewIndex);
+  assert.match(decisionRoute, /STOCK_APPROVAL_REVIEW_INCOMPLETE/);
+});
+
+test("stock approval rejection requires a non-empty bounded reason before opening the transaction", () => {
+  const decisionStart = localServerSource.indexOf('if (url.pathname === "/api/approvals/stock"');
+  const decisionEnd = localServerSource.indexOf('if (url.pathname === "/api/stock/save"', decisionStart);
+  assert.ok(decisionStart >= 0 && decisionEnd > decisionStart);
+  const decisionRoute = localServerSource.slice(decisionStart, decisionEnd);
+  const noteIndex = decisionRoute.indexOf('const note = String(body.note ?? "").trim().slice(0, 500)');
+  const requiredIndex = decisionRoute.indexOf('if (decision === "rejected" && !note)');
+  const transactionIndex = decisionRoute.indexOf('await client.query("BEGIN")');
+  assert.ok(noteIndex >= 0 && requiredIndex > noteIndex && transactionIndex > requiredIndex);
+  assert.match(decisionRoute, /STOCK_APPROVAL_REJECTION_NOTE_REQUIRED/);
+  assert.match(decisionRoute, /驳回库存审批时请填写处理说明/);
 });
