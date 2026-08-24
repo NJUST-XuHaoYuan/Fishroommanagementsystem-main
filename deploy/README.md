@@ -94,6 +94,21 @@ Open:
 http://SERVER_IP:8787
 ```
 
+## Domain and HTTPS
+
+The production domain uses host-level Nginx while the Docker frontend remains
+available on port `8787`:
+
+- `nginx-fishroom.conf`: HTTP bootstrap proxy used before a certificate exists.
+- `nginx-fishroom-ssl.conf`: HTTPS proxy and HTTP-to-HTTPS redirect.
+- `certbot-dnspod-hook.py`: DNSPod DNS-01 hook for unattended certificate renewal.
+- `certbot-reload-nginx.sh`: reloads Nginx after Certbot replaces a certificate.
+
+The DNS hook reads `COS_SECRET_ID` and `COS_SECRET_KEY` from the running
+`fishroom-backend` container. Those credentials must retain DNSPod record
+permissions, and the container name can be overridden with
+`FISHROOM_BACKEND_CONTAINER`.
+
 ## Optional: import current local data
 
 Run this after the database container is healthy:
