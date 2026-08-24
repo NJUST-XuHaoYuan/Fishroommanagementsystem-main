@@ -5,12 +5,13 @@
 - `GET /api/public/catalog`
 - `GET /api/public/bio-records?stockItemId=...`
 
-## 当前开发配置
+## 当前发布配置
 
 - 小程序 AppID：`wxcf900cefaee1432b`
-- 本地调试接口：`http://129.211.211.201:8787`
-- 开发者工具本地私有配置会关闭合法域名校验，该文件不会提交到 Git。
-- 真机预览检测到接口仍为 HTTP 时，会自动使用仓库内的公开鱼单快照和本地缩略图，不会停在加载失败页面。
+- 正式接口：`https://www.marineforest.com.cn`
+- `request` 合法域名：`https://www.marineforest.com.cn`
+- `downloadFile` 合法域名：`https://www.marineforest.com.cn`、`https://cdn.aquaml.com`
+- 开发者工具本地私有配置不提交到 Git；正式预览前应开启合法域名校验。
 
 公开鱼单快照可在仓库根目录更新。生成器会同步读取每条公开库存的维护记录，因此需要等待几分钟：
 
@@ -18,7 +19,7 @@
 node scripts/generate-wechat-fallback.mjs
 ```
 
-开发者工具仍优先请求实时接口；内置快照仅用于真机无法访问 HTTP 接口或实时接口临时不可用时降级展示。
+小程序优先请求实时接口；内置快照仅在实时接口临时不可用时降级展示。
 
 ## 导入与调试
 
@@ -29,12 +30,12 @@ node scripts/generate-wechat-fallback.mjs
 
 ## 正式发布前
 
-1. 为公开接口配置可用的 HTTPS 域名。
-2. 在 `utils/config.js` 中把 `apiBaseUrl` 改为该 HTTPS 地址。
-3. 在微信公众平台配置对应的 `request` 和图片下载合法域名。
-4. 在开发者工具中恢复合法域名校验并完成真机预览。
+1. 确认正式 HTTPS 接口、目录接口和维护记录接口可用。
+2. 在微信公众平台配置上述 `request` 和 `downloadFile` 合法域名。
+3. 在开发者工具中开启合法域名校验并完成真机预览。
+4. 上传稳定版本，设置体验版并测试后提交审核。
 
-微信小程序正式环境不支持裸 IP 和 HTTP 图片地址。内置快照可以用于开发版真机预览，但正式发布和实时库存仍需配置 HTTPS 域名；快照不会自动同步后台库存变化。
+微信小程序正式环境不支持裸 IP 和 HTTP 图片地址。内置快照只用于接口故障时兜底，不会自动同步后台库存变化。
 
 ## 页面
 
