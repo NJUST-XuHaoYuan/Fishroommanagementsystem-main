@@ -7,7 +7,7 @@
 
 ## 当前发布配置
 
-- 小程序 AppID：`wxcf900cefaee1432b`
+- 小程序 AppID：`wxb2bc8f8635f3003b`
 - 正式接口：`https://www.marineforest.com.cn`
 - `request` 合法域名：`https://www.marineforest.com.cn`
 - `downloadFile` 合法域名：`https://www.marineforest.com.cn`、`https://cdn.aquaml.com`
