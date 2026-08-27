@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
 import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
+import { MAX_ACTUAL_SHIPPING_FEE, normalizedPositiveShippingFee } from "../utils/shipmentFee";
 
 function todayDateString(): string {
   const now = new Date();
@@ -66,6 +67,7 @@ export function ShipDialog({
   const [notes, setNotes] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [actualShippingFeeError, setActualShippingFeeError] = useState("");
   const shipMethod: "express" | "pickup" = pickupOnly ? "pickup" : "express";
   const shippingFeeMode = orderShippingFeeMode(order);
 
@@ -87,13 +89,16 @@ export function ShipDialog({
       );
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
+      setSaving(false);
+      setActualShippingFeeError("");
     }
   }, [open, order?.id, pickupOnly]); // eslint-disable-line
 
   if (!order) return null;
 
   const orderShippingFee = order.shippingFee ?? 0;
-  const feeDiff = actualShippingFee - orderShippingFee;
+  const normalizedActualShippingFee = normalizedPositiveShippingFee(actualShippingFee);
+  const feeDiff = (normalizedActualShippingFee ?? actualShippingFee) - orderShippingFee;
 
   const toggleItem = (id: string) => {
     setSelectedIds((prev) => {
@@ -108,22 +113,43 @@ export function ShipDialog({
   };
 
   const confirm = async () => {
+    if (saving) return;
+    setActualShippingFeeError("");
     if (!shipDate) return toast.error("请填写出库日期");
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
     if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
-    if (shipMethod === "express" && shippingFeeMode === "free" && actualShippingFee <= 0) {
-      return toast.error("包邮订单发货时必须填写实际运费");
+    let submittedActualShippingFee = actualShippingFee;
+    if (shipMethod === "express" && shippingFeeMode !== "collect") {
+      const zeroPendingFeeAllowed = shippingFeeMode === "prepaid" && actualShippingFee === 0;
+      if (!zeroPendingFeeAllowed && normalizedActualShippingFee === null) {
+        const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+        setActualShippingFeeError(message);
+        return toast.error(message);
+      }
+      submittedActualShippingFee = normalizedActualShippingFee ?? 0;
+      setActualShippingFee(submittedActualShippingFee);
     }
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
     setSaving(true);
-    const ok = await onShip({ shipDate, shipMethod, carrier, trackingNo, actualShippingFee, notes, selectedItemIds: [...selectedIds] });
-    setSaving(false);
-    if (ok !== false) onOpenChange(false);
+    try {
+      const ok = await onShip({
+        shipDate,
+        shipMethod,
+        carrier,
+        trackingNo,
+        actualShippingFee: submittedActualShippingFee,
+        notes,
+        selectedItemIds: [...selectedIds],
+      });
+      if (ok !== false) onOpenChange(false);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!saving) onOpenChange(nextOpen); }}>
       <DialogContent
         aria-describedby={undefined}
         className="max-w-none sm:max-w-none w-[min(92vw,680px)] max-h-[90vh] min-h-0 flex flex-col"
@@ -243,16 +269,27 @@ export function ShipDialog({
             </div>
             {shipMethod === "express" && shippingFeeMode !== "collect" && (
               <div className="grid gap-1.5">
-                <Label className="text-sm">
+                <Label htmlFor="ship-actual-shipping-fee" className="text-sm">
                   实际运费（¥）
                   {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
                 </Label>
                 <Input
-                  type="number" min={0} step={0.01}
+                  id="ship-actual-shipping-fee"
+                  type="number" min={0} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
                   value={actualShippingFee || ""}
                   placeholder={shippingFeeMode === "prepaid" ? "可发货后补录" : "0"}
-                  onChange={(e) => setActualShippingFee(Number(e.target.value))}
+                  aria-invalid={Boolean(actualShippingFeeError)}
+                  aria-describedby={actualShippingFeeError ? "ship-actual-shipping-fee-error" : undefined}
+                  onChange={(e) => {
+                    setActualShippingFee(Number(e.target.value));
+                    if (actualShippingFeeError) setActualShippingFeeError("");
+                  }}
                 />
+                {actualShippingFeeError && (
+                  <p id="ship-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">
+                    {actualShippingFeeError}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -276,7 +313,7 @@ export function ShipDialog({
               寄付可以先出库和发货，实际运费必须在确认收货和完成订单前补录。
             </div>
           )}
-          {shipMethod === "express" && shippingFeeMode === "prepaid" && actualShippingFee > 0 && Math.abs(feeDiff) > 0.005 && (
+          {shipMethod === "express" && shippingFeeMode === "prepaid" && normalizedActualShippingFee !== null && Math.abs(feeDiff) > 0.005 && (
             <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-sm ${
               feeDiff > 0
                 ? "bg-amber-50 text-amber-800 border border-amber-200"
@@ -299,7 +336,7 @@ export function ShipDialog({
         </div>
 
         <DialogFooter className="border-t pt-3 shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
           <Button onClick={confirm} disabled={saving}>
             <PackageCheck className="size-4 mr-1" />
             {saving ? "保存中..." : pickupOnly ? "确认自提" : "确认出库"}

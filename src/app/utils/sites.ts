@@ -1,4 +1,4 @@
-import type { Store, User } from "../store";
+import type { StockItem, Store, TankGroup, User } from "../store";
 
 export const DEFAULT_SITE_ID = "nanjing";
 export const ALL_SITE_ID = "all";
@@ -49,7 +49,7 @@ export function visibleSitesForUser(user: User, state?: Partial<Store>) {
   const sites = getSites(state);
   if (!user || user.role === "admin") return sites;
   const visibleSiteIds = normalizeVisibleSiteIds(user.visibleSiteIds, sites);
-  if (visibleSiteIds.length === 0) return sites;
+  if (visibleSiteIds.length === 0) return [];
   const allowedIds = new Set(visibleSiteIds);
   return sites.filter((site) => allowedIds.has(site.id));
 }
@@ -67,6 +67,26 @@ export function siteName(state: Partial<Store> | undefined, siteId: unknown): st
 export function matchesSite(item: { siteId?: string } | null | undefined, siteId: SiteScopeId): boolean {
   if (siteId === ALL_SITE_ID) return true;
   return normalizeSiteId(item?.siteId) === siteId;
+}
+
+/**
+ * Physical stock follows its current tank's site. Legacy rows that no longer
+ * resolve to a tank fall back to their own siteId, matching the server scope.
+ */
+export function stockMatchesSite(
+  item: Pick<StockItem, "siteId" | "subTankId"> | null | undefined,
+  siteId: SiteScopeId,
+  tankGroups: readonly Pick<TankGroup, "siteId" | "subTanks">[] = [],
+): boolean {
+  if (siteId === ALL_SITE_ID) return true;
+  for (const group of tankGroups) {
+    const subTank = (Array.isArray(group.subTanks) ? group.subTanks : [])
+      .find((tank) => tank.id === item?.subTankId);
+    if (!subTank) continue;
+    if (group.siteId) return normalizeSiteId(group.siteId) === siteId;
+    break;
+  }
+  return matchesSite(item, siteId);
 }
 
 export function withSite<T extends object>(item: T, siteId: string): T & { siteId: string } {

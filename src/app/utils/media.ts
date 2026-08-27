@@ -88,7 +88,18 @@ export async function resolveMediaUrl(src?: string, options: ResolveMediaOptions
   return signedUrl;
 }
 
-export async function uploadOriginalMedia(file: File): Promise<string> {
+type MediaUploadProgress = {
+  phase: "uploading" | "processing";
+  loaded: number;
+  total: number;
+  percent: number;
+};
+
+type MediaUploadOptions = {
+  onProgress?: (progress: MediaUploadProgress) => void;
+};
+
+export async function uploadOriginalMedia(file: File, options: MediaUploadOptions = {}): Promise<string> {
   const mime = mediaMimeFromFile(file);
   if (!mime.startsWith("image/") && !mime.startsWith("video/")) {
     throw new Error("只支持上传图片或视频文件");
@@ -100,20 +111,48 @@ export async function uploadOriginalMedia(file: File): Promise<string> {
     );
   }
 
-  const response = await fetch("/api/media/upload", {
-    method: "POST",
-    headers: {
-      ...authHeaders(),
-      "Content-Type": mime,
-      "X-File-Name": encodeURIComponent(file.name),
-    },
-    body: file,
+  return new Promise<string>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/media/upload");
+    for (const [key, value] of Object.entries(authHeaders())) request.setRequestHeader(key, value);
+    request.setRequestHeader("Content-Type", mime);
+    request.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    request.timeout = mime.startsWith("video/") ? 10 * 60 * 1000 : 2 * 60 * 1000;
+    request.upload.onprogress = (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
+      const loaded = Math.min(event.loaded, total);
+      options.onProgress?.({
+        phase: "uploading",
+        loaded,
+        total,
+        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+      });
+    };
+    request.upload.onload = () => {
+      options.onProgress?.({
+        phase: "processing",
+        loaded: file.size,
+        total: file.size,
+        percent: 100,
+      });
+    };
+    request.onerror = () => reject(new Error("网络连接失败，请检查网络后重试"));
+    request.ontimeout = () => reject(new Error("上传或视频处理超时，请剪短后重试"));
+    request.onload = () => {
+      let data: any = {};
+      try {
+        data = JSON.parse(request.responseText || "{}");
+      } catch {
+        data = {};
+      }
+      if (request.status < 200 || request.status >= 300 || typeof data?.url !== "string") {
+        reject(new Error(data?.error || `HTTP ${request.status}`));
+        return;
+      }
+      resolve(data.url);
+    };
+    request.send(file);
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || typeof data?.url !== "string") {
-    throw new Error(data?.error || `HTTP ${response.status}`);
-  }
-  return data.url;
 }
 
 export function useResolvedMediaUrl(src?: string, options: ResolveMediaOptions = {}) {
@@ -168,13 +207,86 @@ function triggerDownload(url: string, filename: string) {
 
 type DownloadMediaOptions = {
   mediaType?: "image" | "video";
+  stockItemId?: string;
+  recordId?: string;
 };
 
-export async function downloadMedia(src: string | undefined, filename: string, options: DownloadMediaOptions = {}) {
+export type MediaDownloadResult = {
+  mode: "download" | "mobile-open";
+};
+
+function prefersMobileVideoOpen() {
+  const userAgent = String(window.navigator?.userAgent ?? "");
+  const isDesktopModeIPad = window.navigator?.platform === "MacIntel" &&
+    Number(window.navigator?.maxTouchPoints ?? 0) > 1;
+  return /MicroMessenger|iPhone|iPad|iPod/i.test(userAgent) || isDesktopModeIPad;
+}
+
+function openMobileDownloadWindow() {
+  const downloadWindow = window.open("about:blank", "_blank");
+  if (!downloadWindow) return null;
+  downloadWindow.opener = null;
+  try {
+    downloadWindow.document.title = "正在准备视频";
+    downloadWindow.document.body.textContent = "正在准备视频，请稍候…";
+    downloadWindow.document.body.style.cssText = "font:16px/1.5 system-ui,sans-serif;padding:24px;color:#334155";
+  } catch {
+    // Some embedded browsers deny access to the provisional page; navigation still works.
+  }
+  return downloadWindow;
+}
+
+async function authorizedBioMediaDownloadUrl(
+  src: string,
+  filename: string,
+  options: DownloadMediaOptions,
+) {
+  const query = new URLSearchParams({
+    url: src,
+    filename,
+    mediaType: options.mediaType === "image" ? "image" : "video",
+    stockItemId: String(options.stockItemId ?? ""),
+    recordId: String(options.recordId ?? ""),
+  });
+  const response = await fetch(`/api/bio-records/media-download-url?${query.toString()}`, {
+    headers: authHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data?.url !== "string" || !data.url) {
+    throw new Error(data?.error || `HTTP ${response.status}`);
+  }
+  return data.url as string;
+}
+
+export async function downloadMedia(
+  src: string | undefined,
+  filename: string,
+  options: DownloadMediaOptions = {},
+): Promise<MediaDownloadResult> {
   if (!src) throw new Error("Missing media URL");
   if (src.startsWith("data:")) {
     triggerDownload(src, filename);
-    return;
+    return { mode: "download" };
+  }
+
+  if (options.stockItemId && options.recordId) {
+    const useMobileWindow = options.mediaType === "video" && prefersMobileVideoOpen();
+    const mobileWindow = useMobileWindow ? openMobileDownloadWindow() : null;
+    if (useMobileWindow && !mobileWindow) {
+      throw new Error("当前浏览器阻止打开下载页，请允许弹窗或在默认浏览器中打开后重试");
+    }
+    try {
+      const downloadUrl = await authorizedBioMediaDownloadUrl(src, filename, options);
+      if (mobileWindow && !mobileWindow.closed) {
+        mobileWindow.location.replace(downloadUrl);
+        return { mode: "mobile-open" };
+      }
+      triggerDownload(downloadUrl, filename);
+      return { mode: "download" };
+    } catch (error) {
+      mobileWindow?.close();
+      throw error;
+    }
   }
 
   const targetUrl = (() => {
@@ -201,4 +313,5 @@ export async function downloadMedia(src: string | undefined, filename: string, o
   } finally {
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   }
+  return { mode: "download" };
 }

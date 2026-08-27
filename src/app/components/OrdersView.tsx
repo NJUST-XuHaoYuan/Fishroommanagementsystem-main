@@ -1,9 +1,9 @@
 import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
-  useStore, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
-  Customer, CustomerType, Personnel, ShipmentStatus, Store, TankGroup, uid,
+  useStore, BioRecord, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
+  Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
-  isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
+  isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
   configuredOrderPackagingFee, ShippingFeeMode,
 } from "../store";
 import { DataTable } from "./common";
@@ -36,8 +36,8 @@ import {
   CircleDollarSign, UploadCloud,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
-import { usePermission } from "../utils/permissions";
+import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
@@ -64,6 +64,15 @@ import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
+  beginMaintenanceRequest,
+  createMaintenanceClientMutationId,
+  finishMaintenanceRequest,
+  isMaintenanceRequestInFlight,
+  maintenanceMutationTicket,
+  maintenanceStockExpectedSnapshot,
+  type MaintenanceMutationTicket,
+} from "../utils/maintenanceMutation";
+import {
   getBillableShippingFee,
   hasActualShippingFee,
   orderHasPendingActualShippingFee,
@@ -74,6 +83,12 @@ import {
   SHIPPING_FEE_MODE_OPTIONS,
 } from "../utils/orderFees";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
+import {
+  actualShippingFeePayload,
+  canApplyActualShippingFeeResponse,
+  MAX_ACTUAL_SHIPPING_FEE,
+  normalizedPositiveShippingFee,
+} from "../utils/shipmentFee";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -235,12 +250,14 @@ type CreditSaleRequestDialogState = {
 class OrderApiError extends Error {
   code: string;
   payload: CreditSaleRequiredPayload;
+  status: number;
 
-  constructor(message: string, payload: CreditSaleRequiredPayload = {}) {
+  constructor(message: string, payload: CreditSaleRequiredPayload = {}, status = 0) {
     super(message);
     this.name = "OrderApiError";
     this.code = String(payload.code ?? "");
     this.payload = payload;
+    this.status = status;
   }
 }
 
@@ -255,7 +272,7 @@ async function postOrderApi(path: string, body: Record<string, unknown>) {
     window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
   }
   if (!response.ok || !result.ok) {
-    throw new OrderApiError(result.error || `HTTP ${response.status}`, result);
+    throw new OrderApiError(result.error || `HTTP ${response.status}`, result, response.status);
   }
   return result;
 }
@@ -267,22 +284,46 @@ function mergeOperationLog(current: Store, operationLog: Store["operationLogs"][
     .slice(0, 10000);
 }
 
+function mergeApiRecord<T extends { id: string }>(items: T[], record?: T): T[] {
+  if (!record) return items;
+  const exists = items.some((item) => item.id === record.id);
+  return exists
+    ? items.map((item) => item.id === record.id ? record : item)
+    : [record, ...items];
+}
+
 function applyOrderApiResult(
   setState: (value: Store | ((current: Store) => Store)) => void,
   result: {
     orders?: Store["orders"];
     shipments?: Store["shipments"];
+    order?: Store["orders"][number];
+    shipment?: Store["shipments"][number];
     stock?: Store["stock"];
+    inventoryProjection?: Store["inventoryProjection"];
     operationLog?: Store["operationLogs"][number];
-  }
+  },
+  options: {
+    requireExistingShipmentId?: string;
+    shouldApply?: () => boolean;
+  } = {}
 ) {
-  setState((current) => ({
-    ...current,
-    orders: Array.isArray(result.orders) ? result.orders : current.orders,
-    shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
-    stock: Array.isArray(result.stock) ? result.stock : current.stock,
-    operationLogs: mergeOperationLog(current, result.operationLog),
-  }));
+  setState((current) => {
+    if (options.shouldApply && !options.shouldApply()) return current;
+    if (options.requireExistingShipmentId && !current.shipments.some(
+      (shipment) => shipment.id === options.requireExistingShipmentId
+    )) return current;
+    const orders = Array.isArray(result.orders) ? result.orders : current.orders;
+    const shipments = Array.isArray(result.shipments) ? result.shipments : current.shipments;
+    return {
+      ...current,
+      orders: mergeApiRecord(orders, result.order),
+      shipments: mergeApiRecord(shipments, result.shipment),
+      stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
+      operationLogs: mergeOperationLog(current, result.operationLog),
+    };
+  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -493,6 +534,17 @@ function todayDateString(): string {
   return local.toISOString().slice(0, 10);
 }
 
+function expectedBioRecord(record: BioRecord) {
+  return {
+    id: record.id,
+    stockItemId: record.stockItemId,
+    date: record.date,
+    text: record.text,
+    photos: [...(record.photos ?? [])],
+    videos: [...(record.videos ?? [])],
+  };
+}
+
 function orderNoSequence(orderNo: string): number {
   const match = orderNo.match(/(\d+)$/);
   return match ? Number(match[1]) || 0 : 0;
@@ -537,50 +589,49 @@ function formatShipmentCreatedAt(value?: string): string {
   return formatLocalDateTimeMinute(value, "历史发货未记录");
 }
 
-function getDefaultContactPerson(personnel: Personnel[], username?: string): string {
-  const currentAccount = username
-    ? personnel.find((person) =>
-        (person.username === username || person.name === username) &&
-        !isPersonnelResigned(person)
-      )
-    : undefined;
-  if (currentAccount) return currentAccount.name;
-  return personnel.find((person) => !isPersonnelResigned(person))?.name ?? "";
+function normalizedContactReference(value?: string): string {
+  return String(value ?? "").trim();
 }
 
-function normalizeContactPersonName(value?: string): string {
-  return String(value ?? "").trim().toLowerCase();
+function getDefaultContactPersonnel(personnel: Personnel[], username?: string): Personnel | undefined {
+  const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
+  const reference = normalizedContactReference(username);
+  if (!reference) return activePersonnel[0];
+  const usernameMatch = activePersonnel.find((person) => normalizedContactReference(person.username) === reference);
+  if (usernameMatch) return usernameMatch;
+  const nameMatches = activePersonnel.filter((person) => normalizedContactReference(person.name) === reference);
+  return nameMatches.length === 1 ? nameMatches[0] : activePersonnel[0];
 }
 
-function getCurrentContactAliases(personnel: Personnel[], username?: string): Set<string> {
-  const aliases = new Set<string>();
-  const add = (value?: string) => {
-    const normalized = normalizeContactPersonName(value);
-    if (normalized) aliases.add(normalized);
-  };
-  add(username);
-  const currentAccount = username
-    ? personnel.find((person) =>
-        (person.username === username || person.name === username) &&
-        !isPersonnelResigned(person)
-      )
-    : undefined;
-  add(currentAccount?.name);
-  add(currentAccount?.username);
-  return aliases;
+function resolveOrderContactPersonnel(
+  personnel: Personnel[],
+  order: Pick<Order, "contactPersonnelId" | "contactPerson">,
+  requireEnabledAccount = false
+): Personnel | undefined {
+  const isEligible = (person: Personnel) =>
+    requireEnabledAccount ? isPersonnelAccountEnabled(person) : !isPersonnelResigned(person);
+  const personnelId = normalizedContactReference(order.contactPersonnelId);
+  if (personnelId) {
+    return personnel.find((person) =>
+      normalizedContactReference(person.id) === personnelId && isEligible(person)
+    );
+  }
+
+  const reference = normalizedContactReference(order.contactPerson);
+  if (!reference) return undefined;
+  const matches = personnel.filter((person) =>
+    isEligible(person) &&
+    [person.name, person.username].some((value) => normalizedContactReference(value) === reference)
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function isActiveOrder(order: Order): boolean {
   return order.status !== "completed" && order.status !== "cancelled";
 }
 
-function getContactPersonOptions(personnel: Personnel[], current: string): Personnel[] {
-  const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
-  const names = new Set(activePersonnel.map((person) => person.name));
-  if (current && !names.has(current)) {
-    return [{ id: `current-${current}`, name: current, role: "历史记录", phone: "", notes: "" }, ...activePersonnel];
-  }
-  return activePersonnel;
+function getContactPersonOptions(personnel: Personnel[]): Personnel[] {
+  return personnel.filter((person) => !isPersonnelResigned(person));
 }
 
 function excelEscape(value: unknown): string {
@@ -2093,12 +2144,14 @@ function ShipmentActionDialog({
   const [packingProof, setPackingProof] = useState<string[]>([]);
   const [actualShippingFee, setActualShippingFee] = useState(0);
   const [savingShippingFee, setSavingShippingFee] = useState(false);
+  const [actualShippingFeeError, setActualShippingFeeError] = useState("");
 
   useEffect(() => {
     if (open && shipment) {
       setPackingProof([...(shipment.packingProof ?? [])]);
       setActualShippingFee(Number(shipment.actualShippingFee ?? 0));
       setSavingShippingFee(false);
+      setActualShippingFeeError("");
     }
   }, [open, shipment?.id]);
 
@@ -2106,16 +2159,36 @@ function ShipmentActionDialog({
   const method = shipment.shipMethod === "pickup" ? "上门自取" : (shipment.carrier || "快递");
   const shippingFeeMode = orderShippingFeeMode(order);
   const shippingFeePending = !!order && shipmentHasPendingActualShippingFee(order, shipment);
+  const actionLocked = saving || savingShippingFee;
 
   const saveActualShippingFee = async () => {
-    if (actualShippingFee <= 0) {
-      toast.error("请填写大于 0 的实际运费");
-      return;
+    if (savingShippingFee || saving) return false;
+    const normalizedFee = normalizedPositiveShippingFee(actualShippingFee);
+    if (normalizedFee === null) {
+      const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+      setActualShippingFeeError(message);
+      toast.error(message);
+      return false;
     }
+    setActualShippingFee(normalizedFee);
+    setActualShippingFeeError("");
     setSavingShippingFee(true);
-    const ok = await onSaveActualShippingFee(shipment, actualShippingFee);
-    setSavingShippingFee(false);
-    return ok;
+    try {
+      const ok = await onSaveActualShippingFee(shipment, normalizedFee);
+      if (ok) setActualShippingFeeError("");
+      return ok;
+    } catch (error) {
+      const message = error instanceof OrderApiError && error.status === 401
+        ? "登录状态已失效，请重新登录后再保存"
+        : error instanceof Error && error.message
+        ? error.message
+        : "运费保存失败，请重试";
+      setActualShippingFeeError(message);
+      toast.error(message);
+      return false;
+    } finally {
+      setSavingShippingFee(false);
+    }
   };
 
   if (shipment.status === "outbound") {
@@ -2128,8 +2201,14 @@ function ShipmentActionDialog({
     };
 
     return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent aria-describedby={undefined} className="max-w-2xl">
+      <Dialog open={open} onOpenChange={(nextOpen) => { if (!actionLocked) onOpenChange(nextOpen); }}>
+        <DialogContent
+          aria-describedby={undefined}
+          aria-busy={actionLocked}
+          onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
+          onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
+          className={`max-w-2xl ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+        >
           <DialogHeader>
             <DialogTitle>出库发货确认</DialogTitle>
           </DialogHeader>
@@ -2155,17 +2234,17 @@ function ShipmentActionDialog({
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>关闭</Button>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>关闭</Button>
             <Button
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
               onClick={() => onCancelShipment(shipment)}
-              disabled={saving}
+              disabled={actionLocked}
             >
               <RotateCcw className="size-4 mr-1" />
               取消出库
             </Button>
-            <Button onClick={confirmShipment} disabled={saving}>
+            <Button onClick={confirmShipment} disabled={actionLocked}>
               <Truck className="size-4 mr-1" />
               {saving ? "保存中..." : "确认发货"}
             </Button>
@@ -2176,8 +2255,14 @@ function ShipmentActionDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-w-sm">
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!actionLocked) onOpenChange(nextOpen); }}>
+      <DialogContent
+        aria-describedby={undefined}
+        aria-busy={actionLocked}
+        onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
+        onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
+        className={`max-w-sm ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+      >
         <DialogHeader>
           <DialogTitle>处理运输状态</DialogTitle>
         </DialogHeader>
@@ -2202,15 +2287,27 @@ function ShipmentActionDialog({
                 id="shipment-actual-shipping-fee"
                 type="number"
                 min={0}
+                max={MAX_ACTUAL_SHIPPING_FEE}
                 step={0.01}
                 value={actualShippingFee || ""}
                 placeholder="发货后补录"
-                onChange={(event) => setActualShippingFee(Number(event.target.value))}
+                disabled={actionLocked}
+                aria-invalid={Boolean(actualShippingFeeError)}
+                aria-describedby={actualShippingFeeError ? "shipment-actual-shipping-fee-error" : undefined}
+                onChange={(event) => {
+                  setActualShippingFee(Number(event.target.value));
+                  if (actualShippingFeeError) setActualShippingFeeError("");
+                }}
               />
-              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={saving || savingShippingFee}>
+              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={actionLocked}>
                 {savingShippingFee ? "保存中..." : shippingFeePending ? "补录运费" : "更新运费"}
               </Button>
             </div>
+            {actualShippingFeeError && (
+              <p id="shipment-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">
+                {actualShippingFeeError}
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">寄付可以先发货，实际运费必须在确认收货和完成订单前补录。</p>
           </div>
         )}
@@ -2219,7 +2316,7 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
-            disabled={saving || savingShippingFee || shippingFeePending}
+            disabled={actionLocked || shippingFeePending}
             title={shippingFeePending ? "请先补录实际运费" : undefined}
           >
             <CheckCircle className="size-4" />
@@ -2229,6 +2326,7 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-red-700 border-red-200 hover:bg-red-50"
             onClick={() => onDamage(shipment)}
+            disabled={actionLocked}
           >
             <XCircle className="size-4" />
             报损处理
@@ -2237,13 +2335,14 @@ function ShipmentActionDialog({
             variant="outline"
             className="h-auto py-3 text-amber-700 border-amber-200 hover:bg-amber-50"
             onClick={() => onCancelShipment(shipment)}
+            disabled={actionLocked}
           >
             <RotateCcw className="size-4" />
             取消发货
           </Button>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>取消</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -2306,7 +2405,7 @@ function ReportDamageDialog({
 
   const getProduct = (id: string) => state.products.find((product) => product.id === id);
   const getStockItem = (id: string) => state.stock.find((stock) => stock.id === id);
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
   const productSummary = (product?: Product) =>
     [
       product?.size ? `规格 ${product.size}` : "",
@@ -3042,8 +3141,9 @@ function StockPickerBioDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const { state, setState, saveStateTransform, saveMaintenanceAction } = useStore();
+  const { state, setState, saveBioRecordChange, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
+  const lossPermission = usePermission("lossRecords");
   const today = todayDateString();
   const nowForRecord = nowDatetimeLocal();
   const photoRef = useRef<HTMLInputElement>(null);
@@ -3063,12 +3163,16 @@ function StockPickerBioDialog({
     dropZoneProps: recordMediaDropZoneProps,
     isDragging: recordMediaDragging,
     isUploading: recordMediaUploading,
+    uploadStatus: recordMediaUploadStatus,
     pasteFiles: pasteRecordMedia,
     uploadImages: uploadRecordPhotos,
     uploadVideos: uploadRecordVideos,
   } = useRecordMediaUpload(setNewRecord, permission.canCreate);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [editingRecordTime, setEditingRecordTime] = useState("");
+  const [bioSaving, setBioSaving] = useState(false);
+  const [downloadingMediaKey, setDownloadingMediaKey] = useState("");
+  const newRecordIdRef = useRef(uid());
   const [targetGroupId, setTargetGroupId] = useState("");
   const [targetSubTankId, setTargetSubTankId] = useState("");
   const [moveNotes, setMoveNotes] = useState("");
@@ -3077,8 +3181,15 @@ function StockPickerBioDialog({
   const [lossReason, setLossReason] = useState("");
   const [lossProof, setLossProof] = useState<string[]>([]);
   const [lossSaving, setLossSaving] = useState(false);
+  const maintenanceTicketRef = useRef<MaintenanceMutationTicket | null>(null);
+  const maintenanceRequestInFlightRef = useRef(false);
 
   const item = stockItemId ? state.stock.find((stock) => stock.id === stockItemId) : null;
+  const canRegisterLoss = canRegisterMaintenanceLoss(permission.canDelete, lossPermission.canCreate);
+  const requireLossPermissions = () => requireMaintenanceLossPermissions(
+    () => permission.requirePermission("delete"),
+    () => lossPermission.requirePermission("create"),
+  );
   const product = item ? state.products.find((entry) => entry.id === item.productId) : undefined;
   const batch = item ? state.batches.find((entry) => entry.id === item.batchId) : undefined;
   const order = item
@@ -3096,6 +3207,7 @@ function StockPickerBioDialog({
     setBioCode(item.code ?? "");
     setBioNotes(item.notes ?? "");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     setEditingRecordId(null);
     setEditingRecordTime("");
     setActionMode("detail");
@@ -3105,6 +3217,7 @@ function StockPickerBioDialog({
     setLossDate(today);
     setLossReason("");
     setLossProof([]);
+    maintenanceTicketRef.current = null;
   }, [open, item?.id, item?.status, item?.notes, today]);
 
   useEffect(() => {
@@ -3156,7 +3269,7 @@ function StockPickerBioDialog({
   };
   const tankName = subTankName(item?.subTankId);
   const targetSubTanks = state.tankGroups.find((group) => group.id === targetGroupId)?.subTanks ?? [];
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
 
   const timeline = item
     ? [
@@ -3171,6 +3284,7 @@ function StockPickerBioDialog({
             text: record.text,
             photos: record.photos ?? [],
             videos: record.videos ?? [],
+            sourceType: record.sourceType,
           })),
         ...(order ? [{ type: "sold" as const, date: order.date, orderNo: order.orderNo }] : []),
       ].sort((a, b) => a.date.localeCompare(b.date))
@@ -3205,18 +3319,21 @@ function StockPickerBioDialog({
         : "将保存鱼的状态、编号和备注。",
     )) return;
     const pendingRecord = savePendingRecord
-      ? bioRecordFromDraft(newRecord, { id: uid(), stockItemId: item.id, date: pendingRecordTime })
+      ? bioRecordFromDraft(newRecord, { id: newRecordIdRef.current, stockItemId: item.id, date: pendingRecordTime })
       : null;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      stock: latest.stock.map((stock) =>
-        stock.id === item.id ? { ...stock, status: bioStatus, code: bioCode.trim(), notes: bioNotes } : stock
-      ),
-      bioRecords: pendingRecord ? [...latest.bioRecords, pendingRecord] : latest.bioRecords,
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "saveDetails",
+      stockItemId: item.id,
+      details: { status: bioStatus, code: bioCode.trim(), notes: bioNotes },
+      expectedDetails: { status: item.status, code: item.code ?? "", notes: item.notes ?? "" },
+      ...(pendingRecord ? { record: expectedBioRecord(pendingRecord) } : {}),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     if (pendingRecord) {
       setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+      newRecordIdRef.current = uid();
     }
     toast.success(pendingRecord ? "状态和观察记录已更新" : "状态已更新");
   };
@@ -3234,22 +3351,21 @@ function StockPickerBioDialog({
       return toast.error("请填写记录内容或上传照片/视频");
     }
     if (!confirmWrite("新增", "将新增一条观察记录。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: [
-        ...latest.bioRecords,
-        {
-          id: uid(),
-          stockItemId: item.id,
-          date: recordTime,
-          text: newRecord.text,
-          photos: newRecord.photos,
-          videos: newRecord.videos,
-        },
-      ],
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const pendingRecord = bioRecordFromDraft(newRecord, {
+      id: newRecordIdRef.current,
+      stockItemId: item.id,
+      date: recordTime,
+    });
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "create",
+      stockItemId: item.id,
+      record: expectedBioRecord(pendingRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
+    newRecordIdRef.current = uid();
     toast.success("记录已添加");
   };
 
@@ -3268,13 +3384,18 @@ function StockPickerBioDialog({
     const minTime = minDatetimeForDate(item.inDate);
     if (minTime && recordTime < minTime) return toast.error("记录时间不能早于入库日期");
     if (!confirmWrite("修改", "将修改这条观察记录的记录时间。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.map((record) =>
-        record.id === editingRecordId ? { ...record, date: recordTime } : record
-      ),
-    }));
-    if (!ok) return toast.error("保存失败，请重试");
+    const currentRecord = state.bioRecords.find((record) => record.id === editingRecordId);
+    if (!currentRecord) return toast.error("记录不存在，请刷新后重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "updateTime",
+      stockItemId: item.id,
+      recordId: editingRecordId,
+      record: { date: recordTime },
+      expectedRecord: expectedBioRecord(currentRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "保存失败，请重试");
     setEditingRecordId(null);
     setEditingRecordTime("");
     toast.success("记录时间已更新");
@@ -3283,11 +3404,18 @@ function StockPickerBioDialog({
   const deleteBioRecord = async (recordId: string) => {
     if (!permission.requirePermission("delete")) return;
     if (!confirmWrite("删除", "将删除这条观察记录。")) return;
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      bioRecords: latest.bioRecords.filter((record) => record.id !== recordId),
-    }));
-    if (!ok) return toast.error("删除失败，请重试");
+    if (!item) return toast.error("生物不存在，请刷新后重试");
+    const currentRecord = state.bioRecords.find((record) => record.id === recordId);
+    if (!currentRecord) return toast.error("记录不存在，请刷新后重试");
+    setBioSaving(true);
+    const result = await saveBioRecordChange({
+      action: "delete",
+      stockItemId: item.id,
+      recordId,
+      expectedRecord: expectedBioRecord(currentRecord),
+    });
+    setBioSaving(false);
+    if (!result.ok) return toast.error(result.error || "删除失败，请重试");
     toast.success("记录已删除");
   };
 
@@ -3301,37 +3429,51 @@ function StockPickerBioDialog({
     setTargetGroupId(defaultGroup?.id ?? "");
     setTargetSubTankId("");
     setMoveNotes("");
+    maintenanceTicketRef.current = null;
     setActionMode("move");
   };
 
   const submitMove = async () => {
     if (!item) return;
     if (!permission.requirePermission("update")) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (!targetSubTankId) return toast.error("请选择目标子缸");
     if (item.subTankId === targetSubTankId) return toast.error("目标子缸与当前子缸相同");
     if (!confirmWrite("移缸", `将移动「${product?.name ?? item.productId}」到目标子缸。`)) return;
-    setMoveSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "move",
+    const change = {
+      mode: "move" as const,
       itemIds: [item.id],
+      expectedItems: [maintenanceStockExpectedSnapshot(item)],
       targetSubTankId,
       moveDate: today,
       moveNotes: moveNotes.trim(),
-    });
-    setMoveSaving(false);
-    if (!ok) return toast.error("移缸保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setMoveSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setMoveSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "移缸保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     toast.success("已移缸");
     onOpenChange(false);
   };
 
   const openLossDialog = () => {
     if (!item) return;
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
     if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("该鱼已不在当前库存中，不能登记损耗");
     setLossDate(today);
     setLossReason("");
     setLossProof([]);
+    maintenanceTicketRef.current = null;
     setActionMode("loss");
   };
 
@@ -3358,22 +3500,34 @@ function StockPickerBioDialog({
 
   const submitLoss = async () => {
     if (!item) return;
-    if (!permission.requirePermission("delete")) return;
+    if (!requireLossPermissions()) return;
+    if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (!lossDate) return toast.error("请选择损耗日期");
     if (lossDate > today) return toast.error("损耗日期不能晚于今天");
     if (lossDate < item.inDate) return toast.error("损耗日期不能早于入库日期");
     if (lossProof.length === 0) return toast.error("请上传损耗照片凭证");
     if (!confirmWrite("登记损耗", "损耗后该鱼会从缸位视图和可售库存中移除，并生成损耗记录。")) return;
-    setLossSaving(true);
-    const ok = await saveMaintenanceAction({
-      mode: "loss",
-      stockItemId: item.id,
+    const change = {
+      mode: "loss" as const,
+      itemIds: [item.id],
+      expectedItems: [maintenanceStockExpectedSnapshot(item)],
       lossDate,
       lossReason: lossReason.trim(),
       lossProof,
-    });
-    setLossSaving(false);
-    if (!ok) return toast.error("损耗保存失败，请刷新后重试");
+    };
+    const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
+    maintenanceTicketRef.current = ticket;
+    if (!beginMaintenanceRequest(maintenanceRequestInFlightRef)) return;
+    setLossSaving(true);
+    let saveResult: MaintenanceSaveResult = { ok: false };
+    try {
+      saveResult = await saveMaintenanceAction({ ...change, clientMutationId: ticket.clientMutationId });
+    } finally {
+      finishMaintenanceRequest(maintenanceRequestInFlightRef);
+      setLossSaving(false);
+    }
+    if (!saveResult.ok) return toast.error(saveResult.error || "损耗保存失败，请刷新后重试");
+    maintenanceTicketRef.current = null;
     if (order) {
       toast.success(`已登记损耗；请到订单 ${order.orderNo} 中移除该商品，需要退款时在订单详情登记`);
     } else {
@@ -3387,7 +3541,7 @@ function StockPickerBioDialog({
     <Dialog
       open={open && actionMode === "detail"}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && recordMediaUploading) return toast.info("请等待照片或视频上传完成");
+        if (!nextOpen && (recordMediaUploading || bioSaving)) return toast.info("请等待当前保存完成");
         onOpenChange(nextOpen);
       }}
     >
@@ -3484,7 +3638,7 @@ function StockPickerBioDialog({
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {event.type === "record" && editingRecordId === event.id ? (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && editingRecordId === event.id ? (
                             <div className="flex items-center gap-1">
                               <PreciseDateTimeInput
                                 min={minDatetimeForDate(item.inDate)}
@@ -3493,13 +3647,13 @@ function StockPickerBioDialog({
                                 onChange={setEditingRecordTime}
                                 className="w-full sm:w-72 [&_input]:h-7 [&_input]:text-xs"
                               />
-                              <button type="button" onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline">保存</button>
-                              <button type="button" onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline">取消</button>
+                              <button type="button" disabled={bioSaving} onClick={saveBioRecordTime} className="text-xs text-emerald-600 hover:underline disabled:opacity-50">{bioSaving ? "保存中…" : "保存"}</button>
+                              <button type="button" disabled={bioSaving} onClick={() => { setEditingRecordId(null); setEditingRecordTime(""); }} className="text-xs text-muted-foreground hover:underline disabled:opacity-50">取消</button>
                             </div>
                           ) : (
                             <span className="text-xs text-muted-foreground">{formatBioRecordTime(event.date)}</span>
                           )}
-                          {event.type === "record" && permission.canUpdate && editingRecordId !== event.id && (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canUpdate && editingRecordId !== event.id && (
                             <button
                               type="button"
                               onClick={() => startEditBioRecordTime(event.id, event.date)}
@@ -3509,8 +3663,8 @@ function StockPickerBioDialog({
                               改时间
                             </button>
                           )}
-                          {event.type === "record" && permission.canDelete && (
-                            <button type="button" onClick={() => deleteBioRecord(event.id)} className="text-xs text-red-400 hover:text-red-600" title="删除记录">
+                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canDelete && (
+                            <button type="button" disabled={bioSaving} onClick={() => deleteBioRecord(event.id)} className="text-xs text-red-400 hover:text-red-600 disabled:opacity-50" title="删除记录">
                               <X className="size-3" />
                             </button>
                           )}
@@ -3548,22 +3702,39 @@ function StockPickerBioDialog({
                           {event.videos.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.videos.map((src, videoIndex) => (
-                                <div key={videoIndex} className="group relative overflow-hidden rounded border" style={{ width: "120px" }}>
+                                <div key={videoIndex} className="w-36 overflow-hidden rounded border bg-card">
                                   <MediaVideo src={src} className="w-full" controls />
                                   <button
                                     type="button"
+                                    disabled={Boolean(downloadingMediaKey)}
                                     onClick={async (e) => {
                                       e.stopPropagation();
+                                      const mediaKey = `${event.id}:video:${videoIndex}`;
+                                      if (downloadingMediaKey) return;
+                                      setDownloadingMediaKey(mediaKey);
                                       try {
-                                        await downloadMedia(src, `video-${videoIndex + 1}.mp4`, { mediaType: "video" });
-                                      } catch {
-                                        toast.error("视频下载失败，请刷新后重试");
+                                        const result = await downloadMedia(src, `video-${videoIndex + 1}.mp4`, {
+                                          mediaType: "video",
+                                          stockItemId: item.id,
+                                          recordId: event.id,
+                                        });
+                                        toast.info(result.mode === "mobile-open"
+                                          ? "已打开下载页；如微信未开始下载，请点右上角在默认浏览器中打开"
+                                          : "视频下载已开始");
+                                      } catch (error) {
+                                        toast.error(error instanceof Error ? error.message : "视频下载失败，请刷新后重试");
+                                      } finally {
+                                        setDownloadingMediaKey("");
                                       }
                                     }}
-                                    className="absolute right-1 top-1 rounded bg-black/60 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
-                                    title="下载视频"
+                                    className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 border-t bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-wait disabled:opacity-60"
+                                    title="保存视频"
+                                    aria-label={`保存第 ${videoIndex + 1} 个视频`}
                                   >
-                                    <Download className="size-3.5 text-white" />
+                                    {downloadingMediaKey === `${event.id}:video:${videoIndex}`
+                                      ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                                      : <Download className="size-4" aria-hidden="true" />}
+                                    {downloadingMediaKey === `${event.id}:video:${videoIndex}` ? "准备中…" : "保存视频"}
                                   </button>
                                 </div>
                               ))}
@@ -3596,7 +3767,7 @@ function StockPickerBioDialog({
                   <div className="grid gap-2">
                     <Label className="text-xs">照片</Label>
                     <input ref={photoRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => { void uploadRecordPhotos(event.target.files); event.target.value = ""; }} />
-                    <Button type="button" variant="outline" size="sm" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的图片" onClick={() => photoRef.current?.click()}>
+                    <Button type="button" variant="outline" size="sm" disabled={recordMediaUploading || bioSaving} title="也可直接粘贴剪贴板中的图片" onClick={() => photoRef.current?.click()}>
                       <Camera className="size-4" /> 上传照片
                     </Button>
 	                  </div>
@@ -3604,10 +3775,11 @@ function StockPickerBioDialog({
 	                    <Label className="text-xs">视频</Label>
 	                    <div className="flex items-center gap-2">
 	                      <input ref={videoRef} type="file" accept={ORIGINAL_VIDEO_ACCEPT} multiple className="hidden" onChange={(event) => { void uploadRecordVideos(event.target.files); event.target.value = ""; }} />
-	                      <Button type="button" variant="outline" size="sm" className="flex-1" disabled={recordMediaUploading} title="也可直接粘贴剪贴板中的视频" onClick={() => videoRef.current?.click()}>
+	                      <Button type="button" variant="outline" size="sm" className="flex-1" disabled={recordMediaUploading || bioSaving} title="也可直接粘贴剪贴板中的视频" onClick={() => videoRef.current?.click()}>
 	                        <Video className="size-4" /> 上传视频
 	                      </Button>
 	                    </div>
+	                    {recordMediaUploading && <p className="text-xs text-muted-foreground">{recordMediaUploadStatus || "媒体上传中…"}</p>}
 	                  </div>
 	                </div>
                 {newRecord.photos.length > 0 && (
@@ -3634,9 +3806,9 @@ function StockPickerBioDialog({
                   <Label className="text-xs">记录内容</Label>
                   <Textarea rows={2} placeholder="填写观察内容、用药记录等..." value={newRecord.text} onChange={(event) => setNewRecord((prev) => ({ ...prev, text: event.target.value }))} />
                 </div>
-                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading} className="self-end">
-                  {recordMediaUploading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {recordMediaUploading ? "媒体上传中…" : "添加此记录"}
+                <Button type="button" variant="outline" size="sm" onClick={addBioRecord} disabled={recordMediaUploading || bioSaving} className="self-end">
+                  {recordMediaUploading || bioSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {recordMediaUploading ? (recordMediaUploadStatus || "媒体上传中…") : bioSaving ? "保存中…" : "添加此记录"}
                 </Button>
               </div>
             )}
@@ -3648,16 +3820,16 @@ function StockPickerBioDialog({
         <DialogFooter className="shrink-0 border-t pt-2">
           <div className="mr-auto flex items-center gap-2">
             {permission.canUpdate && item && (
-              <Button variant="outline" disabled={recordMediaUploading} onClick={openMoveDialog}>
+              <Button variant="outline" disabled={recordMediaUploading || bioSaving} onClick={openMoveDialog}>
                 <ArrowRightLeft className="mr-1 size-4" />
                 移缸
               </Button>
             )}
-            {permission.canDelete && item && (
+            {canRegisterLoss && item && (
               <Button
                 variant="outline"
                 className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                disabled={recordMediaUploading}
+                disabled={recordMediaUploading || bioSaving}
                 onClick={openLossDialog}
               >
                 <AlertTriangle className="mr-1 size-4" />
@@ -3665,10 +3837,10 @@ function StockPickerBioDialog({
               </Button>
             )}
           </div>
-          <Button variant="outline" disabled={recordMediaUploading} onClick={() => onOpenChange(false)}>关闭</Button>
+          <Button variant="outline" disabled={recordMediaUploading || bioSaving} onClick={() => onOpenChange(false)}>关闭</Button>
           {permission.canUpdate && item && (
-            <Button disabled={recordMediaUploading} onClick={saveBio}>
-              {hasBioRecordDraftContent(newRecord) ? "保存状态和记录" : "保存状态"}
+            <Button disabled={recordMediaUploading || bioSaving} onClick={saveBio}>
+              {bioSaving ? "保存中…" : hasBioRecordDraftContent(newRecord) ? "保存状态和记录" : "保存状态"}
             </Button>
           )}
         </DialogFooter>
@@ -4102,7 +4274,7 @@ function ItemsWithShipments({
 // ─── OrderDetailDialog ────────────────────────────────────────────────────────
 
 type EditForm = {
-  customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPerson: string; notes: string;
+  customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPersonnelId: string; contactPerson: string; notes: string;
   shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
 };
@@ -4138,6 +4310,8 @@ function OrderDetailDialog({
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
+  const shipmentFeeRequestSequence = useRef(0);
+  const shipmentListRef = useRef(state.shipments);
   const [damageShipment, setDamageShipment] = useState<Shipment | null>(null);
   const [returnItem, setReturnItem] = useState<OrderItem | null>(null);
   const [returnSaving, setReturnSaving] = useState(false);
@@ -4147,8 +4321,8 @@ function OrderDetailDialog({
   const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
   const personnel = state.personnel ?? [];
-  const defaultContactPerson = getDefaultContactPerson(personnel, state.user?.username);
-  const editContactOptions = getContactPersonOptions(personnel, editForm?.contactPerson ?? defaultContactPerson);
+  const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
+  const editContactOptions = getContactPersonOptions(personnel);
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const editPaymentOptions = useMemo(() => {
     if (!editForm) return [];
@@ -4172,7 +4346,12 @@ function OrderDetailDialog({
   const editPaymentAccount = editPaymentMethod?.account ?? "";
 
   useEffect(() => {
+    shipmentListRef.current = state.shipments;
+  }, [state.shipments]);
+
+  useEffect(() => {
     if (!open) {
+      shipmentFeeRequestSequence.current += 1;
       setEditMode(false);
       setEditForm(null);
       setShipDialogOpen(false);
@@ -4192,17 +4371,14 @@ function OrderDetailDialog({
   const showCreditSaleRequest = (error: unknown): boolean => {
     if (!(error instanceof OrderApiError) || error.code !== "CREDIT_SALE_CONFIRMATION_REQUIRED") return false;
     const payload = error.payload;
-    const fallbackOwner = personnel.find((person) =>
-      !isPersonnelResigned(person) &&
-      String(person.username ?? "").trim() &&
-      [person.name, person.username].some((value) => String(value ?? "").trim() === String(order?.contactPerson ?? "").trim())
-    );
+    const fallbackOwner = order
+      ? resolveOrderContactPersonnel(personnel, order, true)
+      : undefined;
     const fallbackApproversByUsername = new Map<string, CreditSaleApprover>(
       personnel
         .filter((person) =>
           person.accessRole === "admin" &&
-          !isPersonnelResigned(person) &&
-          String(person.username ?? "").trim()
+          isPersonnelAccountEnabled(person)
         )
         .map((person) => ({
           username: String(person.username).trim(),
@@ -4295,6 +4471,10 @@ function OrderDetailDialog({
       ? order.paymentMethodId || historicalOrderPaymentMethodId(order.id)
       : configuredOrderMethod?.id ?? (sourceMethods.length === 1 ? sourceMethods[0].id : "");
     const paymentChannel = order.paymentChannel ?? configuredOrderMethod?.channel ?? "";
+    const resolvedContactPersonnel = resolveOrderContactPersonnel(personnel, order)
+      ?? (!normalizedContactReference(order.contactPersonnelId) && !normalizedContactReference(order.contactPerson)
+        ? defaultContactPersonnel
+        : undefined);
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
@@ -4302,7 +4482,9 @@ function OrderDetailDialog({
       paymentMethodId,
       paymentChannel,
       shippingAddress: order.shippingAddress ?? "",
-      contactPerson: order.contactPerson || defaultContactPerson, notes: order.notes ?? "",
+      contactPersonnelId: resolvedContactPersonnel?.id ?? "",
+      contactPerson: resolvedContactPersonnel?.name ?? order.contactPerson ?? "",
+      notes: order.notes ?? "",
       shippingFeeMode: orderShippingFeeMode(order), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
         stockItemId: i.stockItemId,
@@ -4339,7 +4521,8 @@ function OrderDetailDialog({
     }
     if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
-    if (!editForm.contactPerson.trim()) return toast.error("请选择订单负责人");
+    const selectedContactPersonnel = editContactOptions.find((person) => person.id === editForm.contactPersonnelId);
+    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
@@ -4362,7 +4545,8 @@ function OrderDetailDialog({
         paymentChannel: editPaymentMethod.channel,
         shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
-        contactPerson: editForm.contactPerson.trim(),
+        contactPersonnelId: selectedContactPersonnel.id,
+        contactPerson: selectedContactPersonnel.name.trim(),
         notes: editForm.notes,
         shippingFeeMode: isPickupOrderSource(editForm.source) ? "collect" : editForm.shippingFeeMode,
         shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
@@ -4635,6 +4819,7 @@ function OrderDetailDialog({
       return;
     }
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
+    shipmentFeeRequestSequence.current += 1;
     try {
       const result = await postOrderApi("shipments/deliver", { shipmentId: shipment.id });
       applyOrderApiResult(setState, result);
@@ -4646,25 +4831,29 @@ function OrderDetailDialog({
   };
 
   const saveShipmentActualShippingFee = async (shipment: Shipment, actualShippingFee: number) => {
-    if (!order) return false;
-    if (!permission.requirePermission("update")) return false;
-    if (!Number.isFinite(actualShippingFee) || actualShippingFee <= 0) {
-      toast.error("请填写大于 0 的实际运费");
+    if (!order) throw new Error("订单不存在或已关闭，请刷新后重试");
+    if (!permission.canUpdate) throw new Error("当前账号没有修改订单的权限");
+    const payload = actualShippingFeePayload(shipment, actualShippingFee);
+    if (!payload) throw new Error("实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数");
+    if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${payload.actualShippingFee.toFixed(2)}。`)) return false;
+
+    const requestSequence = ++shipmentFeeRequestSequence.current;
+    const result = await postOrderApi("shipments/actual-shipping-fee", payload);
+    if (!result.shipment) throw new Error("服务端未返回更新后的发货记录，请刷新后重试");
+    if (!canApplyActualShippingFeeResponse(
+      shipmentListRef.current,
+      shipment.id,
+      requestSequence,
+      shipmentFeeRequestSequence.current
+    )) {
+      setShipmentAction((current) => current?.id === shipment.id ? null : current);
       return false;
     }
-    if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${actualShippingFee.toFixed(2)}。`)) return false;
-    const normalizedFee = Number(actualShippingFee.toFixed(2));
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      shipments: latest.shipments.map((item) =>
-        item.id === shipment.id ? { ...item, actualShippingFee: normalizedFee } : item
-      ),
-    }));
-    if (!ok) {
-      toast.error("运费保存失败，请重试");
-      return false;
-    }
-    setShipmentAction({ ...shipment, actualShippingFee: normalizedFee });
+    applyOrderApiResult(setState, result, {
+      requireExistingShipmentId: shipment.id,
+      shouldApply: () => requestSequence === shipmentFeeRequestSequence.current,
+    });
+    setShipmentAction((current) => current?.id === shipment.id ? result.shipment : current);
     toast.success("实际运费已补录");
     return true;
   };
@@ -4677,6 +4866,7 @@ function OrderDetailDialog({
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
+    shipmentFeeRequestSequence.current += 1;
     setShipmentConfirmSaving(true);
     try {
       const result = await postOrderApi("shipments/confirm", {
@@ -4701,6 +4891,7 @@ function OrderDetailDialog({
     if (order.status === "completed") return toast.error("已完成订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
     if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。")) return;
+    shipmentFeeRequestSequence.current += 1;
     setShipmentConfirmSaving(true);
     try {
       const result = await postOrderApi("shipments/cancel", { shipmentId: shipment.id });
@@ -4877,16 +5068,23 @@ function OrderDetailDialog({
                 <div className="grid gap-1.5">
                   <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
-                    value={editForm.contactPerson}
-                    onValueChange={(value) => setEditForm((f) => f ? { ...f, contactPerson: value } : f)}
+                    value={editForm.contactPersonnelId}
+                    onValueChange={(value) => {
+                      const selectedPerson = editContactOptions.find((person) => person.id === value);
+                      setEditForm((form) => form && selectedPerson ? {
+                        ...form,
+                        contactPersonnelId: selectedPerson.id,
+                        contactPerson: selectedPerson.name,
+                      } : form);
+                    }}
                   >
-                    <SelectTrigger className={!editForm.contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectTrigger className={!editForm.contactPersonnelId ? "border-red-500 focus-visible:ring-red-500" : ""}>
                       <SelectValue placeholder="请选择订单负责人" />
                     </SelectTrigger>
                     <SelectContent>
                       {editContactOptions.map((person) => (
-                        <SelectItem key={person.id} value={person.name}>
-                          {person.name}{person.role ? ` · ${person.role}` : ""}
+                        <SelectItem key={person.id} value={person.id}>
+                          {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -5387,9 +5585,15 @@ function OrderDetailDialog({
         order={order}
         open={!!shipmentAction}
         saving={shipmentConfirmSaving}
-        onOpenChange={(o) => { if (!o) setShipmentAction(null); }}
+        onOpenChange={(o) => {
+          if (!o) {
+            shipmentFeeRequestSequence.current += 1;
+            setShipmentAction(null);
+          }
+        }}
         onDelivered={markShipmentDelivered}
         onDamage={(shipment) => {
+          shipmentFeeRequestSequence.current += 1;
           setShipmentAction(null);
           setDamageShipment(shipment);
         }}
@@ -5634,7 +5838,7 @@ function StockPickerDialog({
     return [...map.entries()];
   };
 
-  const shippedOutStockIds = getShippedOutStockIds(state.shipments);
+  const shippedOutStockIds = getInventoryOutStockIds(state);
   const isAvail = (s: StockItem) =>
     !s.sold && !excludeIds.has(s.id) && isPhysicallyInTank(s, shippedOutStockIds);
   const unavailableReason = (s: StockItem) => {
@@ -6150,7 +6354,7 @@ function NewOrderDialog({
   const today = todayDateString();
   const currentUsername = state.user?.username ?? "";
   const personnel = state.personnel ?? [];
-  const defaultContactPerson = getDefaultContactPerson(personnel, currentUsername);
+  const defaultContactPersonnelId = getDefaultContactPersonnel(personnel, currentUsername)?.id ?? "";
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
@@ -6159,7 +6363,7 @@ function NewOrderDialog({
   const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
-  const [contactPerson, setContactPerson] = useState(defaultContactPerson);
+  const [contactPersonnelId, setContactPersonnelId] = useState(defaultContactPersonnelId);
   const [notes, setNotes] = useState("");
   const [selectedItems, setSelectedItems] = useState<Map<string, {
     price: number;
@@ -6176,14 +6380,14 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPerson(defaultContactPerson); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
       setSelectedItems(new Map());
       setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
       setCustomerDialogOpen(false);
       setSubmitAttempted(false);
     }
-  }, [open, defaultContactPerson, today]);
+  }, [open, defaultContactPersonnelId, today]);
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
   const selectedCustomer = useMemo(
@@ -6259,7 +6463,9 @@ function NewOrderDialog({
   const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
   const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
-  const contactOptions = getContactPersonOptions(personnel, contactPerson);
+  const contactOptions = getContactPersonOptions(personnel);
+  const selectedContactPersonnel = contactOptions.find((person) => person.id === contactPersonnelId);
+  const contactPerson = selectedContactPersonnel?.name ?? "";
 
   const createCustomer = async (customer: Customer) => {
     if (!customerPermission.requirePermission("create")) return false;
@@ -6322,7 +6528,7 @@ function NewOrderDialog({
     if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
     if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     if (date > today) return toast.error("下单日期不能晚于今天");
-    if (!contactPerson.trim()) return toast.error("请选择订单负责人");
+    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
     if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
@@ -6363,7 +6569,8 @@ function NewOrderDialog({
         paymentChannel,
         shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
-        contactPerson: contactPerson.trim(),
+        contactPersonnelId: selectedContactPersonnel.id,
+        contactPerson: selectedContactPersonnel.name.trim(),
         items,
         shippingFeeMode: pickupOrder ? "collect" : shippingFeeMode,
         shippingFee: pickupOrder ? 0 : shippingFee,
@@ -6519,16 +6726,16 @@ function NewOrderDialog({
               <div className="grid gap-2">
                 <Label>订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
-                  value={contactPerson}
-                  onValueChange={setContactPerson}
+                  value={contactPersonnelId}
+                  onValueChange={setContactPersonnelId}
                 >
-                  <SelectTrigger className={submitAttempted && !contactPerson.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger className={submitAttempted && !selectedContactPersonnel ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择订单负责人" />
                   </SelectTrigger>
                   <SelectContent>
                     {contactOptions.map((person) => (
-                      <SelectItem key={person.id} value={person.name}>
-                        {person.name}{person.role ? ` · ${person.role}` : ""}
+                      <SelectItem key={person.id} value={person.id}>
+                        {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -7096,12 +7303,23 @@ export function OrdersView({
     () => [...state.orders].sort(compareOrdersByCreatedDesc),
     [state.orders]
   );
-  const currentContactAliases = useMemo(
-    () => getCurrentContactAliases(state.personnel ?? [], state.user?.username),
-    [state.personnel, state.user?.username]
-  );
-  const isCurrentUserContactOrder = (order: Order) =>
-    currentContactAliases.has(normalizeContactPersonName(order.contactPerson));
+  const currentContactPersonnel = useMemo(() => {
+    const reference = normalizedContactReference(state.user?.username);
+    if (!reference) return undefined;
+    const activeAccounts = (state.personnel ?? []).filter(isPersonnelAccountEnabled);
+    const usernameMatches = activeAccounts.filter((person) =>
+      normalizedContactReference(person.username) === reference
+    );
+    if (usernameMatches.length === 1) return usernameMatches[0];
+    const nameMatches = activeAccounts.filter((person) =>
+      normalizedContactReference(person.name) === reference
+    );
+    return nameMatches.length === 1 ? nameMatches[0] : undefined;
+  }, [state.personnel, state.user?.username]);
+  const isCurrentUserContactOrder = useCallback((order: Order) => {
+    if (!currentContactPersonnel) return false;
+    return resolveOrderContactPersonnel(state.personnel ?? [], order, true)?.id === currentContactPersonnel.id;
+  }, [currentContactPersonnel, state.personnel]);
 
   type OrderListRow = Order & {
     searchText: string;
@@ -7209,7 +7427,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, currentContactAliases, dateFrom, dateTo]);
+	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const mobileFilteredOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7324,7 +7542,7 @@ export function OrdersView({
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
-    [orderList, currentContactAliases]
+    [orderList, isCurrentUserContactOrder]
   );
   const todayShipCount = useMemo(
     () => orderList.filter((order) => hasPlannedShipPlanOnDate(order, today)).length,

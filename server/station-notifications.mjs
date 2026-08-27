@@ -24,7 +24,7 @@ function normalizeCompletedNotificationReadState(notification) {
     notification.status !== "completed" ||
     notification.readAt ||
     notification.notificationRole === "requester" ||
-    !["credit_sale_confirmation", "stock_approval"].includes(notification.type)
+    !["credit_sale_confirmation", "stock_approval", "personnel_profile_approval"].includes(notification.type)
   ) return notification;
   return {
     ...notification,
@@ -324,6 +324,117 @@ export function resolveApprovalNotifications(notifications = [], approvalRequest
       ...(isRequester && input.resultTitle ? { title: String(input.resultTitle) } : {}),
       ...(isRequester && input.resultMessage ? { message: String(input.resultMessage) } : {}),
       readAt: isRequester ? "" : notification.readAt || resolvedAt,
+    };
+  });
+  return { notifications: sortedNotifications(next), changed };
+}
+
+export function ensurePersonnelProfileApprovalNotifications(notifications = [], input = {}) {
+  const current = Array.isArray(notifications) ? notifications : [];
+  const profileRequestId = String(input.profileRequestId ?? "").trim();
+  const recipients = (Array.isArray(input.recipients) ? input.recipients : [])
+    .map((recipient) => ({
+      username: String(recipient?.username ?? "").trim(),
+      name: String(recipient?.name ?? recipient?.username ?? "").trim(),
+    }))
+    .filter((recipient, index, all) =>
+      recipient.username && all.findIndex((item) => item.username === recipient.username) === index
+    );
+  const requesterUsername = String(input.requester?.username ?? input.createdBy ?? "").trim();
+  const requesterName = String(input.requester?.name ?? input.createdByName ?? requesterUsername).trim();
+  if (!profileRequestId || !requesterUsername || recipients.length === 0) {
+    throw new Error("无法创建人员资料审批站内信");
+  }
+  const createdAt = String(input.createdAt ?? new Date().toISOString());
+  const createdBy = String(input.createdBy ?? requesterUsername);
+  const createdByName = String(input.createdByName ?? requesterName);
+  const changedFieldCount = Math.max(1, Number(input.changedFieldCount ?? 0) || 0);
+  const existingForRequest = current.filter((notification) =>
+    notification?.type === "personnel_profile_approval" &&
+    String(notification?.profileRequestId ?? "") === profileRequestId
+  );
+  const existingApproverUsernames = new Set(existingForRequest
+    .filter((notification) => notification?.notificationRole === "approver")
+    .map((notification) => String(notification?.recipientUsername ?? "")));
+  const approverNotifications = recipients.flatMap((recipient, index) =>
+    existingApproverUsernames.has(recipient.username) ? [] : [{
+    id: String(input.notificationIds?.[index] ?? `${profileRequestId}-${recipient.username}`).trim(),
+    type: "personnel_profile_approval",
+    status: "pending",
+    title: `人员「${requesterName}」资料修改待审批`,
+    message: `${requesterName}提交了人员资料修改申请，共 ${changedFieldCount} 项变更，请核对后处理。`,
+    createdAt,
+    createdBy,
+    createdByName,
+    readAt: "",
+    recipientUsername: recipient.username,
+    recipientName: recipient.name,
+    notificationRole: "approver",
+    profileRequestId,
+  }]);
+  const requesterNotification = {
+    id: String(input.requesterNotificationId ?? `${profileRequestId}-requester`).trim(),
+    type: "personnel_profile_approval",
+    status: "pending",
+    title: "人员资料修改已提交",
+    message: `你的人员资料修改申请已提交，共 ${changedFieldCount} 项变更，等待管理员审批。`,
+    createdAt,
+    createdBy,
+    createdByName,
+    readAt: createdAt,
+    recipientUsername: requesterUsername,
+    recipientName: requesterName,
+    notificationRole: "requester",
+    profileRequestId,
+  };
+  const requesterExists = existingForRequest.some((notification) =>
+    notification?.notificationRole === "requester" &&
+    String(notification?.recipientUsername ?? "") === requesterUsername
+  );
+  const created = [
+    ...approverNotifications,
+    ...(requesterExists ? [] : [requesterNotification]),
+  ];
+  if (created.some((notification) => !notification.id)) throw new Error("人员资料审批站内信缺少编号");
+  if (created.length === 0) {
+    return { notifications: current, notificationsCreated: [], changed: false };
+  }
+  return {
+    notifications: sortedNotifications([...created, ...current]),
+    notificationsCreated: created,
+    changed: true,
+  };
+}
+
+export function resolvePersonnelProfileApprovalNotifications(notifications = [], profileRequestId = "", input = {}) {
+  const requestId = String(profileRequestId ?? "").trim();
+  const resolution = input.resolution === "approved" ? "approved" : "rejected";
+  const resolvedAt = String(input.resolvedAt ?? new Date().toISOString());
+  let changed = false;
+  const next = (Array.isArray(notifications) ? notifications : []).map((notification) => {
+    if (
+      notification?.type !== "personnel_profile_approval" ||
+      notification?.status !== "pending" ||
+      String(notification?.profileRequestId ?? "") !== requestId
+    ) return notification;
+    changed = true;
+    const requester = notification?.notificationRole === "requester";
+    return {
+      ...notification,
+      status: "completed",
+      resolution,
+      resolvedAt,
+      updatedAt: resolvedAt,
+      resolvedBy: String(input.resolvedBy ?? "system"),
+      resolvedByName: String(input.resolvedByName ?? input.resolvedBy ?? "system"),
+      resolutionNote: String(input.resolutionNote ?? ""),
+      ...(requester ? {
+        title: resolution === "approved" ? "人员资料修改已批准" : "人员资料修改已驳回",
+        message: resolution === "approved"
+          ? "你的人员资料修改申请已由管理员批准，正式档案已经更新。"
+          : "你的人员资料修改申请未通过，请根据处理说明修改后重新提交。",
+      } : {}),
+      readAt: requester ? "" : notification.readAt || resolvedAt,
     };
   });
   return { notifications: sortedNotifications(next), changed };

@@ -2,12 +2,14 @@
   "name": "@figma/my-make-file",
   "private": true,
   "version": "0.0.1",
+  "packageManager": "pnpm@11.19.0",
   "type": "module",
   "scripts": {
     "build": "vite build",
     "dev": "vite",
     "api": "node server/local-server.mjs",
     "dev:local": "node server/dev-local.mjs",
+    "release:source": "node scripts/create-release.mjs",
     "start": "node server/local-server.mjs"
   },
   "dependencies": {
@@ -89,11 +91,6 @@
     },
     "react-dom": {
       "optional": true
-    }
-  },
-  "pnpm": {
-    "overrides": {
-      "vite": "6.3.5"
     }
   }
 }

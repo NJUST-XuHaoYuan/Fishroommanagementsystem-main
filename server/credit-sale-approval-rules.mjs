@@ -1,19 +1,32 @@
+import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
+
 function normalizedText(value) {
   return String(value ?? "").trim();
 }
 
 function isActivePersonnel(person = {}) {
-  return person?.employmentStatus !== "resigned" && !person?.resignedAt;
+  return isPersonnelAccountEnabled(person);
 }
 
 export function creditSaleOrderOwner(personnel = [], order = {}) {
+  const people = Array.isArray(personnel) ? personnel : [];
+  const personnelId = normalizedText(order?.contactPersonnelId);
+  if (personnelId) {
+    return people.find((person) =>
+      normalizedText(person?.id) === personnelId &&
+      isActivePersonnel(person) &&
+      normalizedText(person?.username)
+    ) ?? null;
+  }
+
   const reference = normalizedText(order?.contactPerson);
   if (!reference) return null;
-  return (Array.isArray(personnel) ? personnel : []).find((person) =>
-    isActivePersonnel(person) &&
-    normalizedText(person?.username) &&
+  const matches = people.filter((person) =>
     (normalizedText(person?.name) === reference || normalizedText(person?.username) === reference)
-  ) ?? null;
+  );
+  if (matches.length !== 1) return null;
+  const owner = matches[0];
+  return isActivePersonnel(owner) && normalizedText(owner?.username) ? owner : null;
 }
 
 export function creditSaleEligibleApprovers(personnel = [], order = {}) {

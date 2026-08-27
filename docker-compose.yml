@@ -1,14 +1,21 @@
 services:
   fishroom:
-    build: .
+    build:
+      context: .
+      args:
+        RELEASE_REVISION: ${RELEASE_REVISION:-local-development}
+        RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:-1970-01-01T00:00:00Z}
     container_name: fishroom-management-local
     environment:
       HOST: 0.0.0.0
       PORT: 8787
       AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?AUTH_SESSION_SECRET must be set}
+      PERSONNEL_DATA_KEYRING_JSON: ${PERSONNEL_DATA_KEYRING_JSON:?PERSONNEL_DATA_KEYRING_JSON must be set}
+      RELEASE_REVISION: ${RELEASE_REVISION:-local-development}
+      RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:-1970-01-01T00:00:00Z}
       POSTGRES_DB: fishroom
       POSTGRES_USER: fishroom
-      POSTGRES_PASSWORD: fishroom_local_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       PGDATA: /var/lib/postgresql/data
       AI_API_KEY: ${AI_API_KEY:-}
       AI_API_BASE_URL: ${AI_API_BASE_URL:-https://api.openai.com/v1}
@@ -24,6 +31,7 @@ services:
     volumes:
       - fishroom-data:/app/.data
       - fishroom-postgres-data:/var/lib/postgresql/data
+      - fishroom-uploads:/app/uploads
     restart: unless-stopped
 
 volumes:
@@ -31,3 +39,5 @@ volumes:
     name: fishroom-data
   fishroom-postgres-data:
     name: fishroom-postgres-data
+  fishroom-uploads:
+    name: fishroom-uploads

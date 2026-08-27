@@ -8,13 +8,23 @@
 docker compose up --build -d
 ```
 
+启动前必须设置会话密钥、人员敏感数据密钥和数据库密码。身份证号、工资银行卡号、开户名与开户行使用独立的 AES-256-GCM 字段级加密；身份证正反面和学历证明图片使用同一人员数据 keyring、按附件独立加密后存入受保护目录，不会通过公开上传地址访问：
+
+```env
+AUTH_SESSION_SECRET=请替换为高强度随机值
+PERSONNEL_DATA_KEYRING_JSON={"activeKid":"personnel-v1","keys":{"personnel-v1":"请替换为 openssl rand -base64 32 的输出"}}
+POSTGRES_PASSWORD=请替换为高强度数据库密码
+```
+
+轮换人员数据密钥必须分阶段进行：先让所有运行实例和回滚配置同时持有旧、新密钥，再把 `activeKid` 指向新密钥并逐一重启；健康检查通过表示数据库敏感字段和已登记私密附件均已完成重新加密。确认所有实例、附件及仍在保留期内的备份都不再依赖旧密钥前，不得移除旧 `kid`。不要把真实密钥提交到代码仓库或发版包。
+
 启动后打开：
 
 ```text
 http://127.0.0.1:8787
 ```
 
-数据会保存在同一个容器里的本地 PostgreSQL 中。PostgreSQL 数据目录挂载到 Docker 命名卷 `fishroom-postgres-data`，容器内路径是 `/var/lib/postgresql/data`。
+数据会保存在同一个容器里的本地 PostgreSQL 中。PostgreSQL 数据目录挂载到 Docker 命名卷 `fishroom-postgres-data`，上传文件（包括加密的人员私密附件）挂载到 `fishroom-uploads`，升级容器时不会随容器消失；备份与恢复必须同时覆盖数据库和该上传卷。
 
 镜像会把完整项目源码、`node_modules` 依赖、生产构建产物和 PostgreSQL 服务都放进同一个容器。运行时不会挂载宿主机代码目录，只挂载 Docker 数据卷。
 
@@ -25,6 +35,16 @@ docker compose ps
 docker compose logs -f
 docker compose down
 ```
+
+## 生成正式源码发版包
+
+所有修改通过测试并提交后执行：
+
+```bash
+pnpm release:source
+```
+
+脚本只打包当前 Git 提交，会在 `release-output/fishroom-management-<commit>/` 生成源码包、`RELEASE.env`、清单和 SHA-256 校验文件。它会排除小程序、环境变量、凭据、上传、备份、构建产物和 Git 元数据，并在校验完成前把候选产物留在临时目录。生成发版包不会自动部署生产；生产构建、备份、启动和版本核对见 `deploy/README.md`。
 
 进入同容器里的 PostgreSQL：
 

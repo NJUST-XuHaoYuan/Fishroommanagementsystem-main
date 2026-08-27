@@ -457,6 +457,8 @@ function isDesktopCatalogLayout() {
   return window.matchMedia("(min-width: 1024px)").matches;
 }
 
+const PUBLIC_CATALOG_MEDIA_REFRESH_MS = 8 * 60 * 1000;
+
 function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement, onTopOverscroll: () => void) {
   const maxScrollTop = container.scrollHeight - container.clientHeight;
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
@@ -503,24 +505,43 @@ export function PublicCatalogPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/public/catalog", { cache: "no-store" })
-      .then(async (response) => {
+    let requestInFlight = false;
+    let loadedOnce = false;
+    let lastSuccessAt = 0;
+    const loadCatalog = async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const response = await fetch("/api/public/catalog", { cache: "no-store" });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-        return normalizeCatalog(result.catalog ?? result.data ?? result);
-      })
-      .then((nextCatalog) => {
+        const nextCatalog = normalizeCatalog(result.catalog ?? result.data ?? result);
         if (cancelled) return;
         setCatalog(nextCatalog);
+        setDetailBioRecordsByStockId(new Map());
         setCatalogLoaded(true);
-      })
-      .catch(() => {
-        if (cancelled) return;
+        loadedOnce = true;
+        lastSuccessAt = Date.now();
+      } catch {
+        if (cancelled || loadedOnce) return;
         setCatalog(fallbackCatalog);
         setCatalogLoaded(false);
-      });
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastSuccessAt >= PUBLIC_CATALOG_MEDIA_REFRESH_MS) {
+        void loadCatalog();
+      }
+    };
+    void loadCatalog();
+    const interval = window.setInterval(() => { void loadCatalog(); }, PUBLIC_CATALOG_MEDIA_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, []);
 

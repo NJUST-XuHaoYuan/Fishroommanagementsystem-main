@@ -5,10 +5,176 @@ import {
   buildStockChangeSnapshot,
   buildStockDeletionSnapshot,
   classifyStockMutationForApproval,
+  filterEffectiveStockMutation,
   preserveBatchCreationTimes,
+  rebuildStockChangeSnapshotFromApprovalRequest,
+  stockApprovalDetailsForResponse,
+  stockApprovalReviewDetails,
   stockChangeAdjustmentSignature,
+  STOCK_CHANGE_SNAPSHOT_SCHEMA_VERSION,
   STOCK_BATCH_APPROVAL_DELAY_MS,
 } from "./stock-approval-rules.mjs";
+import { stockConcurrencySnapshot } from "./stock-mutation-relationships.mjs";
+
+test("canonical no-op stock upserts are filtered while creates, deletes and real edits remain", () => {
+  const legacySold = {
+    id: "legacy-sold",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "sold",
+    cost: 88,
+    lossDate: " ",
+    lossReason: "   ",
+    notes: "   ",
+  };
+  const unchangedDisplayed = {
+    id: "legacy-sold",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    sold: true,
+    lost: false,
+    lossDate: "",
+    lossReason: "",
+    lossProof: [],
+    inDate: "",
+    basePrice: 88,
+    priceOverridden: false,
+    commissionRate: 0,
+    code: "",
+    notes: "",
+  };
+  const realEdit = { ...unchangedDisplayed, notes: "核对后修改" };
+  const created = { ...unchangedDisplayed, id: "new-stock" };
+
+  assert.deepEqual(filterEffectiveStockMutation({
+    stock: [legacySold],
+    upsertItems: [unchangedDisplayed],
+  }).upsertItems, []);
+  assert.deepEqual(filterEffectiveStockMutation({
+    stock: [legacySold],
+    upsertItems: [realEdit, created],
+    deleteIds: ["remove-stock"],
+  }), {
+    upsertItems: [realEdit, created],
+    deleteIds: ["remove-stock"],
+  });
+});
+
+test("stock change snapshots omit canonical no-ops and keep only real updates", () => {
+  const current = {
+    id: "stock-1",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-07-30",
+    basePrice: 260,
+    notes: "",
+  };
+  const snapshot = buildStockChangeSnapshot({
+    stock: [current],
+    upsertItems: [
+      { ...current, notes: "   ", lossProof: [], commissionRate: 0, priceOverridden: false },
+      { ...current, id: "stock-2", notes: "new" },
+    ],
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  });
+
+  assert.deepEqual(snapshot.totals, { addCount: 1, removeCount: 0, updateCount: 0 });
+  assert.equal(snapshot.items.length, 1);
+  assert.equal(snapshot.items[0].operation, "add");
+  assert.equal(snapshot.items[0].stockItemId, "stock-2");
+});
+
+test("real stock updates expose every canonical audit field without loss proof URLs", () => {
+  const current = {
+    id: "stock-1",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    sold: false,
+    lost: false,
+    lossDate: "",
+    lossReason: "",
+    lossProof: ["https://private.example/old-proof"],
+    inDate: "2026-07-30",
+    basePrice: 260,
+    priceOverridden: false,
+    commissionRate: 0,
+    code: "",
+    notes: "",
+  };
+  const updated = {
+    ...current,
+    lossDate: "2026-08-20",
+    lossReason: "运输损耗",
+    lossProof: ["https://private.example/new-proof"],
+    priceOverridden: true,
+    commissionRate: 2,
+    code: "stock-1",
+  };
+  const snapshot = buildStockChangeSnapshot({
+    stock: [current],
+    upsertItems: [updated],
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  });
+  const change = snapshot.items[0];
+
+  assert.deepEqual(snapshot.totals, { addCount: 0, removeCount: 0, updateCount: 1 });
+  assert.deepEqual(change.changedFields, [
+    "lossDate",
+    "lossReason",
+    "lossProof",
+    "priceOverridden",
+    "commissionRate",
+    "code",
+  ]);
+  assert.equal(change.lossProofChanged, true);
+  assert.equal(change.before.code, "");
+  assert.equal(change.after.code, "stock-1");
+  assert.equal(change.before.rawCode, "");
+  assert.equal(change.after.rawCode, "stock-1");
+  assert.equal(change.before.lossProofCount, 1);
+  assert.equal(change.after.lossProofCount, 1);
+  assert.notEqual(change.before.lossProofFingerprint, change.after.lossProofFingerprint);
+  assert.equal(change.after.priceOverridden, true);
+  assert.equal(change.after.commissionRate, 2);
+  assert.equal(change.after.lossDate, "2026-08-20");
+  assert.equal(change.after.lossReason, "运输损耗");
+  for (const field of [
+    "siteId",
+    "productId",
+    "batchId",
+    "subTankId",
+    "status",
+    "sold",
+    "lost",
+    "lossDate",
+    "lossReason",
+    "inDate",
+    "basePrice",
+    "priceOverridden",
+    "commissionRate",
+    "code",
+    "notes",
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(change.after, field), true, `${field} should be auditable`);
+  }
+  assert.equal(Object.prototype.hasOwnProperty.call(change.after, "lossProof"), false);
+  assert.doesNotMatch(JSON.stringify(snapshot), /private\.example/);
+});
 
 test("stock change approvals group exact deltas by tank, product and batch", () => {
   const snapshot = buildStockChangeSnapshot({
@@ -84,6 +250,279 @@ test("inventory adjustment signatures distinguish exact removals", () => {
   const second = buildStockChangeSnapshot({ ...input, deleteIds: ["remove-b"] });
 
   assert.notDeepEqual(stockChangeAdjustmentSignature(first), stockChangeAdjustmentSignature(second));
+});
+
+test("inventory adjustment signatures bind every canonical add proposal field", () => {
+  const context = {
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ siteId: "nanjing", name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  };
+  const baselineItem = {
+    id: "generated-baseline",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    sold: false,
+    lost: false,
+    lossDate: "",
+    lossReason: "",
+    lossProof: ["https://private.example/proof-a"],
+    inDate: "2026-08-20",
+    basePrice: 100,
+    priceOverridden: false,
+    commissionRate: 0,
+    code: "FISH-001",
+    notes: "原备注",
+  };
+  const signatureFor = (item) => stockChangeAdjustmentSignature(buildStockChangeSnapshot({
+    ...context,
+    upsertItems: [item],
+  }));
+  const baselineSignature = signatureFor(baselineItem);
+  const variants = [
+    ["status", { status: "feeding" }],
+    ["sold", { sold: true }],
+    ["lost", { lost: true }],
+    ["lossDate", { lossDate: "2026-08-21" }],
+    ["lossReason", { lossReason: "运输损耗" }],
+    ["lossProof", { lossProof: ["https://private.example/proof-b"] }],
+    ["inDate", { inDate: "2026-08-21" }],
+    ["basePrice", { basePrice: 101 }],
+    ["priceOverridden", { priceOverridden: true }],
+    ["commissionRate", { commissionRate: 2 }],
+    ["code", { code: "FISH-002" }],
+    ["notes", { notes: "新备注" }],
+  ];
+
+  for (const [field, patch] of variants) {
+    assert.notDeepEqual(signatureFor({
+      ...baselineItem,
+      ...patch,
+      id: `generated-${field}`,
+    }), baselineSignature, `${field} must change the adjustment signature`);
+  }
+  assert.doesNotMatch(JSON.stringify(baselineSignature), /private\.example/);
+});
+
+test("inventory adjustment signatures are multisets and keep update targets plus full proposals", () => {
+  const context = {
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  };
+  const proposal = {
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-08-20",
+    basePrice: 100,
+    code: "FISH-001",
+    notes: "新增",
+  };
+  const twoAdds = buildStockChangeSnapshot({
+    ...context,
+    upsertItems: [{ ...proposal, id: "generated-a" }, { ...proposal, id: "generated-b" }],
+  });
+  const reorderedAdds = buildStockChangeSnapshot({
+    ...context,
+    upsertItems: [{ ...proposal, id: "generated-y" }, { ...proposal, id: "generated-x" }],
+  });
+  const oneAdd = buildStockChangeSnapshot({
+    ...context,
+    upsertItems: [{ ...proposal, id: "generated-one" }],
+  });
+  assert.deepEqual(stockChangeAdjustmentSignature(twoAdds), stockChangeAdjustmentSignature(reorderedAdds));
+  assert.notDeepEqual(stockChangeAdjustmentSignature(twoAdds), stockChangeAdjustmentSignature(oneAdd));
+
+  const current = { ...proposal, id: "stock-update", notes: "旧备注" };
+  const firstUpdate = buildStockChangeSnapshot({
+    ...context,
+    stock: [current],
+    upsertItems: [{ ...current, notes: "新备注", basePrice: 110 }],
+  });
+  const secondUpdate = buildStockChangeSnapshot({
+    ...context,
+    stock: [current],
+    upsertItems: [{ ...current, notes: "另一个备注", basePrice: 110 }],
+  });
+  assert.notDeepEqual(stockChangeAdjustmentSignature(firstUpdate), stockChangeAdjustmentSignature(secondUpdate));
+  assert.equal(stockChangeAdjustmentSignature(firstUpdate).updates[0].stockItemId, "stock-update");
+});
+
+test("legacy and partial stock snapshots rebuild only from immutable payload snapshots", () => {
+  const context = {
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  };
+  const beforeUpdate = {
+    id: "stock-update",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-08-20",
+    basePrice: 100,
+    priceOverridden: false,
+    commissionRate: 0,
+    lossProof: ["https://private.example/proof-before"],
+    code: "",
+    notes: "不变",
+  };
+  const proposedUpdate = {
+    ...beforeUpdate,
+    priceOverridden: true,
+    commissionRate: 2,
+    lossProof: ["https://private.example/proof-after"],
+  };
+  const created = { ...proposedUpdate, id: "stock-create", code: "NEW-001" };
+  const beforeRemove = { ...beforeUpdate, id: "stock-remove", code: "OLD-001" };
+  const request = {
+    payload: {
+      upsert: [proposedUpdate, created],
+      deleteIds: ["stock-remove"],
+      expectedOperations: {
+        "stock-update": "update",
+        "stock-create": "create",
+        "stock-remove": "delete",
+      },
+      expectedBefore: {
+        "stock-update": stockConcurrencySnapshot(beforeUpdate),
+        "stock-remove": stockConcurrencySnapshot(beforeRemove),
+      },
+    },
+    stockDetails: {
+      type: "stock_change",
+      totals: { addCount: 1, removeCount: 0, updateCount: 0 },
+      requestedCount: 1,
+      items: [{
+        operation: "add",
+        stockItemId: "stock-create",
+        before: null,
+        after: { stockItemId: "stock-create", productId: "product-1", subTankId: "tank-1", batchId: "batch-1" },
+      }],
+    },
+  };
+  const review = stockApprovalReviewDetails(request, context);
+
+  assert.equal(review.reviewComplete, true);
+  assert.equal(review.usedStoredSnapshot, false);
+  assert.equal(review.rebuiltFromPayload, true);
+  assert.equal(review.stockDetails.schemaVersion, STOCK_CHANGE_SNAPSHOT_SCHEMA_VERSION);
+  assert.equal(review.stockDetails.reviewComplete, true);
+  assert.deepEqual(review.stockDetails.items.map((item) => [item.operation, item.stockItemId]).sort(), [
+    ["add", "stock-create"],
+    ["remove", "stock-remove"],
+    ["update", "stock-update"],
+  ]);
+  const update = review.stockDetails.items.find((item) => item.operation === "update");
+  assert.deepEqual(update.changedFields, ["lossProof", "priceOverridden", "commissionRate"]);
+  assert.equal(update.lossProofChanged, true);
+  assert.equal(update.before.basePrice, 100);
+});
+
+test("valid schema v2 snapshots stay immutable while unsafe requests fail closed", () => {
+  const context = {
+    products: [{ id: "product-1", name: "蓝吊" }],
+    batches: [{ id: "batch-1", batchNo: "PO-1" }],
+    tankGroups: [{ name: "鱼D", subTanks: [{ id: "tank-1", name: "D1-1" }] }],
+  };
+  const before = {
+    id: "stock-update",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-08-20",
+    basePrice: 100,
+    notes: "旧",
+  };
+  const request = {
+    payload: {
+      upsert: [{ ...before, notes: "新" }],
+      deleteIds: [],
+      expectedOperations: { "stock-update": "update" },
+      expectedBefore: { "stock-update": stockConcurrencySnapshot(before) },
+    },
+  };
+  const canonical = rebuildStockChangeSnapshotFromApprovalRequest(request, context);
+  request.stockDetails = canonical;
+  const validReview = stockApprovalReviewDetails(request, context);
+  assert.equal(validReview.reviewComplete, true);
+  assert.equal(validReview.usedStoredSnapshot, true);
+  assert.strictEqual(validReview.stockDetails, canonical);
+
+  const partialV2 = structuredClone(canonical);
+  delete partialV2.items[0].after.status;
+  const rebuiltPartialV2 = stockApprovalReviewDetails({ ...request, stockDetails: partialV2 }, context);
+  assert.equal(rebuiltPartialV2.reviewComplete, true);
+  assert.equal(rebuiltPartialV2.usedStoredSnapshot, false);
+  assert.equal(rebuiltPartialV2.rebuiltFromPayload, true);
+  assert.equal(rebuiltPartialV2.stockDetails.items[0].after.status, "healthy");
+
+  const missingBefore = {
+    ...request,
+    payload: { ...request.payload, expectedBefore: {} },
+  };
+  const incomplete = stockApprovalReviewDetails(missingBefore, context);
+  assert.equal(incomplete.reviewComplete, false);
+  assert.equal(incomplete.stockDetails.reviewComplete, false);
+
+  const extraOperation = {
+    ...request,
+    payload: {
+      ...request.payload,
+      expectedOperations: { ...request.payload.expectedOperations, unexpected: "delete" },
+    },
+  };
+  assert.equal(stockApprovalReviewDetails(extraOperation, context).reviewComplete, false);
+
+  const noOpUpdate = {
+    ...request,
+    payload: {
+      ...request.payload,
+      upsert: [before],
+    },
+  };
+  assert.equal(stockApprovalReviewDetails(noOpUpdate, context).reviewComplete, false);
+});
+
+test("stock approval detail responses redact proof fingerprints and raw proof locations", () => {
+  const before = {
+    id: "stock-update",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-08-20",
+    basePrice: 100,
+    lossProof: ["https://private.example/proof-before"],
+  };
+  const request = {
+    payload: {
+      upsert: [{ ...before, lossProof: ["https://private.example/proof-after"] }],
+      deleteIds: [],
+      expectedOperations: { "stock-update": "update" },
+      expectedBefore: { "stock-update": stockConcurrencySnapshot(before) },
+    },
+  };
+  const internal = stockApprovalReviewDetails(request, {}).stockDetails;
+  const response = stockApprovalDetailsForResponse(internal);
+  const serialized = JSON.stringify(response);
+
+  assert.equal(response.reviewComplete, true);
+  assert.equal(response.items[0].lossProofChanged, true);
+  assert.equal(response.items[0].before.lossProofCount, 1);
+  assert.equal(response.items[0].after.lossProofCount, 1);
+  assert.doesNotMatch(serialized, /lossProofFingerprint|private\.example|"signature"/);
 });
 
 test("stock deletion approvals preserve complete inventory details", () => {
@@ -215,6 +654,38 @@ test("staff updates and deletes require approval before changing stock", () => {
   });
   assert.equal(deleted.requiresApproval, true);
   assert.equal(deleted.hasDeletes, true);
+});
+
+test("approval classification ignores existing canonical no-op upserts", () => {
+  const current = {
+    id: "stock-1",
+    siteId: "nanjing",
+    productId: "product-1",
+    batchId: "batch-1",
+    subTankId: "tank-1",
+    status: "healthy",
+    inDate: "2026-08-20",
+    basePrice: 100,
+    notes: "",
+  };
+  const classification = classifyStockMutationForApproval({
+    existingIds: new Set(["stock-1"]),
+    stock: [current],
+    upsertItems: [{
+      ...current,
+      sold: false,
+      lost: false,
+      lossProof: [],
+      priceOverridden: false,
+      commissionRate: 0,
+      notes: "   ",
+    }],
+    batches: [{ id: "batch-1", createdAt: "2026-08-01T00:00:00.000Z" }],
+    now: Date.parse("2026-08-23T00:00:00.000Z"),
+  });
+
+  assert.equal(classification.requiresApproval, false);
+  assert.deepEqual(classification.updatedItems, []);
 });
 
 test("administrators remain the approving authority and may maintain stock directly", () => {

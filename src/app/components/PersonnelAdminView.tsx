@@ -1,58 +1,40 @@
-import { useState } from "react";
 import { ShieldCheck, UsersRound } from "lucide-react";
 import { PermissionsView } from "./PermissionsView";
 import { PersonnelView } from "./PersonnelView";
-import { Button } from "./ui/button";
-
-type PersonnelSection = "accounts" | "permissions";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
 export function PersonnelAdminView() {
-  const [section, setSection] = useState<PersonnelSection>("accounts");
-
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h2>人员与权限</h2>
-        <p className="text-sm text-muted-foreground">集中维护员工账号、登录密码、可见区域和业务权限</p>
+        <p className="text-sm text-muted-foreground">
+          先维护完整人员档案，再按需开通登录账号并配置访问权限
+        </p>
       </div>
 
-      <div
-        role="tablist"
-        aria-label="人员与权限管理"
-        className="grid w-full grid-cols-2 gap-1 rounded-md border bg-muted/40 p-1 sm:w-[19rem]"
-      >
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={section === "accounts"}
-          variant={section === "accounts" ? "default" : "ghost"}
-          size="sm"
-          className="h-8"
-          onClick={() => setSection("accounts")}
+      <Tabs defaultValue="profiles" className="gap-4">
+        <TabsList
+          aria-label="人员与权限管理"
+          className="grid h-auto w-full grid-cols-2 rounded-md border bg-muted/40 p-1 sm:w-[22rem]"
         >
-          <UsersRound className="size-4" />
-          人员账号
-        </Button>
-        <Button
-          type="button"
-          role="tab"
-          aria-selected={section === "permissions"}
-          variant={section === "permissions" ? "default" : "ghost"}
-          size="sm"
-          className="h-8"
-          onClick={() => setSection("permissions")}
-        >
-          <ShieldCheck className="size-4" />
-          权限设置
-        </Button>
-      </div>
+          <TabsTrigger value="profiles" className="min-h-11 rounded-md">
+            <UsersRound className="size-4" aria-hidden="true" />
+            人员档案
+          </TabsTrigger>
+          <TabsTrigger value="accounts" className="min-h-11 rounded-md">
+            <ShieldCheck className="size-4" aria-hidden="true" />
+            账号与权限
+          </TabsTrigger>
+        </TabsList>
 
-      <div hidden={section !== "accounts"}>
-        <PersonnelView embedded />
-      </div>
-      <div hidden={section !== "permissions"}>
-        <PermissionsView embedded />
-      </div>
+        <TabsContent value="profiles" forceMount className="data-[state=inactive]:hidden">
+          <PersonnelView embedded />
+        </TabsContent>
+        <TabsContent value="accounts" forceMount className="data-[state=inactive]:hidden">
+          <PermissionsView embedded />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

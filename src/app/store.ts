@@ -2,7 +2,13 @@ import { createContext, useContext } from "react";
 
 export type Role = "admin" | "staff";
 
-export type User = { username: string; role: Role; visibleSiteIds?: string[] } | null;
+export type User = {
+  username: string;
+  role: Role;
+  visibleSiteIds?: string[];
+  /** 当前登录账号的最小权限摘要，仅存在于前端会话，不进入业务状态持久化。 */
+  account?: AuthAccountPermissionSummary;
+} | null;
 
 export type PermissionAction = "create" | "update" | "delete";
 
@@ -22,6 +28,14 @@ export type PermissionModule =
 export type ModulePermission = Record<PermissionAction, boolean>;
 
 export type PermissionSet = Record<PermissionModule, ModulePermission>;
+
+export type AuthAccountPermissionSummary = {
+  personnelId: string;
+  username: string;
+  accessRole: Role;
+  accountEnabled: boolean;
+  permissions: PermissionSet;
+};
 
 export type Species = {
   id: string;
@@ -203,6 +217,85 @@ export type BioRecord = {
   operator?: string;
 };
 
+export type BioRecordExpectedSnapshot = Pick<
+  BioRecord,
+  "id" | "stockItemId" | "date" | "text" | "photos" | "videos"
+>;
+
+export type BioDetailsPatch = Partial<Pick<StockItem, "status" | "basePrice" | "code" | "notes">>;
+
+export type BioRecordSaveChange =
+  | { action: "create"; stockItemId: string; record: BioRecordExpectedSnapshot }
+  | { action: "updateTime"; stockItemId: string; recordId: string; record: { date: string }; expectedRecord: BioRecordExpectedSnapshot }
+  | { action: "delete"; stockItemId: string; recordId: string; expectedRecord: BioRecordExpectedSnapshot }
+  | {
+      action: "saveDetails";
+      stockItemId: string;
+      details: BioDetailsPatch;
+      expectedDetails: BioDetailsPatch;
+      record?: BioRecordExpectedSnapshot;
+    };
+
+export type BioRecordSaveResult = {
+  ok: boolean;
+  error?: string;
+  conflict?: boolean;
+};
+
+export type MaintenanceSaveResult = {
+  ok: boolean;
+  error?: string;
+  code?: string;
+  conflict?: boolean;
+};
+
+/**
+ * The stock fields that maintenance actions use as a compare-and-swap guard.
+ * Keeping this deliberately small lets the server reject stale moves, status
+ * edits, and loss registrations without accepting a client-owned stock row.
+ */
+export type MaintenanceStockExpectedSnapshot = Pick<
+  StockItem,
+  "id" | "subTankId" | "status"
+> & { lost: boolean };
+
+export type MaintenanceSaveChange =
+  | {
+      mode: "record";
+      clientMutationId: string;
+      itemIds: string[];
+      recordDate: string;
+      recordText?: string;
+      recordPhotos: string[];
+      recordVideos: string[];
+    }
+  | {
+      mode: "move";
+      clientMutationId: string;
+      itemIds: string[];
+      expectedItems: MaintenanceStockExpectedSnapshot[];
+      targetSubTankId: string;
+      moveDate?: string;
+      moveNotes?: string;
+    }
+  | {
+      mode: "status";
+      clientMutationId: string;
+      itemIds: string[];
+      expectedItems: MaintenanceStockExpectedSnapshot[];
+      targetStatus: StockStatus;
+    }
+  | {
+      mode: "loss";
+      clientMutationId: string;
+      stockItemId?: string;
+      itemIds?: string[];
+      expectedItems: MaintenanceStockExpectedSnapshot[];
+      lossDate: string;
+      lossReason?: string;
+      lossProof: string[];
+    };
+
 export type DailyLog = {
   id: string;
   siteId?: string;
@@ -327,6 +420,11 @@ export type InventoryAdjustmentDraft = {
 export type StockChangeRequest = {
   upsert?: StockItem[];
   deleteIds?: string[];
+  /** Snapshot CAS: every requested ID must keep the operation and before value
+   * that the user actually reviewed. The server rejects stale forms instead of
+   * silently overwriting maintenance or another user's change. */
+  expectedOperations: Record<string, "create" | "update" | "delete">;
+  expectedBefore: Record<string, StockItem>;
   adjustmentContext?: {
     kind: "inventory_adjustment";
     draftId?: string;
@@ -511,6 +609,8 @@ export type Order = {
   paymentReference?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
+  /** Stable personnel reference for the order owner. `contactPerson` remains the saved display-name snapshot. */
+  contactPersonnelId?: string;
   contactPerson?: string;
   items: OrderItem[];
   /** 物流订单的运费承担方式；历史订单未设置时按寄付处理。 */
@@ -594,23 +694,144 @@ export type Customer = {
   notes: string;
 };
 
+export type PersonnelProfileAttachmentKind =
+  | "id_card_front"
+  | "id_card_back"
+  | "education_proof";
+
+export type PersonnelProfileAttachment = {
+  id: string;
+  kind: PersonnelProfileAttachmentKind;
+  originalName?: string;
+  mime?: string;
+  size?: number;
+  uploadedAt?: string;
+};
+
+export type PersonnelEducationLevel =
+  | "high_school_or_below"
+  | "college"
+  | "bachelor"
+  | "master"
+  | "doctorate";
+
+export type PersonnelSelfProfileForm = {
+  name: string;
+  gender: "" | "male" | "female" | "other";
+  nativePlace: string;
+  birthMonth: string;
+  educationLevel: "" | PersonnelEducationLevel;
+  idCardNo: string;
+  idCardFrontAttachment: PersonnelProfileAttachment | null;
+  idCardBackAttachment: PersonnelProfileAttachment | null;
+  educationProofAttachment: PersonnelProfileAttachment | null;
+  phone: string;
+  email: string;
+  wechat: string;
+  address: string;
+  bankAccountName: string;
+  bankAccountNo: string;
+  bankName: string;
+};
+
+export type PersonnelEmploymentSummary = {
+  personnelNo?: string;
+  department?: string;
+  role?: string;
+  hireDate?: string;
+  siteIds?: string[];
+  employmentStatus?: "active" | "resigned";
+};
+
+export type PersonnelAccountSummary = {
+  personnelId?: string;
+  username?: string;
+  accountEnabled?: boolean;
+  accessRole?: Role;
+};
+
+export type PersonnelProfileRequestStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "superseded"
+  | "cancelled";
+
+export type PersonnelProfileRequest = {
+  id: string;
+  status: PersonnelProfileRequestStatus;
+  createdAt?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  resolutionNote?: string;
+  changedFields?: string[];
+};
+
+export type PersonnelSelfProfile = PersonnelSelfProfileForm & {
+  personnelNo?: string;
+  employment: PersonnelEmploymentSummary;
+  account: PersonnelAccountSummary;
+  profileRevision: string;
+  missingFields?: string[];
+};
+
 export type Personnel = {
   id: string;
+  personnelNo?: string;
   name: string;
   username: string;
   password: string;
+  accountEnabled?: boolean;
   accessRole: Role;
   visibleSiteIds?: string[];
   permissions?: PermissionSet;
   employmentStatus?: "active" | "resigned";
   resignedAt?: string;
+  gender?: "" | "male" | "female" | "other";
+  nativePlace?: string;
+  birthMonth?: string;
+  educationLevel?: "" | PersonnelEducationLevel;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  idCardFrontAttachment?: PersonnelProfileAttachment | null;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  idCardBackAttachment?: PersonnelProfileAttachment | null;
+  /** 仅由受保护的人员敏感档案接口按需填充，普通人员列表不得携带。 */
+  educationProofAttachment?: PersonnelProfileAttachment | null;
+  profileComplete?: boolean;
+  missingProfileFields?: string[];
+  birthDate?: string;
+  department?: string;
   role: string;
+  hireDate?: string;
+  siteIds?: string[];
   phone: string;
+  email?: string;
+  wechat?: string;
+  address?: string;
+  emergencyContact?: string;
+  emergencyPhone?: string;
+  idCardNo?: string;
+  bankAccountName?: string;
+  bankAccountNo?: string;
+  bankName?: string;
+  /** 编辑敏感档案时由服务端签发的并发版本，只在当前编辑会话中使用。 */
+  sensitiveRevision?: string;
   notes: string;
 };
 
 export function isPersonnelResigned(person?: Pick<Personnel, "employmentStatus" | "resignedAt"> | null): boolean {
   return person?.employmentStatus === "resigned" || Boolean(person?.resignedAt);
+}
+
+export function hasPersonnelAccount(person?: Pick<Personnel, "username"> | null): boolean {
+  return Boolean(String(person?.username ?? "").trim());
+}
+
+export function isPersonnelAccountEnabled(
+  person?: Pick<Personnel, "username" | "accountEnabled" | "employmentStatus" | "resignedAt"> | null
+): boolean {
+  return hasPersonnelAccount(person) && person?.accountEnabled !== false && !isPersonnelResigned(person);
 }
 
 export type OperationLog = {
@@ -620,6 +841,15 @@ export type OperationLog = {
   module: string;
   action: string;
   detail: string;
+  /** Bounded server-owned maintenance idempotency metadata; never a full delta. */
+  clientMutationId?: string;
+  mutationDigest?: string;
+  maintenanceDeltaIds?: {
+    stockUpdateIds: string[];
+    batchUpdateIds: string[];
+    bioRecordUpdateIds: string[];
+    lossRecordUpdateIds: string[];
+  };
 };
 
 export type Site = {
@@ -768,6 +998,11 @@ export function configuredPaymentMethod(
 
 export type Store = {
   user: User;
+  /** 服务端在权限裁剪前生成的只读库存履约投影，不属于可持久化业务状态。 */
+  inventoryProjection?: {
+    outStockIds: string[];
+    outDateByStockId?: Record<string, string>;
+  };
   systemSettings: SystemSettings;
   sites: Site[];
   personnel: Personnel[];
@@ -801,11 +1036,8 @@ export type StoreContextType = {
   saveProduct: (product: Product) => Promise<boolean>;
   deleteProduct: (productId: string) => Promise<ProductDeleteResult>;
   saveStockChange: (change: StockChangeRequest) => Promise<StockChangeResult>;
-  saveMaintenanceAction: (change:
-    | { mode: "record"; itemIds: string[]; recordDate: string; recordText?: string; recordPhotos: string[]; recordVideos: string[] }
-    | { mode: "move"; itemIds: string[]; targetSubTankId: string; moveDate?: string; moveNotes?: string }
-    | { mode: "loss"; stockItemId?: string; itemIds?: string[]; lossDate: string; lossReason?: string; lossProof: string[] }
-  ) => Promise<boolean>;
+  saveMaintenanceAction: (change: MaintenanceSaveChange) => Promise<MaintenanceSaveResult>;
+  saveBioRecordChange: (change: BioRecordSaveChange) => Promise<BioRecordSaveResult>;
   saveTankGroupChange: (change: {
     mode: "upsertGroup" | "deleteGroup" | "upsertSubTank" | "deleteSubTank";
     group?: TankGroup;
@@ -890,9 +1122,9 @@ export const initialState: Store = {
     { id: "beijing", name: "北京" },
   ],
   personnel: [
-    { id: "person-admin", name: "admin", username: "admin", password: "", accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
-    { id: "person-staff", name: "staff", username: "staff", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "店员", phone: "", notes: "系统默认店员账户" },
-    { id: "person-a", name: "店员A", username: "staff-a", password: "", accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "养护", phone: "", notes: "" },
+    { id: "person-admin", personnelNo: "RY-0001", name: "admin", username: "admin", password: "", accountEnabled: true, accessRole: "admin", permissions: fullPermissions(), employmentStatus: "active", role: "管理员", phone: "", notes: "系统默认管理员账户" },
+    { id: "person-staff", personnelNo: "RY-0002", name: "staff", username: "staff", password: "", accountEnabled: true, accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "店员", phone: "", notes: "系统默认店员账户" },
+    { id: "person-a", personnelNo: "RY-0003", name: "店员A", username: "staff-a", password: "", accountEnabled: true, accessRole: "staff", permissions: fullPermissions(), employmentStatus: "active", role: "养护", phone: "", notes: "" },
   ],
   operationLogs: [],
   speciesCategories: [
@@ -1051,7 +1283,8 @@ export const StoreContext = createContext<StoreContextType>({
   saveProduct: async () => false,
   deleteProduct: async () => ({ ok: false, error: "删除商品功能尚未初始化" }),
   saveStockChange: async () => ({ ok: false }),
-  saveMaintenanceAction: async () => false,
+  saveMaintenanceAction: async () => ({ ok: false, error: "维护保存功能尚未初始化" }),
+  saveBioRecordChange: async () => ({ ok: false, error: "生物记录保存功能尚未初始化" }),
   saveTankGroupChange: async () => false,
   saveDailyLog: async () => false,
   saveWaterQualitySettings: async () => false,

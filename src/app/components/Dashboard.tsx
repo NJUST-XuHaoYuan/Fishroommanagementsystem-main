@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, useStore } from "../store";
+import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, TankGroup, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Textarea } from "./ui/textarea";
-import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert } from "lucide-react";
-import { getShippedOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { Fish, PackageSearch, AlertTriangle, ShoppingBag, Truck, TrendingUp, Banknote, RotateCcw, Download, Settings2, CircleAlert, BadgeDollarSign } from "lucide-react";
+import { getInventoryOutStockIds, isPhysicallyInTank, normalizeInventoryId } from "../utils/inventory";
 import { toast } from "sonner";
-import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName } from "../utils/sites";
+import { ALL_SITE_ID, getSites, matchesSite, normalizeSiteScope, siteName, stockMatchesSite } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 import { getBillableShippingFee } from "../utils/orderFees";
 import { dashboardOrderAdjustmentTotals } from "../../../server/dashboard-sales-metrics.mjs";
+import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-fish-value.mjs";
 
 function todayDateString(): string {
   const now = new Date();
@@ -171,6 +172,9 @@ type DashboardSummary = {
   inTankSold: number;
   inTankSick: number;
   inTankNormal: number;
+  healthyFishStockValue?: number;
+  healthyFishStockCount?: number;
+  healthyFishUnpricedCount?: number;
   tankGroupCount: number;
   subTankCount: number;
   activeOrders: number;
@@ -179,6 +183,10 @@ type DashboardSummary = {
   financeDays?: number;
   dailyFinanceData: DailyFinancePoint[];
   dailyLossData?: DailyLossPoint[];
+  dailySalespersonData?: DailySalespersonPoint[];
+  salespersonOptions?: Array<{ name: string; orderCount: number; amount: number }>;
+  focusOptions?: Record<FocusMode, FocusOption[]>;
+  defaultFocus?: FocusDetail | null;
 };
 
 type FocusMode = "species" | "product";
@@ -186,12 +194,17 @@ type FocusMode = "species" | "product";
 type FocusData = {
   species: Species[];
   products: Product[];
+  tankGroups: TankGroup[];
   stock: StockItem[];
   orders: Order[];
   shipments: Shipment[];
   lossRecords: StockLossRecord[];
   customers: Customer[];
   personnel: Personnel[];
+  inventoryProjection?: {
+    outStockIds: string[];
+    outDateByStockId?: Record<string, string>;
+  };
 };
 
 type FocusOption = {
@@ -212,6 +225,31 @@ type FocusProductRow = {
   lost: number;
   salesCount: number;
   salesAmount: number;
+};
+
+type FocusMetrics = {
+  salesCount: number;
+  salesAmount: number;
+  salesCount30: number;
+  salesAmount30: number;
+  averageTurnoverDays: number;
+  turnoverSampleCount: number;
+  currentAverageAgeDays: number;
+  estimatedClearDays: number | null;
+  inTank: number;
+  sellable: number;
+  soldInTank: number;
+  sick: number;
+  lost: number;
+  totalStock: number;
+  lossRate: number;
+};
+
+type FocusDetail = {
+  mode: FocusMode;
+  id: string;
+  metrics: FocusMetrics;
+  productRows: FocusProductRow[];
 };
 
 function financeMetricValue(point: DailyFinancePoint, key: DailyFinanceMetricKey): number {
@@ -923,8 +961,13 @@ export function Dashboard() {
   const [focusMode, setFocusMode] = useState<FocusMode>("species");
   const [focusSearch, setFocusSearch] = useState("");
   const [focusId, setFocusId] = useState("");
-  const [focusData, setFocusData] = useState<FocusData | null>(null);
+  const [focusDetail, setFocusDetail] = useState<FocusDetail | null>(null);
   const [focusLoading, setFocusLoading] = useState(false);
+  const [focusError, setFocusError] = useState("");
+  const [focusRetry, setFocusRetry] = useState(0);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
+  const [summaryRetry, setSummaryRetry] = useState(0);
   const sites = getSites(state);
   const configuredFishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
     ? state.systemSettings.fishListFooterText
@@ -938,6 +981,10 @@ export function Dashboard() {
   }, [activeSiteId]);
   useEffect(() => {
     let cancelled = false;
+    setSummaryLoading(true);
+    setSummaryError("");
+    setSummary(null);
+    setFocusDetail(null);
     setHoveredFinanceIndex(null);
     setHoveredSalespersonIndex(null);
     setSelectedSalespersonPoint(null);
@@ -953,61 +1000,83 @@ export function Dashboard() {
           setFinanceDays((current) => normalizeFinanceDays(Number(nextSummary.financeDays) || current));
         }
         setSummary(nextSummary);
-      })
-      .catch((error) => {
-        if (!cancelled) console.error("Failed to load dashboard summary:", error);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [financeDays, dashboardSiteId]);
-  useEffect(() => {
-    let cancelled = false;
-    setFocusLoading(true);
-    fetch("/api/state/slice?keys=species,products,stock,orders,shipments,lossRecords,customers,personnel&lite=species", { headers: authJsonHeaders() })
-      .then((response) => response.json().then((result) => ({ response, result })))
-      .then(({ response, result }) => {
-        if (cancelled) return;
-        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-        const data = result.data ?? {};
-        setFocusData({
-          species: Array.isArray(data.species) ? data.species : [],
-          products: Array.isArray(data.products) ? data.products : [],
-          stock: Array.isArray(data.stock) ? data.stock : [],
-          orders: Array.isArray(data.orders) ? data.orders : [],
-          shipments: Array.isArray(data.shipments) ? data.shipments : [],
-          lossRecords: Array.isArray(data.lossRecords) ? data.lossRecords : [],
-          customers: Array.isArray(data.customers) ? data.customers : [],
-          personnel: Array.isArray(data.personnel) ? data.personnel : [],
-        });
+        if (!focusId && nextSummary?.defaultFocus) {
+          setFocusMode(nextSummary.defaultFocus.mode === "product" ? "product" : "species");
+          setFocusId(String(nextSummary.defaultFocus.id ?? ""));
+          setFocusDetail(nextSummary.defaultFocus);
+          setFocusError("");
+        }
       })
       .catch((error) => {
         if (!cancelled) {
-          console.error("Failed to load focus dashboard data:", error);
-          setFocusData(null);
+          console.error("Failed to load dashboard summary:", error);
+          setSummary(null);
+          setSummaryError("概览数据加载失败，请重试");
         }
       })
       .finally(() => {
-        if (!cancelled) setFocusLoading(false);
+        if (!cancelled) setSummaryLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [financeDays, dashboardSiteId, summaryRetry]);
   useEffect(() => {
     if (fishListSettingsOpen) setFishListFooterDraft(fishListFooterText);
   }, [fishListSettingsOpen, fishListFooterText]);
-  const dashboardSpecies = focusData?.species ?? (Array.isArray(state.species) ? state.species : []);
-  const dashboardProducts = focusData?.products ?? (Array.isArray(state.products) ? state.products : []);
-  const dashboardBatches = Array.isArray(state.batches) ? state.batches : [];
-  const dashboardTankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
-  const dashboardStock = focusData?.stock ?? (Array.isArray(state.stock) ? state.stock : []);
-  const dashboardOrders = focusData?.orders ?? (Array.isArray(state.orders) ? state.orders : []);
-  const dashboardShipments = focusData?.shipments ?? (Array.isArray(state.shipments) ? state.shipments : []);
-  const dashboardLossRecords = focusData?.lossRecords ?? (Array.isArray(state.lossRecords) ? state.lossRecords : []);
-  const dashboardPersonnel = focusData?.personnel ?? (Array.isArray(state.personnel) ? state.personnel : []);
-  const dashboardCustomers = focusData?.customers ?? (Array.isArray(state.customers) ? state.customers : []);
-  const shippedOutStockIds = getShippedOutStockIds(dashboardShipments);
+  useEffect(() => {
+    if (!focusId) {
+      setFocusDetail(null);
+      setFocusError("");
+      return;
+    }
+    if (focusDetail?.mode === focusMode && focusDetail.id === focusId) return;
+    const controller = new AbortController();
+    setFocusLoading(true);
+    setFocusError("");
+    fetch(
+      `/api/dashboard-focus?mode=${encodeURIComponent(focusMode)}&id=${encodeURIComponent(focusId)}&siteId=${encodeURIComponent(dashboardSiteId)}`,
+      { headers: authJsonHeaders(), signal: controller.signal }
+    )
+      .then((response) => response.json().then((result) => ({ response, result })))
+      .then(({ response, result }) => {
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        setFocusDetail(result.focus ?? null);
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") {
+          console.error("Failed to load dashboard focus detail:", error);
+          setFocusDetail(null);
+          setFocusError("关注数据加载失败，请重新选择后重试");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setFocusLoading(false);
+      });
+    return () => controller.abort();
+  }, [dashboardSiteId, focusDetail, focusId, focusMode, focusRetry]);
+  const focusData: FocusData | null = null;
+  // Dashboard data is served as compact aggregates. Do not reuse large arrays
+  // left in the shared store after navigating from another page: doing so
+  // would re-run the old D x N fallback calculations before the summary wins.
+  // The empty fallback only keeps the first render deterministic while the
+  // compact request is in flight. Fish-list export loads its data on demand.
+  const dashboardSpecies: Species[] = [];
+  const dashboardProducts: Product[] = [];
+  const dashboardBatches: PurchaseBatch[] = [];
+  const dashboardTankGroups: TankGroup[] = [];
+  const dashboardStock: StockItem[] = [];
+  const dashboardOrders: Order[] = [];
+  const dashboardShipments: Shipment[] = [];
+  const dashboardLossRecords: StockLossRecord[] = [];
+  const dashboardPersonnel: Personnel[] = [];
+  const dashboardCustomers: Customer[] = [];
+  const dashboardInventoryProjection = { outStockIds: [] as string[], outDateByStockId: {} as Record<string, string> };
+  const shippedOutStockIds = getInventoryOutStockIds({
+    shipments: dashboardShipments,
+    orders: dashboardOrders,
+    inventoryProjection: dashboardInventoryProjection,
+  });
   const today = todayDateString();
   const todayDate = new Date(`${today}T00:00:00`);
 
@@ -1141,12 +1210,18 @@ export function Dashboard() {
     const current = lossDateByStockId.get(item.id);
     if (!current || itemLossDate < current) lossDateByStockId.set(item.id, itemLossDate);
   }
-  const shippedDateByStockId = new Map<string, string>();
+  const shippedDateByStockId = new Map<string, string>(
+    Object.entries(dashboardInventoryProjection?.outDateByStockId ?? {})
+      .map(([id, date]) => [normalizeInventoryId(id), String(date ?? "").slice(0, 10)] as const)
+      .filter(([id, date]) => Boolean(id) && /^\d{4}-\d{2}-\d{2}$/.test(date))
+  );
   for (const shipment of dashboardShipments) {
     if (shipment.status === "preparing") continue;
-    const date = String(shipment.shipDate ?? shipment.outboundDate ?? shipment.createdAt ?? "").slice(0, 10);
+    const date = String(shipment.outboundDate ?? shipment.shipDate ?? shipment.createdAt ?? "").slice(0, 10);
     if (!date) continue;
-    for (const stockItemId of shipment.itemStockIds ?? []) {
+    for (const rawStockItemId of shipment.itemStockIds ?? []) {
+      const stockItemId = normalizeInventoryId(rawStockItemId);
+      if (!stockItemId) continue;
       const current = shippedDateByStockId.get(stockItemId);
       if (!current || date < current) shippedDateByStockId.set(stockItemId, date);
     }
@@ -1169,7 +1244,7 @@ export function Dashboard() {
       if (!inDate || inDate > date) return false;
       const lossDate = lossDateByStockId.get(item.id);
       if (lossDate && lossDate < date) return false;
-      const shippedDate = shippedDateByStockId.get(item.id);
+      const shippedDate = shippedDateByStockId.get(normalizeInventoryId(item.id));
       if (shippedDate && shippedDate < date) return false;
       return true;
     }).length;
@@ -1243,101 +1318,26 @@ export function Dashboard() {
       : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
-  const salesScope = normalizeSiteScope(dashboardSiteId);
-  const scopedSalesOrders = dashboardOrders.filter((order) =>
-    order.status !== "cancelled" && (salesScope === ALL_SITE_ID || matchesSite(order, salesScope))
-  );
-  const scopedSalesOrderIds = new Set(scopedSalesOrders.map((order) => order.id));
-	  const scopedSalesShipments = dashboardShipments.filter((shipment) =>
-	    salesScope === ALL_SITE_ID || matchesSite(shipment, salesScope) || scopedSalesOrderIds.has(shipment.orderId)
-	  );
-	  const resignedSalespersonNames = new Set(
-	    dashboardPersonnel
-	      .filter((person) => isPersonnelResigned(person))
-	      .map((person) => normalizeSalespersonName(person.name || person.username))
-	      .filter(Boolean)
-	  );
-	  const salespersonOptions = (() => {
-	    const seen = new Set<string>();
-	    const options: Array<{ name: string; person?: Personnel; orderCount: number; amount: number }> = [];
-	    const addOption = (name: string, person?: Personnel) => {
-	      const normalized = normalizeSalespersonName(name);
-	      if (!normalized || resignedSalespersonNames.has(normalized)) return;
-	      if (seen.has(normalized)) return;
-      seen.add(normalized);
-      const personOrders = scopedSalesOrders.filter((order) => normalizeSalespersonName(order.contactPerson) === normalized);
-      options.push({
-        name: normalized,
-        person,
-        orderCount: personOrders.length,
-        amount: personOrders.reduce((sum, order) => sum + calcOrderDealAmount(order, scopedSalesShipments), 0),
-      });
-	    };
-	    dashboardPersonnel
-	      .filter((person) => String(person.name ?? "").trim() && !isPersonnelResigned(person))
-	      .forEach((person) => addOption(person.name, person));
-    scopedSalesOrders.forEach((order) => addOption(order.contactPerson));
-    return options.sort((a, b) =>
-      b.amount - a.amount ||
-      b.orderCount - a.orderCount ||
-      a.name.localeCompare(b.name, "zh-Hans-CN")
-    );
-  })();
+  const salespersonOptions = Array.isArray(summary?.salespersonOptions)
+    ? summary.salespersonOptions
+    : [];
   const selectedSalespersonNames = salespersonOptions
     .map((option) => option.name)
     .filter((name) => selectedSalespeople.size === 0 || selectedSalespeople.has(name));
   const selectedSalespersonSet = new Set(selectedSalespersonNames);
-  const dailySalespersonData: DailySalespersonPoint[] = dailyFinanceData.map((financePoint) => {
-    const rowsByPerson = new Map<string, DailySalespersonBreakdown>();
-    const ordersForDate = scopedSalesOrders.filter((order) => String(order.date ?? "").slice(0, 10) === financePoint.date);
-    for (const order of ordersForDate) {
-	      const salesperson = normalizeSalespersonName(order.contactPerson);
-	      if (resignedSalespersonNames.has(salesperson)) continue;
-	      if (!selectedSalespersonSet.has(salesperson)) continue;
-      const amount = calcOrderDealAmount(order, scopedSalesShipments);
-      const customer = customerById.get(order.customerId);
-      const detail: DailySalespersonOrderDetail = {
-        orderId: order.id,
-        orderNo: order.orderNo,
-        customerName: customer?.name ?? (
-          isPlatformOrderSource(order.source)
-            ? platformOrderDisplayName(order)
-            : order.customerId || "未关联客户"
-        ),
-        contactPerson: salesperson,
-        amount,
-        itemCount: order.items?.length ?? 0,
-        status: ORDER_STATUS_TEXT[order.status] ?? order.status,
-        notes: order.notes ?? "",
+  const dailySalespersonData: DailySalespersonPoint[] = (Array.isArray(summary?.dailySalespersonData)
+    ? summary.dailySalespersonData
+    : []).map((point) => {
+      const breakdowns = (Array.isArray(point.breakdowns) ? point.breakdowns : [])
+        .filter((row) => selectedSalespersonSet.has(row.salesperson));
+      return {
+        ...point,
+        total: Number(breakdowns.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2)),
+        orderCount: breakdowns.reduce((sum, row) => sum + Number(row.orderCount || 0), 0),
+        itemCount: breakdowns.reduce((sum, row) => sum + Number(row.itemCount || 0), 0),
+        breakdowns,
       };
-      const current = rowsByPerson.get(salesperson) ?? {
-        salesperson,
-        amount: 0,
-        orderCount: 0,
-        itemCount: 0,
-        orders: [],
-      };
-      current.amount = Number((current.amount + amount).toFixed(2));
-      current.orderCount += 1;
-      current.itemCount += detail.itemCount;
-      current.orders.push(detail);
-      rowsByPerson.set(salesperson, current);
-    }
-    const breakdowns = [...rowsByPerson.values()]
-      .map((row) => ({
-        ...row,
-        orders: row.orders.sort((a, b) => b.amount - a.amount || a.orderNo.localeCompare(b.orderNo, "zh-Hans-CN")),
-      }))
-      .sort((a, b) => b.amount - a.amount || a.salesperson.localeCompare(b.salesperson, "zh-Hans-CN"));
-    return {
-      date: financePoint.date,
-      label: financePoint.label,
-      total: Number(breakdowns.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
-      orderCount: breakdowns.reduce((sum, row) => sum + row.orderCount, 0),
-      itemCount: breakdowns.reduce((sum, row) => sum + row.itemCount, 0),
-      breakdowns,
-    };
-  });
+    });
   const maxSalespersonValue = Math.max(
     1,
     ...dailySalespersonData.flatMap((point) => point.breakdowns.map((row) => row.amount))
@@ -1436,27 +1436,111 @@ export function Dashboard() {
     const source: FocusData = {
       species: focusData?.species ?? dashboardSpecies,
       products: focusData?.products ?? dashboardProducts,
+      tankGroups: focusData?.tankGroups ?? dashboardTankGroups,
       stock: focusData?.stock ?? dashboardStock,
       orders: focusData?.orders ?? dashboardOrders,
       shipments: focusData?.shipments ?? dashboardShipments,
       lossRecords: focusData?.lossRecords ?? dashboardLossRecords,
+      customers: focusData?.customers ?? dashboardCustomers,
+      personnel: focusData?.personnel ?? dashboardPersonnel,
+      inventoryProjection: focusData?.inventoryProjection ?? dashboardInventoryProjection,
     };
     const scope = normalizeSiteScope(dashboardSiteId);
     if (scope === ALL_SITE_ID) return source;
+    const tankGroups = source.tankGroups.filter((group) => matchesSite(group, scope));
     const orders = source.orders.filter((order) => matchesSite(order, scope));
     const orderIds = new Set(orders.map((order) => order.id));
-    const stock = source.stock.filter((item) => matchesSite(item, scope));
-    const stockIds = new Set(stock.map((item) => item.id));
+    const stock = source.stock.filter((item) => stockMatchesSite(item, scope, source.tankGroups));
+    const stockIds = new Set(stock.map((item) => normalizeInventoryId(item.id)));
     return {
       ...source,
+      tankGroups,
       stock,
+      inventoryProjection: {
+        outStockIds: (source.inventoryProjection?.outStockIds ?? [])
+          .filter((id) => stockIds.has(normalizeInventoryId(id))),
+        outDateByStockId: Object.fromEntries(
+          Object.entries(source.inventoryProjection?.outDateByStockId ?? {})
+            .filter(([id]) => stockIds.has(normalizeInventoryId(id)))
+        ),
+      },
       orders,
       shipments: source.shipments.filter((shipment) => matchesSite(shipment, scope) || orderIds.has(shipment.orderId)),
       lossRecords: source.lossRecords.filter((record) => matchesSite(record, scope) || stockIds.has(record.stockItemId)),
     };
-  }, [dashboardSiteId, focusData, dashboardSpecies, dashboardProducts, dashboardStock, dashboardOrders, dashboardShipments, dashboardLossRecords]);
+  }, [
+    dashboardSiteId,
+    focusData,
+    dashboardSpecies,
+    dashboardProducts,
+    dashboardTankGroups,
+    dashboardStock,
+    dashboardOrders,
+    dashboardShipments,
+    dashboardLossRecords,
+    dashboardCustomers,
+    dashboardPersonnel,
+    dashboardInventoryProjection,
+  ]);
+
+  const fallbackHealthyFishStockMetrics = useMemo(() => {
+    const fulfilledStockIds = getInventoryOutStockIds({
+      shipments: focusSource.shipments,
+      orders: focusSource.orders,
+      inventoryProjection: focusSource.inventoryProjection,
+    });
+    try {
+      return healthyFishInventoryMetrics({
+        stock: focusSource.stock,
+        products: focusSource.products,
+        species: focusSource.species,
+        outStockIds: fulfilledStockIds,
+      });
+    } catch (error) {
+      console.error("Failed to calculate healthy fish inventory value:", error);
+      return null;
+    }
+  }, [focusSource]);
+  const summaryHealthyFishStockValue = Number(summary?.healthyFishStockValue);
+  const summaryHealthyFishStockCount = Number(summary?.healthyFishStockCount);
+  const summaryHealthyFishUnpricedCount = Number(summary?.healthyFishUnpricedCount);
+  const summaryMatchesDashboardScope = normalizeSiteScope(summary?.siteId) === normalizeSiteScope(dashboardSiteId);
+  const summaryHealthyFishStockValueCents = Math.round((summaryHealthyFishStockValue + Number.EPSILON) * 100);
+  const hasValidSummaryHealthyFishMetrics = summaryMatchesDashboardScope &&
+    Number.isFinite(summaryHealthyFishStockValue) &&
+    summaryHealthyFishStockValue >= 0 &&
+    Number.isSafeInteger(summaryHealthyFishStockValueCents) &&
+    Number.isSafeInteger(summaryHealthyFishStockCount) &&
+    summaryHealthyFishStockCount >= 0 &&
+    Number.isSafeInteger(summaryHealthyFishUnpricedCount) &&
+    summaryHealthyFishUnpricedCount >= 0;
+  const healthyFishStockMetrics = hasValidSummaryHealthyFishMetrics
+    ? {
+        value: summaryHealthyFishStockValue,
+        count: summaryHealthyFishStockCount,
+        unpricedCount: summaryHealthyFishUnpricedCount,
+      }
+    : fallbackHealthyFishStockMetrics;
+  const healthyFishStockDescription = !healthyFishStockMetrics
+    ? "售价数据异常，暂无法安全计算"
+    : healthyFishStockMetrics.unpricedCount > 0
+      ? `按当前单鱼售价估算；${healthyFishStockMetrics.unpricedCount} 条未定价未计入`
+      : "按当前单鱼售价估算，不含已售和疾病鱼";
 
   const focusAnalysis = useMemo(() => {
+    const compactOptions = Array.isArray(summary?.focusOptions?.[focusMode])
+      ? summary.focusOptions[focusMode]
+      : null;
+    if (compactOptions) {
+      const selectedOption = compactOptions.find((option) => option.id === focusId) ?? null;
+      const detailMatches = focusDetail?.mode === focusMode && focusDetail.id === focusId;
+      return {
+        options: compactOptions,
+        selectedOption,
+        metrics: detailMatches ? focusDetail.metrics : null,
+        productRows: detailMatches ? focusDetail.productRows : [] as FocusProductRow[],
+      };
+    }
     const products = focusSource.products;
     const species = focusSource.species;
     const stock = focusSource.stock;
@@ -1464,7 +1548,11 @@ export function Dashboard() {
     const shipments = focusSource.shipments;
     const focusProductById = new Map(products.map((product) => [product.id, product]));
     const focusSpeciesById = new Map(species.map((item) => [item.id, item]));
-    const shippedIds = getShippedOutStockIds(shipments);
+    const shippedIds = getInventoryOutStockIds({
+      shipments,
+      orders,
+      inventoryProjection: focusSource.inventoryProjection,
+    });
     const physicalStock = stock.filter((item) => isPhysicallyInTank(item, shippedIds));
     const physicalCountByProduct = new Map<string, number>();
     for (const item of physicalStock) {
@@ -1587,7 +1675,7 @@ export function Dashboard() {
       },
       productRows,
     };
-  }, [focusSource, focusMode, focusId, today, todayDate]);
+  }, [focusDetail, focusId, focusMode, focusSource, summary, today, todayDate]);
 
   useEffect(() => {
     if (focusAnalysis.options.length === 0) {
@@ -1622,6 +1710,7 @@ export function Dashboard() {
       tankGroups: dashboardTankGroups,
       stock: dashboardStock,
       shipments: dashboardShipments,
+      inventoryProjection: dashboardInventoryProjection,
     };
     try {
       const response = await fetch("/api/state/slice?keys=species,products,tankGroups,stock,shipments&lite=species", { headers: authJsonHeaders() });
@@ -1634,6 +1723,7 @@ export function Dashboard() {
         tankGroups: Array.isArray(data.tankGroups) ? data.tankGroups : exportData.tankGroups,
         stock: Array.isArray(data.stock) ? data.stock : exportData.stock,
         shipments: Array.isArray(data.shipments) ? data.shipments : exportData.shipments,
+        inventoryProjection: data.inventoryProjection ?? exportData.inventoryProjection,
       };
     } catch (error) {
       console.error("Failed to load available fish list data:", error);
@@ -1656,7 +1746,10 @@ export function Dashboard() {
 
     const exportProductById = new Map(exportData.products.map((product) => [product.id, product]));
     const exportSpeciesById = new Map(exportData.species.map((species) => [species.id, species]));
-    const exportShippedOutStockIds = getShippedOutStockIds(exportData.shipments);
+    const exportShippedOutStockIds = getInventoryOutStockIds({
+      shipments: exportData.shipments,
+      inventoryProjection: exportData.inventoryProjection,
+    });
     const exportTankName = (subTankId?: string) => {
       if (!subTankId) return "—";
       for (const group of exportData.tankGroups) {
@@ -1860,16 +1953,23 @@ export function Dashboard() {
   };
 
   const cards = [
-    { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote, color: "bg-emerald-500" },
-    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw, color: "bg-rose-500" },
-    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert, color: "bg-amber-500" },
-    { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck, color: "bg-indigo-500" },
-    { label: "在缸鱼类", value: inFishStock, icon: Fish, color: "bg-sky-500" },
-    { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch, color: "bg-emerald-500" },
-    { label: "疾病观察中", value: sick, icon: AlertTriangle, color: "bg-red-500" },
-    { label: "进行中订单", value: activeOrders, icon: ShoppingBag, color: "bg-orange-500" },
-    { label: "待发/运输中", value: pendingShipments, icon: Truck, color: "bg-purple-500" },
-    { label: "销售总额(¥)", value: totalRevenue.toFixed(0), icon: TrendingUp, color: "bg-teal-500" },
+    { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote },
+    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw },
+    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert },
+    { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck },
+    {
+      label: "库存健康鱼总价值",
+      value: healthyFishStockMetrics ? formatMoney(healthyFishStockMetrics.value) : "暂不可用",
+      description: healthyFishStockDescription,
+      icon: BadgeDollarSign,
+      className: "sm:col-span-2",
+    },
+    { label: "在缸鱼类", value: inFishStock, icon: Fish },
+    { label: "缸组/子缸", value: `${tankGroupCount} / ${subTankCount}`, icon: PackageSearch },
+    { label: "疾病观察中", value: sick, icon: AlertTriangle },
+    { label: "进行中订单", value: activeOrders, icon: ShoppingBag },
+    { label: "待发/运输中", value: pendingShipments, icon: Truck },
+    { label: "销售总额(¥)", value: totalRevenue.toFixed(0), icon: TrendingUp },
   ];
 
   return (
@@ -1915,6 +2015,18 @@ export function Dashboard() {
         </div>
       </div>
       </div>
+      {summaryError ? (
+        <div className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
+          <span>{summaryError}</span>
+          <Button type="button" variant="outline" size="sm" onClick={() => setSummaryRetry((value) => value + 1)}>
+            重新加载
+          </Button>
+        </div>
+      ) : summaryLoading ? (
+        <div className="rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground" role="status">
+          正在加载经营概览…
+        </div>
+      ) : null}
       <Dialog open={fishListSettingsOpen} onOpenChange={setFishListSettingsOpen}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -1942,17 +2054,20 @@ export function Dashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="order-2 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
         {cards.map((c) => {
           const Icon = c.icon;
           return (
-            <Card key={c.label} className="fishroom-card fishroom-metric-card p-5 flex items-center gap-4">
-              <div className="fishroom-metric-icon size-12 rounded-xl flex items-center justify-center">
-                <Icon className="size-6" />
+            <Card key={c.label} className={`fishroom-card fishroom-metric-card flex items-center gap-4 p-5 ${c.className ?? ""}`}>
+              <div className="fishroom-metric-icon flex size-12 shrink-0 items-center justify-center rounded-xl">
+                <Icon aria-hidden="true" className="size-6" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="text-xs font-medium text-muted-foreground">{c.label}</div>
-                <div className="mt-1 text-2xl font-semibold tracking-normal">{c.value}</div>
+                <div className="mt-1 text-2xl font-semibold tracking-normal tabular-nums">{c.value}</div>
+                {c.description ? (
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">{c.description}</div>
+                ) : null}
               </div>
             </Card>
           );
@@ -2040,8 +2155,17 @@ export function Dashboard() {
 
           <div className="min-w-0">
             {!focusMetrics ? (
-              <div className="fishroom-card rounded-xl px-4 py-8 text-center text-sm text-muted-foreground">
-                {focusLoading ? "正在加载关注看板数据..." : "请选择要关注的商品或物种"}
+              <div className={`fishroom-card rounded-xl px-4 py-8 text-center text-sm ${focusError ? "text-red-700" : "text-muted-foreground"}`} role={focusError ? "alert" : "status"}>
+                <div>{focusLoading ? "正在加载关注看板数据..." : focusError || "请选择要关注的商品或物种"}</div>
+                {focusError && !focusLoading ? (
+                  <button
+                    type="button"
+                    className="mt-3 rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                    onClick={() => setFocusRetry((value) => value + 1)}
+                  >
+                    重新加载
+                  </button>
+                ) : null}
               </div>
             ) : (
               <div className="grid gap-4">
