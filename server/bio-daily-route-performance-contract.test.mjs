@@ -48,6 +48,8 @@ test("bio-record save never materializes full stock, history, order, shipment or
   assert.match(block, /CROSS JOIN LATERAL[\s\S]*?stock_target/);
   assert.match(block, /record_target\.bio_records/);
   assert.match(block, /jsonb_set\([\s\S]*?'\{operationLogs\}'/);
+  assert.match(block, /appendBioRecordsMutationSql\(\{/);
+  assert.doesNotMatch(block, /recordIdParam\s*=\s*bindValue\(targetRecordId\)/);
   assert.match(block, /bioRecord: plan\.record/);
   assert.match(block, /deletedRecordId: plan\.deletedRecordId/);
 });
