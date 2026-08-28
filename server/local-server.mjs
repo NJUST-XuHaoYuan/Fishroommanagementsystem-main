@@ -167,6 +167,7 @@ import {
   maintenanceRequiredPermissions,
   planBioRecordSave,
 } from "./bio-record-rules.mjs";
+import { appendBioRecordsMutationSql } from "./bio-record-save-sql.mjs";
 import {
   assertMaintenanceExpectedItems,
   findMaintenanceMutationLog,
@@ -10598,43 +10599,13 @@ async function handleApi(req, res, url) {
         )`;
       }
       if (plan.changedKeys.includes("bioRecords")) {
-        const recordIdParam = bindValue(targetRecordId);
-        if (action === "delete") {
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            (
-              SELECT COALESCE(jsonb_agg(record_row.record_item ORDER BY record_row.ordinality), '[]'::jsonb)
-              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
-                WITH ORDINALITY AS record_row(record_item, ordinality)
-              WHERE btrim(COALESCE(record_row.record_item ->> 'id', '')) <> ${recordIdParam}
-            ),
-            true
-          )`;
-        } else if (action === "updateTime") {
-          const recordParam = bindValue(JSON.stringify(plan.record));
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            (
-              SELECT COALESCE(jsonb_agg(
-                CASE WHEN btrim(COALESCE(record_row.record_item ->> 'id', '')) = ${recordIdParam} THEN ${recordParam}::jsonb ELSE record_row.record_item END
-                ORDER BY record_row.ordinality
-              ), '[]'::jsonb)
-              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
-                WITH ORDINALITY AS record_row(record_item, ordinality)
-            ),
-            true
-          )`;
-        } else {
-          const recordParam = bindValue(JSON.stringify(plan.record));
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            COALESCE(data -> 'bioRecords', '[]'::jsonb) || jsonb_build_array(${recordParam}::jsonb),
-            true
-          )`;
-        }
+        dataExpression = appendBioRecordsMutationSql({
+          dataExpression,
+          action,
+          targetRecordId,
+          record: plan.record,
+          bindValue,
+        });
       }
       const operationLogParam = bindValue(JSON.stringify(operationLog));
       const maxExistingOperationLogsParam = bindValue(Math.max(0, MAX_OPERATION_LOGS - 1));
