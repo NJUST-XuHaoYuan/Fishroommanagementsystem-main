@@ -126,6 +126,7 @@ import {
   healthyFishInventoryMetrics,
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
+import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
   resolveShippingCarrier,
@@ -10214,6 +10215,83 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/login-data" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel FROM app_state WHERE id = $1", [stateId]);
     sendJson(req, res, 200, { personnel: sanitizePersonnelForLoginData(rows[0]?.personnel ?? [], req) });
+    return;
+  }
+
+  if (url.pathname === "/api/batches/revenue-metrics" && req.method === "GET") {
+    const requestedSiteId = String(url.searchParams.get("siteId") ?? "").trim();
+    if (!requestedSiteId || requestedSiteId === ALL_SITE_ID) {
+      sendJson(req, res, 400, {
+        ok: false,
+        error: "查看采购批次回款前请选择具体场地",
+      }, { "Cache-Control": "no-store, private" });
+      return;
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT revision::text AS version,
+                data -> 'sites' AS sites,
+                data -> 'tankGroups' AS tank_groups,
+                data -> 'batches' AS batches,
+                data -> 'stock' AS stock,
+                data -> 'orders' AS orders,
+                data -> 'shipments' AS shipments
+         FROM app_state
+         WHERE id = $1`,
+        [stateId]
+      );
+      const row = rows[0] ?? {};
+      const state = normalizePickupShipmentsForState({
+        sites: Array.isArray(row.sites) ? row.sites : [],
+        tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+        batches: Array.isArray(row.batches) ? row.batches : [],
+        stock: Array.isArray(row.stock) ? row.stock : [],
+        orders: Array.isArray(row.orders) ? row.orders : [],
+        shipments: Array.isArray(row.shipments) ? row.shipments : [],
+      });
+      const siteId = requireVisibleSiteForAuth(
+        req,
+        state,
+        requestedSiteId,
+        "不能查看未授权场地的采购批次"
+      );
+      const scopedState = siteFilteredState(state, siteId);
+      const settlementResult = await pool.query(
+        `SELECT external_order_no,
+                COUNT(*)::int AS row_count,
+                COALESCE(SUM(
+                  CASE
+                    WHEN jsonb_typeof(data -> 'incomeTotal') = 'number'
+                    THEN (data ->> 'incomeTotal')::numeric
+                    ELSE 0
+                  END
+                ), 0)::text AS income_total
+         FROM finance_platform_settlements
+         WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin'
+         GROUP BY external_order_no`,
+        [stateId, siteId]
+      );
+      const result = buildBatchRevenueMetrics({
+        batches: scopedState.batches,
+        stock: scopedState.stock,
+        orders: scopedState.orders,
+        shipments: scopedState.shipments,
+        platformSettlements: settlementResult.rows,
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        siteId,
+        version: row.version ?? null,
+        ...result,
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      const statusCode = Number(error?.statusCode ?? 500);
+      if (statusCode >= 500) console.error("Failed to load batch revenue metrics:", error);
+      sendJson(req, res, statusCode, {
+        ok: false,
+        error: statusCode >= 500 ? "采购批次回款加载失败" : error?.message || "采购批次回款加载失败",
+      }, { "Cache-Control": "no-store, private" });
+    }
     return;
   }
 

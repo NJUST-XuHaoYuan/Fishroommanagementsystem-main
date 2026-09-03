@@ -30,6 +30,8 @@ type Props<T> = {
   searchPlaceholder?: string;
   searchRank?: (row: T, query: string) => number;
   onRowDoubleClick?: (row: T) => void;
+  mobileRender?: (row: T) => ReactNode;
+  tableMinWidth?: string;
 };
 
 export function DataTable<T extends { id: string }>({
@@ -43,6 +45,8 @@ export function DataTable<T extends { id: string }>({
   searchPlaceholder = "搜索...",
   searchRank,
   onRowDoubleClick,
+  mobileRender,
+  tableMinWidth,
 }: Props<T>) {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
@@ -134,7 +138,7 @@ export function DataTable<T extends { id: string }>({
         )}
       </div>
       <div className="fishroom-table-shell hidden overflow-x-auto rounded-xl md:block">
-        <table className="w-full">
+        <table className="w-full" style={tableMinWidth ? { minWidth: tableMinWidth } : undefined}>
           <thead>
             <tr>
               {columns.map((c) => (
@@ -192,26 +196,26 @@ export function DataTable<T extends { id: string }>({
               onDoubleClick={() => onRowDoubleClick?.(row)}
             >
               <div className="flex flex-col gap-3">
-                {columns.map((c, index) => (
-                  <div
-                    key={c.key}
-                    className={
-                      index === 0
-                        ? "text-sm font-medium text-foreground"
-                        : "grid grid-cols-[5.5rem_1fr] gap-3 text-sm"
-                    }
-                  >
-                    {index === 0 ? (
-                      c.render ? c.render(row) : String((row as any)[c.key] ?? "")
-                    ) : (
-                      <>
-                        <span className="text-muted-foreground">{c.title}</span>
-                        <div className="min-w-0 break-words text-foreground">
-                          {c.render ? c.render(row) : String((row as any)[c.key] ?? "")}
-                        </div>
-                      </>
-                    )}
-                  </div>
+                {mobileRender ? mobileRender(row) : columns.map((c, index) => (
+                    <div
+                      key={c.key}
+                      className={
+                        index === 0
+                          ? "text-sm font-medium text-foreground"
+                          : "grid grid-cols-[5.5rem_1fr] gap-3 text-sm"
+                      }
+                    >
+                      {index === 0 ? (
+                        c.render ? c.render(row) : String((row as any)[c.key] ?? "")
+                      ) : (
+                        <>
+                          <span className="text-muted-foreground">{c.title}</span>
+                          <div className="min-w-0 break-words text-foreground">
+                            {c.render ? c.render(row) : String((row as any)[c.key] ?? "")}
+                          </div>
+                        </>
+                      )}
+                    </div>
                 ))}
                 {actions && (
                   <div className="border-t pt-3">

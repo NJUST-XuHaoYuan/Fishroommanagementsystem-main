@@ -89,7 +89,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   categorySettings: ["species", "speciesCategories", "speciesCategoryMajorMap"],
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
-  batches: ["batches", "stock", "orders", "shipments"],
+  batches: ["batches"],
   stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],

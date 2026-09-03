@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { isPaymentVerified, useStore, Order, PurchaseBatch, Shipment, StockItem, uid } from "../store";
+import { useEffect, useMemo, useState } from "react";
+import { useStore, PurchaseBatch, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import {
@@ -17,42 +17,65 @@ import { readAndCompressImage } from "../utils/imageUtils";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
-import { getBillableShippingFee } from "../utils/orderFees";
+import { authJsonHeaders } from "../utils/authSession";
 
-function calcBatchPaymentAmount(order: Order): number {
-  return (Array.isArray(order.payments) ? order.payments : []).reduce(
-    (sum, payment) => !isPaymentVerified(payment)
-      ? sum
-      : payment.type === "refund"
-      ? sum - Number(payment.amount || 0)
-      : sum + Number(payment.amount || 0),
-    0
-  );
-}
+type BatchRevenueMetric = {
+  batchId: string;
+  earliestStockInDate?: string;
+  salesNet: number;
+  pendingReceived: number;
+  verifiedReceived: number;
+  platformReceived: number;
+  gross: number;
+  discount: number;
+  refundAdjustment: number;
+  itemCount: number;
+  orderCount: number;
+  platformOrderCount: number;
+};
 
-function collectDamageRefundShareByStockId(shipments: Shipment[]): Map<string, number> {
-  const refundShareByStockId = new Map<string, number>();
-  for (const shipment of shipments) {
-    if (shipment.status !== "damaged" || shipment.damageResolution !== "refund") continue;
-    const itemIds = (shipment.damageItemStockIds?.length ? shipment.damageItemStockIds : shipment.itemStockIds) ?? [];
-    if (itemIds.length === 0) continue;
-    const refundAmount = Number(shipment.damageRefundAmount ?? 0);
-    if (!(refundAmount > 0)) continue;
-    const share = refundAmount / itemIds.length;
-    for (const stockItemId of itemIds) {
-      refundShareByStockId.set(stockItemId, (refundShareByStockId.get(stockItemId) ?? 0) + share);
-    }
-  }
-  return refundShareByStockId;
+type BatchRevenueResponse = {
+  ok: boolean;
+  metrics?: BatchRevenueMetric[];
+  diagnostics?: {
+    unassignedItemCount?: number;
+    unassignedSalesNet?: number;
+  };
+  error?: string;
+};
+
+const EMPTY_SALES_STATS: BatchRevenueMetric = {
+  batchId: "",
+  salesNet: 0,
+  pendingReceived: 0,
+  verifiedReceived: 0,
+  platformReceived: 0,
+  gross: 0,
+  discount: 0,
+  refundAdjustment: 0,
+  itemCount: 0,
+  orderCount: 0,
+  platformOrderCount: 0,
+};
+
+function money(value: number) {
+  const amount = Number.isFinite(value) ? value : 0;
+  return `${amount < 0 ? "-" : ""}¥${Math.abs(amount).toFixed(2)}`;
 }
 
 export function BatchesView() {
-  const { state, saveStateTransform } = useStore();
+  const { state, activeSiteId, saveStateTransform } = useStore();
   const [editing, setEditing] = useState<PurchaseBatch | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<PurchaseBatch | null>(null);
   const [detail, setDetail] = useState<PurchaseBatch | null>(null);
   const [proofPreview, setProofPreview] = useState<{ url: string; title: string } | null>(null);
+  const [revenueMetrics, setRevenueMetrics] = useState<BatchRevenueMetric[] | null>(null);
+  const [loadedRevenueScopeKey, setLoadedRevenueScopeKey] = useState("");
+  const [revenueLoading, setRevenueLoading] = useState(true);
+  const [revenueError, setRevenueError] = useState("");
+  const [revenueRetry, setRevenueRetry] = useState(0);
+  const [revenueDiagnostics, setRevenueDiagnostics] = useState<BatchRevenueResponse["diagnostics"]>();
   const permission = usePermission("batches");
 
   const today = new Date().toISOString().slice(0, 10);
@@ -82,94 +105,86 @@ export function BatchesView() {
     notes: "",
   });
 
-  const itemCount = (id: string) => state.stock.filter((s) => s.batchId === id).length;
-  const earliestStockInDate = (id: string) =>
-    state.stock
-      .filter((s) => s.batchId === id && s.inDate)
-      .map((s) => s.inDate)
-      .sort()[0];
-  const maxArrivalDate = editing?.id ? earliestStockInDate(editing.id) : undefined;
-  const arrivalDateMax = maxArrivalDate && maxArrivalDate < today ? maxArrivalDate : today;
   const totalCost = (batch: PurchaseBatch) => (batch.bioFee + batch.shippingFee).toFixed(2);
   const lossProofs = (batch: PurchaseBatch | null) =>
     Array.isArray(batch?.lossProof) ? batch.lossProof : [];
-  const batchSalesStats = useMemo(() => {
-    const stockList = Array.isArray(state.stock) ? state.stock : [];
-    const orderList = Array.isArray(state.orders) ? state.orders : [];
-    const shipmentList = Array.isArray(state.shipments) ? state.shipments : [];
-    const stockById = new Map<string, StockItem>(stockList.map((item) => [item.id, item]));
-    const refundShareByStockId = collectDamageRefundShareByStockId(shipmentList);
-    const map = new Map<string, {
-      gross: number;
-      discount: number;
-      refundAdjustment: number;
-      received: number;
-      itemCount: number;
-      orderCount: number;
-      orderIds: Set<string>;
-    }>();
+  const batchMetricKey = useMemo(
+    () => state.batches.map((batch) => batch.id).sort().join("\0"),
+    [state.batches]
+  );
+  const revenueScopeKey = `${activeSiteId}\0${batchMetricKey}`;
 
-    for (const order of orderList) {
-      if (order.status === "cancelled") continue;
-      const items = Array.isArray(order.items) ? order.items : [];
-      if (items.length === 0) continue;
-      const discountPerItem = Number(order.discount ?? 0) / items.length;
-      const adjustedItems = items.map((item) => {
-        const gross = Number(item.price ?? 0);
-        const refundAdjustment = refundShareByStockId.get(item.stockItemId) ?? 0;
-        return {
-          item,
-          stockItem: stockById.get(item.stockItemId),
-          gross,
-          discount: discountPerItem,
-          refundAdjustment,
-          adjustedAmount: Math.max(0, gross - discountPerItem - refundAdjustment),
-        };
+  useEffect(() => {
+    setRevenueMetrics(null);
+    setLoadedRevenueScopeKey("");
+    setRevenueDiagnostics(undefined);
+    setRevenueError("");
+  }, [activeSiteId, batchMetricKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setRevenueLoading(true);
+    setRevenueError("");
+    fetch(`/api/batches/revenue-metrics?siteId=${encodeURIComponent(activeSiteId)}`, {
+      headers: authJsonHeaders(),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({})) as BatchRevenueResponse;
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || `HTTP ${response.status}`);
+        }
+        return result;
+      })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setRevenueMetrics(Array.isArray(result.metrics) ? result.metrics : []);
+        setLoadedRevenueScopeKey(revenueScopeKey);
+        setRevenueDiagnostics(result.diagnostics);
+      })
+      .catch((error) => {
+        if (error?.name === "AbortError") return;
+        console.error("Failed to load batch revenue metrics:", error);
+        setRevenueError(error instanceof Error ? error.message : "采购批次回款加载失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRevenueLoading(false);
       });
-      const productDue = adjustedItems.reduce((sum, item) => sum + item.adjustedAmount, 0);
-      if (productDue <= 0) continue;
+    return () => controller.abort();
+  }, [activeSiteId, batchMetricKey, revenueRetry, revenueScopeKey]);
 
-      const orderDue = productDue +
-        getBillableShippingFee(order, shipmentList) +
-        Number(order.packagingFee ?? 0);
-      const netPaid = Math.max(0, calcBatchPaymentAmount(order));
-      const paidProductPool = orderDue > 0
-        ? Math.min(productDue, netPaid * (productDue / orderDue))
-        : 0;
+  useEffect(() => {
+    const refresh = () => setRevenueRetry((value) => value + 1);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 60_000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
 
-      for (const itemStats of adjustedItems) {
-        const stockItem = itemStats.stockItem;
-        if (!stockItem?.batchId) continue;
-        const current = map.get(stockItem.batchId) ?? {
-          gross: 0,
-          discount: 0,
-          refundAdjustment: 0,
-          received: 0,
-          itemCount: 0,
-          orderCount: 0,
-          orderIds: new Set<string>(),
-        };
-        current.gross += itemStats.gross;
-        current.discount += itemStats.discount;
-        current.refundAdjustment += itemStats.refundAdjustment;
-        current.received += paidProductPool * (itemStats.adjustedAmount / productDue);
-        current.itemCount += 1;
-        current.orderIds.add(order.id);
-        current.orderCount = current.orderIds.size;
-        map.set(stockItem.batchId, current);
-      }
-    }
-
-    return map;
-  }, [state.orders, state.shipments, state.stock]);
-  const salesStats = (batchId: string) => batchSalesStats.get(batchId) ?? {
-    gross: 0,
-    discount: 0,
-    refundAdjustment: 0,
-    received: 0,
-    itemCount: 0,
-    orderCount: 0,
-    orderIds: new Set<string>(),
+  const batchSalesStats = useMemo(
+    () => new Map((revenueMetrics ?? []).map((metric) => [metric.batchId, metric])),
+    [revenueMetrics]
+  );
+  const revenueAvailable = revenueMetrics !== null && loadedRevenueScopeKey === revenueScopeKey;
+  const salesStats = (batchId: string) =>
+    revenueAvailable ? batchSalesStats.get(batchId) ?? EMPTY_SALES_STATS : EMPTY_SALES_STATS;
+  const earliestStockInDate = (batchId: string) => salesStats(batchId).earliestStockInDate;
+  const maxArrivalDate = editing?.id ? earliestStockInDate(editing.id) : undefined;
+  const arrivalDateMax = maxArrivalDate && maxArrivalDate < today ? maxArrivalDate : today;
+  const arrivalDateConstraintUnavailable = Boolean(editing?.id) &&
+    (!revenueAvailable || revenueLoading || Boolean(revenueError));
+  const metricText = (batchId: string, key: "salesNet" | "pendingReceived" | "verifiedReceived") => {
+    if (!revenueAvailable) return "—";
+    return money(salesStats(batchId)[key]);
   };
 
   const save = async () => {
@@ -198,26 +213,125 @@ export function BatchesView() {
     <div className="flex flex-col gap-4">
       <div>
         <h2>采购批次管理</h2>
-        <p className="text-sm text-muted-foreground">记录每次采购的批次信息，作为库存明细的来源</p>
+        <p className="text-sm text-muted-foreground">
+          销售净额不含运费和包装费；平台账单匹配后，平台收入计入已核销回款（不扣平台费用）
+        </p>
       </div>
+      {revenueError && (
+        <div role="alert" className="flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between">
+          <span>
+            {revenueAvailable ? "批次回款刷新失败，当前显示上次成功数据" : "批次回款加载失败，当前金额暂不展示"}：{revenueError}
+          </span>
+          <Button size="sm" variant="outline" onClick={() => setRevenueRetry((value) => value + 1)}>
+            重新加载
+          </Button>
+        </div>
+      )}
+      {!revenueError && Number(revenueDiagnostics?.unassignedItemCount ?? 0) > 0 && (
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+          有 {revenueDiagnostics?.unassignedItemCount} 条历史订单商品缺少采购批次映射，销售净额 {money(Number(revenueDiagnostics?.unassignedSalesNet ?? 0))} 未计入下方批次。
+        </div>
+      )}
       <DataTable
         data={state.batches}
-        searchKeys={["batchNo", "supplier", "date"]}
+        searchKeys={["batchNo", "supplier", "arrivalDate"]}
         searchPlaceholder="搜索批次号、供应商..."
         onAdd={permission.canCreate ? () => { setEditing(empty()); setOpen(true); } : undefined}
         addLabel="新增批次"
+        tableMinWidth="960px"
         columns={[
-          { key: "batchNo", title: "批次号" },
-          { key: "supplier", title: "供应商" },
-          { key: "arrivalDate", title: "到货日期" },
-          { key: "bioFee", title: "生物费用(¥)", render: (r) => r.bioFee.toFixed(2) },
-          { key: "shippingFee", title: "运输费用(¥)", render: (r) => r.shippingFee.toFixed(2) },
-          { key: "totalCost", title: "合计(¥)", render: (r) => (r.bioFee + r.shippingFee).toFixed(2) },
-          { key: "received", title: "实收金额(¥)", render: (r) => salesStats(r.id).received.toFixed(2) },
-          { key: "stockedCount", title: "入库数量", render: (r) => `${r.stockedCount} 条` },
-          { key: "lossCount", title: "报损数量", render: (r) => `${r.lossCount} 条` },
-          { key: "notes", title: "备注" },
+          { key: "batchNo", title: "批次号", width: "8rem", render: (r) => <span className="whitespace-nowrap">{r.batchNo}</span> },
+          {
+            key: "supplier",
+            title: <span className="whitespace-nowrap">供应商 / 备注</span>,
+            width: "11rem",
+            render: (r) => (
+              <div className="min-w-36 max-w-48">
+                <div className="whitespace-nowrap">{r.supplier}</div>
+                {r.notes && <div className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{r.notes}</div>}
+              </div>
+            ),
+          },
+          { key: "arrivalDate", title: "到货日期", width: "7rem", render: (r) => <span className="whitespace-nowrap">{r.arrivalDate}</span> },
+          {
+            key: "totalCost",
+            title: "采购成本",
+            width: "7rem",
+            render: (r) => (
+              <span
+                className="whitespace-nowrap tabular-nums"
+                title={`生物 ${money(r.bioFee)} · 运输 ${money(r.shippingFee)}`}
+              >
+                {money(r.bioFee + r.shippingFee)}
+              </span>
+            ),
+          },
+          {
+            key: "salesNet",
+            title: <span className="whitespace-nowrap" title="商品售价减订单折扣和报损退款调整，不含运费与包装费">销售净额</span>,
+            width: "7rem",
+            render: (r) => <span className="whitespace-nowrap font-medium tabular-nums">{metricText(r.id, "salesNet")}</span>,
+          },
+          {
+            key: "pendingReceived",
+            title: <span className="whitespace-nowrap" title="订单中已登记但尚未核销的商品净回款；负数表示待核销退款">待核销回款</span>,
+            width: "7rem",
+            render: (r) => (
+              <span className={`whitespace-nowrap font-medium tabular-nums ${salesStats(r.id).pendingReceived < 0 ? "text-red-700" : "text-amber-700"}`}>
+                {metricText(r.id, "pendingReceived")}
+              </span>
+            ),
+          },
+          {
+            key: "verifiedReceived",
+            title: <span className="whitespace-nowrap" title="已核销收款减已核销退款；抖店匹配账单后采用平台收入">已核销回款</span>,
+            width: "7rem",
+            render: (r) => <span className="whitespace-nowrap font-medium text-emerald-700 tabular-nums">{metricText(r.id, "verifiedReceived")}</span>,
+          },
+          {
+            key: "inventoryCounts",
+            title: <span className="whitespace-nowrap">入库 / 报损</span>,
+            width: "7rem",
+            render: (r) => <span className="whitespace-nowrap">{r.stockedCount} / {r.lossCount} 条</span>,
+          },
         ]}
+        mobileRender={(row) => {
+          const stats = salesStats(row.id);
+          const pendingIsRefund = stats.pendingReceived < 0;
+          return (
+            <div className="grid gap-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold text-foreground">{row.batchNo}</div>
+                  <div className="mt-0.5 truncate text-sm text-muted-foreground">{row.supplier || "未填写供应商"}</div>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">{row.arrivalDate || "—"}</span>
+              </div>
+              <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="text-xs text-muted-foreground">销售净额</div>
+                <div className="mt-1 text-lg font-semibold tabular-nums">{metricText(row.id, "salesNet")}</div>
+                <div className="batch-mobile-two-columns mt-3 grid grid-cols-2 gap-3 border-t pt-3">
+                  <div>
+                    <div className="text-xs text-muted-foreground">{pendingIsRefund ? "待核销退款" : "待核销回款"}</div>
+                    <div className={`mt-1 font-medium tabular-nums ${pendingIsRefund ? "text-red-700" : "text-amber-700"}`}>
+                      {metricText(row.id, "pendingReceived")}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">已核销回款</div>
+                    <div className="mt-1 font-medium text-emerald-700 tabular-nums">{metricText(row.id, "verifiedReceived")}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="batch-mobile-three-columns grid grid-cols-3 gap-2 text-xs">
+                <div><span className="text-muted-foreground">采购成本</span><div className="mt-0.5 font-medium tabular-nums">{money(row.bioFee + row.shippingFee)}</div></div>
+                <div><span className="text-muted-foreground">入库</span><div className="mt-0.5 font-medium">{row.stockedCount} 条</div></div>
+                <div><span className="text-muted-foreground">报损</span><div className="mt-0.5 font-medium">{row.lossCount} 条</div></div>
+              </div>
+              {row.notes && <div className="line-clamp-2 text-xs text-muted-foreground">{row.notes}</div>}
+            </div>
+          );
+        }}
         actions={(row) => (
           <div className="flex justify-end gap-2" onDoubleClick={(event) => event.stopPropagation()}>
             <Button size="sm" variant="outline" onClick={() => setDetail(row)}>详情</Button>
@@ -236,15 +350,42 @@ export function BatchesView() {
               {(() => {
                 const stats = salesStats(detail.id);
                 return (
-                  <div className="rounded-lg border bg-sky-50/70 p-3">
-                    <div className="text-xs text-sky-700">批次实收金额</div>
-                    <div className="mt-1 text-2xl font-semibold text-sky-800">¥{stats.received.toFixed(2)}</div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
-                      <span>销售商品：{stats.itemCount} 条</span>
-                      <span>关联订单：{stats.orderCount} 单</span>
-                      <span>折扣分摊：-¥{stats.discount.toFixed(2)}</span>
-                      <span>退款调整：-¥{stats.refundAdjustment.toFixed(2)}</span>
+                  <div className="rounded-lg border p-3">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="rounded-md bg-muted/30 px-3 py-2.5">
+                        <div className="text-xs text-muted-foreground">销售净额</div>
+                        <div className="mt-1 text-lg font-semibold tabular-nums">{metricText(detail.id, "salesNet")}</div>
+                      </div>
+                      <div className="rounded-md bg-amber-50 px-3 py-2.5">
+                        <div className="text-xs text-amber-800">{stats.pendingReceived < 0 ? "待核销退款" : "待核销回款"}</div>
+                        <div className={`mt-1 text-lg font-semibold tabular-nums ${stats.pendingReceived < 0 ? "text-red-700" : "text-amber-800"}`}>
+                          {metricText(detail.id, "pendingReceived")}
+                        </div>
+                      </div>
+                      <div className="rounded-md bg-emerald-50 px-3 py-2.5">
+                        <div className="text-xs text-emerald-800">已核销回款</div>
+                        <div className="mt-1 text-lg font-semibold text-emerald-800 tabular-nums">{metricText(detail.id, "verifiedReceived")}</div>
+                      </div>
                     </div>
+                    {revenueAvailable ? (
+                      <>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
+                          <span>销售商品：{stats.itemCount} 条</span>
+                          <span>关联订单：{stats.orderCount} 单</span>
+                          <span>折扣分摊：-{money(stats.discount)}</span>
+                          <span>退款调整：-{money(stats.refundAdjustment)}</span>
+                        </div>
+                        {stats.platformOrderCount > 0 && (
+                          <div className="mt-2 border-t pt-2 text-xs text-muted-foreground">
+                            已核销中含平台收入 {money(stats.platformReceived)}（{stats.platformOrderCount} 单，未扣平台费用）
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="mt-3 border-t pt-2 text-xs text-muted-foreground">
+                        回款明细{revenueError ? "加载失败" : "加载中"}，暂不展示商品数、订单数、折扣及退款数据
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -338,6 +479,8 @@ export function BatchesView() {
                     type="date"
                     value={editing.arrivalDate}
                     max={arrivalDateMax}
+                    disabled={arrivalDateConstraintUnavailable}
+                    title={arrivalDateConstraintUnavailable ? "最早入库日期尚未加载，暂不能修改到货日期" : undefined}
                     onChange={(e) => {
                       const value = e.target.value;
                       if (value && value > today) {
@@ -351,6 +494,9 @@ export function BatchesView() {
                       setEditing({ ...editing, arrivalDate: value });
                     }}
                   />
+                  {arrivalDateConstraintUnavailable && (
+                    <p className="text-xs text-muted-foreground">最早入库日期尚未加载，其他信息仍可正常修改。</p>
+                  )}
                 </div>
               </div>
               <div className="grid gap-2">
