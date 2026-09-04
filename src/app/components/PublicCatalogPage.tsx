@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
-import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, MapPin, PackageCheck, X } from "lucide-react";
-import { initialState, Product, Species, StockItem, BioRecord } from "../store";
+import { ArrowRight, Camera, Check, ClipboardCheck, ClipboardList, Clock, Copy, Hash, Loader2, MapPin, PackageCheck, RefreshCw, X } from "lucide-react";
+import { Product, Species, StockItem, BioRecord } from "../store";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { formatBioRecordTime as formatLocalDateTime } from "../utils/localDateTime";
@@ -96,12 +96,12 @@ type PublicBioTimelineEvent =
   | { type: "stock_in"; date: string }
   | { type: "record"; record: PublicBioRecord };
 
-const fallbackCatalog: PublicCatalogData = {
-  speciesCategories: initialState.speciesCategories,
-  species: initialState.species,
-  products: initialState.products,
-  stock: initialState.stock.filter((item) => !item.sold && !item.lost && item.status !== "sick"),
-  bioRecords: initialState.bioRecords,
+const EMPTY_PUBLIC_CATALOG: PublicCatalogData = {
+  speciesCategories: [],
+  species: [],
+  products: [],
+  stock: [],
+  bioRecords: [],
 };
 
 const marinePhotos = {
@@ -194,13 +194,23 @@ const normalizePublicBioRecords = (value: unknown): PublicBioRecord[] =>
       }))
     : [];
 
-const normalizeCatalog = (value: Partial<PublicCatalogData> | null | undefined): PublicCatalogData => ({
-  speciesCategories: Array.isArray(value?.speciesCategories) ? value.speciesCategories : fallbackCatalog.speciesCategories,
-  species: Array.isArray(value?.species) ? value.species : fallbackCatalog.species,
-  products: Array.isArray(value?.products) ? value.products : fallbackCatalog.products,
-  stock: Array.isArray(value?.stock) ? value.stock : fallbackCatalog.stock,
-  bioRecords: Array.isArray(value?.bioRecords) ? normalizePublicBioRecords(value.bioRecords) : fallbackCatalog.bioRecords,
-});
+const normalizeCatalog = (value: Partial<PublicCatalogData> | null | undefined): PublicCatalogData => {
+  if (!value ||
+      !Array.isArray(value.speciesCategories) ||
+      !Array.isArray(value.species) ||
+      !Array.isArray(value.products) ||
+      !Array.isArray(value.stock) ||
+      !Array.isArray(value.bioRecords)) {
+    throw new Error("公开鱼单数据不完整");
+  }
+  return {
+    speciesCategories: value.speciesCategories,
+    species: value.species,
+    products: value.products,
+    stock: value.stock,
+    bioRecords: normalizePublicBioRecords(value.bioRecords),
+  };
+};
 
 function displayImageUrl(src?: string, width = 1400) {
   if (!src) return "";
@@ -457,7 +467,7 @@ function isDesktopCatalogLayout() {
   return window.matchMedia("(min-width: 1024px)").matches;
 }
 
-const PUBLIC_CATALOG_MEDIA_REFRESH_MS = 8 * 60 * 1000;
+const PUBLIC_CATALOG_MEDIA_REFRESH_MS = 60 * 1000;
 
 function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: HTMLElement, onTopOverscroll: () => void) {
   const maxScrollTop = container.scrollHeight - container.clientHeight;
@@ -484,10 +494,12 @@ function scrollCatalogColumnByWheel(event: WheelEvent<HTMLElement>, container: H
 }
 
 export function PublicCatalogPage() {
-  const [catalog, setCatalog] = useState<PublicCatalogData>(fallbackCatalog);
+  const [catalog, setCatalog] = useState<PublicCatalogData>(EMPTY_PUBLIC_CATALOG);
   const [detailBioRecordsByStockId, setDetailBioRecordsByStockId] = useState<Map<string, PublicBioRecord[]>>(() => new Map());
   const [detailLoadingStockId, setDetailLoadingStockId] = useState("");
   const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogLoadAttempt, setCatalogLoadAttempt] = useState(0);
   const [heroImageIndex, setHeroImageIndex] = useState(0);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("");
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("");
@@ -506,8 +518,9 @@ export function PublicCatalogPage() {
   useEffect(() => {
     let cancelled = false;
     let requestInFlight = false;
-    let loadedOnce = false;
-    let lastSuccessAt = 0;
+    setCatalog(EMPTY_PUBLIC_CATALOG);
+    setCatalogError("");
+    setCatalogLoaded(false);
     const loadCatalog = async () => {
       if (requestInFlight) return;
       requestInFlight = true;
@@ -519,31 +532,32 @@ export function PublicCatalogPage() {
         if (cancelled) return;
         setCatalog(nextCatalog);
         setDetailBioRecordsByStockId(new Map());
+        setCatalogError("");
         setCatalogLoaded(true);
-        loadedOnce = true;
-        lastSuccessAt = Date.now();
-      } catch {
-        if (cancelled || loadedOnce) return;
-        setCatalog(fallbackCatalog);
+      } catch (error) {
+        if (cancelled) return;
+        setCatalog(EMPTY_PUBLIC_CATALOG);
+        setDetailBioRecordsByStockId(new Map());
+        setCatalogError(error instanceof Error ? error.message : "公开鱼单加载失败");
         setCatalogLoaded(false);
       } finally {
         requestInFlight = false;
       }
     };
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible" && Date.now() - lastSuccessAt >= PUBLIC_CATALOG_MEDIA_REFRESH_MS) {
-        void loadCatalog();
-      }
+      if (document.visibilityState === "visible") void loadCatalog();
     };
     void loadCatalog();
     const interval = window.setInterval(() => { void loadCatalog(); }, PUBLIC_CATALOG_MEDIA_REFRESH_MS);
     document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
     };
-  }, []);
+  }, [catalogLoadAttempt]);
 
   useEffect(() => {
     if (heroCarouselImages.length < 2) return;
@@ -808,7 +822,11 @@ export function PublicCatalogPage() {
     fetch(`/api/public/bio-records?stockItemId=${encodeURIComponent(selectedStockId)}`, { cache: "no-store" })
       .then(async (response) => {
         const result = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        if (!response.ok) {
+          const error = new Error(result.error || `HTTP ${response.status}`) as Error & { status?: number };
+          error.status = response.status;
+          throw error;
+        }
         return normalizePublicBioRecords(result.bioRecords ?? result.data ?? []);
       })
       .then((records) => {
@@ -819,11 +837,19 @@ export function PublicCatalogPage() {
           return next;
         });
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return;
+        if ((error as Error & { status?: number })?.status === 404) {
+          setDetailOpen(false);
+          setCatalog(EMPTY_PUBLIC_CATALOG);
+          setCatalogLoaded(false);
+          setCatalogError("");
+          setCatalogLoadAttempt((attempt) => attempt + 1);
+          return;
+        }
         setDetailBioRecordsByStockId((current) => {
           const next = new Map(current);
-          next.set(selectedStockId, bioRecordsByStockId.get(selectedStockId) ?? []);
+          next.set(selectedStockId, []);
           return next;
         });
       })
@@ -932,6 +958,51 @@ export function PublicCatalogPage() {
       scrollToCatalog();
     }
   };
+
+  if (!catalogLoaded) {
+    return (
+      <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]">
+        <header className="border-b border-white/10 bg-[#03101f]">
+          <div className="flex h-20 w-full items-center px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center gap-4">
+              <div className="grid size-16 place-items-center rounded-2xl border border-cyan-300/25 bg-white/8">
+                <img src="/assets/brand-logo.jpg" alt="海水鱼廊" className="size-14 rounded-xl object-contain" />
+              </div>
+              <div className="text-2xl font-semibold text-white">海水生物超市</div>
+            </div>
+          </div>
+        </header>
+        <section className="grid min-h-[calc(100dvh-5rem)] place-items-center px-5 py-12">
+          <div className="w-full max-w-md border border-white/12 bg-[#081b2c] px-6 py-8 text-center">
+            {catalogError ? (
+              <>
+                <div className="mx-auto grid size-11 place-items-center rounded-full bg-rose-400/10 text-rose-200">
+                  <RefreshCw className="size-5" />
+                </div>
+                <h1 className="mt-4 text-xl font-semibold text-white">鱼单暂时无法加载</h1>
+                <p className="mt-2 text-sm leading-6 text-[#a9bfce]" role="alert">
+                  为保护实时库存信息，加载失败时不会展示缓存或内部数据。请检查网络后重试。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCatalogLoadAttempt((attempt) => attempt + 1)}
+                  className="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#1ee6ef] px-5 text-sm font-semibold text-[#03101f] transition hover:bg-[#75f5f8] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[#1ee6ef]/45"
+                >
+                  <RefreshCw className="size-4" />重新加载
+                </button>
+              </>
+            ) : (
+              <div role="status" aria-live="polite">
+                <Loader2 className="mx-auto size-7 animate-spin text-[#1ee6ef] motion-reduce:animate-none" />
+                <h1 className="mt-4 text-lg font-semibold text-white">正在同步实时鱼单</h1>
+                <p className="mt-2 text-sm text-[#a9bfce]">正在确认当前可售库存和维护记录…</p>
+              </div>
+            )}
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-[100dvh] bg-[#03101f] text-[#f4f8fb]" onWheelCapture={handlePageWheelCapture}>

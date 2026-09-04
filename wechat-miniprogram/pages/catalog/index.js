@@ -1,6 +1,12 @@
 const { fetchCatalog } = require("../../utils/api");
 const { buildViewModel } = require("../../utils/catalog");
 const { getNavigationMetrics } = require("../../utils/navigation");
+const {
+  beginPublicCatalogRequest,
+  isCurrentPublicCatalogRequest,
+  startPublicCatalogRefresh,
+  stopPublicCatalogRefresh
+} = require("../../utils/public-catalog-refresh");
 
 Page({
   data: {
@@ -17,12 +23,25 @@ Page({
     this.loadCatalog();
   },
 
+  onShow() {
+    startPublicCatalogRefresh(this, () => this.loadCatalog({ force: true, refreshing: true }));
+  },
+
+  onHide() {
+    stopPublicCatalogRefresh(this);
+  },
+
+  onUnload() {
+    stopPublicCatalogRefresh(this);
+  },
+
   onPullDownRefresh() {
     this.loadCatalog({ force: true, refreshing: true });
   },
 
   async loadCatalog(options = {}) {
     const app = getApp();
+    const requestGeneration = beginPublicCatalogRequest(this);
     const now = Date.now();
     const cachedViewModel = app.globalData.catalogViewModel;
     const cacheTtl = 60 * 1000;
@@ -43,10 +62,11 @@ Page({
       const viewModel = useCache
         ? cachedViewModel
         : buildViewModel(catalog);
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
 
       app.globalData.catalog = catalog;
       app.globalData.catalogViewModel = viewModel;
-      app.globalData.loadedAt = now;
+      if (!useCache) app.globalData.loadedAt = Date.now();
 
       this.setData({
         loading: false,
@@ -56,13 +76,20 @@ Page({
         totalSpecimens: viewModel.totalSpecimens
       });
     } catch (error) {
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
+      app.globalData.catalog = null;
+      app.globalData.catalogViewModel = null;
+      app.globalData.loadedAt = 0;
       this.setData({
         loading: false,
         refreshing: false,
-        error: error && error.message || "公开目录加载失败"
+        error: error && error.message || "公开目录加载失败",
+        majorGroups: [],
+        totalProducts: 0,
+        totalSpecimens: 0
       });
     } finally {
-      wx.stopPullDownRefresh();
+      if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
     }
   },
 

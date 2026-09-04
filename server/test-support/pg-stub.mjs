@@ -9,21 +9,95 @@ function result(rows = [], rowCount = rows.length) {
   return { rows, rowCount };
 }
 
-function appStateRow(sql) {
+function publicBioProjectionRow(sql, values = []) {
+  if (!/\bcandidate_stock\s+AS\s+MATERIALIZED\b/i.test(sql)) return null;
+  const targetId = String(values[1] ?? "").trim();
+  const targetRows = (Array.isArray(state.stock) ? state.stock : [])
+    .filter((item) => String(item?.id ?? "").trim() === targetId);
+  const targetProductId = targetRows.length === 1 ? String(targetRows[0]?.productId ?? "").trim() : "";
+  const stock = (Array.isArray(state.stock) ? state.stock : [])
+    .filter((item) => targetProductId && String(item?.productId ?? "").trim() === targetProductId);
+  const stockIds = new Set(stock.map((item) => String(item?.id ?? "").trim()).filter(Boolean));
+  const products = (Array.isArray(state.products) ? state.products : [])
+    .filter((item) => String(item?.id ?? "").trim() === targetProductId);
+  const speciesId = products.length === 1 ? String(products[0]?.speciesId ?? "").trim() : "";
+  const species = (Array.isArray(state.species) ? state.species : [])
+    .filter((item) => String(item?.id ?? "").trim() === speciesId);
+  const subTankIds = new Set(stock.map((item) => String(item?.subTankId ?? "").trim()).filter(Boolean));
+  const tankGroups = (Array.isArray(state.tankGroups) ? state.tankGroups : [])
+    .filter((group) => (Array.isArray(group?.subTanks) ? group.subTanks : [])
+      .some((tank) => subTankIds.has(String(tank?.id ?? "").trim())));
+  const orders = (Array.isArray(state.orders) ? state.orders : [])
+    .filter((order) => (Array.isArray(order?.items) ? order.items : [])
+      .some((item) => stockIds.has(String(item?.stockItemId ?? "").trim())));
+  const orderIds = new Set(orders.map((order) => String(order?.id ?? "").trim()).filter(Boolean));
+  const shipments = (Array.isArray(state.shipments) ? state.shipments : [])
+    .filter((shipment) =>
+      orderIds.has(String(shipment?.orderId ?? "").trim()) ||
+      (Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds : [])
+        .some((id) => stockIds.has(String(id ?? "").trim()))
+    );
+  const bioRecords = (Array.isArray(state.bioRecords) ? state.bioRecords : [])
+    .filter((record) => {
+      const recordStockId = String(record?.stockItemId ?? "").trim();
+      return recordStockId === targetId || (
+        stockIds.has(recordStockId) &&
+        ((Array.isArray(record?.photos) && record.photos.length > 0) ||
+          (Array.isArray(record?.videos) && record.videos.length > 0))
+      );
+    });
+  return {
+    version: revision,
+    sites: Array.isArray(state.sites) ? state.sites : [],
+    species_category_major_map: state.speciesCategoryMajorMap ?? {},
+    public_catalog_policy: state.publicCatalogPolicy ?? {},
+    tank_groups: tankGroups,
+    products,
+    species,
+    orders,
+    shipments,
+    stock_item_count: targetRows.length,
+    stock,
+    bio_records: bioRecords,
+  };
+}
+
+function appStateRow(sql, values = []) {
+  const publicBioRow = publicBioProjectionRow(sql, values);
+  if (publicBioRow) return publicBioRow;
   const row = {};
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\brevision::text\s+AS\s+version\b/i.test(sql)) row.version = revision;
   for (const [stateKey, alias] of [
     ["personnel", "personnel"],
     ["sites", "sites"],
+    ["species", "species"],
+    ["speciesCategories", "species_categories"],
     ["tankGroups", "tank_groups"],
     ["batches", "batches"],
+    ["products", "products"],
     ["stock", "stock"],
     ["orders", "orders"],
     ["shipments", "shipments"],
+    ["bioRecords", "bio_records"],
   ]) {
     const projection = new RegExp(`data\\s*->\\s*'${stateKey}'\\s+AS\\s+${alias}\\b`, "i");
     if (projection.test(sql)) row[alias] = Array.isArray(state[stateKey]) ? state[stateKey] : [];
+  }
+  for (const [stateKey, alias] of [
+    ["speciesCategoryMajorMap", "species_category_major_map"],
+    ["publicCatalogPolicy", "public_catalog_policy"],
+  ]) {
+    const projection = new RegExp(`data\\s*->\\s*'${stateKey}'\\s+AS\\s+${alias}\\b`, "i");
+    if (projection.test(sql)) row[alias] = state[stateKey] && typeof state[stateKey] === "object"
+      ? state[stateKey]
+      : {};
+  }
+  if (/\bAS\s+bio_records\b/i.test(sql) && row.bio_records === undefined) {
+    row.bio_records = (Array.isArray(state.bioRecords) ? state.bioRecords : []).filter((record) =>
+      (Array.isArray(record?.photos) && record.photos.length > 0) ||
+      (Array.isArray(record?.videos) && record.videos.length > 0)
+    );
   }
   return row;
 }
@@ -70,8 +144,8 @@ function runQuery(query, values = []) {
   ) {
     return result(aggregatedSettlementRows(sql, values));
   }
-  if (/^\s*SELECT\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
-    return result([appStateRow(sql)]);
+  if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
+    return result([appStateRow(sql, values)]);
   }
   if (/^\s*SELECT\s+current_database\(\)/i.test(sql)) {
     return result([{ database: "fishroom_route_test", user: "fishroom_route_test" }]);

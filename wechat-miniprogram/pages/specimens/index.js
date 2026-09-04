@@ -4,6 +4,12 @@ const {
   filterSpecimens,
   findProduct
 } = require("../../utils/catalog");
+const {
+  beginPublicCatalogRequest,
+  isCurrentPublicCatalogRequest,
+  startPublicCatalogRefresh,
+  stopPublicCatalogRefresh
+} = require("../../utils/public-catalog-refresh");
 
 const filterOptions = [
   { key: "all", label: "全部" },
@@ -40,6 +46,18 @@ Page({
     this.loadSpecimens();
   },
 
+  onShow() {
+    startPublicCatalogRefresh(this, () => this.loadSpecimens({ force: true, refreshing: true }));
+  },
+
+  onHide() {
+    stopPublicCatalogRefresh(this);
+  },
+
+  onUnload() {
+    stopPublicCatalogRefresh(this);
+  },
+
   onPullDownRefresh() {
     this.loadSpecimens({ force: true, refreshing: true });
   },
@@ -53,6 +71,7 @@ Page({
     }
 
     const app = getApp();
+    const requestGeneration = beginPublicCatalogRequest(this);
     const now = Date.now();
     const cacheTtl = 60 * 1000;
     const cachedViewModel = app.globalData.catalogViewModel;
@@ -69,6 +88,7 @@ Page({
     try {
       const catalog = useCache ? app.globalData.catalog : await fetchCatalog();
       const viewModel = useCache ? cachedViewModel : buildViewModel(catalog);
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const product = productId ? findProduct(viewModel, productId) : null;
       const species = speciesId
         ? viewModel.speciesCards.find((item) => item.id === speciesId)
@@ -86,19 +106,27 @@ Page({
 
       app.globalData.catalog = catalog;
       app.globalData.catalogViewModel = viewModel;
-      app.globalData.loadedAt = now;
+      if (!useCache) app.globalData.loadedAt = Date.now();
       this.viewModel = viewModel;
 
       wx.setNavigationBarTitle({ title: context.name });
       this.setData({ context });
       this.applyFilter("all");
     } catch (error) {
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
+      app.globalData.catalog = null;
+      app.globalData.catalogViewModel = null;
+      app.globalData.loadedAt = 0;
+      this.viewModel = null;
       this.setData({
         loading: false,
-        error: error && error.message || "可选个体加载失败"
+        error: error && error.message || "可选个体加载失败",
+        context: null,
+        specimens: [],
+        activeFilter: "all"
       });
     } finally {
-      wx.stopPullDownRefresh();
+      if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
     }
   },
 

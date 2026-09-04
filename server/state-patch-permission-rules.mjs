@@ -26,6 +26,7 @@ export const VALUE_LIST_STATE_KEYS = new Set([
 export const PLAIN_OBJECT_STATE_KEYS = new Set([
   "systemSettings",
   "speciesCategoryMajorMap",
+  "publicCatalogPolicy",
 ]);
 
 export const DEDICATED_STATE_PATCH_KEYS = new Set(["personnel", "bioRecords", "stock"]);

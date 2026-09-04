@@ -1,4 +1,8 @@
 import { createContext, useContext } from "react";
+import type { PublicCatalogPolicy } from "./utils/publicCatalogPolicy";
+import { copyPublicCatalogPolicy } from "./utils/publicCatalogPolicy";
+
+export type { PublicCatalogPolicy } from "./utils/publicCatalogPolicy";
 
 export type Role = "admin" | "staff";
 
@@ -1011,6 +1015,8 @@ export type Store = {
   speciesCategories: string[];
   /** 现有分类均作为小类，通过名称映射到固定的四个商品大类。 */
   speciesCategoryMajorMap: Record<string, SpeciesMajorCategoryKey>;
+  /** 小程序公开鱼单的全局隐藏与单商品展示数量规则。 */
+  publicCatalogPolicy: PublicCatalogPolicy;
   products: Product[];
   productOrigins: string[];
   tankGroups: TankGroup[];
@@ -1147,6 +1153,7 @@ export const initialState: Store = {
     笛鲷科: "marineFish",
     鲈科: "marineFish",
   },
+  publicCatalogPolicy: copyPublicCatalogPolicy(undefined),
   productOrigins: [
     "印尼", "菲律宾", "马来西亚", "斯里兰卡", "夏威夷",
     "澳大利亚", "马尔代夫", "红海", "坦桑尼亚", "巴西",

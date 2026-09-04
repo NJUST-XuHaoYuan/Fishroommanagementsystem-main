@@ -4,6 +4,12 @@ const {
   filterProducts
 } = require("../../utils/catalog");
 const { getNavigationMetrics } = require("../../utils/navigation");
+const {
+  beginPublicCatalogRequest,
+  isCurrentPublicCatalogRequest,
+  startPublicCatalogRefresh,
+  stopPublicCatalogRefresh
+} = require("../../utils/public-catalog-refresh");
 
 function decodeOption(value) {
   try {
@@ -36,6 +42,18 @@ Page({
     this.loadProducts();
   },
 
+  onShow() {
+    startPublicCatalogRefresh(this, () => this.loadProducts({ force: true, refreshing: true }));
+  },
+
+  onHide() {
+    stopPublicCatalogRefresh(this);
+  },
+
+  onUnload() {
+    stopPublicCatalogRefresh(this);
+  },
+
   onPullDownRefresh() {
     this.loadProducts({ force: true, refreshing: true });
   },
@@ -48,6 +66,7 @@ Page({
     }
 
     const app = getApp();
+    const requestGeneration = beginPublicCatalogRequest(this);
     const now = Date.now();
     const cachedViewModel = app.globalData.catalogViewModel;
     const cacheTtl = 60 * 1000;
@@ -66,6 +85,7 @@ Page({
     try {
       const catalog = useCache ? app.globalData.catalog : await fetchCatalog();
       const viewModel = useCache ? cachedViewModel : buildViewModel(catalog);
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const categoryInfo = viewModel.categories.find((item) => item.key === categoryKey);
       if (!categoryInfo) throw new Error("这个小类当前没有公开可选商品");
       const major = viewModel.majorGroups.find((item) => item.key === categoryInfo.majorKey)
@@ -73,7 +93,7 @@ Page({
 
       app.globalData.catalog = catalog;
       app.globalData.catalogViewModel = viewModel;
-      app.globalData.loadedAt = now;
+      if (!useCache) app.globalData.loadedAt = Date.now();
       this.viewModel = viewModel;
 
       this.setData({
@@ -83,13 +103,22 @@ Page({
       });
       this.applyFilter(this.data.keyword);
     } catch (error) {
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
+      app.globalData.catalog = null;
+      app.globalData.catalogViewModel = null;
+      app.globalData.loadedAt = 0;
+      this.viewModel = null;
       this.setData({
         loading: false,
         refreshing: false,
-        error: error && error.message || "商品列表加载失败"
+        error: error && error.message || "商品列表加载失败",
+        categoryInfo: null,
+        majorLabel: "",
+        products: [],
+        filteredSpecimenCount: 0
       });
     } finally {
-      wx.stopPullDownRefresh();
+      if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
     }
   },
 

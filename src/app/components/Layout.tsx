@@ -49,6 +49,7 @@ export type ViewKey =
   | "lossRecords"
   | "customers"
   | "orders"
+  | "catalogManagement"
   | "finance"
   | "categorySettings"
   | "paymentMethods"
@@ -58,7 +59,7 @@ export type ViewKey =
   | "profile"
   | "operationLogs";
 
-type NavItem = { key: ViewKey; label: string };
+type NavItem = { key: ViewKey; label: string; adminOnly?: boolean };
 type NavSection = { title: string; icon: ComponentType<{ className?: string }>; items: NavItem[] };
 
 const NAV: NavSection[] = [
@@ -93,6 +94,7 @@ const NAV: NavSection[] = [
     items: [
       { key: "customers", label: "客户管理" },
       { key: "orders", label: "订单管理" },
+      { key: "catalogManagement", label: "鱼单管理", adminOnly: true },
     ],
   },
   {
@@ -295,7 +297,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
                 </span>
                 <span>{section.title}</span>
               </div>
-              {section.items.map((item) => (
+              {section.items.filter((item) => !item.adminOnly || user.role === "admin").map((item) => (
                 <button
                   key={item.key}
                   onClick={() => navigate(item.key)}
@@ -497,7 +499,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
           {children}
         </div>
       </main>
-      <AIAssistantPanel />
+      {view !== "catalogManagement" && <AIAssistantPanel />}
     </div>
   );
 }

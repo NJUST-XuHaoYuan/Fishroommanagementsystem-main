@@ -90,6 +90,7 @@ test("declares the state shapes used by the generic patch endpoint", () => {
   assert.equal(VALUE_LIST_STATE_KEYS.has("speciesCategories"), true);
   assert.equal(PLAIN_OBJECT_STATE_KEYS.has("systemSettings"), true);
   assert.equal(PLAIN_OBJECT_STATE_KEYS.has("speciesCategoryMajorMap"), true);
+  assert.equal(PLAIN_OBJECT_STATE_KEYS.has("publicCatalogPolicy"), true);
 });
 
 test("classifies ID collection additions, changes and removals separately", () => {
@@ -137,11 +138,13 @@ test("requires object state fields and the patch envelope to be plain objects", 
   assert.doesNotThrow(() => validateStatePatchShapes({
     systemSettings: { orderPackagingFee: 10 },
     speciesCategoryMajorMap: { 刺尾鱼科: "marineFish" },
+    publicCatalogPolicy: { hiddenProductIds: [] },
     species: [{ id: "s1" }],
     speciesCategories: ["刺尾鱼科"],
   }));
   assert.throws(() => validateStatePatchValueShape("systemSettings", []), /必须是普通对象/);
   assert.throws(() => validateStatePatchValueShape("speciesCategoryMajorMap", null), /必须是普通对象/);
+  assert.throws(() => validateStatePatchValueShape("publicCatalogPolicy", []), /必须是普通对象/);
   assert.throws(() => validateStatePatchValueShape("systemSettings", new Date()), /必须是普通对象/);
   assert.throws(() => validateStatePatchShapes([]), /状态补丁必须是普通对象/);
 });

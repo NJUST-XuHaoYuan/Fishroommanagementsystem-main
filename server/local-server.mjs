@@ -151,6 +151,15 @@ import {
   verifyPublicMediaUrlToken,
 } from "./public-media-token.mjs";
 import {
+  PUBLIC_CATALOG_MAJOR_CATEGORIES,
+  describePublicCatalogPolicyChanges,
+  normalizePublicCatalogCategoryMajorMap,
+  normalizePublicCatalogPolicy,
+  prunePublicCatalogPolicyReferences,
+  selectPublicCatalogStock,
+  validatePublicCatalogPolicyWrite,
+} from "./public-catalog-policy.mjs";
+import {
   cosObjectDelivery,
   normalizeSingleByteRange,
   upstreamHeader,
@@ -371,6 +380,7 @@ const STATE_PATCH_PERMISSION_MODULES = {
   species: "species",
   speciesCategories: "accounts",
   speciesCategoryMajorMap: "accounts",
+  publicCatalogPolicy: "accounts",
   products: "products",
   productOrigins: "products",
   tankGroups: "tankGroups",
@@ -392,6 +402,7 @@ const STATE_PATCH_MODULE_LABELS = {
   species: "物种管理",
   speciesCategories: "分类管理",
   speciesCategoryMajorMap: "分类管理",
+  publicCatalogPolicy: "鱼单管理",
   products: "商品管理",
   productOrigins: "商品产地",
   tankGroups: "缸组管理",
@@ -412,6 +423,7 @@ const ADMIN_ONLY_STATE_PATCH_KEYS = new Set([
   "sites",
   "speciesCategories",
   "speciesCategoryMajorMap",
+  "publicCatalogPolicy",
 ]);
 const PASSWORD_HASH_PREFIX = "scrypt$1$";
 const cosConfig = {
@@ -460,6 +472,7 @@ const STATE_KEYS = [
   "species",
   "speciesCategories",
   "speciesCategoryMajorMap",
+  "publicCatalogPolicy",
   "products",
   "productOrigins",
   "tankGroups",
@@ -1202,6 +1215,7 @@ function publicCatalogProjectionFromRow(row = {}) {
     speciesCategoryMajorMap: row.species_category_major_map && typeof row.species_category_major_map === "object"
       ? row.species_category_major_map
       : {},
+    publicCatalogPolicy: normalizePublicCatalogPolicy(row.public_catalog_policy),
     products: Array.isArray(row.products) ? row.products : [],
     tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
     stock: Array.isArray(row.stock) ? row.stock : [],
@@ -1209,35 +1223,6 @@ function publicCatalogProjectionFromRow(row = {}) {
     shipments: Array.isArray(row.shipments) ? row.shipments : [],
     bioRecords: Array.isArray(row.bio_records) ? row.bio_records : [],
   };
-}
-
-const PUBLIC_CATALOG_MAJOR_CATEGORIES = [
-  { key: "marineFish", label: "海水鱼" },
-  { key: "coral", label: "珊瑚" },
-  { key: "invertebrate", label: "无脊椎" },
-  { key: "consumable", label: "耗材" },
-];
-const PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS = new Set(
-  PUBLIC_CATALOG_MAJOR_CATEGORIES.map((category) => category.key)
-);
-
-function inferPublicCatalogMajorCategory(categoryName) {
-  const name = String(categoryName ?? "").trim();
-  if (/鱼科$|海马科$|虾虎/u.test(name)) return "marineFish";
-  if (/耗材|器材|用品|药剂|海盐|饲料|滤材|测试|设备|工具|添加剂|包装/u.test(name)) return "consumable";
-  if (/珊瑚|硬骨|脑珊瑚|榔头|火柴头|纽扣|菇珊瑚|飞盘|SPS|LPS/iu.test(name)) return "coral";
-  if (/无脊椎|虾|蟹|螺|海星|海胆|海参|贝|管虫|海葵/u.test(name)) return "invertebrate";
-  return "marineFish";
-}
-
-function normalizePublicCatalogCategoryMajorMap(categories = [], value = {}) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return Object.fromEntries(categories.map((category) => [
-    category,
-    PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS.has(source[category])
-      ? source[category]
-      : inferPublicCatalogMajorCategory(category),
-  ]));
 }
 
 function uniqueNonEmptyEntityIds(items = []) {
@@ -1249,33 +1234,108 @@ function uniqueNonEmptyEntityIds(items = []) {
   return new Set([...counts].filter(([, count]) => count === 1).map(([id]) => id));
 }
 
-function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
+function publicRecordDateSortValue(record = {}) {
+  const text = String(record?.date ?? "").trim();
+  const milliseconds = Date.parse(text);
+  return { text, milliseconds: Number.isFinite(milliseconds) ? milliseconds : null };
+}
+
+function publicRecordIsLater(candidate = {}, current = {}) {
+  const left = publicRecordDateSortValue(candidate);
+  const right = publicRecordDateSortValue(current);
+  if (left.milliseconds !== null && right.milliseconds !== null && left.milliseconds !== right.milliseconds) {
+    return left.milliseconds > right.milliseconds;
+  }
+  if (left.milliseconds !== null && right.milliseconds === null) return true;
+  if (left.milliseconds === null && right.milliseconds !== null) return false;
+  return left.text.localeCompare(right.text) > 0;
+}
+
+function latestPublicMediaByStockId(records = [], allowedStockIds = new Set()) {
+  const latest = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    const stockItemId = String(record?.stockItemId ?? "").trim();
+    if (!allowedStockIds.has(stockItemId)) continue;
+    const photos = publicMediaUrls(record?.photos, 6);
+    const videos = publicMediaUrls(record?.videos, 3);
+    if (photos.length === 0 && videos.length === 0) continue;
+    const current = latest.get(stockItemId);
+    if (!current || publicRecordIsLater(record, current.record)) {
+      latest.set(stockItemId, { record, photos, videos });
+    }
+  }
+  return latest;
+}
+
+function buildGlobalPublicCatalogSelection(state = {}) {
   const normalizedState = normalizePickupShipmentsForState(state);
   const sourceStock = Array.isArray(normalizedState.stock) ? normalizedState.stock : [];
   const uniqueStockIds = uniqueNonEmptyEntityIds(sourceStock);
-  const scopedState = siteFilteredState({
+  const globalState = siteFilteredState({
     ...normalizedState,
     // A duplicated stock ID is ambiguous across sites. Exclude every copy from
     // the public catalog instead of letting array order choose one identity.
     stock: sourceStock.filter((item) => uniqueStockIds.has(String(item?.id ?? "").trim())),
-  }, siteId);
-  const shippedIds = shippedOutStockIds(scopedState);
-  const species = Array.isArray(scopedState.species) ? scopedState.species : [];
-  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
-  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
-  const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  }, ALL_SITE_ID);
+  const shippedIds = shippedOutStockIds(globalState);
+  const activeOrderStockIds = orderActiveStockIds(globalState);
+  const species = Array.isArray(globalState.species) ? globalState.species : [];
+  const products = Array.isArray(globalState.products) ? globalState.products : [];
+  const stock = Array.isArray(globalState.stock) ? globalState.stock : [];
+  const bioRecords = Array.isArray(globalState.bioRecords) ? globalState.bioRecords : [];
   const publicProductIds = new Set(
     products
       .filter((product) => product?.publicVisible !== false)
       .map((product) => String(product?.id ?? ""))
       .filter(Boolean)
   );
-  const sellableStock = stock.filter((item) =>
+  const eligibleStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
+    !activeOrderStockIds.has(String(item?.id ?? "")) &&
     isPhysicallyInTank(item, shippedIds) &&
     publicProductIds.has(String(item?.productId ?? ""))
   );
+  const eligibleStockIds = new Set(eligibleStock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const latestMediaByStockId = latestPublicMediaByStockId(bioRecords, eligibleStockIds);
+  const allSpeciesCategories = species
+    .map((item) => String(item?.category ?? "").trim())
+    .filter(Boolean);
+  const completeCategoryMajorMap = normalizePublicCatalogCategoryMajorMap(
+    allSpeciesCategories,
+    globalState.speciesCategoryMajorMap
+  );
+  const selectedStock = selectPublicCatalogStock({
+    stock: eligibleStock,
+    products,
+    species,
+    speciesCategoryMajorMap: completeCategoryMajorMap,
+    publicCatalogPolicy: globalState.publicCatalogPolicy,
+    latestMediaAtByStockId: new Map(
+      [...latestMediaByStockId].map(([stockItemId, media]) => [stockItemId, media.record?.date])
+    ),
+  });
+  return {
+    globalState,
+    species,
+    products,
+    latestMediaByStockId,
+    completeCategoryMajorMap,
+    selectedStock,
+  };
+}
+
+function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
+  const selection = buildGlobalPublicCatalogSelection(state);
+  const scopedState = siteFilteredState({
+    ...selection.globalState,
+    stock: selection.selectedStock,
+  }, siteId);
+  const species = selection.species;
+  const products = selection.products;
+  const latestMediaByStockId = selection.latestMediaByStockId;
+  const completeCategoryMajorMap = selection.completeCategoryMajorMap;
+  const sellableStock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
   const availableProducts = products.filter((product) =>
@@ -1284,20 +1344,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const latestMediaByStockId = new Map();
-  bioRecords
-    .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
-    .forEach((record) => {
-      const stockItemId = String(record?.stockItemId ?? "");
-      const photos = publicMediaUrls(record?.photos, 6);
-      const videos = publicMediaUrls(record?.videos, 3);
-      if (photos.length > 0 || videos.length > 0) {
-        const currentMedia = latestMediaByStockId.get(stockItemId);
-        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
-          latestMediaByStockId.set(stockItemId, { record, photos, videos });
-        }
-      }
-    });
   const categorySet = new Set(
     species
       .filter((item) => speciesIds.has(String(item?.id ?? "")))
@@ -1311,7 +1357,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   ];
   const speciesCategoryMajorMap = normalizePublicCatalogCategoryMajorMap(
     speciesCategories,
-    scopedState.speciesCategoryMajorMap
+    completeCategoryMajorMap
   );
 
   return {
@@ -1354,7 +1400,9 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         tankLocation: String(tank?.group?.location ?? ""),
       };
     }),
-    bioRecords: [...latestMediaByStockId.values()]
+    bioRecords: [...latestMediaByStockId]
+      .filter(([stockItemId]) => sellableStockIds.has(stockItemId))
+      .map(([, media]) => media)
       .sort((a, b) =>
         String(b?.record?.date ?? "").localeCompare(String(a?.record?.date ?? "")) ||
         String(a?.record?.id ?? "").localeCompare(String(b?.record?.id ?? ""))
@@ -1364,22 +1412,17 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
 }
 
 function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
-  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
-  const shippedIds = shippedOutStockIds(scopedState);
-  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
-  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const selection = buildGlobalPublicCatalogSelection(state);
+  const scopedState = siteFilteredState({
+    ...selection.globalState,
+    stock: selection.selectedStock,
+  }, siteId);
   const targetId = String(stockItemId ?? "").trim();
-  let item;
-  try {
-    item = findUniqueBioStockItem(stock, targetId);
-  } catch (error) {
-    if (error instanceof BioRecordConflictError) return null;
-    throw error;
-  }
-  if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
-  const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
-  if (!product || product?.publicVisible === false) return null;
-  const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const selectedStockIds = new Set((Array.isArray(scopedState.stock) ? scopedState.stock : [])
+    .map((item) => String(item?.id ?? "").trim())
+    .filter(Boolean));
+  if (!selectedStockIds.has(targetId)) return null;
+  const records = Array.isArray(selection.globalState.bioRecords) ? selection.globalState.bioRecords : [];
   try {
     assertUniqueBioRecordIds(records.filter((record) => String(record?.stockItemId ?? "") === targetId));
   } catch (error) {
@@ -2133,11 +2176,17 @@ function statePatchOperationLogs(req, current = {}, next = {}, patchedKeys = [])
     const actions = statePatchActionsForKey(key, current[key], next[key]);
     if (actions.length === 0) return [];
     const moduleLabel = STATE_PATCH_MODULE_LABELS[key] ?? "系统数据";
+    const detail = key === "publicCatalogPolicy"
+      ? describePublicCatalogPolicyChanges(current[key], next[key], {
+        products: next.products,
+        species: next.species,
+      })
+      : `已通过服务端校验保存「${moduleLabel}」变更`;
     return [createOperationLog(
       req,
       moduleLabel,
       actions.map((action) => actionLabels[action]).join("、"),
-      `已通过服务端校验保存「${moduleLabel}」变更`
+      detail
     )];
   });
 }
@@ -7658,6 +7707,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/public/catalog" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
     let releaseProjectionSlot = null;
     try {
       const requestedSiteId = normalizeSiteScope(url.searchParams.get("siteId") ?? ALL_SITE_ID);
@@ -7692,6 +7742,7 @@ async function handleApi(req, res, url) {
            data -> 'species' AS species,
            data -> 'speciesCategories' AS species_categories,
            data -> 'speciesCategoryMajorMap' AS species_category_major_map,
+           data -> 'publicCatalogPolicy' AS public_catalog_policy,
            data -> 'products' AS products,
            data -> 'tankGroups' AS tank_groups,
            data -> 'stock' AS stock,
@@ -7738,6 +7789,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
     let releaseProjectionSlot = null;
     try {
       const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
@@ -7785,6 +7837,20 @@ async function handleApi(req, res, url) {
              LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stock_rows(stock_item)
            WHERE stock_item ->> 'id' = $2
          ),
+         candidate_stock AS MATERIALIZED (
+           SELECT candidate_item AS stock_item, candidate_ordinality AS inventory_ordinality
+           FROM source,
+             LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb))
+               WITH ORDINALITY AS stock_rows(candidate_item, candidate_ordinality)
+           WHERE candidate_item ->> 'productId' = (
+             SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
+           )
+         ),
+         candidate_stock_ids AS MATERIALIZED (
+           SELECT stock_item ->> 'id' AS stock_item_id
+           FROM candidate_stock
+           WHERE COALESCE(stock_item ->> 'id', '') <> ''
+         ),
          relevant_orders AS MATERIALIZED (
            SELECT order_item
            FROM source,
@@ -7795,23 +7861,27 @@ async function handleApi(req, res, url) {
                CASE WHEN jsonb_typeof(order_item -> 'items') = 'array'
                  THEN order_item -> 'items' ELSE '[]'::jsonb END
              ) AS order_items(item)
-             WHERE item ->> 'stockItemId' = $2
+             WHERE item ->> 'stockItemId' IN (
+               SELECT stock_item_id FROM candidate_stock_ids
+             )
            )
          )
          SELECT
            version,
            data -> 'sites' AS sites,
+           data -> 'speciesCategoryMajorMap' AS species_category_major_map,
+           data -> 'publicCatalogPolicy' AS public_catalog_policy,
            COALESCE((
              SELECT jsonb_agg(group_item)
              FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(group_item)
              WHERE EXISTS (
                SELECT 1
                FROM jsonb_array_elements(
-                 CASE WHEN jsonb_typeof(group_item -> 'subTanks') = 'array'
-                   THEN group_item -> 'subTanks' ELSE '[]'::jsonb END
+               CASE WHEN jsonb_typeof(group_item -> 'subTanks') = 'array'
+                 THEN group_item -> 'subTanks' ELSE '[]'::jsonb END
                ) AS sub_tanks(sub_tank)
-               WHERE sub_tank ->> 'id' = (
-                 SELECT stock_item ->> 'subTankId' FROM target_stock LIMIT 1
+               WHERE sub_tank ->> 'id' IN (
+                 SELECT stock_item ->> 'subTankId' FROM candidate_stock
                )
              )
            ), '[]'::jsonb) AS tank_groups,
@@ -7822,6 +7892,18 @@ async function handleApi(req, res, url) {
                SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
              )
            ), '[]'::jsonb) AS products,
+           COALESCE((
+             SELECT jsonb_agg(species_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'species', '[]'::jsonb)) AS species_rows(species_item)
+             WHERE species_item ->> 'id' = (
+               SELECT product_item ->> 'speciesId'
+               FROM jsonb_array_elements(COALESCE(data -> 'products', '[]'::jsonb)) AS product_rows(product_item)
+               WHERE product_item ->> 'id' = (
+                 SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
+               )
+               LIMIT 1
+             )
+           ), '[]'::jsonb) AS species,
            COALESCE((SELECT jsonb_agg(order_item) FROM relevant_orders), '[]'::jsonb) AS orders,
            COALESCE((
              SELECT jsonb_agg(shipment_item)
@@ -7834,30 +7916,50 @@ async function handleApi(req, res, url) {
                  CASE WHEN jsonb_typeof(shipment_item -> 'itemStockIds') = 'array'
                    THEN shipment_item -> 'itemStockIds' ELSE '[]'::jsonb END
                ) AS shipment_stock_ids(stock_id)
-               WHERE stock_id = $2
+               WHERE stock_id IN (
+                 SELECT stock_item_id FROM candidate_stock_ids
+               )
              )
            ), '[]'::jsonb) AS shipments,
            (SELECT count(*)::int FROM target_stock) AS stock_item_count,
-           (SELECT stock_item FROM target_stock LIMIT 1) AS stock_item,
+           COALESCE((
+             SELECT jsonb_agg(stock_item ORDER BY inventory_ordinality)
+             FROM candidate_stock
+           ), '[]'::jsonb) AS stock,
            COALESCE((
              SELECT jsonb_agg(record_item)
              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS bio_rows(record_item)
              WHERE record_item ->> 'stockItemId' = $2
+               OR (
+                 record_item ->> 'stockItemId' IN (
+                   SELECT stock_item_id FROM candidate_stock_ids
+                 )
+                 AND (
+                   CASE WHEN jsonb_typeof(record_item -> 'photos') = 'array'
+                     THEN jsonb_array_length(record_item -> 'photos') ELSE 0 END > 0
+                   OR
+                   CASE WHEN jsonb_typeof(record_item -> 'videos') = 'array'
+                     THEN jsonb_array_length(record_item -> 'videos') ELSE 0 END > 0
+                 )
+               )
            ), '[]'::jsonb) AS bio_records
          FROM source`,
         [stateId, stockItemId]
       );
       const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
-      const stockItem = rows[0]?.stock_item && typeof rows[0].stock_item === "object"
-        ? rows[0].stock_item
-        : null;
       const projectedState = {
         sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+        species: Array.isArray(rows[0]?.species) ? rows[0].species : [],
+        speciesCategoryMajorMap: rows[0]?.species_category_major_map &&
+          typeof rows[0].species_category_major_map === "object"
+          ? rows[0].species_category_major_map
+          : {},
+        publicCatalogPolicy: normalizePublicCatalogPolicy(rows[0]?.public_catalog_policy),
         tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
         products: Array.isArray(rows[0]?.products) ? rows[0].products : [],
         orders: Array.isArray(rows[0]?.orders) ? rows[0].orders : [],
         shipments: Array.isArray(rows[0]?.shipments) ? rows[0].shipments : [],
-        stock: stockItemCount === 1 && stockItem ? [stockItem] : [],
+        stock: Array.isArray(rows[0]?.stock) ? rows[0].stock : [],
         bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
       };
       const bioRecords = stockItemCount === 1
@@ -12498,6 +12600,22 @@ async function handleApi(req, res, url) {
 	      if (!rows[0]) throw new Error("系统状态不存在");
 	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
 	      const current = normalizePickupShipmentsForState(persistedCurrent);
+	      if (projectedKeys.includes("publicCatalogPolicy")) {
+	        current.publicCatalogPolicy = normalizePublicCatalogPolicy(current.publicCatalogPolicy);
+	      }
+	      if (Object.prototype.hasOwnProperty.call(rawPatch, "publicCatalogPolicy")) {
+	        if (!Object.prototype.hasOwnProperty.call(basePatch, "publicCatalogPolicy") ||
+	            stableJson(normalizePublicCatalogPolicy(basePatch.publicCatalogPolicy)) !== stableJson(current.publicCatalogPolicy)) {
+	          const error = new Error("鱼单展示设置已被其他管理员修改，请刷新后重试");
+	          error.statusCode = 409;
+	          error.code = "PUBLIC_CATALOG_POLICY_CONFLICT";
+	          throw error;
+	        }
+	        rawPatch.publicCatalogPolicy = validatePublicCatalogPolicyWrite(rawPatch.publicCatalogPolicy, {
+	          products: current.products,
+	          species: current.species,
+	        });
+	      }
 	      if (Array.isArray(rawPatch.shipments)) {
 	        const currentShipments = new Map((Array.isArray(current.shipments) ? current.shipments : [])
 	          .map((shipment) => [String(shipment?.id ?? ""), shipment]));
@@ -12527,6 +12645,12 @@ async function handleApi(req, res, url) {
 	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
 	      }
 	      const stateWithoutLogs = buildStatePatch(current, patch, basePatch, [], req);
+	      if (Object.keys(patch).some((key) => key === "products" || key === "species")) {
+	        stateWithoutLogs.publicCatalogPolicy = prunePublicCatalogPolicyReferences(
+	          stateWithoutLogs.publicCatalogPolicy,
+	          { products: stateWithoutLogs.products, species: stateWithoutLogs.species }
+	        );
+	      }
 	      const appliedOperationLogs = statePatchOperationLogs(req, current, stateWithoutLogs, Object.keys(patch));
 	      // Audit history is deliberately not selected into Node for every small
 	      // generic edit. Append the new server-generated entries in PostgreSQL
@@ -14115,6 +14239,12 @@ async function handleApi(req, res, url) {
 	          : item)
 	        : products.filter((item) => String(item?.id ?? "") !== productId);
 	      const nextOrigins = mergeProductOrigins(state.productOrigins, nextProducts);
+	      const nextPublicCatalogPolicy = disposition.mode === "hard"
+	        ? prunePublicCatalogPolicyReferences(state.publicCatalogPolicy, {
+	          products: nextProducts,
+	          species: state.species,
+	        })
+	        : normalizePublicCatalogPolicy(state.publicCatalogPolicy);
 	      const operationLog = {
 	        id: uid("log"),
 	        time: archivedAt,
@@ -14129,6 +14259,7 @@ async function handleApi(req, res, url) {
 	        ...state,
 	        products: nextProducts,
 	        productOrigins: nextOrigins,
+	        publicCatalogPolicy: nextPublicCatalogPolicy,
 	        operationLogs: pushOperationLog(state.operationLogs, operationLog),
 	      };
 
@@ -14141,6 +14272,7 @@ async function handleApi(req, res, url) {
 	        ok: true,
 	        products: nextProducts,
 	        productOrigins: nextOrigins,
+	        publicCatalogPolicy: nextPublicCatalogPolicy,
 	        operationLog,
 	        mode: disposition.mode,
 	        message: disposition.message,
