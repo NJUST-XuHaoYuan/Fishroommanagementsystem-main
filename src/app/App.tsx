@@ -36,6 +36,7 @@ import { copyPublicCatalogPolicy, normalizePublicCatalogPolicy } from "./utils/p
 
 const API = "/api";
 const MAX_OPERATION_LOGS = 10000;
+const PUBLIC_CATALOG_POLICY_SCHEMA_VERSION = 1;
 
 const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "systemSettings", module: "系统设置" },
@@ -378,13 +379,38 @@ function normalizePersistedState(data: any, currentUser: User): Store {
 	        };
     })
     : migratedData.stock;
+  const legacyHiddenProductIds: string[] = [];
+  const legacyCatalogMigrationCompleted = Number(
+    migratedData._publicCatalogPolicySchemaVersion ?? 0
+  ) >= PUBLIC_CATALOG_POLICY_SCHEMA_VERSION;
   const migratedProducts = Array.isArray(migratedData.products)
-    ? migratedData.products.map((product: Record<string, unknown>) => ({
-        ...product,
-        publicVisible: product.publicVisible !== false,
-        notes: String(product.notes ?? ""),
-      }))
+    ? migratedData.products.map((product: Record<string, unknown>) => {
+        const { publicVisible: legacyPublicVisible, ...currentProduct } = product;
+        const productId = String(product.id ?? "").trim();
+        if (
+          !legacyCatalogMigrationCompleted &&
+          legacyPublicVisible === false &&
+          productId &&
+          !product.archivedAt
+        ) {
+          legacyHiddenProductIds.push(productId);
+        }
+        return {
+          ...currentProduct,
+          notes: String(product.notes ?? ""),
+        };
+      })
     : migratedData.products;
+  const normalizedPublicCatalogPolicy = normalizePublicCatalogPolicy(migratedData.publicCatalogPolicy);
+  const migratedPublicCatalogPolicy = legacyHiddenProductIds.length === 0
+    ? normalizedPublicCatalogPolicy
+    : {
+        ...normalizedPublicCatalogPolicy,
+        hiddenProductIds: Array.from(new Set([
+          ...normalizedPublicCatalogPolicy.hiddenProductIds,
+          ...legacyHiddenProductIds,
+        ])),
+      };
   const migratedProductOrigins = mergeProductOrigins(migratedData.productOrigins, migratedProducts ?? migratedData.products);
   const migratedSpecies = Array.isArray(migratedData.species) ? migratedData.species : [];
   const migratedSpeciesCategories = Array.from(new Set([
@@ -490,7 +516,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     species: migratedSpecies,
     speciesCategories: migratedSpeciesCategories,
     speciesCategoryMajorMap: migratedSpeciesCategoryMajorMap,
-    publicCatalogPolicy: normalizePublicCatalogPolicy(migratedData.publicCatalogPolicy),
+    publicCatalogPolicy: migratedPublicCatalogPolicy,
     products: migratedProducts ?? migratedData.products,
     productOrigins: migratedProductOrigins,
     tankGroups: migratedTankGroups,

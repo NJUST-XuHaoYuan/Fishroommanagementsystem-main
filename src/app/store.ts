@@ -110,8 +110,6 @@ export type Product = {
   defaultPrice: number;
   /** 商品最低回厂价，订单商品折后金额必须高于该价格合计。 */
   minReturnPrice?: number;
-  /** 是否进入对外公开目录（网站和小程序）。未设置时按展示处理，兼容旧数据。 */
-  publicVisible?: boolean;
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;
   /** 停用商品继续保留供历史库存和订单展示，但不能用于新增业务。 */
@@ -1166,9 +1164,9 @@ export const initialState: Store = {
     { id: "s3", name: "黄金吊", scientificName: "Zebrasoma flavescens", category: "刺尾鱼科", commonNames: ["黄三角吊"], description: "鲜艳的黄色", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200" },
   ],
   products: [
-    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
-    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
-    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "" },
+    { id: "p1", speciesId: "s1", name: "公子小丑(M)", size: "M", origin: "印尼", imageUrl: "https://images.unsplash.com/photo-1535591273668-578e31182c4f?w=200", defaultPrice: 80, minReturnPrice: 0, commissionRate: 0, notes: "" },
+    { id: "p2", speciesId: "s2", name: "蓝倒吊(S)", size: "S", origin: "菲律宾", imageUrl: "https://images.unsplash.com/photo-1524704654690-b56c05c78a00?w=200", defaultPrice: 280, minReturnPrice: 0, commissionRate: 0, notes: "" },
+    { id: "p3", speciesId: "s3", name: "黄金吊(M)", size: "M", origin: "夏威夷", imageUrl: "https://images.unsplash.com/photo-1583212292454-1fe6229603b7?w=200", defaultPrice: 350, minReturnPrice: 0, commissionRate: 0, notes: "" },
   ],
   tankGroups: [
     {

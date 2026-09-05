@@ -21,7 +21,6 @@ import {
 } from "./ui/alert-dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { ImageUpload } from "./ImageUpload";
@@ -29,6 +28,12 @@ import { toast } from "sonner";
 import { ChevronDown, Plus, Check, Settings2, Pencil, Trash2, Search, RotateCcw } from "lucide-react";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
+
+function withoutLegacyPublicVisible(product: Product): Product {
+  const { publicVisible: legacyPublicVisible, ...currentProduct } = product as Product & { publicVisible?: unknown };
+  void legacyPublicVisible;
+  return currentProduct;
+}
 
 function mergeOrigins(origins: string[] = [], products: Product[] = []): string[] {
   const merged: string[] = [];
@@ -299,7 +304,10 @@ function ManageOriginsDialog({
 
   useEffect(() => {
     if (!open) return;
-    setDraftProducts((state.products ?? []).map((product) => ({ ...product, notes: product.notes ?? "" })));
+    setDraftProducts((state.products ?? []).map((product) => ({
+      ...withoutLegacyPublicVisible(product),
+      notes: product.notes ?? "",
+    })));
     setDraftOrigins(mergeOrigins(state.productOrigins ?? [], state.products ?? []));
     setEditingIdx(null);
     setEditVal("");
@@ -339,7 +347,10 @@ function ManageOriginsDialog({
 
   const saveAndClose = async () => {
     let nextOrigins = [...draftOrigins];
-    let nextProducts = draftProducts.map((product) => ({ ...product, notes: product.notes ?? "" }));
+    let nextProducts = draftProducts.map((product) => ({
+      ...withoutLegacyPublicVisible(product),
+      notes: product.notes ?? "",
+    }));
     if (editingIdx !== null) {
       const trimmed = editVal.trim();
       const oldName = nextOrigins[editingIdx];
@@ -531,7 +542,8 @@ export function ProductsView() {
   const speciesById = (id: string) => state.species.find((s) => s.id === id);
   const allProductRows = useMemo<ProductRow[]>(
     () => state.products.map((product) => {
-      const species = speciesById(product.speciesId);
+      const currentProduct = withoutLegacyPublicVisible(product);
+      const species = speciesById(currentProduct.speciesId);
       const speciesSearch = species
         ? [
             species.name,
@@ -541,7 +553,7 @@ export function ProductsView() {
             ...(species.commonNames ?? []),
           ].filter(Boolean).join(" ")
         : "";
-      return { ...product, speciesSearch };
+      return { ...currentProduct, speciesSearch };
     }),
     [state.products, state.species]
   );
@@ -552,7 +564,7 @@ export function ProductsView() {
   );
 
   const empty = (): Product => ({
-    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, minReturnPrice: 0, publicVisible: true, commissionRate: 0, notes: "",
+    id: "", speciesId: "", name: "", size: "", origin: "", imageUrl: "", defaultPrice: 0, minReturnPrice: 0, commissionRate: 0, notes: "",
   });
 
   const onSpeciesChange = (sid: string) => {
@@ -578,13 +590,12 @@ export function ProductsView() {
     if (isNaN(price) || price <= 0) return toast.error("请填写销售默认价");
     const minReturnPrice = minReturnPriceStr.trim() === "" ? 0 : Number(minReturnPriceStr);
     if (Number.isNaN(minReturnPrice) || minReturnPrice < 0) return toast.error("最低回厂价格不能小于 0");
-    const finalEditing = {
-      ...editing,
+    const finalEditing: Product = {
+      ...withoutLegacyPublicVisible(editing),
       id: editing.id || uid(),
       notes: editing.notes?.trim() ?? "",
       defaultPrice: isNaN(price) ? 0 : price,
       minReturnPrice: Number(minReturnPrice.toFixed(2)),
-      publicVisible: editing.publicVisible !== false,
       commissionRate: 0,
     };
     if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存商品信息的修改。" : "将新增一个商品。")) return;
@@ -624,12 +635,10 @@ export function ProductsView() {
     void archivedAt;
     void archivedBy;
     setRestoringProductId(row.id);
-    const ok = await saveProduct({ ...product, archivedAt: "", archivedBy: "" });
+    const ok = await saveProduct({ ...withoutLegacyPublicVisible(product), archivedAt: "", archivedBy: "" });
     setRestoringProductId("");
     if (!ok) return toast.error("恢复失败，请重试");
-    toast.success(product.publicVisible === false
-      ? "商品已恢复使用；对外展示仍关闭，可在编辑商品中开启"
-      : "商品已恢复使用");
+    toast.success("商品已恢复使用");
   };
 
   return (
@@ -708,19 +717,6 @@ export function ProductsView() {
           { key: "defaultPrice", title: "销售默认价(¥)", render: (r) => Number(r.defaultPrice || 0).toFixed(2) },
           { key: "minReturnPrice", title: "最低回厂价(¥)", render: (r) => Number(r.minReturnPrice ?? 0).toFixed(2) },
           {
-            key: "publicVisible",
-            title: "对外展示",
-            render: (r) => (
-              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
-                r.publicVisible === false
-                  ? "bg-slate-100 text-slate-500"
-                  : "bg-emerald-50 text-emerald-700"
-              }`}>
-                {r.publicVisible === false ? "已关闭" : "已开启"}
-              </span>
-            ),
-          },
-          {
             key: "notes",
             title: "备注",
             render: (r) => (
@@ -734,7 +730,7 @@ export function ProductsView() {
           <div className="flex justify-end gap-2">
             {permission.canUpdate && <Button size="sm" variant="outline" onClick={() => {
               const { speciesSearch, ...product } = row;
-              setEditing({ ...product, minReturnPrice: Number(product.minReturnPrice ?? 0), publicVisible: product.publicVisible !== false, commissionRate: 0, notes: product.notes ?? "" });
+              setEditing({ ...withoutLegacyPublicVisible(product), minReturnPrice: Number(product.minReturnPrice ?? 0), commissionRate: 0, notes: product.notes ?? "" });
               setPriceStr(String(row.defaultPrice));
               setMinReturnPriceStr(String(row.minReturnPrice ?? 0));
               setOpen(true);
@@ -811,17 +807,6 @@ export function ProductsView() {
                 <span className="text-xs text-muted-foreground">
                   {isAdmin ? "订单商品折后金额必须高于所选商品的最低回厂价合计；超出部分作为销售提成。" : "仅管理员可修改最低回厂价格"}
                 </span>
-              </div>
-              <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/20 px-3 py-3">
-                <div className="space-y-1">
-                  <Label htmlFor="product-public-visible">对外展示（网站和小程序）</Label>
-                  <div className="text-xs text-muted-foreground">这是对外展示总开关。关闭后，此商品和库存不会出现在公开网站或小程序中，也不能通过公开选鱼码查询详情；鱼单管理里的规则无法覆盖它。按类型、物种、商品或数量精细控制时，请保持开启，再到“销售管理 → 鱼单管理”设置。</div>
-                </div>
-                <Switch
-                  id="product-public-visible"
-                  checked={editing.publicVisible !== false}
-                  onCheckedChange={(checked) => setEditing({ ...editing, publicVisible: checked })}
-                />
               </div>
               <div className="grid gap-2">
                 <Label>备注</Label>

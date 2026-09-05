@@ -14,6 +14,7 @@ const pgLoaderPath = fileURLToPath(new URL("./test-support/pg-stub-loader.mjs", 
 const databaseFixture = {
   revision: 91,
   state: {
+    _publicCatalogPolicySchemaVersion: 1,
     sites: [
       { id: "nanjing", name: "南京" },
       { id: "jiangyin", name: "江阴" },
@@ -57,7 +58,7 @@ const databaseFixture = {
         id: "gold-tang",
         speciesId: "species-gold",
         name: "黄金吊 5-7cm",
-        publicVisible: true,
+        publicVisible: false,
         defaultPrice: 680,
       },
       {
@@ -109,6 +110,14 @@ const databaseFixture = {
         publicVisible: true,
         defaultPrice: 640,
       },
+      {
+        id: "archived-tang",
+        speciesId: "species-gold",
+        name: "已停用黄金吊",
+        publicVisible: true,
+        archivedAt: "2026-09-05T12:00:00+08:00",
+        defaultPrice: 600,
+      },
     ],
     stock: [
       { id: "fish-new", productId: "gold-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy" },
@@ -127,6 +136,7 @@ const databaseFixture = {
       { id: "reserved-active", productId: "reservation-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy", sold: false },
       { id: "released-cancelled", productId: "reservation-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy", sold: false },
       { id: "released-removed", productId: "reservation-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy", sold: false },
+      { id: "archived-stock", productId: "archived-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy" },
     ],
     orders: [
       {
@@ -301,6 +311,20 @@ test("the public catalog exposes only the cap winner chosen by latest maintenanc
     ["fish-new"]
   );
   assert.equal(body.catalog.products.some((item) => item.id === "gold-tang"), true);
+  assert.equal(body.catalog.products.some((item) => item.id === "archived-tang"), false);
+  assert.equal(body.catalog.stock.some((item) => item.id === "archived-stock"), false);
+});
+
+test("a post-migration legacy false flag no longer hides a product, while archivedAt still does", async () => {
+  const catalog = await publicGet("/api/public/catalog?siteId=all");
+  assert.equal(catalog.response.status, 200, JSON.stringify(catalog.body));
+  assert.equal(catalog.body.catalog.products.some((item) => item.id === "gold-tang"), true);
+
+  const archived = await publicGet(
+    "/api/public/bio-records?siteId=all&stockItemId=archived-stock"
+  );
+  assert.equal(archived.response.status, 404, JSON.stringify(archived.body));
+  assert.equal(archived.response.headers.get("cache-control"), "no-store");
 });
 
 test("the public detail route returns the cap winner and rejects a capped-out sibling", async () => {

@@ -5,6 +5,8 @@ export const PUBLIC_CATALOG_MAJOR_CATEGORIES = Object.freeze([
   Object.freeze({ key: "consumable", label: "耗材" }),
 ]);
 
+export const PUBLIC_CATALOG_POLICY_SCHEMA_VERSION = 1;
+
 const PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS = new Set(
   PUBLIC_CATALOG_MAJOR_CATEGORIES.map((category) => category.key)
 );
@@ -72,6 +74,77 @@ export function normalizePublicCatalogPolicy(value = {}) {
     hiddenProductIds,
     hiddenSpeciesIds,
     productDisplayCaps: Object.fromEntries(productDisplayCapEntries),
+  };
+}
+
+/**
+ * One-time compatibility migration for the legacy Product.publicVisible flag.
+ *
+ * The version marker is deliberately stored outside the public policy object:
+ * once an administrator later removes a migrated product from hiddenProductIds,
+ * a restart must not read a stale legacy flag and hide it again.
+ */
+export function migrateLegacyPublicCatalogVisibilityState(state = {}) {
+  if (!isPlainObject(state)) {
+    return { state, changed: false, migratedProductIds: [] };
+  }
+  const products = Array.isArray(state.products) ? state.products : null;
+  const hasLegacyVisibilityFields = products?.some((product) =>
+    isPlainObject(product) && Object.prototype.hasOwnProperty.call(product, "publicVisible")
+  ) ?? false;
+  const nextProducts = products?.map((product) => {
+    if (!isPlainObject(product)) return product;
+    const { publicVisible: _legacyPublicVisible, ...nextProduct } = product;
+    return nextProduct;
+  });
+  const schemaVersion = Number(state._publicCatalogPolicySchemaVersion ?? 0);
+  if (schemaVersion >= PUBLIC_CATALOG_POLICY_SCHEMA_VERSION) {
+    if (!hasLegacyVisibilityFields) {
+      return { state, changed: false, migratedProductIds: [] };
+    }
+    return {
+      state: { ...state, products: nextProducts },
+      changed: true,
+      migratedProductIds: [],
+    };
+  }
+
+  const migratedProductIds = [];
+  for (const product of products ?? []) {
+    if (!isPlainObject(product)) continue;
+    const productId = normalizedId(product.id);
+    if (product.publicVisible === false && productId && !normalizedId(product.archivedAt)) {
+      if (productId.length > MAX_POLICY_ENTITY_ID_LENGTH) {
+        throw new Error("旧商品展示设置包含过长商品 ID，无法安全迁移");
+      }
+      migratedProductIds.push(productId);
+    }
+  }
+  const currentPolicy = normalizePublicCatalogPolicy(state.publicCatalogPolicy);
+  const hiddenProductIds = [...currentPolicy.hiddenProductIds];
+  const hiddenProductIdSet = new Set(hiddenProductIds);
+  for (const productId of migratedProductIds) {
+    if (hiddenProductIdSet.has(productId)) continue;
+    if (hiddenProductIds.length >= MAX_POLICY_ENTITY_IDS) {
+      throw new Error("旧商品展示设置数量超过鱼单隐藏规则上限，无法安全迁移");
+    }
+    hiddenProductIds.push(productId);
+    hiddenProductIdSet.add(productId);
+  }
+
+  const nextState = {
+    ...state,
+    publicCatalogPolicy: {
+      ...currentPolicy,
+      hiddenProductIds,
+    },
+    _publicCatalogPolicySchemaVersion: PUBLIC_CATALOG_POLICY_SCHEMA_VERSION,
+  };
+  if (products) nextState.products = nextProducts;
+  return {
+    state: nextState,
+    changed: true,
+    migratedProductIds: uniqueNormalizedIds(migratedProductIds),
   };
 }
 
@@ -285,7 +358,7 @@ function productAllowedByNormalizedPolicy({
 } = {}) {
   const productId = normalizedId(product?.id);
   const speciesId = normalizedId(product?.speciesId ?? species?.id);
-  if (!productId || product?.publicVisible === false || !speciesId || normalizedId(species?.id) !== speciesId) {
+  if (!productId || normalizedId(product?.archivedAt) || !speciesId || normalizedId(species?.id) !== speciesId) {
     return false;
   }
   if (hiddenProductIds.has(productId)) return false;

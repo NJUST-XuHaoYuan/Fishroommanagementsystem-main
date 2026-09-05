@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  PUBLIC_CATALOG_POLICY_SCHEMA_VERSION,
   describePublicCatalogPolicyChanges,
   inferPublicCatalogMajorCategory,
   isPublicCatalogProductAllowed,
+  migrateLegacyPublicCatalogVisibilityState,
   normalizePublicCatalogPolicy,
   prunePublicCatalogPolicyReferences,
   selectPublicCatalogStock,
@@ -31,6 +33,103 @@ function select(stock, policy = {}, latestMediaAtByStockId = {}) {
     latestMediaAtByStockId,
   }).map((item) => item.id);
 }
+
+test("migrates active legacy-hidden products into the policy and removes the legacy field", () => {
+  const currentState = {
+    products: [
+      { id: "legacy-hidden", name: "旧隐藏商品", publicVisible: false },
+      { id: "already-public", publicVisible: true },
+      { id: "archived-hidden", publicVisible: false, archivedAt: "2026-09-05T12:00:00+08:00" },
+      { id: "legacy-hidden", publicVisible: false },
+      { id: "missing-flag" },
+    ],
+    publicCatalogPolicy: {
+      hiddenMajorCategoryKeys: ["coral"],
+      hiddenProductIds: ["already-hidden"],
+      hiddenSpeciesIds: ["species-coral"],
+      productDisplayCaps: { "already-public": 8 },
+    },
+  };
+
+  const migration = migrateLegacyPublicCatalogVisibilityState(currentState);
+  assert.equal(migration.changed, true);
+  assert.deepEqual(migration.migratedProductIds, ["legacy-hidden"]);
+  assert.equal(
+    migration.state._publicCatalogPolicySchemaVersion,
+    PUBLIC_CATALOG_POLICY_SCHEMA_VERSION,
+  );
+  assert.deepEqual(migration.state.publicCatalogPolicy, {
+    hiddenMajorCategoryKeys: ["coral"],
+    hiddenProductIds: ["already-hidden", "legacy-hidden"],
+    hiddenSpeciesIds: ["species-coral"],
+    productDisplayCaps: { "already-public": 8 },
+  });
+  assert.equal(
+    migration.state.products.some((product) =>
+      product && Object.prototype.hasOwnProperty.call(product, "publicVisible")
+    ),
+    false,
+  );
+  assert.equal(migration.state.publicCatalogPolicy.hiddenProductIds.includes("archived-hidden"), false);
+  assert.equal(currentState.products[0].publicVisible, false, "migration must not mutate its input");
+});
+
+test("legacy visibility migration is idempotent and never re-hides an administrator-unhidden product", () => {
+  const first = migrateLegacyPublicCatalogVisibilityState({
+    products: [{ id: "legacy-hidden", publicVisible: false }],
+    publicCatalogPolicy: {},
+  });
+  const administratorUnhiddenState = {
+    ...first.state,
+    publicCatalogPolicy: {
+      ...first.state.publicCatalogPolicy,
+      hiddenProductIds: [],
+    },
+  };
+
+  const second = migrateLegacyPublicCatalogVisibilityState(administratorUnhiddenState);
+  assert.equal(second.changed, false);
+  assert.strictEqual(second.state, administratorUnhiddenState);
+  assert.deepEqual(second.migratedProductIds, []);
+  assert.deepEqual(second.state.publicCatalogPolicy.hiddenProductIds, []);
+});
+
+test("a stale legacy field written after migration is removed without changing the administrator policy", () => {
+  const state = {
+    _publicCatalogPolicySchemaVersion: PUBLIC_CATALOG_POLICY_SCHEMA_VERSION,
+    products: [{ id: "administrator-unhidden", publicVisible: false }],
+    publicCatalogPolicy: { hiddenProductIds: [] },
+  };
+  const cleanup = migrateLegacyPublicCatalogVisibilityState(state);
+  assert.equal(cleanup.changed, true);
+  assert.deepEqual(cleanup.migratedProductIds, []);
+  assert.deepEqual(cleanup.state.publicCatalogPolicy, { hiddenProductIds: [] });
+  assert.deepEqual(cleanup.state.products, [{ id: "administrator-unhidden" }]);
+});
+
+test("migration preserves malformed product state and fails closed when a legacy hidden ID cannot fit policy limits", () => {
+  const malformedProducts = { preserve: "do-not-overwrite" };
+  const malformed = migrateLegacyPublicCatalogVisibilityState({
+    products: malformedProducts,
+    publicCatalogPolicy: null,
+  });
+  assert.strictEqual(malformed.state.products, malformedProducts);
+  assert.equal(malformed.state._publicCatalogPolicySchemaVersion, PUBLIC_CATALOG_POLICY_SCHEMA_VERSION);
+
+  assert.throws(() => migrateLegacyPublicCatalogVisibilityState({
+    products: [{ id: "x".repeat(241), publicVisible: false }],
+    publicCatalogPolicy: {},
+  }), /过长商品 ID.*无法安全迁移/);
+
+  const fullHiddenProductIds = Array.from(
+    { length: 50_000 },
+    (_, index) => `hidden-${String(index).padStart(5, "0")}`,
+  );
+  assert.throws(() => migrateLegacyPublicCatalogVisibilityState({
+    products: [{ id: "one-more-hidden-product", publicVisible: false }],
+    publicCatalogPolicy: { hiddenProductIds: fullHiddenProductIds },
+  }), /数量超过.*无法安全迁移/);
+});
 
 test("normalizes the persisted policy and drops unsupported or unsafe entries", () => {
   assert.deepEqual(normalizePublicCatalogPolicy({
@@ -263,17 +362,24 @@ test("uncapped and partially filled products preserve deterministic inventory or
   assert.deepEqual(select(stock, { productDisplayCaps: { "gold-tang": 1 } }), ["first", "third"]);
 });
 
-test("ambiguous identities, missing species and legacy product visibility fail closed", () => {
+test("ambiguous identities, missing species and archived products fail closed while legacy visibility is ignored", () => {
   const stock = [
     { id: "duplicate-stock", productId: "gold-tang" },
     { id: "duplicate-stock", productId: "gold-tang" },
-    { id: "hidden-product-stock", productId: "legacy-hidden" },
+    { id: "legacy-visibility-stock", productId: "legacy-visibility-false" },
+    { id: "archived-product-stock", productId: "archived-product" },
     { id: "orphan-stock", productId: "orphan" },
     { id: "ambiguous-product-stock", productId: "ambiguous-product" },
   ];
   const extendedProducts = [
     ...products,
-    { id: "legacy-hidden", speciesId: "species-fish", publicVisible: false },
+    { id: "legacy-visibility-false", speciesId: "species-fish", publicVisible: false },
+    {
+      id: "archived-product",
+      speciesId: "species-fish",
+      publicVisible: true,
+      archivedAt: "2026-09-05T12:00:00+08:00",
+    },
     { id: "orphan", speciesId: "missing-species" },
     { id: "ambiguous-product", speciesId: "species-fish" },
     { id: "ambiguous-product", speciesId: "species-fish" },
@@ -283,7 +389,17 @@ test("ambiguous identities, missing species and legacy product visibility fail c
     products: extendedProducts,
     species,
     speciesCategoryMajorMap: categoryMap,
-  }), []);
+  }).map((item) => item.id), ["legacy-visibility-stock"]);
+  assert.equal(isPublicCatalogProductAllowed({
+    product: extendedProducts.find((product) => product.id === "legacy-visibility-false"),
+    species: species[0],
+    speciesCategoryMajorMap: categoryMap,
+  }), true);
+  assert.equal(isPublicCatalogProductAllowed({
+    product: extendedProducts.find((product) => product.id === "archived-product"),
+    species: species[0],
+    speciesCategoryMajorMap: categoryMap,
+  }), false);
 });
 
 test("JavaScript prototype property names remain valid product IDs and cap keys", () => {

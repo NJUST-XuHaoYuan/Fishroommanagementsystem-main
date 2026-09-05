@@ -153,6 +153,7 @@ import {
 import {
   PUBLIC_CATALOG_MAJOR_CATEGORIES,
   describePublicCatalogPolicyChanges,
+  migrateLegacyPublicCatalogVisibilityState,
   normalizePublicCatalogCategoryMajorMap,
   normalizePublicCatalogPolicy,
   prunePublicCatalogPolicyReferences,
@@ -982,6 +983,12 @@ function stableJson(value) {
   return JSON.stringify(value ?? null);
 }
 
+function withoutLegacyProductVisibility(product) {
+  if (!product || typeof product !== "object" || Array.isArray(product)) return product;
+  const { publicVisible: _legacyPublicVisible, ...nextProduct } = product;
+  return nextProduct;
+}
+
 function applyObjectDiff(currentItem = {}, baseItem = {}, incomingItem = {}) {
   if (!currentItem || typeof currentItem !== "object") return incomingItem;
   if (!baseItem || typeof baseItem !== "object") return incomingItem;
@@ -1283,9 +1290,8 @@ function buildGlobalPublicCatalogSelection(state = {}) {
   const products = Array.isArray(globalState.products) ? globalState.products : [];
   const stock = Array.isArray(globalState.stock) ? globalState.stock : [];
   const bioRecords = Array.isArray(globalState.bioRecords) ? globalState.bioRecords : [];
-  const publicProductIds = new Set(
+  const knownProductIds = new Set(
     products
-      .filter((product) => product?.publicVisible !== false)
       .map((product) => String(product?.id ?? ""))
       .filter(Boolean)
   );
@@ -1294,7 +1300,7 @@ function buildGlobalPublicCatalogSelection(state = {}) {
     item?.status !== "sick" &&
     !activeOrderStockIds.has(String(item?.id ?? "")) &&
     isPhysicallyInTank(item, shippedIds) &&
-    publicProductIds.has(String(item?.productId ?? ""))
+    knownProductIds.has(String(item?.productId ?? ""))
   );
   const eligibleStockIds = new Set(eligibleStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const latestMediaByStockId = latestPublicMediaByStockId(bioRecords, eligibleStockIds);
@@ -1339,7 +1345,6 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
   const availableProducts = products.filter((product) =>
-    product?.publicVisible !== false &&
     sellableProductIds.has(String(product?.id ?? ""))
   );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
@@ -6867,6 +6872,32 @@ async function importLegacyStateIfPresent() {
   console.log(`Imported legacy JSON state from ${legacyStateFile}`);
 }
 
+async function migrateLegacyPublicCatalogVisibility() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const currentState = rows[0]?.data;
+    const migration = migrateLegacyPublicCatalogVisibilityState(currentState);
+    if (!migration.changed) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    await client.query(
+      "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify(migration.state)]
+    );
+    await client.query("COMMIT");
+    console.log(`Migrated legacy public product visibility into fish-list policy: ${migration.migratedProductIds.length}`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("Failed to migrate legacy public product visibility:", error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function backfillDefaultSites() {
   const client = await pool.connect();
   try {
@@ -7499,6 +7530,7 @@ async function ensureSchema() {
       ON finance_payment_statements (state_id, matched_order_id, match_status)
     `);
     await importLegacyStateIfPresent();
+    await migrateLegacyPublicCatalogVisibility();
     await backfillDefaultSites();
     await backfillPersonnelProfiles();
     await ensurePersonnelSensitiveDataEncryption();
@@ -12581,6 +12613,12 @@ async function handleApi(req, res, url) {
 	      }
 	      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
 	      validateStatePatchShapes(basePatch);
+	      if (Array.isArray(rawPatch.products)) {
+	        rawPatch.products = rawPatch.products.map(withoutLegacyProductVisibility);
+	      }
+	      if (Array.isArray(basePatch.products)) {
+	        basePatch.products = basePatch.products.map(withoutLegacyProductVisibility);
+	      }
 	      if (Array.isArray(parsed?.operationLogs) && parsed.operationLogs.length > 0) {
 	        throw new Error("操作日志只能由服务端生成");
 	      }
@@ -12600,6 +12638,9 @@ async function handleApi(req, res, url) {
 	      if (!rows[0]) throw new Error("系统状态不存在");
 	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
 	      const current = normalizePickupShipmentsForState(persistedCurrent);
+	      if (projectedKeys.includes("products") && Array.isArray(current.products)) {
+	        current.products = current.products.map(withoutLegacyProductVisibility);
+	      }
 	      if (projectedKeys.includes("publicCatalogPolicy")) {
 	        current.publicCatalogPolicy = normalizePublicCatalogPolicy(current.publicCatalogPolicy);
 	      }
@@ -12645,6 +12686,9 @@ async function handleApi(req, res, url) {
 	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
 	      }
 	      const stateWithoutLogs = buildStatePatch(current, patch, basePatch, [], req);
+	      if (Array.isArray(stateWithoutLogs.products)) {
+	        stateWithoutLogs.products = stateWithoutLogs.products.map(withoutLegacyProductVisibility);
+	      }
 	      if (Object.keys(patch).some((key) => key === "products" || key === "species")) {
 	        stateWithoutLogs.publicCatalogPolicy = prunePublicCatalogPolicyReferences(
 	          stateWithoutLogs.publicCatalogPolicy,
@@ -14222,7 +14266,8 @@ async function handleApi(req, res, url) {
 	      await client.query("BEGIN");
 	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	      const state = rows[0]?.data ?? {};
-	      const products = Array.isArray(state.products) ? state.products : [];
+	      const products = (Array.isArray(state.products) ? state.products : [])
+	        .map(withoutLegacyProductVisibility);
 	      const product = products.find((item) => String(item?.id ?? "") === productId);
 	      if (!product) {
 	        await client.query("ROLLBACK");
@@ -14235,7 +14280,7 @@ async function handleApi(req, res, url) {
 	      const archivedAt = new Date().toISOString();
 	      const nextProducts = disposition.mode === "archived"
 	        ? products.map((item) => String(item?.id ?? "") === productId
-	          ? { ...item, publicVisible: false, archivedAt, archivedBy: operator }
+	          ? { ...withoutLegacyProductVisibility(item), archivedAt, archivedBy: operator }
 	          : item)
 	        : products.filter((item) => String(item?.id ?? "") !== productId);
 	      const nextOrigins = mergeProductOrigins(state.productOrigins, nextProducts);
@@ -14315,14 +14360,15 @@ async function handleApi(req, res, url) {
         await client.query("BEGIN");
         const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
-	        const products = Array.isArray(state.products) ? state.products : [];
+	        const products = (Array.isArray(state.products) ? state.products : [])
+	          .map(withoutLegacyProductVisibility);
 	        const productOrigins = Array.isArray(state.productOrigins) ? state.productOrigins : [];
 	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
 	        const productExists = products.some((item) => String(item?.id ?? "") === String(product.id ?? ""));
 	        requireModulePermissionForAuth(req, "products", productExists ? "update" : "create");
 
 	        const normalizedProduct = await externalizeDataUrls({
-          ...product,
+          ...withoutLegacyProductVisibility(product),
           name: String(product.name).trim(),
           size: String(product.size).trim(),
           origin: String(product.origin).trim(),
@@ -14330,7 +14376,6 @@ async function handleApi(req, res, url) {
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
           minReturnPrice: normalizeMinReturnPrice(minReturnPriceInput),
-          publicVisible: product.publicVisible !== false,
           commissionRate: 0,
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);

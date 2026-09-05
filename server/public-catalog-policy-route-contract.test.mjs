@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./local-server.mjs", import.meta.url), "utf8");
+const policySource = await readFile(new URL("./public-catalog-policy.mjs", import.meta.url), "utf8");
 
 function routeBlock(path, method = "GET") {
   const marker = `if (url.pathname === "${path}" && req.method === "${method}") {`;
@@ -26,9 +27,19 @@ const catalogRoute = routeBlock("/api/public/catalog");
 const bioRecordsRoute = routeBlock("/api/public/bio-records");
 const statePatchRoute = routeBlock("/api/state/patch", "POST");
 const productDeleteRoute = routeBlock("/api/products/delete", "POST");
+const productUpsertRoute = routeBlock("/api/products/upsert", "POST");
 const globalSelectionBuilder = functionBlock("buildGlobalPublicCatalogSelection", "buildPublicCatalog");
 const catalogBuilder = functionBlock("buildPublicCatalog", "buildPublicBioRecordsForStock");
 const bioRecordsBuilder = functionBlock("buildPublicBioRecordsForStock", "normalizePickupShipmentRecord");
+const legacyVisibilityMigration = functionBlock(
+  "migrateLegacyPublicCatalogVisibility",
+  "backfillDefaultSites",
+);
+const productAllowedStart = policySource.indexOf("function productAllowedByNormalizedPolicy(");
+const productAllowedEnd = policySource.indexOf("export function isPublicCatalogProductAllowed(", productAllowedStart);
+assert.notEqual(productAllowedStart, -1);
+assert.notEqual(productAllowedEnd, -1);
+const productAllowedBuilder = policySource.slice(productAllowedStart, productAllowedEnd);
 
 test("the public catalog route projects the persisted policy and applies it server-side", () => {
   assert.match(catalogRoute, /res\.setHeader\("Cache-Control",\s*"no-store"\)/);
@@ -44,6 +55,25 @@ test("the public catalog route projects the persisted policy and applies it serv
   assert.match(globalSelectionBuilder, /isPhysicallyInTank\(item, shippedIds\)/);
   assert.match(catalogBuilder, /const selection = buildGlobalPublicCatalogSelection\(state\)/);
   assert.match(catalogBuilder, /stock:\s*selection\.selectedStock[\s\S]*?\},\s*siteId\)/);
+  assert.doesNotMatch(globalSelectionBuilder, /publicVisible/);
+  assert.doesNotMatch(catalogBuilder, /publicVisible/);
+  assert.doesNotMatch(productAllowedBuilder, /publicVisible/);
+  assert.match(productAllowedBuilder, /product\?\.archivedAt/);
+});
+
+test("legacy product visibility migrates once under a row lock and future writes strip the old field", () => {
+  assert.match(legacyVisibilityMigration, /SELECT data FROM app_state WHERE id = \$1 FOR UPDATE/);
+  assert.match(legacyVisibilityMigration, /migrateLegacyPublicCatalogVisibilityState\(currentState\)/);
+  assert.match(legacyVisibilityMigration, /UPDATE app_state SET data = \$2::jsonb/);
+  assert.match(legacyVisibilityMigration, /await client\.query\("COMMIT"\)/);
+  assert.match(source, /await importLegacyStateIfPresent\(\);\s*await migrateLegacyPublicCatalogVisibility\(\);/);
+  assert.match(statePatchRoute, /rawPatch\.products = rawPatch\.products\.map\(withoutLegacyProductVisibility\)/);
+  assert.match(statePatchRoute, /basePatch\.products = basePatch\.products\.map\(withoutLegacyProductVisibility\)/);
+  assert.match(statePatchRoute, /current\.products = current\.products\.map\(withoutLegacyProductVisibility\)/);
+  assert.match(statePatchRoute, /stateWithoutLogs\.products = stateWithoutLogs\.products\.map\(withoutLegacyProductVisibility\)/);
+  assert.match(productDeleteRoute, /\.\.\.withoutLegacyProductVisibility\(item\), archivedAt/);
+  assert.match(productUpsertRoute, /\.\.\.withoutLegacyProductVisibility\(product\)/);
+  assert.doesNotMatch(productUpsertRoute, /publicVisible:\s*product\.publicVisible/);
 });
 
 test("the public detail route ranks every same-product sibling so capped-out IDs cannot bypass the catalog", () => {
