@@ -110,7 +110,7 @@ export type Product = {
   defaultPrice: number;
   /** 商品最低回厂价，订单商品折后金额必须高于该价格合计。 */
   minReturnPrice?: number;
-  /** 是否展示在对外网站。未设置时按展示处理，兼容旧数据。 */
+  /** 是否进入对外公开目录（网站和小程序）。未设置时按展示处理，兼容旧数据。 */
   publicVisible?: boolean;
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
   commissionRate?: number;

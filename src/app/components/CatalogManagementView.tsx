@@ -4,6 +4,7 @@ import {
   Eye,
   EyeOff,
   Image as ImageIcon,
+  Info,
   ListFilter,
   RotateCcw,
   Save,
@@ -36,9 +37,14 @@ type ProductSummary = {
   product: Product;
   species?: Species;
   majorCategoryKey: SpeciesMajorCategoryKey;
-  hiddenReason: "major" | "species" | "product" | "productArchive" | null;
+  hiddenReason: "major" | "species" | "product" | "productVisibility" | "productArchive" | null;
+  majorRuleHidden: boolean;
+  speciesRuleHidden: boolean;
+  productRuleHidden: boolean;
   displayCap?: number;
 };
+
+type CatalogRuleTab = "major" | "species" | "product";
 
 const PAGE_SIZE = 20;
 
@@ -169,7 +175,7 @@ function ProductCapInput({
 
 function RuleStateBadge({ summary }: { summary: ProductSummary }) {
   if (summary.hiddenReason === "major") {
-    return <Badge variant="secondary">随大类隐藏</Badge>;
+    return <Badge variant="secondary">随类型隐藏</Badge>;
   }
   if (summary.hiddenReason === "species") {
     return <Badge variant="secondary">随物种隐藏</Badge>;
@@ -177,8 +183,24 @@ function RuleStateBadge({ summary }: { summary: ProductSummary }) {
   if (summary.hiddenReason === "product") {
     return <Badge variant="secondary">商品规则隐藏</Badge>;
   }
+  if (summary.hiddenReason === "productVisibility") {
+    const pendingRules = [
+      summary.majorRuleHidden ? "类型规则隐藏" : "",
+      summary.speciesRuleHidden ? "物种规则隐藏" : "",
+      summary.productRuleHidden ? "商品规则隐藏" : "",
+      summary.displayCap ? `上限 ${summary.displayCap} 条` : "",
+    ].filter(Boolean);
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <Badge variant="outline">对外展示已关闭</Badge>
+        {pendingRules.length > 0 && (
+          <span className="text-[11px] leading-4 text-muted-foreground">开启后仍执行：{pendingRules.join("、")}</span>
+        )}
+      </div>
+    );
+  }
   if (summary.hiddenReason === "productArchive") {
-    return <Badge variant="outline">商品档案未公开</Badge>;
+    return <Badge variant="outline">商品已停用</Badge>;
   }
   const cap = summary.displayCap;
   return (
@@ -244,6 +266,7 @@ export function CatalogManagementView() {
   const [speciesPage, setSpeciesPage] = useState(1);
   const [productPage, setProductPage] = useState(1);
   const [productFilter, setProductFilter] = useState<"all" | "hidden" | "limited">("all");
+  const [activeRuleTab, setActiveRuleTab] = useState<CatalogRuleTab>("major");
 
   const normalizedDraft = useMemo(() => normalizePublicCatalogPolicy(draft), [draft]);
   const baselinePolicyFingerprint = useMemo(() => publicCatalogPolicyFingerprint(baselinePolicy), [baselinePolicy]);
@@ -286,20 +309,28 @@ export function CatalogManagementView() {
       const species = speciesById.get(product.speciesId);
       const majorCategoryKey = majorMap[species?.category ?? ""] ?? "marineFish";
       const cap = getPublicCatalogProductDisplayCap(normalizedDraft, product.id);
-      const hiddenReason: ProductSummary["hiddenReason"] = product.archivedAt || product.publicVisible === false
+      const majorRuleHidden = normalizedDraft.hiddenMajorCategoryKeys.includes(majorCategoryKey);
+      const speciesRuleHidden = normalizedDraft.hiddenSpeciesIds.includes(product.speciesId);
+      const productRuleHidden = normalizedDraft.hiddenProductIds.includes(product.id);
+      const hiddenReason: ProductSummary["hiddenReason"] = product.archivedAt
         ? "productArchive"
-        : normalizedDraft.hiddenMajorCategoryKeys.includes(majorCategoryKey)
-          ? "major"
-          : normalizedDraft.hiddenSpeciesIds.includes(product.speciesId)
-            ? "species"
-            : normalizedDraft.hiddenProductIds.includes(product.id)
-              ? "product"
-              : null;
+        : product.publicVisible === false
+          ? "productVisibility"
+          : majorRuleHidden
+            ? "major"
+            : speciesRuleHidden
+              ? "species"
+              : productRuleHidden
+                ? "product"
+                : null;
       return {
         product,
         species,
         majorCategoryKey,
         hiddenReason,
+        majorRuleHidden,
+        speciesRuleHidden,
+        productRuleHidden,
         displayCap: cap,
       };
     })
@@ -309,6 +340,7 @@ export function CatalogManagementView() {
     ), [majorMap, normalizedDraft, speciesById, state.products]);
 
   const activeProductSummaries = productSummaries.filter((summary) => !summary.product.archivedAt);
+  const productVisibilityDisabledCount = activeProductSummaries.filter((summary) => summary.product.publicVisible === false).length;
 
   const filteredSpecies = useMemo(() => state.species
     .filter((species) => includesSearch([
@@ -383,7 +415,7 @@ export function CatalogManagementView() {
       return;
     }
     const nextPolicy = normalizePublicCatalogPolicy(draft);
-    if (!confirmWrite("修改", "保存鱼单展示规则；新的小程序请求会立即按新规则生成公开目录和库存数量。")) return;
+    if (!confirmWrite("修改", "保存鱼单展示规则；新的公开网站和小程序请求会立即按新规则生成目录和库存数量。")) return;
     setSaving(true);
     const ok = await saveStateTransform((latest) => ({
       ...latest,
@@ -396,7 +428,7 @@ export function CatalogManagementView() {
     setDraft(copyPublicCatalogPolicy(storedPolicy));
     setRemotePolicyChanged(false);
     lastSeenSavedPolicyFingerprint.current = publicCatalogPolicyFingerprint(storedPolicy);
-    toast.success("鱼单规则已保存；新请求立即生效，已打开的小程序会在 1 分钟内刷新");
+    toast.success("鱼单规则已保存；新请求立即生效，已打开的公开页面和小程序会在约 1 分钟内刷新");
   };
 
   if (!canEdit) {
@@ -414,7 +446,7 @@ export function CatalogManagementView() {
               {changed && <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">有未保存修改</Badge>}
             </div>
             <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-              控制客户在小程序看到的大类、物种、商品和库存数量。规则对所有场地生效。
+              控制客户在公开网站和小程序看到的类型、物种、商品和库存数量。规则对所有场地生效。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -451,15 +483,15 @@ export function CatalogManagementView() {
           </section>
         )}
 
-        <section className="overflow-hidden rounded-md border bg-card" aria-label="当前鱼单规则概览">
+        <section className="overflow-hidden rounded-md border bg-card" aria-label="已设置的鱼单规则概览">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
             <div>
-              <h2 className="text-sm font-semibold">当前规则概览</h2>
-              <p className="mt-0.5 text-xs text-muted-foreground">实际库存由公开接口实时筛选；管理页不加载全部库存和维护影像，避免大数据量拖慢页面</p>
+              <h2 className="text-sm font-semibold">已设置的鱼单规则</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">前四项来自本页规则；“对外展示已关闭”来自商品管理的独立总开关</p>
             </div>
             <Badge variant="outline">规则全局生效</Badge>
           </div>
-          <div className="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4" aria-live="polite">
+          <div className="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-5" aria-live="polite">
             <div className="px-4 py-3">
               <div className="text-xs text-muted-foreground">隐藏类型</div>
               <div className="mt-1 text-lg font-semibold tabular-nums">{normalizedDraft.hiddenMajorCategoryKeys.length} 个</div>
@@ -476,22 +508,51 @@ export function CatalogManagementView() {
               <div className="text-xs text-muted-foreground">设置数量上限</div>
               <div className="mt-1 text-lg font-semibold tabular-nums text-teal-800">{Object.keys(normalizedDraft.productDisplayCaps).length} 款</div>
             </div>
+            <div className="px-4 py-3">
+              <div className="text-xs text-muted-foreground">对外展示已关闭</div>
+              <div className="mt-1 text-lg font-semibold tabular-nums">{productVisibilityDisabledCount} 款</div>
+            </div>
           </div>
         </section>
 
-        <Tabs defaultValue="major" className="gap-4">
-          <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-md border bg-card p-1 sm:w-fit">
-            <TabsTrigger value="major" className="!min-h-[44px] rounded-md px-3 sm:!min-h-9">
-              按类型 <span className="text-xs opacity-70">{normalizedDraft.hiddenMajorCategoryKeys.length}</span>
+        <Tabs
+          value={activeRuleTab}
+          onValueChange={(value) => setActiveRuleTab(value as CatalogRuleTab)}
+          className="gap-4"
+        >
+          <TabsList
+            className="h-auto w-full justify-start overflow-x-auto rounded-md border bg-muted/50 p-1 sm:w-fit"
+            aria-label="鱼单规则设置方式"
+          >
+            <TabsTrigger
+              value="major"
+              className="!min-h-[44px] rounded-md px-3 text-muted-foreground hover:bg-background/70 hover:text-foreground data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary dark:data-[state=active]:text-primary-foreground sm:!min-h-9"
+            >
+              按类型
+              <span className={`min-w-5 rounded-full px-1.5 py-0.5 text-center text-[11px] ${activeRuleTab === "major" ? "bg-primary-foreground/15 text-primary-foreground" : "bg-background text-muted-foreground"}`}>
+                {normalizedDraft.hiddenMajorCategoryKeys.length}
+              </span>
             </TabsTrigger>
-            <TabsTrigger value="species" className="!min-h-[44px] rounded-md px-3 sm:!min-h-9">
-              按物种 <span className="text-xs opacity-70">{normalizedDraft.hiddenSpeciesIds.length}</span>
+            <TabsTrigger
+              value="species"
+              className="!min-h-[44px] rounded-md px-3 text-muted-foreground hover:bg-background/70 hover:text-foreground data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary dark:data-[state=active]:text-primary-foreground sm:!min-h-9"
+            >
+              按物种
+              <span className={`min-w-5 rounded-full px-1.5 py-0.5 text-center text-[11px] ${activeRuleTab === "species" ? "bg-primary-foreground/15 text-primary-foreground" : "bg-background text-muted-foreground"}`}>
+                {normalizedDraft.hiddenSpeciesIds.length}
+              </span>
             </TabsTrigger>
-            <TabsTrigger value="product" className="!min-h-[44px] rounded-md px-3 sm:!min-h-9">
-              按商品与数量 <span className="text-xs opacity-70">{uniqueCount([
-                ...normalizedDraft.hiddenProductIds,
-                ...Object.keys(normalizedDraft.productDisplayCaps),
-              ])}</span>
+            <TabsTrigger
+              value="product"
+              className="!min-h-[44px] rounded-md px-3 text-muted-foreground hover:bg-background/70 hover:text-foreground data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary dark:data-[state=active]:text-primary-foreground sm:!min-h-9"
+            >
+              按商品
+              <span className={`min-w-5 rounded-full px-1.5 py-0.5 text-center text-[11px] ${activeRuleTab === "product" ? "bg-primary-foreground/15 text-primary-foreground" : "bg-background text-muted-foreground"}`}>
+                {uniqueCount([
+                  ...normalizedDraft.hiddenProductIds,
+                  ...Object.keys(normalizedDraft.productDisplayCaps),
+                ])}
+              </span>
             </TabsTrigger>
           </TabsList>
 
@@ -499,7 +560,7 @@ export function CatalogManagementView() {
             <section className="overflow-hidden rounded-md border bg-card">
               <div className="border-b px-4 py-3">
                 <h2 className="font-semibold">类型展示</h2>
-                <p className="mt-1 text-sm text-muted-foreground">关闭某一类型后，其下所有物种、商品和库存都不会出现在小程序。</p>
+                <p className="mt-1 text-sm text-muted-foreground">类型指海水鱼、珊瑚、无脊椎和耗材。关闭后，其下所有物种、商品和库存都不会对外展示。</p>
               </div>
               <div className="divide-y">
                 {SPECIES_MAJOR_CATEGORIES.map((category) => {
@@ -523,7 +584,7 @@ export function CatalogManagementView() {
                           checked={!hidden}
                           onCheckedChange={(visible) => updateHidden("hiddenMajorCategoryKeys", category.key, !visible)}
                           disabled={!canEdit || saving}
-                          aria-label={`${category.label}在小程序${hidden ? "已隐藏" : "展示"}`}
+                          aria-label={`${category.label}对外${hidden ? "已隐藏" : "展示"}`}
                         />
                       </label>
                     </div>
@@ -573,7 +634,7 @@ export function CatalogManagementView() {
                             checked={!hidden}
                             onCheckedChange={(visible) => updateHidden("hiddenSpeciesIds", species.id, !visible)}
                             disabled={!canEdit || saving}
-                            aria-label={`${species.name}在小程序${hidden ? "已隐藏" : "展示"}`}
+                            aria-label={`${species.name}对外${hidden ? "已隐藏" : "展示"}`}
                           />
                         </label>
                       </div>
@@ -591,6 +652,10 @@ export function CatalogManagementView() {
                 <div>
                   <h2 className="font-semibold">商品展示与库存上限</h2>
                   <p className="mt-1 text-sm text-muted-foreground">留空表示显示全部，填写正整数后只显示该数量；0 会清除数量限制。</p>
+                  <p className="mt-2 flex max-w-3xl items-start gap-1.5 text-xs leading-5 text-muted-foreground">
+                    <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                    <span><strong className="font-medium text-foreground">“对外展示总开关已关闭”不是资料不完整。</strong>它表示该商品的“对外展示”当前处于关闭状态；请到“品名管理 → 商品管理 → 编辑”开启。开启后，仍会继续执行本页已设置的隐藏或数量规则。</span>
+                  </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
                   <label className="fishroom-control flex h-[44px] items-center rounded-md border bg-background px-2 sm:h-9">
@@ -633,7 +698,8 @@ export function CatalogManagementView() {
                         {visibleProducts.map((summary) => {
                           const productHidden = normalizedDraft.hiddenProductIds.includes(summary.product.id);
                           const cap = getPublicCatalogProductDisplayCap(normalizedDraft, summary.product.id);
-                          const inheritedHidden = summary.hiddenReason === "major" || summary.hiddenReason === "species" || summary.hiddenReason === "productArchive";
+                          const productVisibilityLocked = summary.hiddenReason === "productVisibility" || summary.hiddenReason === "productArchive";
+                          const inheritedHidden = summary.hiddenReason === "major" || summary.hiddenReason === "species" || productVisibilityLocked;
                           return (
                             <tr key={summary.product.id}>
                               <td className="px-4 py-3">
@@ -668,13 +734,16 @@ export function CatalogManagementView() {
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-center">
-                                <Switch
-                                  checked={!productHidden}
-                                  onCheckedChange={(visible) => updateHidden("hiddenProductIds", summary.product.id, !visible)}
-                                  disabled={!canEdit || saving || summary.hiddenReason === "productArchive"}
-                                  aria-label={`${summary.product.name}商品规则${productHidden ? "已隐藏" : "展示"}`}
-                                  title={summary.hiddenReason === "productArchive" ? "需先在商品管理中设为公开" : undefined}
-                                />
+                                {productVisibilityLocked ? (
+                                  <span className="text-xs text-muted-foreground">先开启对外展示</span>
+                                ) : (
+                                  <Switch
+                                    checked={!productHidden}
+                                    onCheckedChange={(visible) => updateHidden("hiddenProductIds", summary.product.id, !visible)}
+                                    disabled={!canEdit || saving}
+                                    aria-label={`${summary.product.name}商品规则${productHidden ? "已隐藏" : "展示"}`}
+                                  />
+                                )}
                               </td>
                             </tr>
                           );
@@ -687,7 +756,8 @@ export function CatalogManagementView() {
                     {visibleProducts.map((summary) => {
                       const productHidden = normalizedDraft.hiddenProductIds.includes(summary.product.id);
                       const cap = getPublicCatalogProductDisplayCap(normalizedDraft, summary.product.id);
-                      const inheritedHidden = summary.hiddenReason === "major" || summary.hiddenReason === "species" || summary.hiddenReason === "productArchive";
+                      const productVisibilityLocked = summary.hiddenReason === "productVisibility" || summary.hiddenReason === "productArchive";
+                      const inheritedHidden = summary.hiddenReason === "major" || summary.hiddenReason === "species" || productVisibilityLocked;
                       return (
                         <div key={summary.product.id} className="p-4">
                           <div className="flex items-start justify-between gap-3">
@@ -695,15 +765,18 @@ export function CatalogManagementView() {
                               <div className="font-medium">{summary.product.name}</div>
                               <div className="mt-1 text-xs text-muted-foreground">{[summary.species?.name, summary.product.size, summary.product.origin].filter(Boolean).join(" · ")}</div>
                             </div>
-                            <label className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-end">
-                              <Switch
-                                checked={!productHidden}
-                                onCheckedChange={(visible) => updateHidden("hiddenProductIds", summary.product.id, !visible)}
-                                disabled={!canEdit || saving || summary.hiddenReason === "productArchive"}
-                                aria-label={`${summary.product.name}商品规则${productHidden ? "已隐藏" : "展示"}`}
-                                title={summary.hiddenReason === "productArchive" ? "需先在商品管理中设为公开" : undefined}
-                              />
-                            </label>
+                            {productVisibilityLocked ? (
+                              <Badge variant="outline" className="shrink-0">先开启对外展示</Badge>
+                            ) : (
+                              <label className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-end">
+                                <Switch
+                                  checked={!productHidden}
+                                  onCheckedChange={(visible) => updateHidden("hiddenProductIds", summary.product.id, !visible)}
+                                  disabled={!canEdit || saving}
+                                  aria-label={`${summary.product.name}商品规则${productHidden ? "已隐藏" : "展示"}`}
+                                />
+                              </label>
+                            )}
                           </div>
                           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                             <RuleStateBadge summary={summary} />
@@ -743,7 +816,7 @@ export function CatalogManagementView() {
             <div className="min-w-0">
               <h2 id="catalog-fill-rule-title" className="font-semibold">限量展示与自动补位</h2>
               <p className="mt-1 max-w-4xl text-sm leading-6 text-muted-foreground">
-                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗或变为病鱼后，系统会在下一次小程序请求时自动补位，不需要重新保存规则。
+                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗或变为病鱼后，系统会在下一次公开鱼单请求时自动补位，不需要重新保存规则。
               </p>
             </div>
           </div>

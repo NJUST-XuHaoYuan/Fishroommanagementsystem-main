@@ -627,7 +627,9 @@ export function ProductsView() {
     const ok = await saveProduct({ ...product, archivedAt: "", archivedBy: "" });
     setRestoringProductId("");
     if (!ok) return toast.error("恢复失败，请重试");
-    toast.success("商品已恢复使用");
+    toast.success(product.publicVisible === false
+      ? "商品已恢复使用；对外展示仍关闭，可在编辑商品中开启"
+      : "商品已恢复使用");
   };
 
   return (
@@ -707,14 +709,14 @@ export function ProductsView() {
           { key: "minReturnPrice", title: "最低回厂价(¥)", render: (r) => Number(r.minReturnPrice ?? 0).toFixed(2) },
           {
             key: "publicVisible",
-            title: "对外网站",
+            title: "对外展示",
             render: (r) => (
               <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
                 r.publicVisible === false
                   ? "bg-slate-100 text-slate-500"
                   : "bg-emerald-50 text-emerald-700"
               }`}>
-                {r.publicVisible === false ? "隐藏" : "展示"}
+                {r.publicVisible === false ? "已关闭" : "已开启"}
               </span>
             ),
           },
@@ -812,8 +814,8 @@ export function ProductsView() {
               </div>
               <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/20 px-3 py-3">
                 <div className="space-y-1">
-                  <Label htmlFor="product-public-visible">对外网站展示</Label>
-                  <div className="text-xs text-muted-foreground">关闭后，此商品和它的库存个体不会出现在公开网站，也不能通过公开选鱼码查询。</div>
+                  <Label htmlFor="product-public-visible">对外展示（网站和小程序）</Label>
+                  <div className="text-xs text-muted-foreground">这是对外展示总开关。关闭后，此商品和库存不会出现在公开网站或小程序中，也不能通过公开选鱼码查询详情；鱼单管理里的规则无法覆盖它。按类型、物种、商品或数量精细控制时，请保持开启，再到“销售管理 → 鱼单管理”设置。</div>
                 </div>
                 <Switch
                   id="product-public-visible"
