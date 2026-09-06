@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
 
@@ -197,6 +198,22 @@ const databaseFixture = {
         photos: [],
         videos: ["/uploads/tie-b.mp4"],
       },
+      {
+        id: "released-photo",
+        stockItemId: "released-cancelled",
+        date: "2026-09-01T09:00:00+08:00",
+        text: "真实维护照片",
+        photos: ["/uploads/released-cancelled.jpg"],
+        videos: [],
+      },
+      {
+        id: "released-video",
+        stockItemId: "released-cancelled",
+        date: "2026-09-02T09:00:00+08:00",
+        text: "较新的维护视频",
+        photos: [],
+        videos: ["/uploads/released-cancelled.mp4"],
+      },
     ],
   },
 };
@@ -313,6 +330,69 @@ test("the public catalog exposes only the cap winner chosen by latest maintenanc
   assert.equal(body.catalog.products.some((item) => item.id === "gold-tang"), true);
   assert.equal(body.catalog.products.some((item) => item.id === "archived-tang"), false);
   assert.equal(body.catalog.stock.some((item) => item.id === "archived-stock"), false);
+});
+
+test("a compact video-only latest record retains the fish's newest real photo for its idle card", async () => {
+  const { response, body } = await publicGet("/api/public/catalog?siteId=all");
+  assert.equal(response.status, 200, JSON.stringify(body));
+  const record = body.catalog.bioRecords.find((item) => item.stockItemId === "released-cancelled");
+  assert.equal(record.id, "released-video");
+  assert.deepEqual(record.photos, ["/uploads/released-cancelled.jpg"]);
+  assert.deepEqual(record.videos, ["/uploads/released-cancelled.mp4"]);
+  assert.match(record.videoPosters[0], /^\/api\/public\/media\/video-derivative\?/);
+  assert.match(record.videoPreviews[0], /^\/api\/public\/media\/video-derivative\?/);
+});
+
+test("signed derivative delivery supports HEAD, Range and tamper rejection", async () => {
+  const catalog = await publicGet("/api/public/catalog?siteId=all");
+  const record = catalog.body.catalog.bioRecords.find(
+    (item) => item.stockItemId === "released-cancelled"
+  );
+  const cacheId = createHash("sha256")
+    .update("local:released-cancelled.mp4")
+    .digest("hex");
+  const posterPath = join(uploadDir, ".video-derived", "posters", `${cacheId}.jpg`);
+  const previewPath = join(uploadDir, ".video-derived", "previews", `${cacheId}.mp4`);
+  await Promise.all([
+    mkdir(dirname(posterPath), { recursive: true }),
+    mkdir(dirname(previewPath), { recursive: true }),
+  ]);
+  const poster = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd9]);
+  const preview = Buffer.from([0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+  await Promise.all([writeFile(posterPath, poster), writeFile(previewPath, preview)]);
+
+  const posterHead = await fetch(`${baseUrl}${record.videoPosters[0]}`, { method: "HEAD" });
+  assert.equal(posterHead.status, 200);
+  assert.equal(posterHead.headers.get("content-type"), "image/jpeg");
+  assert.equal(Number(posterHead.headers.get("content-length")), poster.length);
+
+  const partial = await fetch(`${baseUrl}${record.videoPreviews[0]}`, {
+    headers: { Range: "bytes=4-7" },
+  });
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers.get("content-range"), `bytes 4-7/${preview.length}`);
+  assert.equal(Buffer.from(await partial.arrayBuffer()).toString("ascii"), "ftyp");
+
+  const invalidRange = await fetch(`${baseUrl}${record.videoPreviews[0]}`, {
+    headers: { Range: "bytes=0-1,4-5" },
+  });
+  assert.equal(invalidRange.status, 416);
+
+  const tampered = new URL(`${baseUrl}${record.videoPreviews[0]}`);
+  tampered.searchParams.set("signature", `${tampered.searchParams.get("signature")}x`);
+  const rejected = await fetch(tampered);
+  assert.equal(rejected.status, 403);
+});
+
+test("encoded path normalization cannot bypass signed video-derivative delivery", async () => {
+  const privatePreviewDir = join(uploadDir, ".video-derived", "previews");
+  await mkdir(privatePreviewDir, { recursive: true });
+  await writeFile(join(privatePreviewDir, "should-stay-private.mp4"), Buffer.from("private-preview"));
+  const response = await fetch(
+    `${baseUrl}/uploads/ignored/%2e%2e%2f.video-derived/previews/should-stay-private.mp4`
+  );
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "Upload file not found");
 });
 
 test("a post-migration legacy false flag no longer hides a product, while archivedAt still does", async () => {
@@ -452,6 +532,9 @@ test("active-order inventory is hidden even with sold=false while cancelled and 
       `/api/public/bio-records?siteId=all&stockItemId=${stockItemId}`
     );
     assert.equal(released.response.status, 200, `${stockItemId}: ${JSON.stringify(released.body)}`);
-    assert.deepEqual(released.body.bioRecords, []);
+    assert.deepEqual(
+      released.body.bioRecords.map((record) => record.id),
+      stockItemId === "released-cancelled" ? ["released-photo", "released-video"] : []
+    );
   }
 });

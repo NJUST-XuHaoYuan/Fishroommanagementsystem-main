@@ -1,9 +1,9 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -151,6 +151,16 @@ import {
   verifyPublicMediaUrlToken,
 } from "./public-media-token.mjs";
 import {
+  VIDEO_DERIVATIVE_DIRECTORY,
+  VIDEO_DERIVATIVE_KINDS,
+  normalizeVideoDerivativeKind,
+  publicVideoDerivativeProxyPath,
+  verifyPublicVideoDerivativeToken,
+  videoDerivativeCacheId,
+  videoDerivativeFfmpegArgs,
+  videoDerivativeRelativePath,
+} from "./video-preview.mjs";
+import {
   PUBLIC_CATALOG_MAJOR_CATEGORIES,
   describePublicCatalogPolicyChanges,
   migrateLegacyPublicCatalogVisibilityState,
@@ -292,6 +302,20 @@ const VIDEO_TRANSCODE_MAX_EDGE = Math.max(720, Math.floor(numberFromEnv(process.
 const VIDEO_TRANSCODE_PRESET = normalizeVideoTranscodePreset(process.env.VIDEO_TRANSCODE_PRESET);
 const VIDEO_UPLOAD_CONCURRENCY = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_CONCURRENCY, 3)));
 const VIDEO_UPLOAD_MAX_PENDING = Math.max(0, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_MAX_PENDING, 6)));
+const VIDEO_PREVIEW_CONCURRENCY = Math.max(1, Math.min(2, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_CONCURRENCY, 1))));
+const VIDEO_PREVIEW_MAX_PENDING = Math.max(0, Math.min(12, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_MAX_PENDING, 4))));
+const VIDEO_PREVIEW_TIMEOUT_MS = Math.min(
+  3 * 60 * 1000,
+  Math.max(30_000, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_TIMEOUT_MS, 2 * 60 * 1000)))
+);
+const VIDEO_PREVIEW_DURATION_SECONDS = Math.min(4, Math.max(3, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_DURATION_SECONDS, 4))));
+const VIDEO_PREVIEW_MAX_EDGE = Math.min(480, Math.max(360, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_MAX_EDGE, 480))));
+const VIDEO_PREVIEW_FPS = Math.min(15, Math.max(12, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_FPS, 12))));
+const VIDEO_PREVIEW_BITRATE_KBPS = Math.min(600, Math.max(300, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_BITRATE_KBPS, 450))));
+const MAX_VIDEO_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_VIDEO_POSTER_BYTES = 1024 * 1024;
+const VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+const MAX_VIDEO_DERIVATIVE_FAILURES = 2_000;
 const COS_REQUEST_TIMEOUT_MS = Math.min(
   120_000,
   Math.max(5_000, Math.floor(numberFromEnv(process.env.COS_REQUEST_TIMEOUT_MS, 30_000)))
@@ -310,6 +334,11 @@ const videoUploadLimiter = createConcurrencyLimiter({
   concurrency: VIDEO_UPLOAD_CONCURRENCY,
   maxPending: VIDEO_UPLOAD_MAX_PENDING,
   queueFullMessage: "视频上传任务较多，请稍后重试",
+});
+const videoPreviewLimiter = createConcurrencyLimiter({
+  concurrency: VIDEO_PREVIEW_CONCURRENCY,
+  maxPending: VIDEO_PREVIEW_MAX_PENDING,
+  queueFullMessage: "视频预览生成任务较多，请稍后重试",
 });
 const publicProjectionLimiter = createConcurrencyLimiter({
   concurrency: 2,
@@ -330,6 +359,8 @@ const PUBLIC_PROJECTION_CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_BIO_CACHE_MAX_ENTRIES = 2_000;
 const publicCatalogCache = new Map();
 const publicBioRecordsCache = new Map();
+const videoDerivativeJobs = new Map();
+const videoDerivativeFailures = new Map();
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -1163,6 +1194,57 @@ function publicCatalogMediaUrls(value, limit = 6) {
   return publicMediaUrls(value, limit).map(publicCatalogMediaUrl);
 }
 
+function videoDerivativeSourceDescriptor(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.length > 4096 || raw.includes("\0")) return null;
+
+  if (raw.startsWith("/uploads/")) {
+    try {
+      const parsed = new URL(raw, "http://fishroom.local");
+      const canonicalUrl = parsed.pathname;
+      const localPath = localUploadPathFromUrl(canonicalUrl);
+      if (
+        !localPath ||
+        isPersonnelPrivateAttachmentPath(uploadDir, localPath) ||
+        isVideoDerivativePath(uploadDir, localPath)
+      ) return null;
+      const relative = decodeURIComponent(canonicalUrl.replace(/^\/uploads\/?/, ""));
+      if (
+        relative === VIDEO_DERIVATIVE_DIRECTORY ||
+        relative.startsWith(`${VIDEO_DERIVATIVE_DIRECTORY}/`)
+      ) return null;
+      if (!SUPPORTED_VIDEO_MIMES.has(mimeForExtension(extname(localPath)))) return null;
+      return {
+        type: "local",
+        source: canonicalUrl,
+        identity: `local:${relative}`,
+        localPath,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const cosKey = cosKeyFromUrl(raw);
+  if (!cosKey || !SUPPORTED_VIDEO_MIMES.has(mimeForExtension(extname(cosKey)))) return null;
+  return {
+    type: "cos",
+    source: objectUrlForKey(cosKey),
+    identity: `cos:${cosKey}`,
+    cosKey,
+  };
+}
+
+function publicVideoDerivativeUrl(source, kind) {
+  const descriptor = videoDerivativeSourceDescriptor(source);
+  if (!descriptor) return "";
+  try {
+    return publicVideoDerivativeProxyPath(descriptor.source, kind, { secret: authTokenSecret });
+  } catch {
+    return "";
+  }
+}
+
 function publicBioRecordText(value) {
   return clampText(String(value ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220);
 }
@@ -1170,6 +1252,14 @@ function publicBioRecordText(value) {
 function publicBioRecordPayload(record = {}, media = {}) {
   const photos = media.photos ?? publicMediaUrls(record?.photos, 6);
   const videos = media.videos ?? publicMediaUrls(record?.videos, 3);
+  // Keep these arrays index-aligned with `videos`: clients can use a tiny
+  // preview/poster in list views while retaining the original for detail play.
+  const videoPosters = videos.map((video) =>
+    publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.poster)
+  );
+  const videoPreviews = videos.map((video) =>
+    publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.preview)
+  );
   return {
     id: String(record?.id ?? ""),
     stockItemId: String(record?.stockItemId ?? ""),
@@ -1184,6 +1274,8 @@ function publicBioRecordPayload(record = {}, media = {}) {
     videoCount: videos.length,
     photos: photos.map(publicCatalogMediaUrl),
     videos: videos.map(publicCatalogMediaUrl),
+    videoPosters,
+    videoPreviews,
   };
 }
 
@@ -1260,16 +1352,32 @@ function publicRecordIsLater(candidate = {}, current = {}) {
 
 function latestPublicMediaByStockId(records = [], allowedStockIds = new Set()) {
   const latest = new Map();
+  const latestPhotos = new Map();
   for (const record of Array.isArray(records) ? records : []) {
     const stockItemId = String(record?.stockItemId ?? "").trim();
     if (!allowedStockIds.has(stockItemId)) continue;
     const photos = publicMediaUrls(record?.photos, 6);
     const videos = publicMediaUrls(record?.videos, 3);
     if (photos.length === 0 && videos.length === 0) continue;
+    if (photos.length > 0) {
+      const currentPhoto = latestPhotos.get(stockItemId);
+      if (!currentPhoto || publicRecordIsLater(record, currentPhoto.record)) {
+        latestPhotos.set(stockItemId, { record, photos });
+      }
+    }
     const current = latest.get(stockItemId);
     if (!current || publicRecordIsLater(record, current.record)) {
       latest.set(stockItemId, { record, photos, videos });
     }
+  }
+  // The catalog intentionally keeps one compact maintenance record per fish.
+  // If the newest record is video-only, retain the newest real photo as its
+  // static card fallback instead of forcing every list card to generate a
+  // poster (or falling back to a generic product image).
+  for (const [stockItemId, media] of latest) {
+    if (media.photos.length > 0) continue;
+    const photoMedia = latestPhotos.get(stockItemId);
+    if (photoMedia) media.photos = photoMedia.photos;
   }
   return latest;
 }
@@ -3142,6 +3250,7 @@ function isPublicApiRoute(req, url) {
   if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") return true;
   if (url.pathname === "/api/public/media/cos" && ["GET", "HEAD"].includes(req.method)) return true;
+  if (url.pathname === "/api/public/media/video-derivative" && ["GET", "HEAD"].includes(req.method)) return true;
   if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
   if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
   if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") return true;
@@ -6610,6 +6719,365 @@ function localUploadPathFromUrl(value) {
   return candidate === uploadDir || candidate.startsWith(`${uploadDir}/`) ? candidate : "";
 }
 
+function isVideoDerivativePath(baseDirectory, candidatePath) {
+  const derivativeRoot = normalize(join(baseDirectory, VIDEO_DERIVATIVE_DIRECTORY));
+  const candidate = normalize(String(candidatePath ?? ""));
+  return candidate === derivativeRoot || candidate.startsWith(`${derivativeRoot}${sep}`);
+}
+
+function videoDerivativePaths(descriptor) {
+  const cacheId = videoDerivativeCacheId(descriptor.identity);
+  return {
+    cacheId,
+    posterPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.poster)),
+    previewPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.preview)),
+  };
+}
+
+async function videoDerivativeFileReady(filePath, kind) {
+  let handle = null;
+  try {
+    const info = await stat(filePath);
+    const maximum = kind === VIDEO_DERIVATIVE_KINDS.poster
+      ? MAX_VIDEO_POSTER_BYTES
+      : MAX_VIDEO_PREVIEW_BYTES;
+    if (!info.isFile() || info.size < 12 || info.size > maximum) return false;
+    handle = await open(filePath, "r");
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead < 8) return false;
+    if (kind === VIDEO_DERIVATIVE_KINDS.poster) {
+      return header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    }
+    return header.subarray(4, 8).toString("ascii") === "ftyp";
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function videoDerivativesReady(paths) {
+  const [posterReady, previewReady] = await Promise.all([
+    videoDerivativeFileReady(paths.posterPath, VIDEO_DERIVATIVE_KINDS.poster),
+    videoDerivativeFileReady(paths.previewPath, VIDEO_DERIVATIVE_KINDS.preview),
+  ]);
+  return posterReady && previewReady;
+}
+
+async function assertVideoDerivativeSourceFile(filePath) {
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    const error = new Error("视频源文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!info.isFile() || info.size <= 0) {
+    const error = new Error("视频源文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (info.size > MAX_VIDEO_UPLOAD_BYTES) {
+    const error = new Error("视频源文件超过处理上限");
+    error.statusCode = 413;
+    throw error;
+  }
+  return info;
+}
+
+async function cosObjectMetadata(key) {
+  const client = getCosClient("download");
+  if (!client) {
+    const error = new Error("COS is not configured");
+    error.statusCode = 503;
+    throw error;
+  }
+  return await new Promise((resolvePromise, rejectPromise) => {
+    client.headObject({
+      Bucket: cosConfig.bucket,
+      Region: cosConfig.region,
+      Key: key,
+    }, (error, data = {}) => {
+      if (error) {
+        const next = new Error(Number(error.statusCode || error.status) === 404
+          ? "视频源文件不存在"
+          : "视频源文件读取失败");
+        next.statusCode = Number(error.statusCode || error.status) === 404 ? 404 : 502;
+        rejectPromise(next);
+        return;
+      }
+      const contentLength = Number(
+        data.ContentLength || upstreamHeader(data.headers, "content-length")
+      );
+      const contentType = normalizeMediaMime(
+        data.ContentType || upstreamHeader(data.headers, "content-type")
+      );
+      if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
+        const next = new Error("视频源文件大小无效");
+        next.statusCode = 502;
+        rejectPromise(next);
+        return;
+      }
+      if (contentLength > MAX_VIDEO_UPLOAD_BYTES) {
+        const next = new Error("视频源文件超过处理上限");
+        next.statusCode = 413;
+        rejectPromise(next);
+        return;
+      }
+      if (contentType && !SUPPORTED_VIDEO_MIMES.has(contentType)) {
+        const next = new Error("视频源文件类型无效");
+        next.statusCode = 415;
+        rejectPromise(next);
+        return;
+      }
+      resolvePromise({ contentLength, contentType });
+    });
+  });
+}
+
+async function downloadCosVideoSourceToFile(key, filePath) {
+  const metadata = await cosObjectMetadata(key);
+  const client = getCosClient("download");
+  const output = createWriteStream(filePath, { flags: "wx", mode: 0o600 });
+  await new Promise((resolvePromise, rejectPromise) => {
+    let callbackFinished = false;
+    let streamFinished = false;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      if (error) {
+        settled = true;
+        output.destroy();
+        rejectPromise(error);
+        return;
+      }
+      if (!callbackFinished || !streamFinished) return;
+      settled = true;
+      resolvePromise();
+    };
+    output.once("finish", () => {
+      streamFinished = true;
+      finish();
+    });
+    output.once("error", (error) => finish(error));
+    client.getObject({
+      Bucket: cosConfig.bucket,
+      Region: cosConfig.region,
+      Key: key,
+      Headers: {},
+      Output: output,
+    }, (error) => {
+      if (error) {
+        const next = new Error("视频源文件下载失败");
+        next.statusCode = Number(error.statusCode || error.status) === 404 ? 404 : 502;
+        finish(next);
+        return;
+      }
+      callbackFinished = true;
+      finish();
+    });
+  });
+  const downloaded = await assertVideoDerivativeSourceFile(filePath);
+  if (downloaded.size !== metadata.contentLength) {
+    const error = new Error("视频源文件下载不完整");
+    error.statusCode = 502;
+    throw error;
+  }
+}
+
+async function generateVideoDerivatives(descriptor, paths, options = {}) {
+  const derivativeRoot = join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY);
+  await mkdir(derivativeRoot, { recursive: true });
+  const tempDir = await mkdtemp(join(derivativeRoot, ".job-"));
+  const tempPreviewPath = join(tempDir, "preview.mp4");
+  const tempPosterPath = join(tempDir, "poster.jpg");
+  let inputPath = String(options.sourcePath ?? "").trim();
+  try {
+    if (inputPath) {
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "local") {
+      inputPath = descriptor.localPath;
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "cos") {
+      inputPath = join(tempDir, `source${extname(descriptor.cosKey) || ".mp4"}`);
+      await downloadCosVideoSourceToFile(descriptor.cosKey, inputPath);
+    } else {
+      const error = new Error("视频源地址无效");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    try {
+      await execFileAsync(FFMPEG_PATH, videoDerivativeFfmpegArgs(
+        inputPath,
+        tempPreviewPath,
+        tempPosterPath,
+        {
+          durationSeconds: VIDEO_PREVIEW_DURATION_SECONDS,
+          maxEdge: VIDEO_PREVIEW_MAX_EDGE,
+          framesPerSecond: VIDEO_PREVIEW_FPS,
+          bitrateKbps: VIDEO_PREVIEW_BITRATE_KBPS,
+          threads: VIDEO_TRANSCODE_THREADS,
+        },
+      ), {
+        timeout: VIDEO_PREVIEW_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+    } catch (cause) {
+      console.warn(`Video derivative ffmpeg failed for cache ${paths.cacheId}: ${cause.message}`);
+      const error = new Error("视频预览生成失败");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    const generated = {
+      posterPath: tempPosterPath,
+      previewPath: tempPreviewPath,
+    };
+    if (!await videoDerivativesReady(generated)) {
+      const error = new Error("视频预览生成结果无效");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    await Promise.all([
+      mkdir(join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY, "posters"), { recursive: true }),
+      mkdir(join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY, "previews"), { recursive: true }),
+    ]);
+    await rename(tempPosterPath, paths.posterPath);
+    await rename(tempPreviewPath, paths.previewPath);
+    return paths;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function ensureVideoDerivatives(sourceValue, options = {}) {
+  const descriptor = videoDerivativeSourceDescriptor(sourceValue);
+  if (!descriptor) {
+    const error = new Error("视频预览来源无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  const paths = videoDerivativePaths(descriptor);
+  if (await videoDerivativesReady(paths)) return paths;
+
+  const recentFailure = videoDerivativeFailures.get(paths.cacheId);
+  if (recentFailure && recentFailure.retryAfter > Date.now()) {
+    const error = new Error("视频预览正在等待重试");
+    error.statusCode = 503;
+    throw error;
+  }
+  if (recentFailure) videoDerivativeFailures.delete(paths.cacheId);
+
+  const existingJob = videoDerivativeJobs.get(paths.cacheId);
+  if (existingJob) return await existingJob;
+
+  const job = (async () => {
+    const release = await videoPreviewLimiter.acquire();
+    try {
+      // A queued sibling process may have finished while this task waited.
+      if (await videoDerivativesReady(paths)) return paths;
+      const generated = await generateVideoDerivatives(descriptor, paths, options);
+      videoDerivativeFailures.delete(paths.cacheId);
+      return generated;
+    } catch (error) {
+      videoDerivativeFailures.delete(paths.cacheId);
+      videoDerivativeFailures.set(paths.cacheId, {
+        retryAfter: Date.now() + VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS,
+      });
+      while (videoDerivativeFailures.size > MAX_VIDEO_DERIVATIVE_FAILURES) {
+        const oldestKey = videoDerivativeFailures.keys().next().value;
+        if (oldestKey === undefined) break;
+        videoDerivativeFailures.delete(oldestKey);
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  })();
+  videoDerivativeJobs.set(paths.cacheId, job);
+  job.then(
+    () => videoDerivativeJobs.delete(paths.cacheId),
+    () => videoDerivativeJobs.delete(paths.cacheId),
+  );
+  return await job;
+}
+
+function scheduleVideoDerivativeGeneration(source, sourcePath, cleanupDir = "") {
+  setImmediate(() => {
+    void ensureVideoDerivatives(source, { sourcePath })
+      .catch((error) => {
+        console.warn(`Video preview generation deferred: ${error.message}`);
+      })
+      .finally(() => {
+        if (cleanupDir) {
+          void rm(cleanupDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      });
+  });
+}
+
+async function sendVideoDerivativeFile(req, res, filePath, kind, cacheControl) {
+  const info = await stat(filePath);
+  const requestedRange = normalizeSingleByteRange(req.headers.range);
+  if (!requestedRange.valid) {
+    res.writeHead(416, {
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes */${info.size}`,
+      "Cache-Control": "no-store",
+    });
+    res.end();
+    return;
+  }
+
+  let start = 0;
+  let end = info.size - 1;
+  let statusCode = 200;
+  if (requestedRange.present) {
+    const match = requestedRange.value.match(/^bytes=(\d*)-(\d*)$/);
+    if (match?.[1]) start = Number(match[1]);
+    if (match?.[2]) end = Number(match[2]);
+    if (!match?.[1] && match?.[2]) {
+      const suffixLength = Number(match[2]);
+      start = Math.max(0, info.size - suffixLength);
+      end = info.size - 1;
+    }
+    if (
+      !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+      start < 0 || end < start || start >= info.size
+    ) {
+      res.writeHead(416, {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes */${info.size}`,
+        "Cache-Control": "no-store",
+      });
+      res.end();
+      return;
+    }
+    end = Math.min(end, info.size - 1);
+    statusCode = 206;
+  }
+
+  const contentLength = Math.max(0, end - start + 1);
+  res._logicalResponseBytes = req.method === "HEAD" ? 0 : contentLength;
+  res.writeHead(statusCode, {
+    "Content-Type": kind === VIDEO_DERIVATIVE_KINDS.poster ? "image/jpeg" : "video/mp4",
+    "Content-Length": String(contentLength),
+    "Cache-Control": cacheControl,
+    "Accept-Ranges": "bytes",
+    "X-Content-Type-Options": "nosniff",
+    ...(statusCode === 206 ? { "Content-Range": `bytes ${start}-${end}/${info.size}` } : {}),
+  });
+  if (req.method === "HEAD" || contentLength === 0) {
+    res.end();
+    return;
+  }
+  createReadStream(filePath, { start, end }).pipe(res);
+}
+
 async function externalizeDataUrl(value) {
   const match = typeof value === "string"
     ? value.match(/^data:([^;,]+);base64,(.+)$/)
@@ -7734,6 +8202,59 @@ async function handleApi(req, res, url) {
       sendCosObject(req, res, key, `public, max-age=${maxAge}`, { publicMedia: true });
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public media" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/public/media/video-derivative" && ["GET", "HEAD"].includes(req.method)) {
+    try {
+      const source = String(url.searchParams.get("url") ?? "").trim();
+      const kind = normalizeVideoDerivativeKind(url.searchParams.get("kind"));
+      const now = Date.now();
+      const expiresAt = url.searchParams.get("expires");
+      const validToken = verifyPublicVideoDerivativeToken({
+        source,
+        kind,
+        expiresAt,
+        signature: url.searchParams.get("signature"),
+        secret: authTokenSecret,
+        now,
+      });
+      if (!validToken) {
+        sendJson(req, res, 403, { error: "Public video preview link is invalid or expired" }, {
+          "Cache-Control": "no-store",
+        });
+        return;
+      }
+      if (!videoDerivativeSourceDescriptor(source)) {
+        sendJson(req, res, 400, { error: "Invalid video preview source" }, {
+          "Cache-Control": "no-store",
+        });
+        return;
+      }
+
+      const paths = await ensureVideoDerivatives(source);
+      if (req.aborted || res.destroyed) return;
+      const filePath = kind === VIDEO_DERIVATIVE_KINDS.poster
+        ? paths.posterPath
+        : paths.previewPath;
+      const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt, { now });
+      await sendVideoDerivativeFile(req, res, filePath, kind, `public, max-age=${maxAge}`);
+    } catch (error) {
+      if (req.aborted || res.destroyed) return;
+      const candidateStatus = Number(error?.statusCode ?? 0);
+      const status = [400, 404, 413, 415, 503].includes(candidateStatus) ? candidateStatus : 502;
+      sendJson(req, res, status, {
+        error: status === 503
+          ? "视频预览生成任务较多，请稍后重试"
+          : status === 404
+            ? "视频预览源文件不存在"
+            : status === 413
+              ? "视频源文件超过处理上限"
+              : status === 415
+                ? "视频源文件类型无效"
+                : "视频预览生成失败，请稍后重试",
+      }, { "Cache-Control": "no-store" });
     }
     return;
   }
@@ -10174,6 +10695,7 @@ async function handleApi(req, res, url) {
     let releaseTranscodeSlot = null;
     let releaseVideoUploadSlot = null;
     let videoTempDir = "";
+    let videoDerivativeSourcePath = "";
     try {
       const startedAt = Date.now();
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
@@ -10206,10 +10728,12 @@ async function handleApi(req, res, url) {
           processFinishedAt = Date.now();
           storedBytes = (await stat(processed.outputPath)).size;
           mediaUrl = await storeOriginalMediaFile(processed.outputPath, storedMime);
+          videoDerivativeSourcePath = processed.outputPath;
         } else if (receivedBytes > 0) {
           processFinishedAt = Date.now();
           storedBytes = receivedBytes;
           mediaUrl = await storeOriginalMediaFile(inputPath, storedMime);
+          videoDerivativeSourcePath = inputPath;
         }
       } else {
         const buffer = await readRawBody(req, maxBytes);
@@ -10232,6 +10756,12 @@ async function handleApi(req, res, url) {
           `store;dur=${Math.max(0, finishedAt - processFinishedAt)}`,
           `total;dur=${Math.max(0, finishedAt - startedAt)}`,
         ].join(", ");
+      const posterUrl = isVideo && mediaUrl
+        ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.poster)
+        : "";
+      const previewUrl = isVideo && mediaUrl
+        ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.preview)
+        : "";
       sendJson(req, res, 200, {
         ok: true,
         url: mediaUrl,
@@ -10240,7 +10770,20 @@ async function handleApi(req, res, url) {
         storedSize: storedBytes,
         processingMode,
         storage: cosReady() ? "cos" : "local",
+        ...(isVideo ? {
+          derivativeStatus: posterUrl && previewUrl ? "processing" : "unavailable",
+          posterUrl,
+          previewUrl,
+        } : {}),
       }, { "Server-Timing": uploadTimingHeader });
+      if (isVideo && mediaUrl && videoDerivativeSourcePath) {
+        // The original upload is already complete. Transfer temporary-file
+        // cleanup to a detached, bounded preview task so response latency does
+        // not include poster/preview encoding.
+        const cleanupDir = videoTempDir;
+        videoTempDir = "";
+        scheduleVideoDerivativeGeneration(mediaUrl, videoDerivativeSourcePath, cleanupDir);
+      }
     } catch (error) {
       const status = [400, 413, 503].includes(error?.statusCode) ? error.statusCode : 500;
       sendJson(req, res, status, {
@@ -14450,13 +14993,20 @@ async function serveStatic(req, res, url) {
 
 async function serveUpload(req, res, url) {
   const relative = decodeURIComponent(url.pathname.replace(/^\/uploads\/?/, ""));
-  if (relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
-      relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`)) {
+  if (
+    relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
+    relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`) ||
+    relative === VIDEO_DERIVATIVE_DIRECTORY ||
+    relative.startsWith(`${VIDEO_DERIVATIVE_DIRECTORY}/`)
+  ) {
     sendJson(req, res, 404, { error: "Upload file not found" });
     return;
   }
   const candidate = normalize(join(uploadDir, relative));
-  if (isPersonnelPrivateAttachmentPath(uploadDir, candidate)) {
+  if (
+    isPersonnelPrivateAttachmentPath(uploadDir, candidate) ||
+    isVideoDerivativePath(uploadDir, candidate)
+  ) {
     sendJson(req, res, 404, { error: "Upload file not found" });
     return;
   }

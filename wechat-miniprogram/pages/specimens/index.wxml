@@ -64,8 +64,51 @@
       >
         <view class="specimen-main">
           <view class="specimen-media">
-            <image wx:if="{{item.image}}" class="specimen-image" src="{{item.image}}" mode="aspectFit" lazy-load />
+            <video
+              wx:if="{{activePreviewId === item.id}}"
+              id="card-video-preview-player"
+              class="specimen-image active-card-video"
+              src="{{item.previewVideo}}"
+              poster="{{item.image}}"
+              autoplay="{{true}}"
+              muted="{{true}}"
+              loop="{{true}}"
+              controls="{{false}}"
+              show-center-play-btn="{{false}}"
+              show-play-btn="{{false}}"
+              show-fullscreen-btn="{{false}}"
+              enable-progress-gesture="{{false}}"
+              object-fit="contain"
+              aria-label="选鱼码{{item.displayCode}}的视频预览"
+              data-id="{{item.id}}"
+              catchtap="onSpecimenTap"
+              binderror="onPreviewError"
+            />
+            <image
+              wx:elif="{{item.image}}"
+              class="specimen-image"
+              src="{{item.image}}"
+              mode="aspectFit"
+              lazy-load
+              data-id="{{item.id}}"
+              binderror="onCardImageError"
+            />
             <view wx:else class="specimen-image placeholder"></view>
+            <button
+              wx:if="{{item.hasVideoPreview}}"
+              class="media-preview-toggle {{activePreviewId === item.id ? 'playing' : ''}}"
+              hover-class="media-preview-toggle-hover"
+              aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}选鱼码{{item.displayCode}}的视频预览"
+              data-id="{{item.id}}"
+              data-preview="{{item.previewVideo}}"
+              catchtap="onPreviewToggle"
+            >
+              <view wx:if="{{activePreviewId === item.id}}" class="preview-pause-icon" aria-hidden="true">
+                <view></view>
+                <view></view>
+              </view>
+              <view wx:else class="preview-play-icon" aria-hidden="true"></view>
+            </button>
             <view class="specimen-status {{item.statusClass}}">{{item.statusText}}</view>
           </view>
 

@@ -10,6 +10,12 @@ const {
   startPublicCatalogRefresh,
   stopPublicCatalogRefresh
 } = require("../../utils/public-catalog-refresh");
+const {
+  handleCardImageError,
+  handleCardVideoError,
+  stopCardVideoPreview,
+  toggleCardVideoPreview
+} = require("../../utils/card-video-preview");
 
 const filterOptions = [
   { key: "all", label: "全部" },
@@ -34,6 +40,7 @@ Page({
     speciesId: "",
     context: null,
     specimens: [],
+    activePreviewId: "",
     activeFilter: "all",
     filterOptions
   },
@@ -52,10 +59,12 @@ Page({
 
   onHide() {
     stopPublicCatalogRefresh(this);
+    stopCardVideoPreview(this);
   },
 
   onUnload() {
     stopPublicCatalogRefresh(this);
+    stopCardVideoPreview(this, { clearData: false });
   },
 
   onPullDownRefresh() {
@@ -63,6 +72,7 @@ Page({
   },
 
   async loadSpecimens(options = {}) {
+    stopCardVideoPreview(this);
     const productId = this.data.productId;
     const speciesId = this.data.speciesId;
     if (!productId && !speciesId) {
@@ -132,6 +142,7 @@ Page({
 
   applyFilter(filterKey) {
     if (!this.viewModel) return;
+    stopCardVideoPreview(this);
     const activeFilter = filterKey || "all";
     const specimens = filterSpecimens(this.viewModel, {
       productId: this.data.productId,
@@ -149,6 +160,7 @@ Page({
   },
 
   onSpecimenTap(event) {
+    stopCardVideoPreview(this);
     const stockItemId = event.currentTarget.dataset.id;
     if (!stockItemId) return;
     wx.navigateTo({
@@ -158,6 +170,18 @@ Page({
 
   onRetry() {
     this.loadSpecimens({ force: true });
+  },
+
+  onPreviewToggle(event) {
+    toggleCardVideoPreview(this, event);
+  },
+
+  onPreviewError() {
+    handleCardVideoError(this);
+  },
+
+  onCardImageError(event) {
+    handleCardImageError(this, event, "specimens");
   },
 
   onShareAppMessage() {

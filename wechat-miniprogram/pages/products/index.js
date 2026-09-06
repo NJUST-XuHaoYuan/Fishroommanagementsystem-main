@@ -10,6 +10,12 @@ const {
   startPublicCatalogRefresh,
   stopPublicCatalogRefresh
 } = require("../../utils/public-catalog-refresh");
+const {
+  handleCardImageError,
+  handleCardVideoError,
+  stopCardVideoPreview,
+  toggleCardVideoPreview
+} = require("../../utils/card-video-preview");
 
 function decodeOption(value) {
   try {
@@ -31,6 +37,7 @@ Page({
     keyword: "",
     products: [],
     filteredSpecimenCount: 0,
+    activePreviewId: "",
     ...getNavigationMetrics()
   },
 
@@ -48,10 +55,12 @@ Page({
 
   onHide() {
     stopPublicCatalogRefresh(this);
+    stopCardVideoPreview(this);
   },
 
   onUnload() {
     stopPublicCatalogRefresh(this);
+    stopCardVideoPreview(this, { clearData: false });
   },
 
   onPullDownRefresh() {
@@ -59,6 +68,7 @@ Page({
   },
 
   async loadProducts(options = {}) {
+    stopCardVideoPreview(this);
     const categoryKey = this.data.categoryKey;
     if (!categoryKey) {
       this.setData({ loading: false, error: "缺少小类信息" });
@@ -124,6 +134,7 @@ Page({
 
   applyFilter(keyword) {
     if (!this.viewModel) return;
+    stopCardVideoPreview(this);
     const nextKeyword = keyword || "";
     const products = filterProducts(this.viewModel, this.data.categoryKey, nextKeyword);
     this.setData({
@@ -152,6 +163,7 @@ Page({
   },
 
   onProductTap(event) {
+    stopCardVideoPreview(this);
     const productId = event.currentTarget.dataset.id;
     if (!productId) return;
     wx.navigateTo({
@@ -161,6 +173,18 @@ Page({
 
   onRetry() {
     this.loadProducts({ force: true });
+  },
+
+  onPreviewToggle(event) {
+    toggleCardVideoPreview(this, event);
+  },
+
+  onPreviewError() {
+    handleCardVideoError(this);
+  },
+
+  onCardImageError(event) {
+    handleCardImageError(this, event, "products");
   },
 
   onShareAppMessage() {

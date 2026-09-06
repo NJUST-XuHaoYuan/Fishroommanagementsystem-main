@@ -15,7 +15,7 @@ ENV PGPORT=5432
 ENV RELEASE_REVISION=$RELEASE_REVISION
 ENV RELEASE_BUILT_AT=$RELEASE_BUILT_AT
 
-RUN apk add --no-cache postgresql postgresql-client su-exec
+RUN apk add --no-cache ffmpeg postgresql postgresql-client su-exec
 
 RUN npm install --global pnpm@11.19.0 --no-audit --no-fund
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

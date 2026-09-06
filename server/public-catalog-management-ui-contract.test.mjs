@@ -57,6 +57,6 @@ test("frontend compatibility strips the legacy field without re-hiding a product
   assert.doesNotMatch(storeSource, /publicVisible\?:\s*boolean/);
   assert.match(appSource, /const PUBLIC_CATALOG_POLICY_SCHEMA_VERSION = 1/);
   assert.match(appSource, /publicVisible:\s*legacyPublicVisible/);
-  assert.match(appSource, /!legacyCatalogMigrationCompleted && legacyPublicVisible === false/);
+  assert.match(appSource, /!legacyCatalogMigrationCompleted\s*&&\s*legacyPublicVisible === false/);
   assert.match(appSource, /hiddenProductIds:\s*Array\.from\(new Set/);
 });
