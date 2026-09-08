@@ -45,6 +45,33 @@ function firstPhoto(record) {
   return photos[0] || "";
 }
 
+function firstVideoPreview(record) {
+  const previews = asArray(record && record.videoPreviews).map(absoluteUrl);
+  const previewIndex = previews.findIndex(Boolean);
+  const posters = asArray(record && record.videoPosters).map(absoluteUrl);
+  const fallbackPoster = text(record && record.videoPoster);
+  return {
+    poster: previewIndex >= 0
+      ? posters[previewIndex] || fallbackPoster
+      : posters.find(Boolean) || fallbackPoster,
+    preview: previewIndex >= 0 ? previews[previewIndex] : ""
+  };
+}
+
+function compareMediaRecency(left, right) {
+  const maintenanceDelta = Number(Boolean(right && right.hasMaintenanceMedia))
+    - Number(Boolean(left && left.hasMaintenanceMedia));
+  if (maintenanceDelta) return maintenanceDelta;
+  return text(right && right.mediaDate).localeCompare(text(left && left.mediaDate));
+}
+
+function representativeSpecimen(specimens) {
+  return asArray(specimens)
+    .filter((item) => item && item.image)
+    .slice()
+    .sort(compareMediaRecency)[0] || null;
+}
+
 function stockLocation(stock) {
   const group = text(stock && stock.tankGroupName);
   const sub = text(stock && stock.subTankName);
@@ -170,6 +197,10 @@ function normalizeCatalog(value) {
     bioRecords: asArray(catalog.bioRecords).map((item, index) => {
       const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
       const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
+      const videoPosters = asArray(item.videoPosters).map(absoluteUrl);
+      const videoPreviews = asArray(item.videoPreviews).map(absoluteUrl);
+      const legacyPoster = absoluteUrl(item.posterUrl || item.poster || item.videoPoster);
+      const legacyPreview = absoluteUrl(item.previewVideoUrl || item.previewVideo || item.previewUrl);
       return {
         id: text(item.id) || `fallback-${text(item.stockItemId)}-${index}`,
         stockItemId: text(item.stockItemId),
@@ -183,7 +214,10 @@ function normalizeCatalog(value) {
         photoCount: Math.max(number(item.photoCount), photos.length),
         videoCount: Math.max(number(item.videoCount), videos.length),
         photos,
-        videos
+        videos,
+        videoPosters: videoPosters.length ? videoPosters : legacyPoster ? [legacyPoster] : [],
+        videoPreviews: videoPreviews.length ? videoPreviews : legacyPreview ? [legacyPreview] : [],
+        videoPoster: legacyPoster
       };
     }).filter((item) => item.stockItemId)
   };
@@ -226,6 +260,7 @@ function buildViewModel(catalog) {
   const productsBySpecies = {};
   const stockByProduct = {};
   const latestBioByStock = {};
+  const bioByStock = {};
 
   majorDefinitions.forEach((item) => {
     majorByKey[item.key] = item;
@@ -242,8 +277,14 @@ function buildViewModel(catalog) {
     stockByProduct[item.productId].push(item);
   });
   normalized.bioRecords.forEach((record) => {
+    if (!bioByStock[record.stockItemId]) bioByStock[record.stockItemId] = [];
+    bioByStock[record.stockItemId].push(record);
     const current = latestBioByStock[record.stockItemId];
     if (!current || record.date > current.date) latestBioByStock[record.stockItemId] = record;
+  });
+
+  Object.keys(bioByStock).forEach((stockItemId) => {
+    bioByStock[stockItemId].sort((left, right) => right.date.localeCompare(left.date));
   });
 
   const specimens = [];
@@ -251,7 +292,19 @@ function buildViewModel(catalog) {
     const species = speciesById[product.speciesId] || {};
     asArray(stockByProduct[product.id]).forEach((stock) => {
       const latestBio = latestBioByStock[stock.id];
-      const image = firstPhoto(latestBio) || product.imageUrl || species.imageUrl || "";
+      const records = asArray(bioByStock[stock.id]);
+      const previewMedia = firstVideoPreview(latestBio);
+      const latestPhotoRecord = records.find((record) => firstPhoto(record));
+      const latestPhoto = firstPhoto(latestPhotoRecord);
+      // Prefer a real maintenance photo for the idle card. Generated video
+      // posters are only needed when the fish has never had a photo, which
+      // avoids a cold-start transcode stampede on long lists.
+      const maintenanceImage = latestPhoto || previewMedia.poster;
+      const defaultImage = product.imageUrl || species.imageUrl || "";
+      const image = maintenanceImage || product.imageUrl || species.imageUrl || "";
+      const mediaDate = previewMedia.poster || previewMedia.preview
+        ? text(latestBio && latestBio.date)
+        : text(latestPhotoRecord && latestPhotoRecord.date);
       const stockPrice = number(stock.basePrice);
       const defaultPrice = number(product.defaultPrice);
       const price = stockPrice || defaultPrice || 0;
@@ -270,6 +323,11 @@ function buildViewModel(catalog) {
         size: product.size || "待确认",
         origin: product.origin || "来源待确认",
         image,
+        fallbackImage: maintenanceImage && defaultImage !== image ? defaultImage : "",
+        previewVideo: previewMedia.preview,
+        hasVideoPreview: Boolean(previewMedia.preview),
+        hasMaintenanceMedia: Boolean(maintenanceImage || previewMedia.preview),
+        mediaDate,
         price,
         priceText: formatMoney(price),
         defaultPrice,
@@ -292,7 +350,7 @@ function buildViewModel(catalog) {
   const productCards = normalized.products.map((product) => {
     const species = speciesById[product.speciesId] || {};
     const productSpecimens = specimens.filter((item) => item.productId === product.id);
-    const firstSpecimenWithImage = productSpecimens.find((item) => item.image);
+    const featuredSpecimen = representativeSpecimen(productSpecimens);
     const prices = productSpecimens.map((item) => item.price).filter((value) => value > 0);
     const minPrice = prices.length ? Math.min(...prices) : product.defaultPrice;
     const category = species.category || "其他";
@@ -307,7 +365,10 @@ function buildViewModel(catalog) {
       majorKey,
       size: product.size || "待确认",
       origin: product.origin || "来源待确认",
-      image: product.imageUrl || species.imageUrl || firstSpecimenWithImage && firstSpecimenWithImage.image || "",
+      image: featuredSpecimen && featuredSpecimen.image || product.imageUrl || species.imageUrl || "",
+      fallbackImage: featuredSpecimen && featuredSpecimen.fallbackImage || product.imageUrl || species.imageUrl || "",
+      previewVideo: featuredSpecimen && featuredSpecimen.previewVideo || "",
+      hasVideoPreview: Boolean(featuredSpecimen && featuredSpecimen.previewVideo),
       specimenCount: productSpecimens.length,
       price: minPrice,
       priceText: formatMoney(minPrice),
@@ -363,7 +424,7 @@ function buildViewModel(catalog) {
   const speciesCards = normalized.species.map((species) => {
     const speciesSpecimens = specimens.filter((item) => item.speciesId === species.id);
     const speciesProducts = asArray(productsBySpecies[species.id]);
-    const firstSpecimenWithImage = speciesSpecimens.find((item) => item.image);
+    const featuredSpecimen = representativeSpecimen(speciesSpecimens);
     const commonNamesText = species.commonNames.join(" / ");
     return {
       id: species.id,
@@ -373,7 +434,10 @@ function buildViewModel(catalog) {
       commonNamesText,
       subtitle: species.scientificName || commonNamesText || "公开品种",
       description: species.description,
-      image: firstSpecimenWithImage ? firstSpecimenWithImage.image : species.imageUrl || "",
+      image: featuredSpecimen ? featuredSpecimen.image : species.imageUrl || "",
+      fallbackImage: featuredSpecimen && featuredSpecimen.fallbackImage || species.imageUrl || "",
+      previewVideo: featuredSpecimen && featuredSpecimen.previewVideo || "",
+      hasVideoPreview: Boolean(featuredSpecimen && featuredSpecimen.previewVideo),
       specimenCount: speciesSpecimens.length,
       productCount: speciesProducts.length,
       priceRange: priceRange(speciesSpecimens.map((item) => item.price)),

@@ -48,6 +48,8 @@ test("bio-record save never materializes full stock, history, order, shipment or
   assert.match(block, /CROSS JOIN LATERAL[\s\S]*?stock_target/);
   assert.match(block, /record_target\.bio_records/);
   assert.match(block, /jsonb_set\([\s\S]*?'\{operationLogs\}'/);
+  assert.match(block, /appendBioRecordsMutationSql\(\{/);
+  assert.doesNotMatch(block, /recordIdParam\s*=\s*bindValue\(targetRecordId\)/);
   assert.match(block, /bioRecord: plan\.record/);
   assert.match(block, /deletedRecordId: plan\.deletedRecordId/);
 });
@@ -61,4 +63,24 @@ test("video upload streams first, queues processing second, and reports the proc
   assert.match(block, /storeOriginalMediaFile/);
   assert.match(block, /processingMode/);
   assert.match(block, /Server-Timing/);
+});
+
+test("video normalization selects one usable audio stream and retries without broken audio", () => {
+  const start = source.indexOf("async function prepareWechatVideoFile(");
+  const end = source.indexOf("\nasync function transcodeVideoToWechatMp4(", start);
+  assert.ok(start >= 0 && end > start, "missing WeChat video normalization function");
+  const block = source.slice(start, end);
+
+  assert.match(block, /selectWechatAudioStream\(probe\)/);
+  assert.match(block, /`0:\$\{selectedAudio\.index\}`/);
+  assert.doesNotMatch(block, /"0:a\?"/, "normal uploads must not map every audio stream");
+  assert.match(block, /"0:a:0\?"/, "ffprobe failure may make one bounded audio attempt");
+  assert.match(block, /transcodeArgs\(\{ withoutAudio: true \}\)/);
+  assert.match(block, /mode: "transcode-no-audio"/);
+});
+
+test("media upload keeps FFmpeg details in server logs instead of the client response", () => {
+  const block = routeBlock("/api/media/upload");
+  assert.match(block, /console\.error\(`Media upload failed/);
+  assert.match(block, /mediaKind === "video" \? "视频上传失败，请稍后重试"/);
 });

@@ -4,6 +4,12 @@ const {
   findSpecimen,
   normalizeTimeline
 } = require("../../utils/catalog");
+const {
+  beginPublicCatalogRequest,
+  isCurrentPublicCatalogRequest,
+  startPublicCatalogRefresh,
+  stopPublicCatalogRefresh
+} = require("../../utils/public-catalog-refresh");
 
 Page({
   data: {
@@ -21,15 +27,31 @@ Page({
     this.loadDetail(stockItemId);
   },
 
+  onShow() {
+    startPublicCatalogRefresh(this, () => this.loadDetail(this.data.stockItemId, { force: true, refreshing: true }));
+  },
+
+  onHide() {
+    stopPublicCatalogRefresh(this);
+  },
+
+  onUnload() {
+    stopPublicCatalogRefresh(this);
+  },
+
   onPullDownRefresh() {
     this.loadDetail(this.data.stockItemId, { force: true, refreshing: true });
   },
 
-  async ensureViewModel(force) {
+  async ensureViewModel(force, requestGeneration) {
     const app = getApp();
-    if (!force && app.globalData.catalogViewModel) return app.globalData.catalogViewModel;
+    const cacheTtl = 60 * 1000;
+    const cacheIsFresh = app.globalData.catalogViewModel
+      && Date.now() - Number(app.globalData.loadedAt || 0) < cacheTtl;
+    if (!force && cacheIsFresh) return app.globalData.catalogViewModel;
     const catalog = await fetchCatalog();
     const viewModel = buildViewModel(catalog);
+    if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return null;
     app.globalData.catalog = catalog;
     app.globalData.catalogViewModel = viewModel;
     app.globalData.loadedAt = Date.now();
@@ -44,6 +66,7 @@ Page({
       });
       return;
     }
+    const requestGeneration = beginPublicCatalogRequest(this);
 
     this.setData({
       loading: !options.refreshing,
@@ -51,10 +74,12 @@ Page({
     });
 
     try {
-      const viewModel = await this.ensureViewModel(Boolean(options.force));
+      const viewModel = await this.ensureViewModel(Boolean(options.force), requestGeneration);
+      if (!viewModel || !isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const specimen = findSpecimen(viewModel, stockItemId);
       if (!specimen) throw new Error("这个个体当前没有公开库存");
       const records = await fetchBioRecords(stockItemId);
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const timeline = normalizeTimeline(records, specimen);
       const imagePreview = [
         specimen.image,
@@ -68,12 +93,20 @@ Page({
         imagePreview
       });
     } catch (error) {
+      if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
+      const app = getApp();
+      app.globalData.catalog = null;
+      app.globalData.catalogViewModel = null;
+      app.globalData.loadedAt = 0;
       this.setData({
         loading: false,
-        error: error && error.message || "详情加载失败"
+        error: error && error.message || "详情加载失败",
+        specimen: null,
+        timeline: [],
+        imagePreview: []
       });
     } finally {
-      wx.stopPullDownRefresh();
+      if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
     }
   },
 

@@ -89,6 +89,62 @@ button::after {
   border: 0;
 }
 
+.active-card-video {
+  display: block;
+}
+
+.media-preview-toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 8;
+  display: flex;
+  width: 88rpx;
+  height: 88rpx;
+  min-width: 88rpx;
+  min-height: 88rpx;
+  align-items: center;
+  justify-content: center;
+  border: 2rpx solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  background: rgba(10, 19, 17, 0.78);
+  box-shadow: 0 6rpx 18rpx rgba(5, 12, 10, 0.22);
+  transform: translate(-50%, -50%);
+}
+
+.media-preview-toggle.playing {
+  top: auto;
+  bottom: 12rpx;
+  left: 12rpx;
+  transform: none;
+}
+
+.media-preview-toggle-hover {
+  background: rgba(7, 84, 78, 0.94);
+}
+
+.preview-play-icon {
+  width: 0;
+  height: 0;
+  margin-left: 6rpx;
+  border-top: 15rpx solid transparent;
+  border-bottom: 15rpx solid transparent;
+  border-left: 23rpx solid #fff;
+}
+
+.preview-pause-icon {
+  display: flex;
+  align-items: center;
+  gap: 9rpx;
+}
+
+.preview-pause-icon view {
+  width: 8rpx;
+  height: 28rpx;
+  border-radius: 2rpx;
+  background: #fff;
+}
+
 .safe-page {
   min-height: 100vh;
   padding-bottom: calc(44rpx + env(safe-area-inset-bottom));

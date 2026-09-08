@@ -84,8 +84,51 @@
           bindtap="onProductTap"
         >
           <view class="product-media">
-            <image wx:if="{{item.image}}" class="product-image" src="{{item.image}}" mode="aspectFill" lazy-load />
+            <video
+              wx:if="{{activePreviewId === item.id}}"
+              id="card-video-preview-player"
+              class="product-image active-card-video"
+              src="{{item.previewVideo}}"
+              poster="{{item.image}}"
+              autoplay="{{true}}"
+              muted="{{true}}"
+              loop="{{true}}"
+              controls="{{false}}"
+              show-center-play-btn="{{false}}"
+              show-play-btn="{{false}}"
+              show-fullscreen-btn="{{false}}"
+              enable-progress-gesture="{{false}}"
+              object-fit="cover"
+              aria-label="{{item.name}}视频预览"
+              data-id="{{item.id}}"
+              catchtap="onProductTap"
+              binderror="onPreviewError"
+            />
+            <image
+              wx:elif="{{item.image}}"
+              class="product-image"
+              src="{{item.image}}"
+              mode="aspectFill"
+              lazy-load
+              data-id="{{item.id}}"
+              binderror="onCardImageError"
+            />
             <view wx:else class="product-image product-placeholder"></view>
+            <button
+              wx:if="{{item.hasVideoPreview}}"
+              class="media-preview-toggle {{activePreviewId === item.id ? 'playing' : ''}}"
+              hover-class="media-preview-toggle-hover"
+              aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}{{item.name}}的视频预览"
+              data-id="{{item.id}}"
+              data-preview="{{item.previewVideo}}"
+              catchtap="onPreviewToggle"
+            >
+              <view wx:if="{{activePreviewId === item.id}}" class="preview-pause-icon" aria-hidden="true">
+                <view></view>
+                <view></view>
+              </view>
+              <view wx:else class="preview-play-icon" aria-hidden="true"></view>
+            </button>
             <view class="product-count">{{item.specimenCount}} {{categoryInfo.unit}}</view>
           </view>
           <view class="product-copy">

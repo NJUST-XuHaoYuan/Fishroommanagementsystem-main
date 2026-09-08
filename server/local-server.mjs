@@ -1,9 +1,9 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import COS from "cos-nodejs-sdk-v5";
 import {
   canFastRemuxWechatVideo,
   normalizeVideoTranscodePreset,
+  selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
@@ -126,6 +127,7 @@ import {
   healthyFishInventoryMetrics,
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
+import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
   resolveShippingCarrier,
@@ -150,6 +152,26 @@ import {
   verifyPublicMediaUrlToken,
 } from "./public-media-token.mjs";
 import {
+  VIDEO_DERIVATIVE_DIRECTORY,
+  VIDEO_DERIVATIVE_KINDS,
+  normalizeVideoDerivativeKind,
+  publicVideoDerivativeProxyPath,
+  verifyPublicVideoDerivativeToken,
+  videoDerivativeCacheId,
+  videoDerivativeFfmpegArgs,
+  videoDerivativeRelativePath,
+} from "./video-preview.mjs";
+import {
+  PUBLIC_CATALOG_MAJOR_CATEGORIES,
+  describePublicCatalogPolicyChanges,
+  migrateLegacyPublicCatalogVisibilityState,
+  normalizePublicCatalogCategoryMajorMap,
+  normalizePublicCatalogPolicy,
+  prunePublicCatalogPolicyReferences,
+  selectPublicCatalogStock,
+  validatePublicCatalogPolicyWrite,
+} from "./public-catalog-policy.mjs";
+import {
   cosObjectDelivery,
   normalizeSingleByteRange,
   upstreamHeader,
@@ -167,6 +189,7 @@ import {
   maintenanceRequiredPermissions,
   planBioRecordSave,
 } from "./bio-record-rules.mjs";
+import { appendBioRecordsMutationSql } from "./bio-record-save-sql.mjs";
 import {
   assertMaintenanceExpectedItems,
   findMaintenanceMutationLog,
@@ -280,6 +303,20 @@ const VIDEO_TRANSCODE_MAX_EDGE = Math.max(720, Math.floor(numberFromEnv(process.
 const VIDEO_TRANSCODE_PRESET = normalizeVideoTranscodePreset(process.env.VIDEO_TRANSCODE_PRESET);
 const VIDEO_UPLOAD_CONCURRENCY = Math.max(1, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_CONCURRENCY, 3)));
 const VIDEO_UPLOAD_MAX_PENDING = Math.max(0, Math.floor(numberFromEnv(process.env.VIDEO_UPLOAD_MAX_PENDING, 6)));
+const VIDEO_PREVIEW_CONCURRENCY = Math.max(1, Math.min(2, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_CONCURRENCY, 1))));
+const VIDEO_PREVIEW_MAX_PENDING = Math.max(0, Math.min(12, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_MAX_PENDING, 4))));
+const VIDEO_PREVIEW_TIMEOUT_MS = Math.min(
+  3 * 60 * 1000,
+  Math.max(30_000, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_TIMEOUT_MS, 2 * 60 * 1000)))
+);
+const VIDEO_PREVIEW_DURATION_SECONDS = Math.min(4, Math.max(3, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_DURATION_SECONDS, 4))));
+const VIDEO_PREVIEW_MAX_EDGE = Math.min(480, Math.max(360, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_MAX_EDGE, 480))));
+const VIDEO_PREVIEW_FPS = Math.min(15, Math.max(12, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_FPS, 12))));
+const VIDEO_PREVIEW_BITRATE_KBPS = Math.min(600, Math.max(300, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_BITRATE_KBPS, 450))));
+const MAX_VIDEO_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_VIDEO_POSTER_BYTES = 1024 * 1024;
+const VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+const MAX_VIDEO_DERIVATIVE_FAILURES = 2_000;
 const COS_REQUEST_TIMEOUT_MS = Math.min(
   120_000,
   Math.max(5_000, Math.floor(numberFromEnv(process.env.COS_REQUEST_TIMEOUT_MS, 30_000)))
@@ -298,6 +335,11 @@ const videoUploadLimiter = createConcurrencyLimiter({
   concurrency: VIDEO_UPLOAD_CONCURRENCY,
   maxPending: VIDEO_UPLOAD_MAX_PENDING,
   queueFullMessage: "视频上传任务较多，请稍后重试",
+});
+const videoPreviewLimiter = createConcurrencyLimiter({
+  concurrency: VIDEO_PREVIEW_CONCURRENCY,
+  maxPending: VIDEO_PREVIEW_MAX_PENDING,
+  queueFullMessage: "视频预览生成任务较多，请稍后重试",
 });
 const publicProjectionLimiter = createConcurrencyLimiter({
   concurrency: 2,
@@ -318,6 +360,8 @@ const PUBLIC_PROJECTION_CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_BIO_CACHE_MAX_ENTRIES = 2_000;
 const publicCatalogCache = new Map();
 const publicBioRecordsCache = new Map();
+const videoDerivativeJobs = new Map();
+const videoDerivativeFailures = new Map();
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -369,6 +413,7 @@ const STATE_PATCH_PERMISSION_MODULES = {
   species: "species",
   speciesCategories: "accounts",
   speciesCategoryMajorMap: "accounts",
+  publicCatalogPolicy: "accounts",
   products: "products",
   productOrigins: "products",
   tankGroups: "tankGroups",
@@ -390,6 +435,7 @@ const STATE_PATCH_MODULE_LABELS = {
   species: "物种管理",
   speciesCategories: "分类管理",
   speciesCategoryMajorMap: "分类管理",
+  publicCatalogPolicy: "鱼单管理",
   products: "商品管理",
   productOrigins: "商品产地",
   tankGroups: "缸组管理",
@@ -410,6 +456,7 @@ const ADMIN_ONLY_STATE_PATCH_KEYS = new Set([
   "sites",
   "speciesCategories",
   "speciesCategoryMajorMap",
+  "publicCatalogPolicy",
 ]);
 const PASSWORD_HASH_PREFIX = "scrypt$1$";
 const cosConfig = {
@@ -458,6 +505,7 @@ const STATE_KEYS = [
   "species",
   "speciesCategories",
   "speciesCategoryMajorMap",
+  "publicCatalogPolicy",
   "products",
   "productOrigins",
   "tankGroups",
@@ -967,6 +1015,12 @@ function stableJson(value) {
   return JSON.stringify(value ?? null);
 }
 
+function withoutLegacyProductVisibility(product) {
+  if (!product || typeof product !== "object" || Array.isArray(product)) return product;
+  const { publicVisible: _legacyPublicVisible, ...nextProduct } = product;
+  return nextProduct;
+}
+
 function applyObjectDiff(currentItem = {}, baseItem = {}, incomingItem = {}) {
   if (!currentItem || typeof currentItem !== "object") return incomingItem;
   if (!baseItem || typeof baseItem !== "object") return incomingItem;
@@ -1141,6 +1195,57 @@ function publicCatalogMediaUrls(value, limit = 6) {
   return publicMediaUrls(value, limit).map(publicCatalogMediaUrl);
 }
 
+function videoDerivativeSourceDescriptor(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.length > 4096 || raw.includes("\0")) return null;
+
+  if (raw.startsWith("/uploads/")) {
+    try {
+      const parsed = new URL(raw, "http://fishroom.local");
+      const canonicalUrl = parsed.pathname;
+      const localPath = localUploadPathFromUrl(canonicalUrl);
+      if (
+        !localPath ||
+        isPersonnelPrivateAttachmentPath(uploadDir, localPath) ||
+        isVideoDerivativePath(uploadDir, localPath)
+      ) return null;
+      const relative = decodeURIComponent(canonicalUrl.replace(/^\/uploads\/?/, ""));
+      if (
+        relative === VIDEO_DERIVATIVE_DIRECTORY ||
+        relative.startsWith(`${VIDEO_DERIVATIVE_DIRECTORY}/`)
+      ) return null;
+      if (!SUPPORTED_VIDEO_MIMES.has(mimeForExtension(extname(localPath)))) return null;
+      return {
+        type: "local",
+        source: canonicalUrl,
+        identity: `local:${relative}`,
+        localPath,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const cosKey = cosKeyFromUrl(raw);
+  if (!cosKey || !SUPPORTED_VIDEO_MIMES.has(mimeForExtension(extname(cosKey)))) return null;
+  return {
+    type: "cos",
+    source: objectUrlForKey(cosKey),
+    identity: `cos:${cosKey}`,
+    cosKey,
+  };
+}
+
+function publicVideoDerivativeUrl(source, kind) {
+  const descriptor = videoDerivativeSourceDescriptor(source);
+  if (!descriptor) return "";
+  try {
+    return publicVideoDerivativeProxyPath(descriptor.source, kind, { secret: authTokenSecret });
+  } catch {
+    return "";
+  }
+}
+
 function publicBioRecordText(value) {
   return clampText(String(value ?? "").replace(/[；。]?备注[:：].*$/u, ""), 220);
 }
@@ -1148,6 +1253,14 @@ function publicBioRecordText(value) {
 function publicBioRecordPayload(record = {}, media = {}) {
   const photos = media.photos ?? publicMediaUrls(record?.photos, 6);
   const videos = media.videos ?? publicMediaUrls(record?.videos, 3);
+  // Keep these arrays index-aligned with `videos`: clients can use a tiny
+  // preview/poster in list views while retaining the original for detail play.
+  const videoPosters = videos.map((video) =>
+    publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.poster)
+  );
+  const videoPreviews = videos.map((video) =>
+    publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.preview)
+  );
   return {
     id: String(record?.id ?? ""),
     stockItemId: String(record?.stockItemId ?? ""),
@@ -1162,6 +1275,8 @@ function publicBioRecordPayload(record = {}, media = {}) {
     videoCount: videos.length,
     photos: photos.map(publicCatalogMediaUrl),
     videos: videos.map(publicCatalogMediaUrl),
+    videoPosters,
+    videoPreviews,
   };
 }
 
@@ -1200,6 +1315,7 @@ function publicCatalogProjectionFromRow(row = {}) {
     speciesCategoryMajorMap: row.species_category_major_map && typeof row.species_category_major_map === "object"
       ? row.species_category_major_map
       : {},
+    publicCatalogPolicy: normalizePublicCatalogPolicy(row.public_catalog_policy),
     products: Array.isArray(row.products) ? row.products : [],
     tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
     stock: Array.isArray(row.stock) ? row.stock : [],
@@ -1207,35 +1323,6 @@ function publicCatalogProjectionFromRow(row = {}) {
     shipments: Array.isArray(row.shipments) ? row.shipments : [],
     bioRecords: Array.isArray(row.bio_records) ? row.bio_records : [],
   };
-}
-
-const PUBLIC_CATALOG_MAJOR_CATEGORIES = [
-  { key: "marineFish", label: "海水鱼" },
-  { key: "coral", label: "珊瑚" },
-  { key: "invertebrate", label: "无脊椎" },
-  { key: "consumable", label: "耗材" },
-];
-const PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS = new Set(
-  PUBLIC_CATALOG_MAJOR_CATEGORIES.map((category) => category.key)
-);
-
-function inferPublicCatalogMajorCategory(categoryName) {
-  const name = String(categoryName ?? "").trim();
-  if (/鱼科$|海马科$|虾虎/u.test(name)) return "marineFish";
-  if (/耗材|器材|用品|药剂|海盐|饲料|滤材|测试|设备|工具|添加剂|包装/u.test(name)) return "consumable";
-  if (/珊瑚|硬骨|脑珊瑚|榔头|火柴头|纽扣|菇珊瑚|飞盘|SPS|LPS/iu.test(name)) return "coral";
-  if (/无脊椎|虾|蟹|螺|海星|海胆|海参|贝|管虫|海葵/u.test(name)) return "invertebrate";
-  return "marineFish";
-}
-
-function normalizePublicCatalogCategoryMajorMap(categories = [], value = {}) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return Object.fromEntries(categories.map((category) => [
-    category,
-    PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS.has(source[category])
-      ? source[category]
-      : inferPublicCatalogMajorCategory(category),
-  ]));
 }
 
 function uniqueNonEmptyEntityIds(items = []) {
@@ -1247,55 +1334,130 @@ function uniqueNonEmptyEntityIds(items = []) {
   return new Set([...counts].filter(([, count]) => count === 1).map(([id]) => id));
 }
 
-function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
+function publicRecordDateSortValue(record = {}) {
+  const text = String(record?.date ?? "").trim();
+  const milliseconds = Date.parse(text);
+  return { text, milliseconds: Number.isFinite(milliseconds) ? milliseconds : null };
+}
+
+function publicRecordIsLater(candidate = {}, current = {}) {
+  const left = publicRecordDateSortValue(candidate);
+  const right = publicRecordDateSortValue(current);
+  if (left.milliseconds !== null && right.milliseconds !== null && left.milliseconds !== right.milliseconds) {
+    return left.milliseconds > right.milliseconds;
+  }
+  if (left.milliseconds !== null && right.milliseconds === null) return true;
+  if (left.milliseconds === null && right.milliseconds !== null) return false;
+  return left.text.localeCompare(right.text) > 0;
+}
+
+function latestPublicMediaByStockId(records = [], allowedStockIds = new Set()) {
+  const latest = new Map();
+  const latestPhotos = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    const stockItemId = String(record?.stockItemId ?? "").trim();
+    if (!allowedStockIds.has(stockItemId)) continue;
+    const photos = publicMediaUrls(record?.photos, 6);
+    const videos = publicMediaUrls(record?.videos, 3);
+    if (photos.length === 0 && videos.length === 0) continue;
+    if (photos.length > 0) {
+      const currentPhoto = latestPhotos.get(stockItemId);
+      if (!currentPhoto || publicRecordIsLater(record, currentPhoto.record)) {
+        latestPhotos.set(stockItemId, { record, photos });
+      }
+    }
+    const current = latest.get(stockItemId);
+    if (!current || publicRecordIsLater(record, current.record)) {
+      latest.set(stockItemId, { record, photos, videos });
+    }
+  }
+  // The catalog intentionally keeps one compact maintenance record per fish.
+  // If the newest record is video-only, retain the newest real photo as its
+  // static card fallback instead of forcing every list card to generate a
+  // poster (or falling back to a generic product image).
+  for (const [stockItemId, media] of latest) {
+    if (media.photos.length > 0) continue;
+    const photoMedia = latestPhotos.get(stockItemId);
+    if (photoMedia) media.photos = photoMedia.photos;
+  }
+  return latest;
+}
+
+function buildGlobalPublicCatalogSelection(state = {}) {
   const normalizedState = normalizePickupShipmentsForState(state);
   const sourceStock = Array.isArray(normalizedState.stock) ? normalizedState.stock : [];
   const uniqueStockIds = uniqueNonEmptyEntityIds(sourceStock);
-  const scopedState = siteFilteredState({
+  const globalState = siteFilteredState({
     ...normalizedState,
     // A duplicated stock ID is ambiguous across sites. Exclude every copy from
     // the public catalog instead of letting array order choose one identity.
     stock: sourceStock.filter((item) => uniqueStockIds.has(String(item?.id ?? "").trim())),
-  }, siteId);
-  const shippedIds = shippedOutStockIds(scopedState);
-  const species = Array.isArray(scopedState.species) ? scopedState.species : [];
-  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
-  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
-  const bioRecords = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
-  const publicProductIds = new Set(
+  }, ALL_SITE_ID);
+  const shippedIds = shippedOutStockIds(globalState);
+  const activeOrderStockIds = orderActiveStockIds(globalState);
+  const species = Array.isArray(globalState.species) ? globalState.species : [];
+  const products = Array.isArray(globalState.products) ? globalState.products : [];
+  const stock = Array.isArray(globalState.stock) ? globalState.stock : [];
+  const bioRecords = Array.isArray(globalState.bioRecords) ? globalState.bioRecords : [];
+  const knownProductIds = new Set(
     products
-      .filter((product) => product?.publicVisible !== false)
       .map((product) => String(product?.id ?? ""))
       .filter(Boolean)
   );
-  const sellableStock = stock.filter((item) =>
+  const eligibleStock = stock.filter((item) =>
     !item?.sold &&
     item?.status !== "sick" &&
+    !activeOrderStockIds.has(String(item?.id ?? "")) &&
     isPhysicallyInTank(item, shippedIds) &&
-    publicProductIds.has(String(item?.productId ?? ""))
+    knownProductIds.has(String(item?.productId ?? ""))
   );
+  const eligibleStockIds = new Set(eligibleStock.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const latestMediaByStockId = latestPublicMediaByStockId(bioRecords, eligibleStockIds);
+  const allSpeciesCategories = species
+    .map((item) => String(item?.category ?? "").trim())
+    .filter(Boolean);
+  const completeCategoryMajorMap = normalizePublicCatalogCategoryMajorMap(
+    allSpeciesCategories,
+    globalState.speciesCategoryMajorMap
+  );
+  const selectedStock = selectPublicCatalogStock({
+    stock: eligibleStock,
+    products,
+    species,
+    speciesCategoryMajorMap: completeCategoryMajorMap,
+    publicCatalogPolicy: globalState.publicCatalogPolicy,
+    latestMediaAtByStockId: new Map(
+      [...latestMediaByStockId].map(([stockItemId, media]) => [stockItemId, media.record?.date])
+    ),
+  });
+  return {
+    globalState,
+    species,
+    products,
+    latestMediaByStockId,
+    completeCategoryMajorMap,
+    selectedStock,
+  };
+}
+
+function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
+  const selection = buildGlobalPublicCatalogSelection(state);
+  const scopedState = siteFilteredState({
+    ...selection.globalState,
+    stock: selection.selectedStock,
+  }, siteId);
+  const species = selection.species;
+  const products = selection.products;
+  const latestMediaByStockId = selection.latestMediaByStockId;
+  const completeCategoryMajorMap = selection.completeCategoryMajorMap;
+  const sellableStock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
   const availableProducts = products.filter((product) =>
-    product?.publicVisible !== false &&
     sellableProductIds.has(String(product?.id ?? ""))
   );
   const productIds = new Set(availableProducts.map((product) => String(product?.id ?? "")).filter(Boolean));
   const speciesIds = new Set(availableProducts.map((product) => String(product?.speciesId ?? "")).filter(Boolean));
-  const latestMediaByStockId = new Map();
-  bioRecords
-    .filter((record) => sellableStockIds.has(String(record?.stockItemId ?? "")))
-    .forEach((record) => {
-      const stockItemId = String(record?.stockItemId ?? "");
-      const photos = publicMediaUrls(record?.photos, 6);
-      const videos = publicMediaUrls(record?.videos, 3);
-      if (photos.length > 0 || videos.length > 0) {
-        const currentMedia = latestMediaByStockId.get(stockItemId);
-        if (!currentMedia || String(record?.date ?? "").localeCompare(String(currentMedia?.date ?? "")) > 0) {
-          latestMediaByStockId.set(stockItemId, { record, photos, videos });
-        }
-      }
-    });
   const categorySet = new Set(
     species
       .filter((item) => speciesIds.has(String(item?.id ?? "")))
@@ -1309,7 +1471,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   ];
   const speciesCategoryMajorMap = normalizePublicCatalogCategoryMajorMap(
     speciesCategories,
-    scopedState.speciesCategoryMajorMap
+    completeCategoryMajorMap
   );
 
   return {
@@ -1352,7 +1514,9 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         tankLocation: String(tank?.group?.location ?? ""),
       };
     }),
-    bioRecords: [...latestMediaByStockId.values()]
+    bioRecords: [...latestMediaByStockId]
+      .filter(([stockItemId]) => sellableStockIds.has(stockItemId))
+      .map(([, media]) => media)
       .sort((a, b) =>
         String(b?.record?.date ?? "").localeCompare(String(a?.record?.date ?? "")) ||
         String(a?.record?.id ?? "").localeCompare(String(b?.record?.id ?? ""))
@@ -1362,22 +1526,17 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
 }
 
 function buildPublicBioRecordsForStock(state = {}, siteId = ALL_SITE_ID, stockItemId = "") {
-  const scopedState = siteFilteredState(normalizePickupShipmentsForState(state), siteId);
-  const shippedIds = shippedOutStockIds(scopedState);
-  const products = Array.isArray(scopedState.products) ? scopedState.products : [];
-  const stock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const selection = buildGlobalPublicCatalogSelection(state);
+  const scopedState = siteFilteredState({
+    ...selection.globalState,
+    stock: selection.selectedStock,
+  }, siteId);
   const targetId = String(stockItemId ?? "").trim();
-  let item;
-  try {
-    item = findUniqueBioStockItem(stock, targetId);
-  } catch (error) {
-    if (error instanceof BioRecordConflictError) return null;
-    throw error;
-  }
-  if (!item || item?.sold || item?.status === "sick" || !isPhysicallyInTank(item, shippedIds)) return null;
-  const product = products.find((candidate) => String(candidate?.id ?? "") === String(item?.productId ?? ""));
-  if (!product || product?.publicVisible === false) return null;
-  const records = Array.isArray(scopedState.bioRecords) ? scopedState.bioRecords : [];
+  const selectedStockIds = new Set((Array.isArray(scopedState.stock) ? scopedState.stock : [])
+    .map((item) => String(item?.id ?? "").trim())
+    .filter(Boolean));
+  if (!selectedStockIds.has(targetId)) return null;
+  const records = Array.isArray(selection.globalState.bioRecords) ? selection.globalState.bioRecords : [];
   try {
     assertUniqueBioRecordIds(records.filter((record) => String(record?.stockItemId ?? "") === targetId));
   } catch (error) {
@@ -2131,11 +2290,17 @@ function statePatchOperationLogs(req, current = {}, next = {}, patchedKeys = [])
     const actions = statePatchActionsForKey(key, current[key], next[key]);
     if (actions.length === 0) return [];
     const moduleLabel = STATE_PATCH_MODULE_LABELS[key] ?? "系统数据";
+    const detail = key === "publicCatalogPolicy"
+      ? describePublicCatalogPolicyChanges(current[key], next[key], {
+        products: next.products,
+        species: next.species,
+      })
+      : `已通过服务端校验保存「${moduleLabel}」变更`;
     return [createOperationLog(
       req,
       moduleLabel,
       actions.map((action) => actionLabels[action]).join("、"),
-      `已通过服务端校验保存「${moduleLabel}」变更`
+      detail
     )];
   });
 }
@@ -3086,6 +3251,7 @@ function isPublicApiRoute(req, url) {
   if (url.pathname === "/api/public/catalog" && req.method === "GET") return true;
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") return true;
   if (url.pathname === "/api/public/media/cos" && ["GET", "HEAD"].includes(req.method)) return true;
+  if (url.pathname === "/api/public/media/video-derivative" && ["GET", "HEAD"].includes(req.method)) return true;
   if (url.pathname === "/api/auth/login" && req.method === "POST") return true;
   if (url.pathname === "/api/auth/logout" && req.method === "POST") return true;
   if (url.pathname === "/api/assistant/feishu/events" && req.method === "POST") return true;
@@ -6386,11 +6552,24 @@ async function probeVideoFile(inputPath) {
 
 async function prepareWechatVideoFile(inputPath, outputPath) {
   let fastRemux = false;
+  let probeSucceeded = false;
+  let selectedAudio = null;
   try {
-    fastRemux = canFastRemuxWechatVideo(await probeVideoFile(inputPath), VIDEO_TRANSCODE_MAX_EDGE);
+    const probe = await probeVideoFile(inputPath);
+    probeSucceeded = true;
+    selectedAudio = selectWechatAudioStream(probe);
+    fastRemux = canFastRemuxWechatVideo(probe, VIDEO_TRANSCODE_MAX_EDGE);
   } catch (error) {
     console.warn(`Video probe failed; falling back to transcoding: ${error.message}`);
   }
+
+  const audioMapArgs = ({ withoutAudio = false } = {}) => {
+    if (withoutAudio || (probeSucceeded && !selectedAudio)) return ["-an"];
+    if (selectedAudio) return ["-map", `0:${selectedAudio.index}`];
+    // ffprobe failure should not reject an otherwise valid upload. Try the
+    // first audio stream, then fall back to a video-only transcode below.
+    return ["-map", "0:a:0?"];
+  };
 
   if (fastRemux) {
     try {
@@ -6403,10 +6582,10 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
         inputPath,
         "-map",
         "0:v:0",
-        "-map",
-        "0:a?",
-        "-c",
+        ...audioMapArgs(),
+        "-c:v",
         "copy",
+        ...(selectedAudio ? ["-c:a", "copy"] : []),
         "-movflags",
         "+faststart",
         outputPath,
@@ -6421,7 +6600,7 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
     }
   }
 
-  await execFileAsync(FFMPEG_PATH, [
+  const transcodeArgs = ({ withoutAudio = false } = {}) => [
       "-y",
       "-hide_banner",
       "-loglevel",
@@ -6434,8 +6613,7 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
       inputPath,
       "-map",
       "0:v:0",
-      "-map",
-      "0:a?",
+      ...audioMapArgs({ withoutAudio }),
       "-c:v",
       "libx264",
       "-threads:v",
@@ -6452,18 +6630,28 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
       "main",
       "-level",
       "4.0",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "128k",
+      ...(!withoutAudio && (selectedAudio || !probeSucceeded)
+        ? ["-c:a", "aac", "-b:a", "128k"]
+        : []),
       "-movflags",
       "+faststart",
       outputPath,
-  ], {
+  ];
+  const execOptions = {
     timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
-  });
-  return { outputPath, mode: "transcode" };
+  };
+  try {
+    await execFileAsync(FFMPEG_PATH, transcodeArgs(), execOptions);
+    return { outputPath, mode: "transcode" };
+  } catch (error) {
+    const attemptedAudio = Boolean(selectedAudio) || !probeSucceeded;
+    if (!attemptedAudio) throw error;
+    console.warn(`Video audio transcode failed; retrying without audio: ${error.message}`);
+    await rm(outputPath, { force: true }).catch(() => undefined);
+    await execFileAsync(FFMPEG_PATH, transcodeArgs({ withoutAudio: true }), execOptions);
+    return { outputPath, mode: "transcode-no-audio" };
+  }
 }
 
 async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", options = {}) {
@@ -6552,6 +6740,365 @@ function localUploadPathFromUrl(value) {
   const relative = decodeURIComponent(value.replace(/^\/uploads\/?/, ""));
   const candidate = normalize(join(uploadDir, relative));
   return candidate === uploadDir || candidate.startsWith(`${uploadDir}/`) ? candidate : "";
+}
+
+function isVideoDerivativePath(baseDirectory, candidatePath) {
+  const derivativeRoot = normalize(join(baseDirectory, VIDEO_DERIVATIVE_DIRECTORY));
+  const candidate = normalize(String(candidatePath ?? ""));
+  return candidate === derivativeRoot || candidate.startsWith(`${derivativeRoot}${sep}`);
+}
+
+function videoDerivativePaths(descriptor) {
+  const cacheId = videoDerivativeCacheId(descriptor.identity);
+  return {
+    cacheId,
+    posterPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.poster)),
+    previewPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.preview)),
+  };
+}
+
+async function videoDerivativeFileReady(filePath, kind) {
+  let handle = null;
+  try {
+    const info = await stat(filePath);
+    const maximum = kind === VIDEO_DERIVATIVE_KINDS.poster
+      ? MAX_VIDEO_POSTER_BYTES
+      : MAX_VIDEO_PREVIEW_BYTES;
+    if (!info.isFile() || info.size < 12 || info.size > maximum) return false;
+    handle = await open(filePath, "r");
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead < 8) return false;
+    if (kind === VIDEO_DERIVATIVE_KINDS.poster) {
+      return header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    }
+    return header.subarray(4, 8).toString("ascii") === "ftyp";
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function videoDerivativesReady(paths) {
+  const [posterReady, previewReady] = await Promise.all([
+    videoDerivativeFileReady(paths.posterPath, VIDEO_DERIVATIVE_KINDS.poster),
+    videoDerivativeFileReady(paths.previewPath, VIDEO_DERIVATIVE_KINDS.preview),
+  ]);
+  return posterReady && previewReady;
+}
+
+async function assertVideoDerivativeSourceFile(filePath) {
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    const error = new Error("视频源文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!info.isFile() || info.size <= 0) {
+    const error = new Error("视频源文件不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (info.size > MAX_VIDEO_UPLOAD_BYTES) {
+    const error = new Error("视频源文件超过处理上限");
+    error.statusCode = 413;
+    throw error;
+  }
+  return info;
+}
+
+async function cosObjectMetadata(key) {
+  const client = getCosClient("download");
+  if (!client) {
+    const error = new Error("COS is not configured");
+    error.statusCode = 503;
+    throw error;
+  }
+  return await new Promise((resolvePromise, rejectPromise) => {
+    client.headObject({
+      Bucket: cosConfig.bucket,
+      Region: cosConfig.region,
+      Key: key,
+    }, (error, data = {}) => {
+      if (error) {
+        const next = new Error(Number(error.statusCode || error.status) === 404
+          ? "视频源文件不存在"
+          : "视频源文件读取失败");
+        next.statusCode = Number(error.statusCode || error.status) === 404 ? 404 : 502;
+        rejectPromise(next);
+        return;
+      }
+      const contentLength = Number(
+        data.ContentLength || upstreamHeader(data.headers, "content-length")
+      );
+      const contentType = normalizeMediaMime(
+        data.ContentType || upstreamHeader(data.headers, "content-type")
+      );
+      if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
+        const next = new Error("视频源文件大小无效");
+        next.statusCode = 502;
+        rejectPromise(next);
+        return;
+      }
+      if (contentLength > MAX_VIDEO_UPLOAD_BYTES) {
+        const next = new Error("视频源文件超过处理上限");
+        next.statusCode = 413;
+        rejectPromise(next);
+        return;
+      }
+      if (contentType && !SUPPORTED_VIDEO_MIMES.has(contentType)) {
+        const next = new Error("视频源文件类型无效");
+        next.statusCode = 415;
+        rejectPromise(next);
+        return;
+      }
+      resolvePromise({ contentLength, contentType });
+    });
+  });
+}
+
+async function downloadCosVideoSourceToFile(key, filePath) {
+  const metadata = await cosObjectMetadata(key);
+  const client = getCosClient("download");
+  const output = createWriteStream(filePath, { flags: "wx", mode: 0o600 });
+  await new Promise((resolvePromise, rejectPromise) => {
+    let callbackFinished = false;
+    let streamFinished = false;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      if (error) {
+        settled = true;
+        output.destroy();
+        rejectPromise(error);
+        return;
+      }
+      if (!callbackFinished || !streamFinished) return;
+      settled = true;
+      resolvePromise();
+    };
+    output.once("finish", () => {
+      streamFinished = true;
+      finish();
+    });
+    output.once("error", (error) => finish(error));
+    client.getObject({
+      Bucket: cosConfig.bucket,
+      Region: cosConfig.region,
+      Key: key,
+      Headers: {},
+      Output: output,
+    }, (error) => {
+      if (error) {
+        const next = new Error("视频源文件下载失败");
+        next.statusCode = Number(error.statusCode || error.status) === 404 ? 404 : 502;
+        finish(next);
+        return;
+      }
+      callbackFinished = true;
+      finish();
+    });
+  });
+  const downloaded = await assertVideoDerivativeSourceFile(filePath);
+  if (downloaded.size !== metadata.contentLength) {
+    const error = new Error("视频源文件下载不完整");
+    error.statusCode = 502;
+    throw error;
+  }
+}
+
+async function generateVideoDerivatives(descriptor, paths, options = {}) {
+  const derivativeRoot = join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY);
+  await mkdir(derivativeRoot, { recursive: true });
+  const tempDir = await mkdtemp(join(derivativeRoot, ".job-"));
+  const tempPreviewPath = join(tempDir, "preview.mp4");
+  const tempPosterPath = join(tempDir, "poster.jpg");
+  let inputPath = String(options.sourcePath ?? "").trim();
+  try {
+    if (inputPath) {
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "local") {
+      inputPath = descriptor.localPath;
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "cos") {
+      inputPath = join(tempDir, `source${extname(descriptor.cosKey) || ".mp4"}`);
+      await downloadCosVideoSourceToFile(descriptor.cosKey, inputPath);
+    } else {
+      const error = new Error("视频源地址无效");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    try {
+      await execFileAsync(FFMPEG_PATH, videoDerivativeFfmpegArgs(
+        inputPath,
+        tempPreviewPath,
+        tempPosterPath,
+        {
+          durationSeconds: VIDEO_PREVIEW_DURATION_SECONDS,
+          maxEdge: VIDEO_PREVIEW_MAX_EDGE,
+          framesPerSecond: VIDEO_PREVIEW_FPS,
+          bitrateKbps: VIDEO_PREVIEW_BITRATE_KBPS,
+          threads: VIDEO_TRANSCODE_THREADS,
+        },
+      ), {
+        timeout: VIDEO_PREVIEW_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+    } catch (cause) {
+      console.warn(`Video derivative ffmpeg failed for cache ${paths.cacheId}: ${cause.message}`);
+      const error = new Error("视频预览生成失败");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    const generated = {
+      posterPath: tempPosterPath,
+      previewPath: tempPreviewPath,
+    };
+    if (!await videoDerivativesReady(generated)) {
+      const error = new Error("视频预览生成结果无效");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    await Promise.all([
+      mkdir(join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY, "posters"), { recursive: true }),
+      mkdir(join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY, "previews"), { recursive: true }),
+    ]);
+    await rename(tempPosterPath, paths.posterPath);
+    await rename(tempPreviewPath, paths.previewPath);
+    return paths;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function ensureVideoDerivatives(sourceValue, options = {}) {
+  const descriptor = videoDerivativeSourceDescriptor(sourceValue);
+  if (!descriptor) {
+    const error = new Error("视频预览来源无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  const paths = videoDerivativePaths(descriptor);
+  if (await videoDerivativesReady(paths)) return paths;
+
+  const recentFailure = videoDerivativeFailures.get(paths.cacheId);
+  if (recentFailure && recentFailure.retryAfter > Date.now()) {
+    const error = new Error("视频预览正在等待重试");
+    error.statusCode = 503;
+    throw error;
+  }
+  if (recentFailure) videoDerivativeFailures.delete(paths.cacheId);
+
+  const existingJob = videoDerivativeJobs.get(paths.cacheId);
+  if (existingJob) return await existingJob;
+
+  const job = (async () => {
+    const release = await videoPreviewLimiter.acquire();
+    try {
+      // A queued sibling process may have finished while this task waited.
+      if (await videoDerivativesReady(paths)) return paths;
+      const generated = await generateVideoDerivatives(descriptor, paths, options);
+      videoDerivativeFailures.delete(paths.cacheId);
+      return generated;
+    } catch (error) {
+      videoDerivativeFailures.delete(paths.cacheId);
+      videoDerivativeFailures.set(paths.cacheId, {
+        retryAfter: Date.now() + VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS,
+      });
+      while (videoDerivativeFailures.size > MAX_VIDEO_DERIVATIVE_FAILURES) {
+        const oldestKey = videoDerivativeFailures.keys().next().value;
+        if (oldestKey === undefined) break;
+        videoDerivativeFailures.delete(oldestKey);
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  })();
+  videoDerivativeJobs.set(paths.cacheId, job);
+  job.then(
+    () => videoDerivativeJobs.delete(paths.cacheId),
+    () => videoDerivativeJobs.delete(paths.cacheId),
+  );
+  return await job;
+}
+
+function scheduleVideoDerivativeGeneration(source, sourcePath, cleanupDir = "") {
+  setImmediate(() => {
+    void ensureVideoDerivatives(source, { sourcePath })
+      .catch((error) => {
+        console.warn(`Video preview generation deferred: ${error.message}`);
+      })
+      .finally(() => {
+        if (cleanupDir) {
+          void rm(cleanupDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      });
+  });
+}
+
+async function sendVideoDerivativeFile(req, res, filePath, kind, cacheControl) {
+  const info = await stat(filePath);
+  const requestedRange = normalizeSingleByteRange(req.headers.range);
+  if (!requestedRange.valid) {
+    res.writeHead(416, {
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes */${info.size}`,
+      "Cache-Control": "no-store",
+    });
+    res.end();
+    return;
+  }
+
+  let start = 0;
+  let end = info.size - 1;
+  let statusCode = 200;
+  if (requestedRange.present) {
+    const match = requestedRange.value.match(/^bytes=(\d*)-(\d*)$/);
+    if (match?.[1]) start = Number(match[1]);
+    if (match?.[2]) end = Number(match[2]);
+    if (!match?.[1] && match?.[2]) {
+      const suffixLength = Number(match[2]);
+      start = Math.max(0, info.size - suffixLength);
+      end = info.size - 1;
+    }
+    if (
+      !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+      start < 0 || end < start || start >= info.size
+    ) {
+      res.writeHead(416, {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes */${info.size}`,
+        "Cache-Control": "no-store",
+      });
+      res.end();
+      return;
+    }
+    end = Math.min(end, info.size - 1);
+    statusCode = 206;
+  }
+
+  const contentLength = Math.max(0, end - start + 1);
+  res._logicalResponseBytes = req.method === "HEAD" ? 0 : contentLength;
+  res.writeHead(statusCode, {
+    "Content-Type": kind === VIDEO_DERIVATIVE_KINDS.poster ? "image/jpeg" : "video/mp4",
+    "Content-Length": String(contentLength),
+    "Cache-Control": cacheControl,
+    "Accept-Ranges": "bytes",
+    "X-Content-Type-Options": "nosniff",
+    ...(statusCode === 206 ? { "Content-Range": `bytes ${start}-${end}/${info.size}` } : {}),
+  });
+  if (req.method === "HEAD" || contentLength === 0) {
+    res.end();
+    return;
+  }
+  createReadStream(filePath, { start, end }).pipe(res);
 }
 
 async function externalizeDataUrl(value) {
@@ -6814,6 +7361,32 @@ async function importLegacyStateIfPresent() {
     [stateId, JSON.stringify(legacyState)]
   );
   console.log(`Imported legacy JSON state from ${legacyStateFile}`);
+}
+
+async function migrateLegacyPublicCatalogVisibility() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+    const currentState = rows[0]?.data;
+    const migration = migrateLegacyPublicCatalogVisibilityState(currentState);
+    if (!migration.changed) {
+      await client.query("ROLLBACK");
+      return;
+    }
+    await client.query(
+      "UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1",
+      [stateId, JSON.stringify(migration.state)]
+    );
+    await client.query("COMMIT");
+    console.log(`Migrated legacy public product visibility into fish-list policy: ${migration.migratedProductIds.length}`);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("Failed to migrate legacy public product visibility:", error);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function backfillDefaultSites() {
@@ -7448,6 +8021,7 @@ async function ensureSchema() {
       ON finance_payment_statements (state_id, matched_order_id, match_status)
     `);
     await importLegacyStateIfPresent();
+    await migrateLegacyPublicCatalogVisibility();
     await backfillDefaultSites();
     await backfillPersonnelProfiles();
     await ensurePersonnelSensitiveDataEncryption();
@@ -7655,7 +8229,61 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/public/media/video-derivative" && ["GET", "HEAD"].includes(req.method)) {
+    try {
+      const source = String(url.searchParams.get("url") ?? "").trim();
+      const kind = normalizeVideoDerivativeKind(url.searchParams.get("kind"));
+      const now = Date.now();
+      const expiresAt = url.searchParams.get("expires");
+      const validToken = verifyPublicVideoDerivativeToken({
+        source,
+        kind,
+        expiresAt,
+        signature: url.searchParams.get("signature"),
+        secret: authTokenSecret,
+        now,
+      });
+      if (!validToken) {
+        sendJson(req, res, 403, { error: "Public video preview link is invalid or expired" }, {
+          "Cache-Control": "no-store",
+        });
+        return;
+      }
+      if (!videoDerivativeSourceDescriptor(source)) {
+        sendJson(req, res, 400, { error: "Invalid video preview source" }, {
+          "Cache-Control": "no-store",
+        });
+        return;
+      }
+
+      const paths = await ensureVideoDerivatives(source);
+      if (req.aborted || res.destroyed) return;
+      const filePath = kind === VIDEO_DERIVATIVE_KINDS.poster
+        ? paths.posterPath
+        : paths.previewPath;
+      const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt, { now });
+      await sendVideoDerivativeFile(req, res, filePath, kind, `public, max-age=${maxAge}`);
+    } catch (error) {
+      if (req.aborted || res.destroyed) return;
+      const candidateStatus = Number(error?.statusCode ?? 0);
+      const status = [400, 404, 413, 415, 503].includes(candidateStatus) ? candidateStatus : 502;
+      sendJson(req, res, status, {
+        error: status === 503
+          ? "视频预览生成任务较多，请稍后重试"
+          : status === 404
+            ? "视频预览源文件不存在"
+            : status === 413
+              ? "视频源文件超过处理上限"
+              : status === 415
+                ? "视频源文件类型无效"
+                : "视频预览生成失败，请稍后重试",
+      }, { "Cache-Control": "no-store" });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/public/catalog" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
     let releaseProjectionSlot = null;
     try {
       const requestedSiteId = normalizeSiteScope(url.searchParams.get("siteId") ?? ALL_SITE_ID);
@@ -7690,6 +8318,7 @@ async function handleApi(req, res, url) {
            data -> 'species' AS species,
            data -> 'speciesCategories' AS species_categories,
            data -> 'speciesCategoryMajorMap' AS species_category_major_map,
+           data -> 'publicCatalogPolicy' AS public_catalog_policy,
            data -> 'products' AS products,
            data -> 'tankGroups' AS tank_groups,
            data -> 'stock' AS stock,
@@ -7736,6 +8365,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/public/bio-records" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
     let releaseProjectionSlot = null;
     try {
       const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
@@ -7783,6 +8413,20 @@ async function handleApi(req, res, url) {
              LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stock_rows(stock_item)
            WHERE stock_item ->> 'id' = $2
          ),
+         candidate_stock AS MATERIALIZED (
+           SELECT candidate_item AS stock_item, candidate_ordinality AS inventory_ordinality
+           FROM source,
+             LATERAL jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb))
+               WITH ORDINALITY AS stock_rows(candidate_item, candidate_ordinality)
+           WHERE candidate_item ->> 'productId' = (
+             SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
+           )
+         ),
+         candidate_stock_ids AS MATERIALIZED (
+           SELECT stock_item ->> 'id' AS stock_item_id
+           FROM candidate_stock
+           WHERE COALESCE(stock_item ->> 'id', '') <> ''
+         ),
          relevant_orders AS MATERIALIZED (
            SELECT order_item
            FROM source,
@@ -7793,23 +8437,27 @@ async function handleApi(req, res, url) {
                CASE WHEN jsonb_typeof(order_item -> 'items') = 'array'
                  THEN order_item -> 'items' ELSE '[]'::jsonb END
              ) AS order_items(item)
-             WHERE item ->> 'stockItemId' = $2
+             WHERE item ->> 'stockItemId' IN (
+               SELECT stock_item_id FROM candidate_stock_ids
+             )
            )
          )
          SELECT
            version,
            data -> 'sites' AS sites,
+           data -> 'speciesCategoryMajorMap' AS species_category_major_map,
+           data -> 'publicCatalogPolicy' AS public_catalog_policy,
            COALESCE((
              SELECT jsonb_agg(group_item)
              FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(group_item)
              WHERE EXISTS (
                SELECT 1
                FROM jsonb_array_elements(
-                 CASE WHEN jsonb_typeof(group_item -> 'subTanks') = 'array'
-                   THEN group_item -> 'subTanks' ELSE '[]'::jsonb END
+               CASE WHEN jsonb_typeof(group_item -> 'subTanks') = 'array'
+                 THEN group_item -> 'subTanks' ELSE '[]'::jsonb END
                ) AS sub_tanks(sub_tank)
-               WHERE sub_tank ->> 'id' = (
-                 SELECT stock_item ->> 'subTankId' FROM target_stock LIMIT 1
+               WHERE sub_tank ->> 'id' IN (
+                 SELECT stock_item ->> 'subTankId' FROM candidate_stock
                )
              )
            ), '[]'::jsonb) AS tank_groups,
@@ -7820,6 +8468,18 @@ async function handleApi(req, res, url) {
                SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
              )
            ), '[]'::jsonb) AS products,
+           COALESCE((
+             SELECT jsonb_agg(species_item)
+             FROM jsonb_array_elements(COALESCE(data -> 'species', '[]'::jsonb)) AS species_rows(species_item)
+             WHERE species_item ->> 'id' = (
+               SELECT product_item ->> 'speciesId'
+               FROM jsonb_array_elements(COALESCE(data -> 'products', '[]'::jsonb)) AS product_rows(product_item)
+               WHERE product_item ->> 'id' = (
+                 SELECT stock_item ->> 'productId' FROM target_stock LIMIT 1
+               )
+               LIMIT 1
+             )
+           ), '[]'::jsonb) AS species,
            COALESCE((SELECT jsonb_agg(order_item) FROM relevant_orders), '[]'::jsonb) AS orders,
            COALESCE((
              SELECT jsonb_agg(shipment_item)
@@ -7832,30 +8492,50 @@ async function handleApi(req, res, url) {
                  CASE WHEN jsonb_typeof(shipment_item -> 'itemStockIds') = 'array'
                    THEN shipment_item -> 'itemStockIds' ELSE '[]'::jsonb END
                ) AS shipment_stock_ids(stock_id)
-               WHERE stock_id = $2
+               WHERE stock_id IN (
+                 SELECT stock_item_id FROM candidate_stock_ids
+               )
              )
            ), '[]'::jsonb) AS shipments,
            (SELECT count(*)::int FROM target_stock) AS stock_item_count,
-           (SELECT stock_item FROM target_stock LIMIT 1) AS stock_item,
+           COALESCE((
+             SELECT jsonb_agg(stock_item ORDER BY inventory_ordinality)
+             FROM candidate_stock
+           ), '[]'::jsonb) AS stock,
            COALESCE((
              SELECT jsonb_agg(record_item)
              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS bio_rows(record_item)
              WHERE record_item ->> 'stockItemId' = $2
+               OR (
+                 record_item ->> 'stockItemId' IN (
+                   SELECT stock_item_id FROM candidate_stock_ids
+                 )
+                 AND (
+                   CASE WHEN jsonb_typeof(record_item -> 'photos') = 'array'
+                     THEN jsonb_array_length(record_item -> 'photos') ELSE 0 END > 0
+                   OR
+                   CASE WHEN jsonb_typeof(record_item -> 'videos') = 'array'
+                     THEN jsonb_array_length(record_item -> 'videos') ELSE 0 END > 0
+                 )
+               )
            ), '[]'::jsonb) AS bio_records
          FROM source`,
         [stateId, stockItemId]
       );
       const stockItemCount = Number(rows[0]?.stock_item_count ?? 0);
-      const stockItem = rows[0]?.stock_item && typeof rows[0].stock_item === "object"
-        ? rows[0].stock_item
-        : null;
       const projectedState = {
         sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+        species: Array.isArray(rows[0]?.species) ? rows[0].species : [],
+        speciesCategoryMajorMap: rows[0]?.species_category_major_map &&
+          typeof rows[0].species_category_major_map === "object"
+          ? rows[0].species_category_major_map
+          : {},
+        publicCatalogPolicy: normalizePublicCatalogPolicy(rows[0]?.public_catalog_policy),
         tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
         products: Array.isArray(rows[0]?.products) ? rows[0].products : [],
         orders: Array.isArray(rows[0]?.orders) ? rows[0].orders : [],
         shipments: Array.isArray(rows[0]?.shipments) ? rows[0].shipments : [],
-        stock: stockItemCount === 1 && stockItem ? [stockItem] : [],
+        stock: Array.isArray(rows[0]?.stock) ? rows[0].stock : [],
         bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
       };
       const bioRecords = stockItemCount === 1
@@ -10038,11 +10718,14 @@ async function handleApi(req, res, url) {
     let releaseTranscodeSlot = null;
     let releaseVideoUploadSlot = null;
     let videoTempDir = "";
+    let videoDerivativeSourcePath = "";
+    let mediaKind = "media";
     try {
       const startedAt = Date.now();
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
       const isImage = isSupportedImageMime(mime);
       const isVideo = SUPPORTED_VIDEO_MIMES.has(mime);
+      mediaKind = isVideo ? "video" : (isImage ? "image" : "media");
       if (!isImage && !isVideo) {
         sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
         return;
@@ -10070,10 +10753,12 @@ async function handleApi(req, res, url) {
           processFinishedAt = Date.now();
           storedBytes = (await stat(processed.outputPath)).size;
           mediaUrl = await storeOriginalMediaFile(processed.outputPath, storedMime);
+          videoDerivativeSourcePath = processed.outputPath;
         } else if (receivedBytes > 0) {
           processFinishedAt = Date.now();
           storedBytes = receivedBytes;
           mediaUrl = await storeOriginalMediaFile(inputPath, storedMime);
+          videoDerivativeSourcePath = inputPath;
         }
       } else {
         const buffer = await readRawBody(req, maxBytes);
@@ -10096,6 +10781,12 @@ async function handleApi(req, res, url) {
           `store;dur=${Math.max(0, finishedAt - processFinishedAt)}`,
           `total;dur=${Math.max(0, finishedAt - startedAt)}`,
         ].join(", ");
+      const posterUrl = isVideo && mediaUrl
+        ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.poster)
+        : "";
+      const previewUrl = isVideo && mediaUrl
+        ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.preview)
+        : "";
       sendJson(req, res, 200, {
         ok: true,
         url: mediaUrl,
@@ -10104,14 +10795,30 @@ async function handleApi(req, res, url) {
         storedSize: storedBytes,
         processingMode,
         storage: cosReady() ? "cos" : "local",
+        ...(isVideo ? {
+          derivativeStatus: posterUrl && previewUrl ? "processing" : "unavailable",
+          posterUrl,
+          previewUrl,
+        } : {}),
       }, { "Server-Timing": uploadTimingHeader });
+      if (isVideo && mediaUrl && videoDerivativeSourcePath) {
+        // The original upload is already complete. Transfer temporary-file
+        // cleanup to a detached, bounded preview task so response latency does
+        // not include poster/preview encoding.
+        const cleanupDir = videoTempDir;
+        videoTempDir = "";
+        scheduleVideoDerivativeGeneration(mediaUrl, videoDerivativeSourcePath, cleanupDir);
+      }
     } catch (error) {
       const status = [400, 413, 503].includes(error?.statusCode) ? error.statusCode : 500;
+      console.error(`Media upload failed (${mediaKind}):`, error);
       sendJson(req, res, status, {
         ok: false,
         error: status === 413
           ? `上传文件过大，当前限制为图片 ${Math.round(MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024)}MB、视频 ${Math.round(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024)}MB`
-          : (error.message || "媒体上传失败"),
+          : (status === 500
+              ? (mediaKind === "video" ? "视频上传失败，请稍后重试" : "媒体上传失败，请稍后重试")
+              : (error.message || "媒体上传失败")),
       });
     } finally {
       releaseTranscodeSlot?.();
@@ -10213,6 +10920,83 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/login-data" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel FROM app_state WHERE id = $1", [stateId]);
     sendJson(req, res, 200, { personnel: sanitizePersonnelForLoginData(rows[0]?.personnel ?? [], req) });
+    return;
+  }
+
+  if (url.pathname === "/api/batches/revenue-metrics" && req.method === "GET") {
+    const requestedSiteId = String(url.searchParams.get("siteId") ?? "").trim();
+    if (!requestedSiteId || requestedSiteId === ALL_SITE_ID) {
+      sendJson(req, res, 400, {
+        ok: false,
+        error: "查看采购批次回款前请选择具体场地",
+      }, { "Cache-Control": "no-store, private" });
+      return;
+    }
+    try {
+      const { rows } = await pool.query(
+        `SELECT revision::text AS version,
+                data -> 'sites' AS sites,
+                data -> 'tankGroups' AS tank_groups,
+                data -> 'batches' AS batches,
+                data -> 'stock' AS stock,
+                data -> 'orders' AS orders,
+                data -> 'shipments' AS shipments
+         FROM app_state
+         WHERE id = $1`,
+        [stateId]
+      );
+      const row = rows[0] ?? {};
+      const state = normalizePickupShipmentsForState({
+        sites: Array.isArray(row.sites) ? row.sites : [],
+        tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
+        batches: Array.isArray(row.batches) ? row.batches : [],
+        stock: Array.isArray(row.stock) ? row.stock : [],
+        orders: Array.isArray(row.orders) ? row.orders : [],
+        shipments: Array.isArray(row.shipments) ? row.shipments : [],
+      });
+      const siteId = requireVisibleSiteForAuth(
+        req,
+        state,
+        requestedSiteId,
+        "不能查看未授权场地的采购批次"
+      );
+      const scopedState = siteFilteredState(state, siteId);
+      const settlementResult = await pool.query(
+        `SELECT external_order_no,
+                COUNT(*)::int AS row_count,
+                COALESCE(SUM(
+                  CASE
+                    WHEN jsonb_typeof(data -> 'incomeTotal') = 'number'
+                    THEN (data ->> 'incomeTotal')::numeric
+                    ELSE 0
+                  END
+                ), 0)::text AS income_total
+         FROM finance_platform_settlements
+         WHERE state_id = $1 AND site_id = $2 AND platform = 'douyin'
+         GROUP BY external_order_no`,
+        [stateId, siteId]
+      );
+      const result = buildBatchRevenueMetrics({
+        batches: scopedState.batches,
+        stock: scopedState.stock,
+        orders: scopedState.orders,
+        shipments: scopedState.shipments,
+        platformSettlements: settlementResult.rows,
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        siteId,
+        version: row.version ?? null,
+        ...result,
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      const statusCode = Number(error?.statusCode ?? 500);
+      if (statusCode >= 500) console.error("Failed to load batch revenue metrics:", error);
+      sendJson(req, res, statusCode, {
+        ok: false,
+        error: statusCode >= 500 ? "采购批次回款加载失败" : error?.message || "采购批次回款加载失败",
+      }, { "Cache-Control": "no-store, private" });
+    }
     return;
   }
 
@@ -10598,43 +11382,13 @@ async function handleApi(req, res, url) {
         )`;
       }
       if (plan.changedKeys.includes("bioRecords")) {
-        const recordIdParam = bindValue(targetRecordId);
-        if (action === "delete") {
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            (
-              SELECT COALESCE(jsonb_agg(record_row.record_item ORDER BY record_row.ordinality), '[]'::jsonb)
-              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
-                WITH ORDINALITY AS record_row(record_item, ordinality)
-              WHERE btrim(COALESCE(record_row.record_item ->> 'id', '')) <> ${recordIdParam}
-            ),
-            true
-          )`;
-        } else if (action === "updateTime") {
-          const recordParam = bindValue(JSON.stringify(plan.record));
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            (
-              SELECT COALESCE(jsonb_agg(
-                CASE WHEN btrim(COALESCE(record_row.record_item ->> 'id', '')) = ${recordIdParam} THEN ${recordParam}::jsonb ELSE record_row.record_item END
-                ORDER BY record_row.ordinality
-              ), '[]'::jsonb)
-              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
-                WITH ORDINALITY AS record_row(record_item, ordinality)
-            ),
-            true
-          )`;
-        } else {
-          const recordParam = bindValue(JSON.stringify(plan.record));
-          dataExpression = `jsonb_set(
-            ${dataExpression},
-            '{bioRecords}',
-            COALESCE(data -> 'bioRecords', '[]'::jsonb) || jsonb_build_array(${recordParam}::jsonb),
-            true
-          )`;
-        }
+        dataExpression = appendBioRecordsMutationSql({
+          dataExpression,
+          action,
+          targetRecordId,
+          record: plan.record,
+          bindValue,
+        });
       }
       const operationLogParam = bindValue(JSON.stringify(operationLog));
       const maxExistingOperationLogsParam = bindValue(Math.max(0, MAX_OPERATION_LOGS - 1));
@@ -12430,6 +13184,12 @@ async function handleApi(req, res, url) {
 	      }
 	      const basePatch = parsed?.basePatch && typeof parsed.basePatch === "object" ? parsed.basePatch : {};
 	      validateStatePatchShapes(basePatch);
+	      if (Array.isArray(rawPatch.products)) {
+	        rawPatch.products = rawPatch.products.map(withoutLegacyProductVisibility);
+	      }
+	      if (Array.isArray(basePatch.products)) {
+	        basePatch.products = basePatch.products.map(withoutLegacyProductVisibility);
+	      }
 	      if (Array.isArray(parsed?.operationLogs) && parsed.operationLogs.length > 0) {
 	        throw new Error("操作日志只能由服务端生成");
 	      }
@@ -12449,6 +13209,25 @@ async function handleApi(req, res, url) {
 	      if (!rows[0]) throw new Error("系统状态不存在");
 	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
 	      const current = normalizePickupShipmentsForState(persistedCurrent);
+	      if (projectedKeys.includes("products") && Array.isArray(current.products)) {
+	        current.products = current.products.map(withoutLegacyProductVisibility);
+	      }
+	      if (projectedKeys.includes("publicCatalogPolicy")) {
+	        current.publicCatalogPolicy = normalizePublicCatalogPolicy(current.publicCatalogPolicy);
+	      }
+	      if (Object.prototype.hasOwnProperty.call(rawPatch, "publicCatalogPolicy")) {
+	        if (!Object.prototype.hasOwnProperty.call(basePatch, "publicCatalogPolicy") ||
+	            stableJson(normalizePublicCatalogPolicy(basePatch.publicCatalogPolicy)) !== stableJson(current.publicCatalogPolicy)) {
+	          const error = new Error("鱼单展示设置已被其他管理员修改，请刷新后重试");
+	          error.statusCode = 409;
+	          error.code = "PUBLIC_CATALOG_POLICY_CONFLICT";
+	          throw error;
+	        }
+	        rawPatch.publicCatalogPolicy = validatePublicCatalogPolicyWrite(rawPatch.publicCatalogPolicy, {
+	          products: current.products,
+	          species: current.species,
+	        });
+	      }
 	      if (Array.isArray(rawPatch.shipments)) {
 	        const currentShipments = new Map((Array.isArray(current.shipments) ? current.shipments : [])
 	          .map((shipment) => [String(shipment?.id ?? ""), shipment]));
@@ -12478,6 +13257,15 @@ async function handleApi(req, res, url) {
 	        patch.batches = preserveBatchCreationTimes(current.batches, patch.batches);
 	      }
 	      const stateWithoutLogs = buildStatePatch(current, patch, basePatch, [], req);
+	      if (Array.isArray(stateWithoutLogs.products)) {
+	        stateWithoutLogs.products = stateWithoutLogs.products.map(withoutLegacyProductVisibility);
+	      }
+	      if (Object.keys(patch).some((key) => key === "products" || key === "species")) {
+	        stateWithoutLogs.publicCatalogPolicy = prunePublicCatalogPolicyReferences(
+	          stateWithoutLogs.publicCatalogPolicy,
+	          { products: stateWithoutLogs.products, species: stateWithoutLogs.species }
+	        );
+	      }
 	      const appliedOperationLogs = statePatchOperationLogs(req, current, stateWithoutLogs, Object.keys(patch));
 	      // Audit history is deliberately not selected into Node for every small
 	      // generic edit. Append the new server-generated entries in PostgreSQL
@@ -14049,7 +14837,8 @@ async function handleApi(req, res, url) {
 	      await client.query("BEGIN");
 	      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	      const state = rows[0]?.data ?? {};
-	      const products = Array.isArray(state.products) ? state.products : [];
+	      const products = (Array.isArray(state.products) ? state.products : [])
+	        .map(withoutLegacyProductVisibility);
 	      const product = products.find((item) => String(item?.id ?? "") === productId);
 	      if (!product) {
 	        await client.query("ROLLBACK");
@@ -14062,10 +14851,16 @@ async function handleApi(req, res, url) {
 	      const archivedAt = new Date().toISOString();
 	      const nextProducts = disposition.mode === "archived"
 	        ? products.map((item) => String(item?.id ?? "") === productId
-	          ? { ...item, publicVisible: false, archivedAt, archivedBy: operator }
+	          ? { ...withoutLegacyProductVisibility(item), archivedAt, archivedBy: operator }
 	          : item)
 	        : products.filter((item) => String(item?.id ?? "") !== productId);
 	      const nextOrigins = mergeProductOrigins(state.productOrigins, nextProducts);
+	      const nextPublicCatalogPolicy = disposition.mode === "hard"
+	        ? prunePublicCatalogPolicyReferences(state.publicCatalogPolicy, {
+	          products: nextProducts,
+	          species: state.species,
+	        })
+	        : normalizePublicCatalogPolicy(state.publicCatalogPolicy);
 	      const operationLog = {
 	        id: uid("log"),
 	        time: archivedAt,
@@ -14080,6 +14875,7 @@ async function handleApi(req, res, url) {
 	        ...state,
 	        products: nextProducts,
 	        productOrigins: nextOrigins,
+	        publicCatalogPolicy: nextPublicCatalogPolicy,
 	        operationLogs: pushOperationLog(state.operationLogs, operationLog),
 	      };
 
@@ -14092,6 +14888,7 @@ async function handleApi(req, res, url) {
 	        ok: true,
 	        products: nextProducts,
 	        productOrigins: nextOrigins,
+	        publicCatalogPolicy: nextPublicCatalogPolicy,
 	        operationLog,
 	        mode: disposition.mode,
 	        message: disposition.message,
@@ -14134,14 +14931,15 @@ async function handleApi(req, res, url) {
         await client.query("BEGIN");
         const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
-	        const products = Array.isArray(state.products) ? state.products : [];
+	        const products = (Array.isArray(state.products) ? state.products : [])
+	          .map(withoutLegacyProductVisibility);
 	        const productOrigins = Array.isArray(state.productOrigins) ? state.productOrigins : [];
 	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
 	        const productExists = products.some((item) => String(item?.id ?? "") === String(product.id ?? ""));
 	        requireModulePermissionForAuth(req, "products", productExists ? "update" : "create");
 
 	        const normalizedProduct = await externalizeDataUrls({
-          ...product,
+          ...withoutLegacyProductVisibility(product),
           name: String(product.name).trim(),
           size: String(product.size).trim(),
           origin: String(product.origin).trim(),
@@ -14149,7 +14947,6 @@ async function handleApi(req, res, url) {
           notes: String(product.notes ?? "").trim(),
           defaultPrice: Number(product.defaultPrice),
           minReturnPrice: normalizeMinReturnPrice(minReturnPriceInput),
-          publicVisible: product.publicVisible !== false,
           commissionRate: 0,
         });
         const exists = products.some((item) => item.id === normalizedProduct.id);
@@ -14224,13 +15021,20 @@ async function serveStatic(req, res, url) {
 
 async function serveUpload(req, res, url) {
   const relative = decodeURIComponent(url.pathname.replace(/^\/uploads\/?/, ""));
-  if (relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
-      relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`)) {
+  if (
+    relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
+    relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`) ||
+    relative === VIDEO_DERIVATIVE_DIRECTORY ||
+    relative.startsWith(`${VIDEO_DERIVATIVE_DIRECTORY}/`)
+  ) {
     sendJson(req, res, 404, { error: "Upload file not found" });
     return;
   }
   const candidate = normalize(join(uploadDir, relative));
-  if (isPersonnelPrivateAttachmentPath(uploadDir, candidate)) {
+  if (
+    isPersonnelPrivateAttachmentPath(uploadDir, candidate) ||
+    isVideoDerivativePath(uploadDir, candidate)
+  ) {
     sendJson(req, res, 404, { error: "Upload file not found" });
     return;
   }

@@ -15,6 +15,7 @@ import { StockInView } from "./components/StockInView";
 import { DailyView } from "./components/DailyView";
 import { LossRecordsView } from "./components/LossRecordsView";
 import { OrdersView } from "./components/OrdersView";
+import { CatalogManagementView } from "./components/CatalogManagementView";
 import { CustomersView } from "./components/CustomersView";
 import { FinanceView } from "./components/FinanceView";
 import { PersonnelAdminView } from "./components/PersonnelAdminView";
@@ -31,9 +32,11 @@ import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAut
 import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
 import { changedObjectKeys, hasStateVersionChanged, isCurrentStateRequest, latestStateVersion, mapArrayCopyOnWrite } from "./utils/stateMutation";
 import { maintenanceSaveFailure } from "./utils/maintenanceMutation";
+import { copyPublicCatalogPolicy, normalizePublicCatalogPolicy } from "./utils/publicCatalogPolicy";
 
 const API = "/api";
 const MAX_OPERATION_LOGS = 10000;
+const PUBLIC_CATALOG_POLICY_SCHEMA_VERSION = 1;
 
 const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "systemSettings", module: "系统设置" },
@@ -41,6 +44,7 @@ const AUDIT_COLLECTIONS: { key: keyof Store; module: string }[] = [
   { key: "species", module: "物种管理" },
   { key: "speciesCategories", module: "分类管理" },
   { key: "speciesCategoryMajorMap", module: "分类管理" },
+  { key: "publicCatalogPolicy", module: "鱼单管理" },
   { key: "products", module: "商品管理" },
   { key: "productOrigins", module: "商品产地" },
   { key: "tankGroups", module: "缸组管理" },
@@ -89,12 +93,13 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   categorySettings: ["species", "speciesCategories", "speciesCategoryMajorMap"],
   products: ["species", "products", "productOrigins"],
   tankGroups: ["tankGroups", "stock", "shipments"],
-  batches: ["batches", "stock", "orders", "shipments"],
+  batches: ["batches"],
   stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "personnel"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
   orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "personnel"],
+  catalogManagement: ["publicCatalogPolicy", "species", "speciesCategories", "speciesCategoryMajorMap", "products"],
   finance: ["sites", "systemSettings"],
   paymentMethods: ["systemSettings"],
   shippingCarriers: ["systemSettings"],
@@ -125,6 +130,7 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   species: [],
   speciesCategories: [],
   speciesCategoryMajorMap: {},
+  publicCatalogPolicy: copyPublicCatalogPolicy(undefined),
   products: [],
   productOrigins: [],
   tankGroups: [],
@@ -373,13 +379,38 @@ function normalizePersistedState(data: any, currentUser: User): Store {
 	        };
     })
     : migratedData.stock;
+  const legacyHiddenProductIds: string[] = [];
+  const legacyCatalogMigrationCompleted = Number(
+    migratedData._publicCatalogPolicySchemaVersion ?? 0
+  ) >= PUBLIC_CATALOG_POLICY_SCHEMA_VERSION;
   const migratedProducts = Array.isArray(migratedData.products)
-    ? migratedData.products.map((product: Record<string, unknown>) => ({
-        ...product,
-        publicVisible: product.publicVisible !== false,
-        notes: String(product.notes ?? ""),
-      }))
+    ? migratedData.products.map((product: Record<string, unknown>) => {
+        const { publicVisible: legacyPublicVisible, ...currentProduct } = product;
+        const productId = String(product.id ?? "").trim();
+        if (
+          !legacyCatalogMigrationCompleted &&
+          legacyPublicVisible === false &&
+          productId &&
+          !product.archivedAt
+        ) {
+          legacyHiddenProductIds.push(productId);
+        }
+        return {
+          ...currentProduct,
+          notes: String(product.notes ?? ""),
+        };
+      })
     : migratedData.products;
+  const normalizedPublicCatalogPolicy = normalizePublicCatalogPolicy(migratedData.publicCatalogPolicy);
+  const migratedPublicCatalogPolicy = legacyHiddenProductIds.length === 0
+    ? normalizedPublicCatalogPolicy
+    : {
+        ...normalizedPublicCatalogPolicy,
+        hiddenProductIds: Array.from(new Set([
+          ...normalizedPublicCatalogPolicy.hiddenProductIds,
+          ...legacyHiddenProductIds,
+        ])),
+      };
   const migratedProductOrigins = mergeProductOrigins(migratedData.productOrigins, migratedProducts ?? migratedData.products);
   const migratedSpecies = Array.isArray(migratedData.species) ? migratedData.species : [];
   const migratedSpeciesCategories = Array.from(new Set([
@@ -485,6 +516,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
     species: migratedSpecies,
     speciesCategories: migratedSpeciesCategories,
     speciesCategoryMajorMap: migratedSpeciesCategoryMajorMap,
+    publicCatalogPolicy: migratedPublicCatalogPolicy,
     products: migratedProducts ?? migratedData.products,
     productOrigins: migratedProductOrigins,
     tankGroups: migratedTankGroups,
@@ -2084,6 +2116,7 @@ function AdminApp() {
           onOpenOrderRequestHandled={finishOpenOrderRequest}
         />
       );
+      case "catalogManagement": return <CatalogManagementView />;
       case "finance":    return <FinanceView />;
       case "paymentMethods": return <PaymentMethodsView />;
       case "shippingCarriers": return <ShippingCarriersView />;

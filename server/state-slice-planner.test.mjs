@@ -96,6 +96,20 @@ test("generic settings and customer source patches read only their own fields", 
   assert.deepEqual(plan, ["systemSettings", "customerSources"]);
 });
 
+test("fish-list policy reads the referenced products and species for strict validation", () => {
+  assert.deepEqual(
+    planGenericStatePatchReadKeys(["publicCatalogPolicy"]),
+    ["species", "publicCatalogPolicy", "products"],
+  );
+  assert.deepEqual(planStateSliceDependencies(["publicCatalogPolicy"]), {
+    requestedKeys: ["publicCatalogPolicy"],
+    queryKeys: ["publicCatalogPolicy"],
+    supportKeys: [],
+    needsInventoryProjection: false,
+    inventoryProjectionSourceKeys: [],
+  });
+});
+
 test("generic relationship dependencies are key-specific and deduplicated", () => {
   const plan = planGenericStatePatchReadKeys(["lossRecords", "lossRecords"]);
   assert.deepEqual(plan, ["sites", "tankGroups", "stock", "lossRecords"]);
@@ -108,7 +122,7 @@ test("customer mutations read orders for deletion integrity but no inventory his
 test("product mutations read only product reference owners", () => {
   assert.deepEqual(
     planGenericStatePatchReadKeys(["products"]),
-    ["species", "products", "stock", "orders"],
+    ["species", "publicCatalogPolicy", "products", "stock", "orders"],
   );
 });
 
