@@ -664,18 +664,11 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     });
   };
 
-  const speciesIdOfProduct = (productId: string) => product(productId)?.speciesId ?? productId;
-
-  const selectableSpeciesIds = (items: StockItem[], speciesId: string) =>
-    selectableItems(items)
-      .filter((item) => speciesIdOfProduct(item.productId) === speciesId)
-      .map((item) => item.id);
-
-  const toggleSpeciesSelection = (items: StockItem[], speciesId: string) => {
+  const toggleProductSelection = (items: StockItem[]) => {
     if (!permission.requirePermission("delete")) return;
-    const ids = selectableSpeciesIds(items, speciesId);
+    const ids = selectableItems(items).map((item) => item.id);
     if (ids.length === 0) {
-      toast.error("该物种没有可删除的入库记录");
+      toast.error("该商品分组没有可删除的入库记录");
       return;
     }
     setSelectedIds((prev) => {
@@ -989,10 +982,9 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                         const p = product(productId);
                         const key = `${t.id}-${productId}`;
                         const isExpanded = expandedKeys.has(key);
-                        const speciesId = speciesIdOfProduct(productId);
-                        const sameSpeciesIds = selectableSpeciesIds(items, speciesId);
-                        const sameSpeciesSelected =
-                          sameSpeciesIds.length > 0 && sameSpeciesIds.every((id) => selectedIds.has(id));
+                        const selectableGroupIds = selectableItems(stockItems).map((item) => item.id);
+                        const groupSelected =
+                          selectableGroupIds.length > 0 && selectableGroupIds.every((id) => selectedIds.has(id));
 
                         const counts = stockItems.reduce((acc, s) => {
                           acc[s.status] = (acc[s.status] ?? 0) + 1;
@@ -1007,6 +999,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                               className="w-full flex items-center gap-2 px-3 py-2 hover:bg-slate-50 text-left"
                               onClick={() => toggleExpand(key)}
                               onKeyDown={(e) => {
+                                if (e.target !== e.currentTarget) return;
                                 if (e.key === "Enter" || e.key === " ") {
                                   e.preventDefault();
                                   toggleExpand(key);
@@ -1050,14 +1043,15 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                                 <button
                                   type="button"
                                   className="shrink-0 rounded border border-red-200 px-1.5 py-0.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:border-border disabled:text-muted-foreground"
-                                  disabled={sameSpeciesIds.length === 0}
-                                  title={`选择当前子缸内同一物种的 ${sameSpeciesIds.length} 条`}
+                                  disabled={selectableGroupIds.length === 0}
+                                  aria-pressed={groupSelected}
+                                  title={`${groupSelected ? "取消选择" : "选择"}当前子缸内「${p?.name ?? productId}」本组当前显示且可删除的 ${selectableGroupIds.length} 条`}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    toggleSpeciesSelection(items, speciesId);
+                                    toggleProductSelection(stockItems);
                                   }}
                                 >
-                                  {sameSpeciesSelected ? "取消同种" : "选同种"}
+                                  {groupSelected ? "取消本组" : "选本组"}
                                 </button>
                               )}
                               <ChevronDown
