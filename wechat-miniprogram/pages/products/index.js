@@ -3,7 +3,7 @@ const {
   buildViewModel,
   filterProducts
 } = require("../../utils/catalog");
-const { getNavigationMetrics } = require("../../utils/navigation");
+const { getNavigationMetrics, returnToParent } = require("../../utils/navigation");
 const {
   beginPublicCatalogRequest,
   isCurrentPublicCatalogRequest,
@@ -145,11 +145,7 @@ Page({
   },
 
   onBackTap() {
-    if (getCurrentPages().length > 1) {
-      wx.navigateBack();
-      return;
-    }
-    wx.reLaunch({ url: "/pages/catalog/index" });
+    returnToParent("pages/catalog/index");
   },
 
   onProductTap(event) {

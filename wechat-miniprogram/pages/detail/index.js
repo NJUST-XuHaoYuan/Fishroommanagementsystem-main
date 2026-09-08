@@ -1,4 +1,5 @@
 const { fetchCatalog, fetchBioRecords } = require("../../utils/api");
+const { returnToParent } = require("../../utils/navigation");
 const {
   buildViewModel,
   findSpecimen,
@@ -22,6 +23,7 @@ Page({
     members: [],
     memberLoading: false,
     memberListHeight: 44,
+    codesExpanded: false,
     specimen: null,
     timeline: [],
     imagePreview: []
@@ -132,6 +134,15 @@ Page({
     this.loadDetail(this.data.stockItemId, { force: true });
   },
 
+  onBackTap() {
+    const productId = this.data.specimen && this.data.specimen.productId;
+    returnToParent(productId ? "pages/specimens/index" : "pages/catalog/index", productId ? { productId } : {});
+  },
+
+  onToggleCodes() {
+    this.setData({ codesExpanded: !this.data.codesExpanded });
+  },
+
   onMemberTap(event) {
     const stockItemId = event.currentTarget.dataset.id;
     if (stockItemId === this.data.stockItemId || !this.data.members.some((item) => item.id === stockItemId)) return;
@@ -167,7 +178,7 @@ Page({
   onShareAppMessage() {
     const specimen = this.data.specimen;
     return {
-      title: specimen ? `${specimen.speciesName} · ${specimen.displayCode}` : "海水鱼廊个体详情",
+      title: specimen ? `${specimen.productName} · 库存 ${this.data.members.length || 1} ${specimen.unit}` : "商品详情",
       path: `/pages/detail/index?stockItemId=${encodeURIComponent(this.data.stockItemId || "")}${this.data.groupMode ? "&group=1" : ""}`,
       imageUrl: specimen && specimen.image || undefined
     };

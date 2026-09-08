@@ -97,7 +97,8 @@ test("group detail switches the real selection code and does not permit copying 
   const api = { fetchCatalog: async () => fixture(), fetchBioRecords: async (id) => fixture().bioRecords.filter((item) => item.stockItemId === id) };
   const refresh = load(refreshSource, {}, { getApp: () => app, setInterval, clearInterval });
   let page;
-  load(detailSource, { "../../utils/api": api, "../../utils/catalog": catalog, "../../utils/public-catalog-refresh": refresh }, {
+  load(detailSource, { "../../utils/api": api, "../../utils/catalog": catalog, "../../utils/public-catalog-refresh": refresh,
+    "../../utils/navigation": { returnToParent() {} } }, {
     getApp: () => app, Page: (value) => { page = value; },
     wx: { stopPullDownRefresh() {}, setClipboardData: ({ data }) => copied.push(data) },
   });
@@ -106,6 +107,9 @@ test("group detail switches the real selection code and does not permit copying 
   await page.loadDetail("one");
   assert.equal(page.data.members.length, 3);
   assert.equal(page.data.memberListHeight, 44);
+  assert.equal(page.data.codesExpanded, false);
+  page.onToggleCodes();
+  assert.equal(page.data.codesExpanded, true);
   assert.equal(page.data.timeline.filter((item) => item.text === "Shared care record").length, 1);
   const request = page.onMemberTap({ currentTarget: { dataset: { id: "two" } } });
   assert.equal(page.data.memberLoading, true);
@@ -121,13 +125,30 @@ test("group detail switches the real selection code and does not permit copying 
   assert.equal(page.data.stockItemId, "two");
 });
 
+test("stock cards use product names and quantities, never internal IDs as headings", async () => {
+  const data = fixture();
+  data.stock.forEach((item) => { item.code = ""; });
+  const group = catalog.groupSpecimens(catalog.buildViewModel(data).specimens)[0];
+  assert.equal(group.cardTitle, "Product");
+  assert.equal(group.unit, "条");
+  assert.deepEqual(plain(group.members.map((item) => item.label)), ["第 1 条", "第 2 条", "第 3 条"]);
+  const template = await read("pages/specimens/index.wxml");
+  assert.match(template, /库存 \{\{item.quantity\}\} \{\{item.unit\}\}/);
+  assert.doesNotMatch(template, /item\.displayCode|item\.cardTitle|共同维护| 组/);
+  const detail = await read("pages/detail/index.wxml");
+  assert.match(detail, /wx:if="\{\{codesExpanded\}\}"/);
+  assert.match(detail, /wx:if="\{\{members.length < 2 \|\| codesExpanded\}\}"/);
+  assert.doesNotMatch(detail, /item\.displayCode|共 .* 个|共同维护档案/);
+  assert.match(await read("pages/specimens/index.wxss"), /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+});
+
 test("return navigation overrides native sizing and all three levels render wrapping multi-tags", async () => {
   const products = await read("pages/products/index.wxml");
   const styles = await read("pages/products/index.wxss");
   const appStyles = await read("app.wxss");
   assert.match(products, /<button[^>]*class="back-button"[^>]*size="mini"/);
-  assert.match(styles, /\.back-button\[size="mini"\][\s\S]*?margin:\s*0 auto 0 0/);
-  assert.match(styles, /\.back-button\[size="mini"\][\s\S]*?justify-content:\s*flex-start/);
+  assert.match(styles, /\.back-button\.back-button[\s\S]*?margin:\s*0 auto 0 0/);
+  assert.match(styles, /\.back-button\.back-button[\s\S]*?justify-content:\s*flex-start/);
   assert.match(appStyles, /\.specimen-tags\s*\{[^}]*flex-wrap:\s*wrap/);
   assert.match(await read("pages/detail/index.wxml"), /height: \{\{memberListHeight\}\}px/);
   for (const page of ["products", "specimens", "detail"]) {

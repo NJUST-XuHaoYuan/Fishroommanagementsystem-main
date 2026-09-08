@@ -52,3 +52,16 @@ Date: 2026-09-09
 - Read-only clone benchmark: full maintenance data was about 17.4 MB; SQL history digests about 0.87 MB, with a roughly 339 ms projection query and 19 ms application signature step in this run. These measurements are not a production latency guarantee.
 - Backend revision `78bc21b0d8967f2397f3078bbd9fc2579efd76fa` was deployed after verifying the previous live revision was merged and taking a database backup. Health, version and live catalog checks passed. Existing frontend and database containers were not recreated.
 - Mini-program delivery is a preview only. No official upload, review submission or publication was performed. Physical-device acceptance remains for the user's preview scan.
+
+## Stock cards and explicit return navigation
+
+Date: 2026-09-09
+
+- Supersedes the previous grouped-detail presentation: stock uses ordinary two-column product cards with product names, prices and inventory quantities. Default product-list images and actual stock media in the next level remain unchanged. Different history/arrival/status/price groups still remain separate.
+- Group detail opens with product identity, inventory quantity and maintenance history. Individual codes are collapsed behind an explicit action; unnumbered members use ordinal labels instead of database IDs. Actual selection codes and member switching are preserved.
+- Every non-root page has an explicit left-aligned return action in loading, success and error states. Existing matching parent pages are reused to preserve filters and scrolling; direct-entry pages reconstruct their parent instead of requiring a pre-existing navigation stack.
+- Sticky product navigation reserves the measured custom-header height, avoiding overlap with the status bar and WeChat capsule. Stock/detail pages use their native header plus an in-page return row; stock filters sit below that row.
+- Evidence: `/Users/xuhaoyuan/Documents/New project/miniprogram-preview-20260909/`, including `stock-card-430.jpg`, `stock-detail-430.jpg`, `stock-card-scrolled-320.jpg`, `stock-detail-320.jpg`, and `products-return-preserved-320.jpg`. These are native developer-tool window captures, not physical-device screenshots.
+- Checked 320 px and 430 px views, two-column cards, wrapping tags, quantity counts, expanded/collapsed selection codes, member-code switching, and return navigation. Native return from the five-feeding-fish detail preserved its filter; return to the product list preserved the original scrolled position.
+- 546 Node tests passed with zero skips, including navigation fallbacks, grouping/privacy regressions and the PostgreSQL history-signature fixture. Native compilation and exercised routes reported zero errors. Developer-tool warnings remain; unsupported attribute-based page selectors were replaced with class-only selectors in the touched controls.
+- Scope is mini-program UI, navigation utilities and regression tests only. No new backend deployment or database changes; official mini-program upload/review/publication is not part of this preview iteration. Physical-device acceptance remains pending.

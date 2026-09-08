@@ -1,4 +1,5 @@
 const { fetchCatalog } = require("../../utils/api");
+const { returnToParent } = require("../../utils/navigation");
 const {
   buildViewModel,
   filterSpecimens,
@@ -41,6 +42,8 @@ Page({
     productId: "",
     speciesId: "",
     context: null,
+    parentCategory: "",
+    unit: "条",
     specimens: [],
     filteredSpecimenCount: 0,
     activePreviewId: "",
@@ -123,7 +126,8 @@ Page({
       this.viewModel = viewModel;
 
       wx.setNavigationBarTitle({ title: context.name });
-      this.setData({ context });
+      this.setData({ context, parentCategory: (product || species).category,
+        unit: viewModel.categories.find((item) => item.key === (product || species).category)?.unit || "条" });
       this.applyFilter(this.data.activeFilter);
     } catch (error) {
       if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
@@ -162,6 +166,11 @@ Page({
 
   onFilterTap(event) {
     this.applyFilter(event.currentTarget.dataset.key || "all");
+  },
+
+  onBackTap() {
+    const category = this.data.parentCategory;
+    returnToParent(category ? "pages/products/index" : "pages/catalog/index", category ? { category } : {});
   },
 
   onSpecimenTap(event) {

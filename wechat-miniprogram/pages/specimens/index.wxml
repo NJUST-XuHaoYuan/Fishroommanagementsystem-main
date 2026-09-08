@@ -1,4 +1,9 @@
 <view class="safe-page specimens-page">
+  <view class="page-back-row">
+    <button class="page-back-button" size="mini" bindtap="onBackTap" aria-label="返回商品列表">
+      <text class="page-back-arrow" aria-hidden="true">‹</text><text>返回商品列表</text>
+    </button>
+  </view>
   <view wx:if="{{loading}}" class="state-panel">
     <view class="skeleton loading-hero"></view>
     <view class="skeleton loading-title"></view>
@@ -12,18 +17,13 @@
   </view>
 
   <view wx:else>
-    <view class="species-visual">
-      <image wx:if="{{context.image}}" class="context-image" src="{{context.image}}" mode="aspectFit" />
-      <view wx:else class="context-image placeholder"></view>
-    </view>
-
     <view class="species-intro">
       <view class="species-name">{{context.name}}</view>
       <view class="species-scientific">{{context.subtitle}}</view>
       <view class="species-overview">
         <view class="overview-item">
           <text class="overview-value">{{context.specimenCount}}</text>
-          <text class="overview-label">可选个体</text>
+          <text class="overview-label">{{unit}}在售</text>
         </view>
         <view class="overview-divider"></view>
         <view class="overview-item price-overview">
@@ -35,8 +35,8 @@
 
     <view class="list-toolbar">
       <view class="list-heading">
-        <view class="section-title">选择个体</view>
-        <view class="section-count">{{filteredSpecimenCount}} 个 · {{specimens.length}} 组</view>
+        <view class="section-title">可选库存</view>
+        <view class="section-count">{{filteredSpecimenCount}} {{unit}}</view>
       </view>
       <view class="filter-row">
         <button
@@ -59,7 +59,7 @@
         class="specimen-card"
         hover-class="specimen-card-hover"
         role="button"
-        aria-label="查看{{item.cardTitle}}的维护详情"
+        aria-label="查看{{item.productName}}，库存{{item.quantity}}{{item.unit}}"
         data-id="{{item.id}}"
         bindtap="onSpecimenTap"
       >
@@ -80,7 +80,7 @@
               show-fullscreen-btn="{{false}}"
               enable-progress-gesture="{{false}}"
               object-fit="contain"
-              aria-label="选鱼码{{item.displayCode}}的视频预览"
+              aria-label="{{item.productName}}的视频预览"
               data-id="{{item.id}}"
               catchtap="onSpecimenTap"
               binderror="onPreviewError"
@@ -100,7 +100,7 @@
               class="media-preview-toggle {{activePreviewId === item.id ? 'playing' : ''}}"
               size="mini"
               hover-class="media-preview-toggle-hover"
-              aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}选鱼码{{item.displayCode}}的视频预览"
+              aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}{{item.productName}}的视频预览"
               data-id="{{item.id}}"
               data-preview="{{item.previewVideo}}"
               catchtap="onPreviewToggle"
@@ -111,51 +111,38 @@
               </view>
               <view wx:else class="preview-play-icon" aria-hidden="true"></view>
             </button>
-            <view wx:if="{{item.grouped}}" class="specimen-status">{{item.quantity}} 个</view>
+            <view class="specimen-status">库存 {{item.quantity}} {{item.unit}}</view>
           </view>
 
           <view class="specimen-info">
-            <view class="specimen-top">
-              <view class="specimen-code {{item.grouped ? '' : 'mono'}}">{{item.cardTitle}}</view>
-              <view class="specimen-price-stack">
-                <view wx:if="{{item.isSpecialPrice}}" class="special-price-label">特价</view>
-                <view class="specimen-price">{{item.priceText}}</view>
-                <view wx:if="{{item.isSpecialPrice}}" class="specimen-original-price">{{item.defaultPriceText}}</view>
-              </view>
-            </view>
             <view class="specimen-product">{{item.productName}}</view>
+            <view class="specimen-spec">{{item.size}} · {{item.origin}}</view>
             <view class="specimen-tags">
               <text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
             </view>
-            <view class="specimen-attributes">
-              <view class="attribute">
-                <text class="attribute-label">尺寸</text>
-                <text class="attribute-value">{{item.size}}</text>
+            <view class="specimen-meta">到货 {{item.arrivalDate}}</view>
+            <view class="specimen-meta">{{item.location}}</view>
+            <view wx:if="{{!item.grouped && item.code}}" class="specimen-meta">鱼码 {{item.code}}</view>
+            <view class="specimen-footer">
+              <view class="specimen-price-stack">
+                <view class="specimen-price">{{item.priceText}}</view>
+                <view wx:if="{{item.isSpecialPrice}}" class="specimen-original-price">{{item.defaultPriceText}}</view>
               </view>
-              <view class="attribute">
-                <text class="attribute-label">到货</text>
-                <text class="attribute-value">{{item.arrivalDate}}</text>
-              </view>
-            </view>
-            <view class="location-row">
-              <text class="location-label">缸位</text>
-              <text class="location-value">{{item.location}}</text>
+              <text class="record-arrow" aria-hidden="true">›</text>
             </view>
           </view>
         </view>
 
         <view class="latest-record">
           <view class="record-copy">
-            <text class="record-label">{{item.grouped ? '共同维护' : '最近维护'}}</text>
-            <text class="record-text two-line">{{item.latestBioText}}</text>
+            <text class="record-label">查看维护记录</text>
           </view>
-          <text class="record-arrow">›</text>
         </view>
       </view>
     </view>
 
     <view wx:else class="state-panel compact">
-      <view class="empty-title">当前筛选下没有个体</view>
+      <view class="empty-title">当前筛选下没有库存</view>
       <view class="empty-text">可以切换到“全部”继续查看。</view>
     </view>
   </view>

@@ -3,20 +3,30 @@
 }
 
 .group-selection {
-  padding: 16px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--line);
   background: #fff;
 }
 
-.group-selection-heading {
-  margin-bottom: 10px;
+.codes-toggle.codes-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 0;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
   color: var(--ink);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
 }
 
+.codes-toggle-arrow { color: var(--brand); font-size: 20px; }
+
 .group-members-scroll {
   max-height: 168px;
+  margin: 8px 0 16px;
 }
 
 .group-members {
@@ -25,7 +35,7 @@
   gap: 8px;
 }
 
-.group-member[size="mini"] {
+.group-member.group-member {
   width: 100%;
   min-height: 44px;
   margin: 0;
@@ -39,7 +49,7 @@
   overflow-wrap: anywhere;
 }
 
-.group-member[size="mini"].selected {
+.group-member.group-member.selected {
   border-color: var(--brand);
   background: var(--brand-soft);
   color: var(--brand-dark);
@@ -73,15 +83,17 @@
 
 .identity-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 20rpx;
 }
 
-.display-code {
+.stock-quantity {
   min-width: 0;
+  margin-top: 12px;
   color: var(--brand);
-  font-size: 25rpx;
+  font-size: 15px;
   font-weight: 760;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -121,9 +133,10 @@
 }
 
 .product-name {
-  margin-top: 12rpx;
+  flex: 1 1 150px;
+  min-width: 0;
   color: var(--ink);
-  font-size: 44rpx;
+  font-size: 22px;
   font-weight: 800;
   line-height: 1.22;
   word-break: break-word;
@@ -155,6 +168,7 @@
 
 .identity-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16rpx;
   margin-top: 22rpx;
@@ -271,7 +285,7 @@
 .copy-button {
   display: flex;
   min-width: 116rpx;
-  min-height: 70rpx;
+  min-height: 44px;
   flex: 0 0 116rpx;
   align-items: center;
   justify-content: center;
@@ -461,10 +475,6 @@
 @media (max-width: 340px) {
   .hero-visual {
     height: 460rpx;
-  }
-
-  .product-name {
-    font-size: 41rpx;
   }
 
   .info-item {

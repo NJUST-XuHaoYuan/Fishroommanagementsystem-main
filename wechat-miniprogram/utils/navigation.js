@@ -34,6 +34,23 @@ function getNavigationMetrics() {
   };
 }
 
-module.exports = {
-  getNavigationMetrics
-};
+function returnToParent(route, params = {}) {
+  const query = Object.keys(params).map((key) => `${key}=${encodeURIComponent(params[key])}`).join("&");
+  const url = `/${route}${query ? `?${query}` : ""}`;
+  const fallback = () => wx.redirectTo({ url, fail: () => wx.reLaunch({ url: "/pages/catalog/index" }) });
+  const pages = getCurrentPages();
+  for (let index = pages.length - 2; index >= 0; index -= 1) {
+    const page = pages[index];
+    const matches = Object.keys(params).every((key) => {
+      const value = String(page.options && page.options[key] || "");
+      try { return decodeURIComponent(value) === String(params[key]); } catch (_) { return value === String(params[key]); }
+    });
+    if (page.route === route && matches) {
+      wx.navigateBack({ delta: pages.length - 1 - index, fail: fallback });
+      return;
+    }
+  }
+  fallback();
+}
+
+module.exports = { getNavigationMetrics, returnToParent };

@@ -124,13 +124,14 @@ function groupSpecimens(specimens) {
       group = { ...specimen, members: [], quantity: 0, tags: specimenTags(specimen) };
       groups.set(key, group);
     }
-    group.members.push({ id: specimen.id, displayCode: specimen.displayCode, selectionCode: specimen.selectionCode });
+    group.members.push({ id: specimen.id, displayCode: specimen.displayCode, selectionCode: specimen.selectionCode,
+      label: specimen.code ? `鱼码 ${specimen.code}` : `第 ${group.quantity + 1} ${specimen.unit || "条"}` });
     group.quantity += 1;
   });
   return [...groups.values()].map((group) => ({
     ...group,
     grouped: group.quantity > 1,
-    cardTitle: group.quantity > 1 ? `共 ${group.quantity} 个` : group.displayCode,
+    cardTitle: group.productName,
   }));
 }
 
@@ -363,6 +364,7 @@ function buildViewModel(catalog) {
         id: stock.id,
         specimenGroupKey: stock.specimenGroupKey,
         displayCode: stock.code || stock.id,
+        code: stock.code || "",
         selectionCode: buildPublicSelectionCode(stock.id),
         productId: product.id,
         speciesId: product.speciesId,
@@ -370,6 +372,7 @@ function buildViewModel(catalog) {
         scientificName: species.scientificName || "",
         subtitle: species.scientificName || product.origin || "来源待确认",
         category: species.category || "其他",
+        unit: DEFAULT_MAJOR_CATEGORIES.find((item) => item.key === inferMajorKey(species.category || "其他", normalized.speciesCategoryMajorMap)).unit,
         productName: product.name || species.name || "未命名个体",
         size: product.size || "待确认",
         origin: product.origin || "来源待确认",

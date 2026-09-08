@@ -1,4 +1,9 @@
 <view class="safe-page detail-page">
+  <view class="page-back-row">
+    <button class="page-back-button" size="mini" bindtap="onBackTap" aria-label="返回可选库存">
+      <text class="page-back-arrow" aria-hidden="true">‹</text><text>返回可选库存</text>
+    </button>
+  </view>
   <view wx:if="{{loading}}" class="state-panel">
     <view class="skeleton loading-hero"></view>
     <view class="skeleton loading-title"></view>
@@ -7,7 +12,7 @@
   </view>
 
   <view wx:elif="{{error}}" class="state-panel">
-    <view class="empty-title">个体档案暂时无法加载</view>
+      <view class="empty-title">商品详情暂时无法加载</view>
     <view class="empty-text">{{error}}</view>
     <button class="primary-button" bindtap="onRetry">重新加载</button>
   </view>
@@ -27,14 +32,14 @@
 
     <view class="identity-section">
       <view class="identity-top">
-        <view class="display-code {{members.length > 1 ? '' : 'mono'}}">{{members.length > 1 ? '共 ' + members.length + ' 个' : specimen.displayCode}}</view>
+        <view class="product-name">{{specimen.productName}}</view>
         <view class="price-stack">
           <view wx:if="{{specimen.isSpecialPrice}}" class="special-price-label">特价</view>
           <view class="price">{{specimen.priceText}}</view>
           <view wx:if="{{specimen.isSpecialPrice}}" class="original-price">{{specimen.defaultPriceText}}</view>
         </view>
       </view>
-      <view class="product-name">{{specimen.productName}}</view>
+      <view class="stock-quantity">库存 {{members.length || 1}} {{specimen.unit}}</view>
       <view class="taxonomy">
         <text class="species-name">{{specimen.speciesName}}</text>
         <text class="scientific">{{specimen.subtitle}}</text>
@@ -67,20 +72,23 @@
     </view>
 
     <view wx:if="{{members.length > 1}}" class="group-selection">
-      <view class="group-selection-heading">选鱼码 · {{members.length}} 个</view>
-      <scroll-view class="group-members-scroll" style="height: {{memberListHeight}}px" scroll-y>
+      <button class="codes-toggle" size="mini" aria-expanded="{{codesExpanded}}" bindtap="onToggleCodes">
+        <text>{{codesExpanded ? '收起选鱼码' : '查看选鱼码'}}</text>
+        <text class="codes-toggle-arrow" aria-hidden="true">{{codesExpanded ? '−' : '+'}}</text>
+      </button>
+      <scroll-view wx:if="{{codesExpanded}}" class="group-members-scroll" style="height: {{memberListHeight}}px" scroll-y>
         <view class="group-members">
           <button wx:for="{{members}}" wx:key="id" size="mini"
             class="group-member {{stockItemId === item.id ? 'selected' : ''}}"
             data-id="{{item.id}}" bindtap="onMemberTap"
-            aria-label="选择鱼码{{item.displayCode}}" aria-pressed="{{stockItemId === item.id}}">
-            {{item.displayCode}}
+            aria-label="选择{{item.label}}" aria-pressed="{{stockItemId === item.id}}">
+            {{item.label}}
           </button>
         </view>
       </scroll-view>
     </view>
 
-    <view class="selection-panel">
+    <view wx:if="{{members.length < 2 || codesExpanded}}" class="selection-panel">
       <view class="selection-copy">
         <view class="selection-label">选鱼码</view>
         <view class="selection-code mono">{{specimen.selectionCode}}</view>
@@ -91,7 +99,7 @@
     <view class="timeline-section">
       <view class="timeline-heading">
         <view>
-          <view class="section-title">{{members.length > 1 ? '共同维护档案' : '维护档案'}}</view>
+          <view class="section-title">维护记录</view>
           <view class="section-subtitle">从入库开始持续记录</view>
         </view>
         <view class="timeline-count">{{timeline.length}} 条</view>

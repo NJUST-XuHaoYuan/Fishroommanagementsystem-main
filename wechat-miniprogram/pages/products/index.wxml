@@ -20,10 +20,10 @@
   </view>
 
   <view class="products-content">
-    <view class="back-row">
+    <view class="back-row" style="top: {{navigationHeight}}px;">
       <button class="back-button" size="mini" aria-label="返回分类目录" bindtap="onBackTap">
         <text class="back-symbol" aria-hidden="true">‹</text>
-        <text>分类目录</text>
+        <text>返回分类目录</text>
       </button>
       <text wx:if="{{majorLabel}}" class="major-label">{{majorLabel}}</text>
     </view>
@@ -58,6 +58,7 @@
       <view class="search-box">
         <view class="search-icon" aria-hidden="true"></view>
         <input
+          class="search-input"
           value="{{keyword}}"
           placeholder="搜索商品、学名、规格或产地"
           placeholder-class="search-placeholder"
