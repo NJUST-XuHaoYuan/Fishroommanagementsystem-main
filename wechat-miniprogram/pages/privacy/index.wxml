@@ -1,0 +1,15 @@
+<view class="safe-page privacy-page">
+  <view class="privacy-title">隐私说明</view>
+  <view class="privacy-date">更新日期：2026年9月9日</view>
+  <view class="privacy-heading">微信登录</view>
+  <view class="privacy-text">您可以不登录浏览鱼单和咨询客服。主动登录时，我们使用微信返回的小程序用户标识（OpenID）识别您的账号。服务器仅保存经加密散列处理的标识、账号编号、同意版本和登录时间，不保存微信会话密钥。不索取手机号、头像、昵称或位置。</view>
+  <view class="privacy-heading">登录状态</view>
+  <view class="privacy-text">本机保存登录凭证，用于保持登录，7天后过期。服务器保存凭证摘要，退出登录时立即使本机凭证失效。账号信息保留至您主动注销；注销将删除访客账号及其所有设备的登录凭证。</view>
+  <view class="privacy-heading">剪贴板</view>
+  <view class="privacy-text">仅在您点击复制客服微信号时，将客服微信号写入剪贴板，方便您粘贴。不读取、上传或保存剪贴板中的其他内容。</view>
+  <view class="privacy-heading">咨询客服</view>
+  <view class="privacy-text">客服会话由微信提供。您可主动发送商品卡片、文字和图片给商家；这些信息用于回答咨询。会话信息受微信客服服务规则管理，注销本小程序访客账号不会删除微信客服会话。请勿发送与咨询无关的敏感信息。</view>
+  <view class="privacy-heading">联系我们</view>
+  <view class="privacy-text">关于账号和隐私的问题，请通过“我的”中的咨询客服入口联系，或联系微信 marineforest2024。</view>
+  <button class="privacy-link" bindtap="onPrivacyContractTap">查看微信平台隐私保护指引 ›</button>
+</view>

@@ -55,9 +55,13 @@ git merge-base --is-ancestor origin/codex/current-base HEAD
 - `pages/catalog/index`：四个固定大类及其小类目录。
 - `pages/products/index`：当前小类的商品搜索与选择。
 - `pages/specimens/index`：当前商品的可选库存、编号、单条备注和状态标签，并兼容旧品种链接。
-- `pages/detail/index`：个体详情、选鱼码、维护时间轴。
+- `pages/detail/index`：商品详情、编号、维护时间轴与携带商品卡片的悬浮客服。
+- `pages/account/index`：可选微信登录、退出与注销账号、客服联系方式。
+- `pages/privacy/index`：轻量登录与客服相关隐私说明。
 
 小程序只展示公开目录数据，不读取客户、订单、成本、员工、权限等后台私有信息。
+
+轻量登录必须先部署后端并配置服务器端 AppSecret，验证真实微信登录后再提审。配置和验证要求见 `LOGIN-CUSTOMER-SERVICE.md`；不能把源码提交、部署包生成或开发者工具已登录当成访客登录已开通。
 
 ## 库存卡片规则（2026-09-09）
 

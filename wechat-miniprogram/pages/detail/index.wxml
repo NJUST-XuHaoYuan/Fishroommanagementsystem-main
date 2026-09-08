@@ -73,31 +73,6 @@
       </view>
     </view>
 
-    <view wx:if="{{members.length > 1}}" class="group-selection">
-      <button class="codes-toggle" size="mini" aria-expanded="{{codesExpanded}}" bindtap="onToggleCodes">
-        <text>{{codesExpanded ? '收起选鱼码' : '查看选鱼码'}}</text>
-        <text class="codes-toggle-arrow" aria-hidden="true">{{codesExpanded ? '−' : '+'}}</text>
-      </button>
-      <scroll-view wx:if="{{codesExpanded}}" class="group-members-scroll" style="height: {{memberListHeight}}px" scroll-y>
-        <view class="group-members">
-          <button wx:for="{{members}}" wx:key="id" size="mini"
-            class="group-member {{stockItemId === item.id ? 'selected' : ''}}"
-            data-id="{{item.id}}" bindtap="onMemberTap"
-            aria-label="选择{{item.label}}" aria-pressed="{{stockItemId === item.id}}">
-            {{item.label}}
-          </button>
-        </view>
-      </scroll-view>
-    </view>
-
-    <view wx:if="{{members.length < 2 || codesExpanded}}" class="selection-panel">
-      <view class="selection-copy">
-        <view class="selection-label">选鱼码</view>
-        <view class="selection-code mono">{{specimen.selectionCode}}</view>
-      </view>
-      <button class="copy-button" disabled="{{memberLoading}}" bindtap="onCopyCode">{{memberLoading ? '切换中' : '复制'}}</button>
-    </view>
-
     <view class="timeline-section">
       <view class="timeline-heading">
         <view>
@@ -157,4 +132,13 @@
       </view>
     </view>
   </view>
+  <block wx:if="{{!loading && !error && specimen}}">
+    <view class="detail-contact-space" aria-hidden="true"></view>
+    <button class="detail-contact-button {{refreshing || !contactCard ? 'is-disabled' : ''}}" size="mini" open-type="contact" show-message-card="{{true}}"
+      send-message-title="{{contactCard.title}}" send-message-path="{{contactCard.path}}" send-message-img="{{specimen.image || '/assets/brand-logo.jpg'}}"
+      disabled="{{refreshing || !contactCard}}" hover-class="contact-button-hover" aria-label="咨询此商品">
+      <image class="detail-contact-icon" src="/assets/headset-white.svg" aria-hidden="true" />
+      <text class="detail-contact-label" aria-hidden="true">客服</text>
+    </button>
+  </block>
 </view>

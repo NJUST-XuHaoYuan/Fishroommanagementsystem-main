@@ -19,6 +19,15 @@
     </view>
   </view>
 
+  <view class="catalog-utilities">
+    <button class="utility-button" size="mini" open-type="contact" show-message-card="{{true}}" send-message-title="Marine Forest · 海水生物鱼单" send-message-path="/pages/catalog/index">
+      <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text>
+    </button>
+    <button class="utility-button" size="mini" bindtap="onAccountTap">
+      <image class="utility-icon" src="/assets/user-round.svg" aria-hidden="true" /><text>我的</text>
+    </button>
+  </view>
+
   <view wx:if="{{loading}}" class="catalog-loading">
     <view class="skeleton loading-heading"></view>
     <view class="skeleton loading-grid"></view>

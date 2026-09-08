@@ -1,0 +1,6 @@
+.privacy-page { padding: 24px 20px calc(32px + env(safe-area-inset-bottom)); background: var(--surface); }
+.privacy-title { font-size: 24px; font-weight: 700; }
+.privacy-date { margin-top: 8px; color: var(--muted); font-size: 13px; }
+.privacy-heading { margin-top: 28px; margin-bottom: 8px; font-size: 16px; font-weight: 700; }
+.privacy-text { font-size: 14px; line-height: 1.85; color: var(--ink-soft); overflow-wrap: anywhere; }
+.privacy-link { display: flex; min-height: 48px; margin-top: 24px; align-items: center; text-align: left; color: var(--brand-dark); font-size: 14px; }

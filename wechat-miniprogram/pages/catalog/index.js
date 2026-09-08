@@ -106,6 +106,10 @@ Page({
     this.loadCatalog({ force: true });
   },
 
+  onAccountTap() {
+    wx.navigateTo({ url: "/pages/account/index" });
+  },
+
   onShareAppMessage() {
     return {
       title: "海水生物鱼单",
