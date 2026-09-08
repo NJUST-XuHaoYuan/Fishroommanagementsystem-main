@@ -13,6 +13,7 @@ import COS from "cos-nodejs-sdk-v5";
 import {
   canFastRemuxWechatVideo,
   normalizeVideoTranscodePreset,
+  selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
@@ -6551,11 +6552,24 @@ async function probeVideoFile(inputPath) {
 
 async function prepareWechatVideoFile(inputPath, outputPath) {
   let fastRemux = false;
+  let probeSucceeded = false;
+  let selectedAudio = null;
   try {
-    fastRemux = canFastRemuxWechatVideo(await probeVideoFile(inputPath), VIDEO_TRANSCODE_MAX_EDGE);
+    const probe = await probeVideoFile(inputPath);
+    probeSucceeded = true;
+    selectedAudio = selectWechatAudioStream(probe);
+    fastRemux = canFastRemuxWechatVideo(probe, VIDEO_TRANSCODE_MAX_EDGE);
   } catch (error) {
     console.warn(`Video probe failed; falling back to transcoding: ${error.message}`);
   }
+
+  const audioMapArgs = ({ withoutAudio = false } = {}) => {
+    if (withoutAudio || (probeSucceeded && !selectedAudio)) return ["-an"];
+    if (selectedAudio) return ["-map", `0:${selectedAudio.index}`];
+    // ffprobe failure should not reject an otherwise valid upload. Try the
+    // first audio stream, then fall back to a video-only transcode below.
+    return ["-map", "0:a:0?"];
+  };
 
   if (fastRemux) {
     try {
@@ -6568,10 +6582,10 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
         inputPath,
         "-map",
         "0:v:0",
-        "-map",
-        "0:a?",
-        "-c",
+        ...audioMapArgs(),
+        "-c:v",
         "copy",
+        ...(selectedAudio ? ["-c:a", "copy"] : []),
         "-movflags",
         "+faststart",
         outputPath,
@@ -6586,7 +6600,7 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
     }
   }
 
-  await execFileAsync(FFMPEG_PATH, [
+  const transcodeArgs = ({ withoutAudio = false } = {}) => [
       "-y",
       "-hide_banner",
       "-loglevel",
@@ -6599,8 +6613,7 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
       inputPath,
       "-map",
       "0:v:0",
-      "-map",
-      "0:a?",
+      ...audioMapArgs({ withoutAudio }),
       "-c:v",
       "libx264",
       "-threads:v",
@@ -6617,18 +6630,28 @@ async function prepareWechatVideoFile(inputPath, outputPath) {
       "main",
       "-level",
       "4.0",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "128k",
+      ...(!withoutAudio && (selectedAudio || !probeSucceeded)
+        ? ["-c:a", "aac", "-b:a", "128k"]
+        : []),
       "-movflags",
       "+faststart",
       outputPath,
-  ], {
+  ];
+  const execOptions = {
     timeout: VIDEO_TRANSCODE_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
-  });
-  return { outputPath, mode: "transcode" };
+  };
+  try {
+    await execFileAsync(FFMPEG_PATH, transcodeArgs(), execOptions);
+    return { outputPath, mode: "transcode" };
+  } catch (error) {
+    const attemptedAudio = Boolean(selectedAudio) || !probeSucceeded;
+    if (!attemptedAudio) throw error;
+    console.warn(`Video audio transcode failed; retrying without audio: ${error.message}`);
+    await rm(outputPath, { force: true }).catch(() => undefined);
+    await execFileAsync(FFMPEG_PATH, transcodeArgs({ withoutAudio: true }), execOptions);
+    return { outputPath, mode: "transcode-no-audio" };
+  }
 }
 
 async function transcodeVideoToWechatMp4(buffer, sourceMime = "video/mp4", options = {}) {
@@ -10696,11 +10719,13 @@ async function handleApi(req, res, url) {
     let releaseVideoUploadSlot = null;
     let videoTempDir = "";
     let videoDerivativeSourcePath = "";
+    let mediaKind = "media";
     try {
       const startedAt = Date.now();
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
       const isImage = isSupportedImageMime(mime);
       const isVideo = SUPPORTED_VIDEO_MIMES.has(mime);
+      mediaKind = isVideo ? "video" : (isImage ? "image" : "media");
       if (!isImage && !isVideo) {
         sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
         return;
@@ -10786,11 +10811,14 @@ async function handleApi(req, res, url) {
       }
     } catch (error) {
       const status = [400, 413, 503].includes(error?.statusCode) ? error.statusCode : 500;
+      console.error(`Media upload failed (${mediaKind}):`, error);
       sendJson(req, res, status, {
         ok: false,
         error: status === 413
           ? `上传文件过大，当前限制为图片 ${Math.round(MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024)}MB、视频 ${Math.round(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024)}MB`
-          : (error.message || "媒体上传失败"),
+          : (status === 500
+              ? (mediaKind === "video" ? "视频上传失败，请稍后重试" : "媒体上传失败，请稍后重试")
+              : (error.message || "媒体上传失败")),
       });
     } finally {
       releaseTranscodeSlot?.();
