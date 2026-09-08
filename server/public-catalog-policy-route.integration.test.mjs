@@ -221,7 +221,7 @@ const databaseFixture = {
 for (const id of ["group-one", "group-two", "group-different-history"]) {
   databaseFixture.state.stock.push({
     id, code: id, productId: "eligibility-tang", siteId: "nanjing", subTankId: "tank-nj",
-    status: "healthy", inDate: "2026-08-01", basePrice: 610, batchId: "same-batch", notes: "PRIVATE STOCK NOTE",
+    status: "healthy", inDate: "2026-08-01", basePrice: 610, batchId: "same-batch", notes: " 单侧腹鳍短\n已开口 ",
   });
   databaseFixture.state.bioRecords.push({
     id: `record-${id}`, stockItemId: id, date: "2026-09-01", text: "Shared care",
@@ -232,6 +232,9 @@ databaseFixture.state.bioRecords.push({
   id: "text-only-difference", stockItemId: "group-different-history", date: "2026-08-02",
   text: "Older treatment", photos: [], videos: [],
 });
+databaseFixture.state.customers = [{ id: "private-customer", notes: "PRIVATE CUSTOMER NOTE" }];
+databaseFixture.state.products[0].notes = "PRIVATE PRODUCT NOTE";
+databaseFixture.state.stock.find((item) => item.id === "group-one").purchasePrice = 123.45;
 
 let child;
 let baseUrl;
@@ -358,14 +361,17 @@ test("a compact video-only latest record retains the fish's newest real photo fo
   assert.match(record.videoPreviews[0], /^\/api\/public\/media\/video-derivative\?/);
 });
 
-test("catalog grouping includes older text-only history without exposing private stock notes", async () => {
+test("catalog publishes only the authorized fish note while protecting unrelated business information", async () => {
   const { body } = await publicGet("/api/public/catalog?siteId=all");
   const find = (id) => body.catalog.stock.find((item) => item.id === id);
   assert.match(find("group-one").specimenGroupKey, /^v1:[a-f0-9]{64}$/);
   assert.equal(find("group-one").specimenGroupKey, find("group-two").specimenGroupKey);
   assert.notEqual(find("group-one").specimenGroupKey, find("group-different-history").specimenGroupKey);
   assert.equal(body.catalog.bioRecords.filter((record) => record.stockItemId === "group-different-history").length, 1);
-  assert.doesNotMatch(JSON.stringify(body), /PRIVATE STOCK NOTE/);
+  assert.equal(find("group-one").notes, "单侧腹鳍短\n已开口");
+  assert.equal(find("group-one").purchasePrice, undefined);
+  assert.equal(find("released-cancelled").notes, "");
+  assert.doesNotMatch(JSON.stringify(body), /PRIVATE CUSTOMER NOTE|PRIVATE PRODUCT NOTE/);
   const detail = await publicGet("/api/public/bio-records?siteId=all&stockItemId=group-different-history");
   assert.equal(detail.body.bioRecords.length, 2);
 });

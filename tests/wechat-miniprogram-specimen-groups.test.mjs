@@ -23,8 +23,8 @@ function fixture() {
     speciesCategories: ["Fish"], speciesCategoryMajorMap: { Fish: "marineFish" },
     species: [{ id: "species", name: "Species", imageUrl: "/species.jpg", category: "Fish" }],
     products: [{ id: "product", speciesId: "species", name: "Product", imageUrl: "/default.jpg", defaultPrice: 200 }],
-    stock: ["one", "two", "three"].map((id, index) => ({
-      id, productId: "product", code: String(189 + index), status: "feeding",
+    stock: ["one", "two", "three"].map((id) => ({
+      id, productId: "product", code: "", notes: "", status: "feeding",
       inDate: "2026-08-01", basePrice: 150, specimenGroupKey: "full-history-a",
       tankGroupName: "A", subTankName: "1",
     })),
@@ -133,13 +133,50 @@ test("stock cards use product names and quantities, never internal IDs as headin
   assert.equal(group.unit, "条");
   assert.deepEqual(plain(group.members.map((item) => item.label)), ["第 1 条", "第 2 条", "第 3 条"]);
   const template = await read("pages/specimens/index.wxml");
-  assert.match(template, /库存 \{\{item.quantity\}\} \{\{item.unit\}\}/);
+  assert.match(template, /同款可选.*\{\{item.quantity\}\} \{\{item.unit\}\}/);
   assert.doesNotMatch(template, /item\.displayCode|item\.cardTitle|共同维护| 组/);
   const detail = await read("pages/detail/index.wxml");
   assert.match(detail, /wx:if="\{\{codesExpanded\}\}"/);
   assert.match(detail, /wx:if="\{\{members.length < 2 \|\| codesExpanded\}\}"/);
   assert.doesNotMatch(detail, /item\.displayCode|共 .* 个|共同维护档案/);
   assert.match(await read("pages/specimens/index.wxss"), /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+});
+
+test("numbered or individually noted fish remain separate even when the full history matches", () => {
+  for (const change of [{ code: "304" }, { notes: "单侧腹鳍短\n已开口" }]) {
+    const data = fixture();
+    Object.assign(data.stock[0], change);
+    const model = catalog.buildViewModel(data);
+    const cards = catalog.groupSpecimens(model.specimens);
+    assert.equal(cards.length, 2);
+    assert.equal(cards[0].quantity, 1);
+    assert.equal(cards[1].quantity, 2);
+    assert.equal(cards.reduce((sum, card) => sum + card.quantity, 0), 3);
+    assert.equal(cards[0].notes, change.notes || "");
+  }
+  const data = fixture();
+  data.stock.forEach((item) => { item.notes = "same individual note"; });
+  assert.equal(catalog.groupSpecimens(catalog.buildViewModel(data).specimens).length, 3);
+  data.stock.forEach((item) => { delete item.notes; });
+  assert.equal(catalog.groupSpecimens(catalog.buildViewModel(data).specimens).length, 3, "legacy APIs without notes cannot prove there is no individual note");
+});
+
+test("stock cards show blue identifiers and red notes but no tank position or filter buttons", async () => {
+  const template = await read("pages/specimens/index.wxml");
+  const page = await read("pages/specimens/index.js");
+  const styles = await read("app.wxss");
+  assert.match(template, /class="specimen-number">编号/);
+  assert.match(template, /wx:if="\{\{item.notes\}\}" class="specimen-note">备注：\{\{item.notes\}\}/);
+  assert.ok(template.indexOf('class="specimen-number"') < template.indexOf('class="specimen-note"'));
+  assert.doesNotMatch(template, /item\.location|filter-row|onFilterTap|鱼码/);
+  assert.doesNotMatch(page, /filterOptions|activeFilter|onFilterTap/);
+  assert.match(page, /\}, "all"\)/);
+  assert.match(template, /class="price-unit"> \/ \{\{item.unit\}\}/);
+  assert.match(styles, /\.specimen-number\s*\{[^}]*color: #183d72/);
+  assert.match(styles, /\.specimen-note\s*\{[^}]*color: #b43232/);
+  const detail = await read("pages/detail/index.wxml");
+  assert.match(detail, /detail-number specimen-number/);
+  assert.match(detail, /备注：\{\{specimen.notes\}\}/);
 });
 
 test("return navigation overrides native sizing and all three levels render wrapping multi-tags", async () => {

@@ -113,8 +113,9 @@ function groupSpecimens(specimens) {
   asArray(specimens).forEach((specimen) => {
     // Old APIs without the full-history fingerprint must fail closed: do not
     // merge fish merely because the latest photo or video happens to match.
+    const individuallyIdentified = Boolean(specimen.code || specimen.notes || !specimen.notesKnown);
     const key = JSON.stringify([
-      specimen.specimenGroupKey || `single:${specimen.id}`,
+      (!individuallyIdentified && specimen.specimenGroupKey) || `single:${specimen.id}`,
       specimen.productId, specimen.inDate, specimen.location,
       specimen.status, specimen.price, specimen.defaultPrice,
       specimen.image, specimen.previewVideo,
@@ -125,7 +126,7 @@ function groupSpecimens(specimens) {
       groups.set(key, group);
     }
     group.members.push({ id: specimen.id, displayCode: specimen.displayCode, selectionCode: specimen.selectionCode,
-      label: specimen.code ? `鱼码 ${specimen.code}` : `第 ${group.quantity + 1} ${specimen.unit || "条"}` });
+      label: specimen.code ? `编号 ${specimen.code}` : `第 ${group.quantity + 1} ${specimen.unit || "条"}` });
     group.quantity += 1;
   });
   return [...groups.values()].map((group) => ({
@@ -237,6 +238,8 @@ function normalizeCatalog(value) {
       id: text(item.id),
       productId: text(item.productId),
       code: text(item.code),
+      notes: text(item.notes),
+      notesKnown: typeof item.notes === "string",
       specimenGroupKey: text(item.specimenGroupKey),
       status: text(item.status),
       inDate: text(item.inDate),
@@ -365,6 +368,8 @@ function buildViewModel(catalog) {
         specimenGroupKey: stock.specimenGroupKey,
         displayCode: stock.code || stock.id,
         code: stock.code || "",
+        notes: stock.notes,
+        notesKnown: stock.notesKnown,
         selectionCode: buildPublicSelectionCode(stock.id),
         productId: product.id,
         speciesId: product.speciesId,

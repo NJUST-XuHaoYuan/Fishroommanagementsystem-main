@@ -35,15 +35,17 @@
         <view class="product-name">{{specimen.productName}}</view>
         <view class="price-stack">
           <view wx:if="{{specimen.isSpecialPrice}}" class="special-price-label">特价</view>
-          <view class="price">{{specimen.priceText}}</view>
+          <view class="price">{{specimen.priceText}}<text class="price-unit"> / {{specimen.unit}}</text></view>
           <view wx:if="{{specimen.isSpecialPrice}}" class="original-price">{{specimen.defaultPriceText}}</view>
         </view>
       </view>
-      <view class="stock-quantity">库存 {{members.length || 1}} {{specimen.unit}}</view>
+      <view class="stock-quantity">{{members.length > 1 ? '同款可选' : '可选'}} {{members.length || 1}} {{specimen.unit}}</view>
       <view class="taxonomy">
         <text class="species-name">{{specimen.speciesName}}</text>
         <text class="scientific">{{specimen.subtitle}}</text>
       </view>
+      <view class="detail-number specimen-number">编号 {{specimen.code || (members.length > 1 ? '未单独编号' : '未设置')}}</view>
+      <view wx:if="{{specimen.notes}}" class="detail-note specimen-note">备注：{{specimen.notes}}</view>
       <view class="identity-status">
         <view class="specimen-tags">
           <text wx:for="{{specimen.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
@@ -99,7 +101,7 @@
     <view class="timeline-section">
       <view class="timeline-heading">
         <view>
-          <view class="section-title">维护记录</view>
+          <view class="section-title">{{members.length > 1 ? '共同维护记录' : '维护记录'}}</view>
           <view class="section-subtitle">从入库开始持续记录</view>
         </view>
         <view class="timeline-count">{{timeline.length}} 条</view>

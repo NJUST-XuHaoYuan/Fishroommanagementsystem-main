@@ -19,14 +19,6 @@ const {
   toggleCardVideoPreview
 } = require("../../utils/card-video-preview");
 
-const filterOptions = [
-  { key: "all", label: "全部" },
-  { key: "quarantined", label: "到货14天+" },
-  { key: "feeding", label: "已开口" },
-  { key: "healthy", label: "状态稳定" },
-  { key: "special", label: "特价" }
-];
-
 function decodeOption(value) {
   try {
     return decodeURIComponent(value || "");
@@ -46,9 +38,7 @@ Page({
     unit: "条",
     specimens: [],
     filteredSpecimenCount: 0,
-    activePreviewId: "",
-    activeFilter: "all",
-    filterOptions
+    activePreviewId: ""
   },
 
   onLoad(options) {
@@ -117,7 +107,8 @@ Page({
         subtitle: `${product.speciesName} · ${product.size} · ${product.origin}`,
         image: product.image,
         specimenCount: product.specimenCount,
-        priceRange: product.priceText
+        priceRange: product.priceText,
+        priceNote: product.priceNote
       } : species;
 
       app.globalData.catalog = catalog;
@@ -128,7 +119,7 @@ Page({
       wx.setNavigationBarTitle({ title: context.name });
       this.setData({ context, parentCategory: (product || species).category,
         unit: viewModel.categories.find((item) => item.key === (product || species).category)?.unit || "条" });
-      this.applyFilter(this.data.activeFilter);
+      this.showAllStock();
     } catch (error) {
       if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       app.globalData.catalog = null;
@@ -140,32 +131,25 @@ Page({
         error: error && error.message || "可选个体加载失败",
         context: null,
         specimens: [],
-        filteredSpecimenCount: 0,
-        activeFilter: "all"
+        filteredSpecimenCount: 0
       });
     } finally {
       if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
     }
   },
 
-  applyFilter(filterKey) {
+  showAllStock() {
     if (!this.viewModel) return;
     stopCardVideoPreview(this);
-    const activeFilter = filterKey || "all";
     const specimens = filterSpecimens(this.viewModel, {
       productId: this.data.productId,
       speciesId: this.data.productId ? "" : this.data.speciesId
-    }, activeFilter);
+    }, "all");
     this.setData({
       loading: false,
-      activeFilter,
       specimens: groupSpecimens(specimens),
       filteredSpecimenCount: specimens.length
     });
-  },
-
-  onFilterTap(event) {
-    this.applyFilter(event.currentTarget.dataset.key || "all");
   },
 
   onBackTap() {

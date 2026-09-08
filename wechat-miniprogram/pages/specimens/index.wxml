@@ -27,8 +27,8 @@
         </view>
         <view class="overview-divider"></view>
         <view class="overview-item price-overview">
-          <text class="overview-value">{{context.priceRange}}</text>
-          <text class="overview-label">当前售价</text>
+          <text class="overview-value">{{context.priceRange}}{{context.priceNote}}</text>
+          <text class="overview-label">/ {{unit}}</text>
         </view>
       </view>
     </view>
@@ -37,18 +37,6 @@
       <view class="list-heading">
         <view class="section-title">可选库存</view>
         <view class="section-count">{{filteredSpecimenCount}} {{unit}}</view>
-      </view>
-      <view class="filter-row">
-        <button
-          wx:for="{{filterOptions}}"
-          wx:key="key"
-          class="filter-option {{activeFilter === item.key ? 'active' : ''}}"
-          size="mini"
-          data-key="{{item.key}}"
-          bindtap="onFilterTap"
-        >
-          {{item.label}}
-        </button>
       </view>
     </view>
 
@@ -59,7 +47,7 @@
         class="specimen-card"
         hover-class="specimen-card-hover"
         role="button"
-        aria-label="查看{{item.productName}}，库存{{item.quantity}}{{item.unit}}"
+        aria-label="查看{{item.productName}}，{{item.grouped ? '同款可选' : '单独展示'}}{{item.quantity}}{{item.unit}}，编号{{item.code || '未设置'}}"
         data-id="{{item.id}}"
         bindtap="onSpecimenTap"
       >
@@ -111,7 +99,7 @@
               </view>
               <view wx:else class="preview-play-icon" aria-hidden="true"></view>
             </button>
-            <view class="specimen-status">库存 {{item.quantity}} {{item.unit}}</view>
+            <view class="specimen-status">{{item.grouped ? '同款可选' : '可选'}} {{item.quantity}} {{item.unit}}</view>
           </view>
 
           <view class="specimen-info">
@@ -121,11 +109,11 @@
               <text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
             </view>
             <view class="specimen-meta">到货 {{item.arrivalDate}}</view>
-            <view class="specimen-meta">{{item.location}}</view>
-            <view wx:if="{{!item.grouped && item.code}}" class="specimen-meta">鱼码 {{item.code}}</view>
+            <view class="specimen-number">编号 {{item.code || (item.grouped ? '未单独编号' : '未设置')}}</view>
+            <view wx:if="{{item.notes}}" class="specimen-note">备注：{{item.notes}}</view>
             <view class="specimen-footer">
               <view class="specimen-price-stack">
-                <view class="specimen-price">{{item.priceText}}</view>
+                <view class="specimen-price">{{item.priceText}}<text class="price-unit"> / {{item.unit}}</text></view>
                 <view wx:if="{{item.isSpecialPrice}}" class="specimen-original-price">{{item.defaultPriceText}}</view>
               </view>
               <text class="record-arrow" aria-hidden="true">›</text>
@@ -135,15 +123,14 @@
 
         <view class="latest-record">
           <view class="record-copy">
-            <text class="record-label">查看维护记录</text>
+            <text class="record-label">{{item.grouped ? '共同记录 · ' + item.quantity + ' ' + item.unit : '查看维护记录'}}</text>
           </view>
         </view>
       </view>
     </view>
 
     <view wx:else class="state-panel compact">
-      <view class="empty-title">当前筛选下没有库存</view>
-      <view class="empty-text">可以切换到“全部”继续查看。</view>
+      <view class="empty-title">暂无可选库存</view>
     </view>
   </view>
 </view>

@@ -1511,6 +1511,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         id: String(item?.id ?? ""),
         productId: String(item?.productId ?? ""),
         code: String(item?.code ?? ""),
+        notes: typeof item?.notes === "string" ? item.notes.trim() : "",
         specimenGroupKey: specimenGroupKeys.get(String(item?.id ?? "")) || "",
         status: item?.status === "feeding" ? "feeding" : "healthy",
         inDate: String(item?.inDate ?? ""),
