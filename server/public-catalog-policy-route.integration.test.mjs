@@ -218,6 +218,21 @@ const databaseFixture = {
   },
 };
 
+for (const id of ["group-one", "group-two", "group-different-history"]) {
+  databaseFixture.state.stock.push({
+    id, code: id, productId: "eligibility-tang", siteId: "nanjing", subTankId: "tank-nj",
+    status: "healthy", inDate: "2026-08-01", basePrice: 610, batchId: "same-batch", notes: "PRIVATE STOCK NOTE",
+  });
+  databaseFixture.state.bioRecords.push({
+    id: `record-${id}`, stockItemId: id, date: "2026-09-01", text: "Shared care",
+    photos: ["/uploads/shared.jpg"], videos: [],
+  });
+}
+databaseFixture.state.bioRecords.push({
+  id: "text-only-difference", stockItemId: "group-different-history", date: "2026-08-02",
+  text: "Older treatment", photos: [], videos: [],
+});
+
 let child;
 let baseUrl;
 let uploadDir;
@@ -341,6 +356,18 @@ test("a compact video-only latest record retains the fish's newest real photo fo
   assert.deepEqual(record.videos, ["/uploads/released-cancelled.mp4"]);
   assert.match(record.videoPosters[0], /^\/api\/public\/media\/video-derivative\?/);
   assert.match(record.videoPreviews[0], /^\/api\/public\/media\/video-derivative\?/);
+});
+
+test("catalog grouping includes older text-only history without exposing private stock notes", async () => {
+  const { body } = await publicGet("/api/public/catalog?siteId=all");
+  const find = (id) => body.catalog.stock.find((item) => item.id === id);
+  assert.match(find("group-one").specimenGroupKey, /^v1:[a-f0-9]{64}$/);
+  assert.equal(find("group-one").specimenGroupKey, find("group-two").specimenGroupKey);
+  assert.notEqual(find("group-one").specimenGroupKey, find("group-different-history").specimenGroupKey);
+  assert.equal(body.catalog.bioRecords.filter((record) => record.stockItemId === "group-different-history").length, 1);
+  assert.doesNotMatch(JSON.stringify(body), /PRIVATE STOCK NOTE/);
+  const detail = await publicGet("/api/public/bio-records?siteId=all&stockItemId=group-different-history");
+  assert.equal(detail.body.bioRecords.length, 2);
 });
 
 test("signed derivative delivery supports HEAD, Range and tamper rejection", async () => {

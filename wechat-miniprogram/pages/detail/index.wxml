@@ -27,7 +27,7 @@
 
     <view class="identity-section">
       <view class="identity-top">
-        <view class="display-code mono">{{specimen.displayCode}}</view>
+        <view class="display-code {{members.length > 1 ? '' : 'mono'}}">{{members.length > 1 ? '共 ' + members.length + ' 个' : specimen.displayCode}}</view>
         <view class="price-stack">
           <view wx:if="{{specimen.isSpecialPrice}}" class="special-price-label">特价</view>
           <view class="price">{{specimen.priceText}}</view>
@@ -40,9 +40,8 @@
         <text class="scientific">{{specimen.subtitle}}</text>
       </view>
       <view class="identity-status">
-        <view class="status-label {{specimen.statusClass}}">
-          <view class="status-dot"></view>
-          <text>{{specimen.statusText}}</text>
+        <view class="specimen-tags">
+          <text wx:for="{{specimen.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
         </view>
         <view class="stay-days">到货 {{specimen.daysInStore}} 天</view>
       </view>
@@ -67,18 +66,32 @@
       </view>
     </view>
 
+    <view wx:if="{{members.length > 1}}" class="group-selection">
+      <view class="group-selection-heading">选鱼码 · {{members.length}} 个</view>
+      <scroll-view class="group-members-scroll" scroll-y>
+        <view class="group-members">
+          <button wx:for="{{members}}" wx:key="id" size="mini"
+            class="group-member {{stockItemId === item.id ? 'selected' : ''}}"
+            data-id="{{item.id}}" bindtap="onMemberTap"
+            aria-label="选择鱼码{{item.displayCode}}" aria-pressed="{{stockItemId === item.id}}">
+            {{item.displayCode}}
+          </button>
+        </view>
+      </scroll-view>
+    </view>
+
     <view class="selection-panel">
       <view class="selection-copy">
         <view class="selection-label">选鱼码</view>
         <view class="selection-code mono">{{specimen.selectionCode}}</view>
       </view>
-      <button class="copy-button" bindtap="onCopyCode">复制</button>
+      <button class="copy-button" disabled="{{memberLoading}}" bindtap="onCopyCode">{{memberLoading ? '切换中' : '复制'}}</button>
     </view>
 
     <view class="timeline-section">
       <view class="timeline-heading">
         <view>
-          <view class="section-title">维护档案</view>
+          <view class="section-title">{{members.length > 1 ? '共同维护档案' : '维护档案'}}</view>
           <view class="section-subtitle">从入库开始持续记录</view>
         </view>
         <view class="timeline-count">{{timeline.length}} 条</view>

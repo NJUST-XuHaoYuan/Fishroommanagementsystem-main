@@ -104,8 +104,9 @@ test("catalog view model uses a generated preview while preferring the newest re
   assert.equal(specimen.previewVideo, "https://fish.example/uploads/preview-2.mp4");
   assert.equal(specimen.hasVideoPreview, true);
   assert.equal(specimen.hasMaintenanceMedia, true);
-  assert.equal(viewModel.productCards[0].image, specimen.image, "product card must prefer real specimen media");
-  assert.equal(viewModel.productCards[0].previewVideo, specimen.previewVideo);
+  assert.equal(viewModel.productCards[0].image, "https://fish.example/product-default.jpg");
+  assert.equal(viewModel.productCards[0].previewVideo, "");
+  assert.equal(viewModel.productCards[0].hasVideoPreview, false);
   assert.equal(viewModel.speciesCards[0].image, specimen.image, "species card must prefer real specimen media");
 
   const videoOnly = buildViewModel(catalogFixture([{
@@ -245,8 +246,8 @@ test("card preview controller keeps one player, stops off-screen, and pauses on 
   assert.equal(page.data.products[0].fallbackImage, "");
 });
 
-test("product and specimen cards create muted previews only after an explicit tap", () => {
-  for (const template of [productsTemplate, specimensTemplate]) {
+test("specimen cards create muted previews only after an explicit tap", () => {
+  for (const template of [specimensTemplate]) {
     assert.match(template, /wx:if="\{\{activePreviewId === item\.id\}\}"[\s\S]*?<video|<video[\s\S]*?wx:if="\{\{activePreviewId === item\.id\}\}"/);
     assert.match(template, /src="\{\{item\.previewVideo\}\}"/);
     assert.match(template, /poster="\{\{item\.image\}\}"/);
@@ -261,7 +262,7 @@ test("product and specimen cards create muted previews only after an explicit ta
     assert.doesNotMatch(template, /src="\{\{item\.videos?/);
   }
 
-  for (const pageSource of [productsPageSource, specimensPageSource]) {
+  for (const pageSource of [specimensPageSource]) {
     assert.match(pageSource, /onHide\(\)[\s\S]*?stopCardVideoPreview\(this\)/);
     assert.match(pageSource, /onUnload\(\)[\s\S]*?stopCardVideoPreview\(this, \{ clearData: false \}\)/);
     assert.match(pageSource, /onPreviewToggle\(event\)[\s\S]*?toggleCardVideoPreview\(this, event\)/);
@@ -272,8 +273,8 @@ test("product and specimen cards create muted previews only after an explicit ta
   assert.match(previewSource, /intersectionRatio/);
 });
 
-test("preview buttons opt out of native full-width sizing on both card lists", () => {
-  for (const template of [productsTemplate, specimensTemplate]) {
+test("specimen preview buttons opt out of native full-width sizing", () => {
+  for (const template of [specimensTemplate]) {
     const button = template.match(/<button\b[^>]*class="media-preview-toggle[^>]*>/)?.[0];
     assert.ok(button, "each card list must have a preview toggle");
     assert.match(button, /size="mini"/, "exclude the native default-size button rule");
@@ -287,4 +288,11 @@ test("preview buttons opt out of native full-width sizing on both card lists", (
   assert.match(rule, /margin:\s*0;/);
   assert.match(rule, /padding:\s*0;/);
   assert.match(rule, /border-radius:\s*50%;/);
+});
+
+test("product cards show only default images without a video player or play control", () => {
+  assert.doesNotMatch(productsTemplate, /<video|onPreviewToggle|media-preview-toggle/);
+  assert.doesNotMatch(productsPageSource, /toggleCardVideoPreview|activePreviewId/);
+  assert.match(productsTemplate, /src="\{\{item.image\}\}"/);
+  assert.match(productsTemplate, /binderror="onCardImageError"/);
 });

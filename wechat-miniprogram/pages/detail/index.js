@@ -2,6 +2,8 @@ const { fetchCatalog, fetchBioRecords } = require("../../utils/api");
 const {
   buildViewModel,
   findSpecimen,
+  filterSpecimens,
+  groupSpecimens,
   normalizeTimeline
 } = require("../../utils/catalog");
 const {
@@ -16,6 +18,9 @@ Page({
     loading: true,
     error: "",
     stockItemId: "",
+    groupMode: false,
+    members: [],
+    memberLoading: false,
     specimen: null,
     timeline: [],
     imagePreview: []
@@ -23,7 +28,7 @@ Page({
 
   onLoad(options) {
     const stockItemId = decodeURIComponent(options.stockItemId || "");
-    this.setData({ stockItemId });
+    this.setData({ stockItemId, groupMode: options.group === "1" });
     this.loadDetail(stockItemId);
   },
 
@@ -78,6 +83,11 @@ Page({
       if (!viewModel || !isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const specimen = findSpecimen(viewModel, stockItemId);
       if (!specimen) throw new Error("这个个体当前没有公开库存");
+      const group = this.data.groupMode
+        ? groupSpecimens(filterSpecimens(viewModel, { productId: specimen.productId }, "all"))
+          .find((item) => item.members.some((member) => member.id === stockItemId))
+        : null;
+      const members = group ? group.members : [];
       const records = await fetchBioRecords(stockItemId);
       if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       const timeline = normalizeTimeline(records, specimen);
@@ -89,6 +99,8 @@ Page({
       this.setData({
         loading: false,
         specimen,
+        stockItemId,
+        members,
         timeline,
         imagePreview
       });
@@ -102,11 +114,15 @@ Page({
         loading: false,
         error: error && error.message || "详情加载失败",
         specimen: null,
+        members: [],
         timeline: [],
         imagePreview: []
       });
     } finally {
-      if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
+      if (isCurrentPublicCatalogRequest(this, requestGeneration)) {
+        this.setData({ memberLoading: false });
+        wx.stopPullDownRefresh();
+      }
     }
   },
 
@@ -114,7 +130,15 @@ Page({
     this.loadDetail(this.data.stockItemId, { force: true });
   },
 
+  onMemberTap(event) {
+    const stockItemId = event.currentTarget.dataset.id;
+    if (stockItemId === this.data.stockItemId || !this.data.members.some((item) => item.id === stockItemId)) return;
+    this.setData({ memberLoading: true });
+    return this.loadDetail(stockItemId, { refreshing: true });
+  },
+
   onCopyCode() {
+    if (this.data.memberLoading) return;
     const code = this.data.specimen && this.data.specimen.selectionCode;
     if (!code) return;
     wx.setClipboardData({
@@ -142,7 +166,7 @@ Page({
     const specimen = this.data.specimen;
     return {
       title: specimen ? `${specimen.speciesName} · ${specimen.displayCode}` : "海水鱼廊个体详情",
-      path: `/pages/detail/index?stockItemId=${encodeURIComponent(this.data.stockItemId || "")}`,
+      path: `/pages/detail/index?stockItemId=${encodeURIComponent(this.data.stockItemId || "")}${this.data.groupMode ? "&group=1" : ""}`,
       imageUrl: specimen && specimen.image || undefined
     };
   }

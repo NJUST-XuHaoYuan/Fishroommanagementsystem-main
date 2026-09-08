@@ -85,6 +85,55 @@ function statusLabel(status) {
   return "状态稳定";
 }
 
+function specimenTags(specimen) {
+  const tags = [];
+  if (specimen.daysInStore >= 14) tags.push({ key: "arrival", label: "到货14天+", tone: "arrival" });
+  if (specimen.status === "feeding") tags.push({ key: "feeding", label: "已开口", tone: "feeding" });
+  else if (specimen.status === "healthy") tags.push({ key: "healthy", label: "状态稳定", tone: "healthy" });
+  else if (specimen.status === "sick") tags.push({ key: "sick", label: "观察中", tone: "sick" });
+  if (specimen.isSpecialPrice) tags.push({ key: "special", label: "特价", tone: "special" });
+  return tags;
+}
+
+function summarizeSpecimenTags(specimens, unit) {
+  const totals = new Map();
+  specimens.forEach((specimen) => specimenTags(specimen).forEach((tag) => {
+    const current = totals.get(tag.key) || { ...tag, count: 0 };
+    current.count += 1;
+    totals.set(tag.key, current);
+  }));
+  return ["arrival", "feeding", "healthy", "sick", "special"].map((key) => totals.get(key)).filter(Boolean).map((tag) => ({
+    ...tag,
+    label: tag.count === specimens.length ? tag.label : `${tag.label} ${tag.count}${unit}`
+  }));
+}
+
+function groupSpecimens(specimens) {
+  const groups = new Map();
+  asArray(specimens).forEach((specimen) => {
+    // Old APIs without the full-history fingerprint must fail closed: do not
+    // merge fish merely because the latest photo or video happens to match.
+    const key = JSON.stringify([
+      specimen.specimenGroupKey || `single:${specimen.id}`,
+      specimen.productId, specimen.inDate, specimen.location,
+      specimen.status, specimen.price, specimen.defaultPrice,
+      specimen.image, specimen.previewVideo,
+    ]);
+    let group = groups.get(key);
+    if (!group) {
+      group = { ...specimen, members: [], quantity: 0, tags: specimenTags(specimen) };
+      groups.set(key, group);
+    }
+    group.members.push({ id: specimen.id, displayCode: specimen.displayCode, selectionCode: specimen.selectionCode });
+    group.quantity += 1;
+  });
+  return [...groups.values()].map((group) => ({
+    ...group,
+    grouped: group.quantity > 1,
+    cardTitle: group.quantity > 1 ? `共 ${group.quantity} 个` : group.displayCode,
+  }));
+}
+
 function formatDate(value) {
   const raw = text(value);
   if (!raw) return "待确认";
@@ -187,6 +236,7 @@ function normalizeCatalog(value) {
       id: text(item.id),
       productId: text(item.productId),
       code: text(item.code),
+      specimenGroupKey: text(item.specimenGroupKey),
       status: text(item.status),
       inDate: text(item.inDate),
       basePrice: number(item.basePrice),
@@ -311,6 +361,7 @@ function buildViewModel(catalog) {
       const isSpecialPrice = stockPrice > 0 && defaultPrice > 0 && stockPrice < defaultPrice;
       specimens.push({
         id: stock.id,
+        specimenGroupKey: stock.specimenGroupKey,
         displayCode: stock.code || stock.id,
         selectionCode: buildPublicSelectionCode(stock.id),
         productId: product.id,
@@ -340,17 +391,18 @@ function buildViewModel(catalog) {
         arrivalDate: formatDate(stock.inDate),
         daysInStore: daysSince(stock.inDate),
         location: stockLocation(stock),
-        latestBioText: latestBio ? latestBio.text : "暂无公开维护记录",
+        latestBioText: latestBio ? latestBio.text || "查看照片与视频记录" : "暂无公开维护记录",
         latestBioDate: latestBio ? formatDate(latestBio.date) : "",
         hasPhoto: Boolean(image)
       });
     });
   });
 
+  specimens.forEach((specimen) => { specimen.tags = specimenTags(specimen); });
+
   const productCards = normalized.products.map((product) => {
     const species = speciesById[product.speciesId] || {};
     const productSpecimens = specimens.filter((item) => item.productId === product.id);
-    const featuredSpecimen = representativeSpecimen(productSpecimens);
     const prices = productSpecimens.map((item) => item.price).filter((value) => value > 0);
     const minPrice = prices.length ? Math.min(...prices) : product.defaultPrice;
     const category = species.category || "其他";
@@ -365,10 +417,11 @@ function buildViewModel(catalog) {
       majorKey,
       size: product.size || "待确认",
       origin: product.origin || "来源待确认",
-      image: featuredSpecimen && featuredSpecimen.image || product.imageUrl || species.imageUrl || "",
-      fallbackImage: featuredSpecimen && featuredSpecimen.fallbackImage || product.imageUrl || species.imageUrl || "",
-      previewVideo: featuredSpecimen && featuredSpecimen.previewVideo || "",
-      hasVideoPreview: Boolean(featuredSpecimen && featuredSpecimen.previewVideo),
+      image: product.imageUrl || species.imageUrl || "",
+      fallbackImage: product.imageUrl && product.imageUrl !== species.imageUrl ? species.imageUrl || "" : "",
+      previewVideo: "",
+      hasVideoPreview: false,
+      tags: summarizeSpecimenTags(productSpecimens, DEFAULT_MAJOR_CATEGORIES.find((item) => item.key === majorKey).unit),
       specimenCount: productSpecimens.length,
       price: minPrice,
       priceText: formatMoney(minPrice),
@@ -494,6 +547,7 @@ function filterSpecimens(viewModel, selection, filterKey) {
     if (productId && item.productId !== productId) return false;
     if (filterKey === "quarantined") return item.daysInStore >= 14;
     if (filterKey === "feeding") return item.status === "feeding";
+    if (filterKey === "healthy") return item.status === "healthy";
     if (filterKey === "special") return item.isSpecialPrice;
     return true;
   });
@@ -558,6 +612,7 @@ module.exports = {
   filterProducts,
   filterSpecies,
   filterSpecimens,
+  groupSpecimens,
   findProduct,
   findSpecimen,
   formatDate,

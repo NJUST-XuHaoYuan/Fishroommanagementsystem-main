@@ -2,6 +2,7 @@ const { fetchCatalog } = require("../../utils/api");
 const {
   buildViewModel,
   filterSpecimens,
+  groupSpecimens,
   findProduct
 } = require("../../utils/catalog");
 const {
@@ -21,6 +22,7 @@ const filterOptions = [
   { key: "all", label: "全部" },
   { key: "quarantined", label: "到货14天+" },
   { key: "feeding", label: "已开口" },
+  { key: "healthy", label: "状态稳定" },
   { key: "special", label: "特价" }
 ];
 
@@ -40,6 +42,7 @@ Page({
     speciesId: "",
     context: null,
     specimens: [],
+    filteredSpecimenCount: 0,
     activePreviewId: "",
     activeFilter: "all",
     filterOptions
@@ -121,7 +124,7 @@ Page({
 
       wx.setNavigationBarTitle({ title: context.name });
       this.setData({ context });
-      this.applyFilter("all");
+      this.applyFilter(this.data.activeFilter);
     } catch (error) {
       if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
       app.globalData.catalog = null;
@@ -133,6 +136,7 @@ Page({
         error: error && error.message || "可选个体加载失败",
         context: null,
         specimens: [],
+        filteredSpecimenCount: 0,
         activeFilter: "all"
       });
     } finally {
@@ -151,7 +155,8 @@ Page({
     this.setData({
       loading: false,
       activeFilter,
-      specimens
+      specimens: groupSpecimens(specimens),
+      filteredSpecimenCount: specimens.length
     });
   },
 
@@ -163,8 +168,9 @@ Page({
     stopCardVideoPreview(this);
     const stockItemId = event.currentTarget.dataset.id;
     if (!stockItemId) return;
+    const group = this.data.specimens.find((item) => item.id === stockItemId);
     wx.navigateTo({
-      url: `/pages/detail/index?stockItemId=${encodeURIComponent(stockItemId)}`
+      url: `/pages/detail/index?stockItemId=${encodeURIComponent(stockItemId)}${group && group.grouped ? "&group=1" : ""}`
     });
   },
 

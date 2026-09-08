@@ -128,6 +128,7 @@ import {
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
 import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
+import { PUBLIC_SPECIMEN_HISTORY_SQL, publicSpecimenGroupKeys } from "./public-specimen-groups.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
   resolveShippingCarrier,
@@ -1322,6 +1323,7 @@ function publicCatalogProjectionFromRow(row = {}) {
     orders: Array.isArray(row.orders) ? row.orders : [],
     shipments: Array.isArray(row.shipments) ? row.shipments : [],
     bioRecords: Array.isArray(row.bio_records) ? row.bio_records : [],
+    specimenHistoryDigests: row.specimen_history_digests,
   };
 }
 
@@ -1451,6 +1453,9 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const latestMediaByStockId = selection.latestMediaByStockId;
   const completeCategoryMajorMap = selection.completeCategoryMajorMap;
   const sellableStock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const specimenGroupKeys = publicSpecimenGroupKeys(
+    sellableStock, state.specimenHistoryDigests, authTokenSecret
+  );
   const sellableStockIds = new Set(sellableStock.map((item) => String(item?.id ?? "")).filter(Boolean));
   const sellableProductIds = new Set(sellableStock.map((item) => String(item?.productId ?? "")).filter(Boolean));
   const availableProducts = products.filter((product) =>
@@ -1506,6 +1511,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
         id: String(item?.id ?? ""),
         productId: String(item?.productId ?? ""),
         code: String(item?.code ?? ""),
+        specimenGroupKey: specimenGroupKeys.get(String(item?.id ?? "")) || "",
         status: item?.status === "feeding" ? "feeding" : "healthy",
         inDate: String(item?.inDate ?? ""),
         basePrice: Number(item?.basePrice ?? 0),
@@ -8324,6 +8330,7 @@ async function handleApi(req, res, url) {
            data -> 'stock' AS stock,
            data -> 'orders' AS orders,
            data -> 'shipments' AS shipments,
+           ${PUBLIC_SPECIMEN_HISTORY_SQL} AS specimen_history_digests,
            COALESCE((
              SELECT jsonb_agg(record_item)
              FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS records(record_item)

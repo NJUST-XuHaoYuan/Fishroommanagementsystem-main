@@ -106,6 +106,8 @@
 
 .filter-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   margin-top: 14rpx;
   padding: 5rpx;
   border: 1rpx solid #cbd4d0;
@@ -113,19 +115,22 @@
   background: #e2e8e5;
 }
 
-.filter-option {
+.filter-option[size="mini"] {
   display: flex;
-  min-height: 66rpx;
-  flex: 1;
+  width: auto;
+  min-height: 44px;
+  flex: 1 0 auto;
+  margin: 0;
+  padding: 0 8px;
   align-items: center;
   justify-content: center;
   border-radius: 9rpx;
   color: #53605c;
-  font-size: 24rpx;
+  font-size: 12px;
   font-weight: 680;
 }
 
-.filter-option.active {
+.filter-option[size="mini"].active {
   background: #111a18;
   color: #fff;
 }
@@ -203,6 +208,7 @@
 
 .specimen-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 10rpx;

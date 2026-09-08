@@ -21,7 +21,7 @@
 
   <view class="products-content">
     <view class="back-row">
-      <button class="back-button" aria-label="返回分类目录" bindtap="onBackTap">
+      <button class="back-button" size="mini" aria-label="返回分类目录" bindtap="onBackTap">
         <text class="back-symbol" aria-hidden="true">‹</text>
         <text>分类目录</text>
       </button>
@@ -84,28 +84,8 @@
           bindtap="onProductTap"
         >
           <view class="product-media">
-            <video
-              wx:if="{{activePreviewId === item.id}}"
-              id="card-video-preview-player"
-              class="product-image active-card-video"
-              src="{{item.previewVideo}}"
-              poster="{{item.image}}"
-              autoplay="{{true}}"
-              muted="{{true}}"
-              loop="{{true}}"
-              controls="{{false}}"
-              show-center-play-btn="{{false}}"
-              show-play-btn="{{false}}"
-              show-fullscreen-btn="{{false}}"
-              enable-progress-gesture="{{false}}"
-              object-fit="cover"
-              aria-label="{{item.name}}视频预览"
-              data-id="{{item.id}}"
-              catchtap="onProductTap"
-              binderror="onPreviewError"
-            />
             <image
-              wx:elif="{{item.image}}"
+              wx:if="{{item.image}}"
               class="product-image"
               src="{{item.image}}"
               mode="aspectFill"
@@ -114,28 +94,15 @@
               binderror="onCardImageError"
             />
             <view wx:else class="product-image product-placeholder"></view>
-            <button
-              wx:if="{{item.hasVideoPreview}}"
-              class="media-preview-toggle {{activePreviewId === item.id ? 'playing' : ''}}"
-              size="mini"
-              hover-class="media-preview-toggle-hover"
-              aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}{{item.name}}的视频预览"
-              data-id="{{item.id}}"
-              data-preview="{{item.previewVideo}}"
-              catchtap="onPreviewToggle"
-            >
-              <view wx:if="{{activePreviewId === item.id}}" class="preview-pause-icon" aria-hidden="true">
-                <view></view>
-                <view></view>
-              </view>
-              <view wx:else class="preview-play-icon" aria-hidden="true"></view>
-            </button>
             <view class="product-count">{{item.specimenCount}} {{categoryInfo.unit}}</view>
           </view>
           <view class="product-copy">
             <view class="product-name">{{item.name}}</view>
             <view class="product-species">{{item.speciesName}}</view>
             <view class="product-spec">{{item.size}} · {{item.origin}}</view>
+            <view class="specimen-tags">
+              <text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
+            </view>
             <view class="product-footer">
               <view class="product-price">
                 <text>{{item.priceText}}</text>

@@ -155,6 +155,44 @@ button::after {
   padding-bottom: calc(44rpx + env(safe-area-inset-bottom));
 }
 
+.specimen-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.specimen-tag {
+  max-width: 100%;
+  padding: 2px 5px;
+  border: 1px solid #cbd8d2;
+  border-radius: 4px;
+  background: #f0f5f2;
+  color: #355449;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.specimen-tag.arrival {
+  border-color: #c4d6e8;
+  background: #edf4fc;
+  color: #315e8b;
+}
+
+.specimen-tag.feeding {
+  border-color: #b7d9ce;
+  background: #eaf6f0;
+  color: #1b6650;
+}
+
+.specimen-tag.special,
+.specimen-tag.sick {
+  border-color: #e8c9c5;
+  background: #fff1ee;
+  color: #9d453c;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }

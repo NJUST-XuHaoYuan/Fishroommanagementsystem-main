@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const fixture = JSON.parse(process.env.FISHROOM_TEST_DATABASE_FIXTURE_JSON || "{}");
 const state = fixture.state && typeof fixture.state === "object" ? fixture.state : {};
 const revision = String(fixture.revision ?? "1");
@@ -98,6 +100,16 @@ function appStateRow(sql, values = []) {
       (Array.isArray(record?.photos) && record.photos.length > 0) ||
       (Array.isArray(record?.videos) && record.videos.length > 0)
     );
+  }
+  if (/\bAS\s+specimen_history_digests\b/i.test(sql)) {
+    const histories = Map.groupBy(state.bioRecords || [], (record) => record.stockItemId);
+    row.specimen_history_digests = Object.fromEntries([...histories].map(([id, records]) => [id,
+      records.some((record) => !record.id) || new Set(records.map((record) => record.id)).size !== records.length
+        ? null
+        : createHash("sha256").update(JSON.stringify(records.map(({ id, stockItemId, ...content }) =>
+          JSON.stringify(content, Object.keys(content).sort())
+        ).sort())).digest("hex"),
+    ]));
   }
   return row;
 }

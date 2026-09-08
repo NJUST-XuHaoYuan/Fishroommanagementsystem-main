@@ -124,3 +124,10 @@ test("public responses do not expose the policy rule lists", () => {
   assert.doesNotMatch(payload, /hiddenMajorCategoryKeys|hiddenProductIds|hiddenSpeciesIds|productDisplayCaps/);
   assert.doesNotMatch(bioRecordsBuilder, /hiddenMajorCategoryKeys|hiddenProductIds|hiddenSpeciesIds|productDisplayCaps/);
 });
+
+test("group equality is based on full server-side history while public catalog media stays compact", () => {
+  assert.match(catalogRoute, /\$\{PUBLIC_SPECIMEN_HISTORY_SQL\} AS specimen_history_digests/);
+  assert.match(catalogBuilder, /publicSpecimenGroupKeys\(\s*sellableStock, state\.specimenHistoryDigests, authTokenSecret/);
+  assert.match(catalogBuilder, /specimenGroupKey: specimenGroupKeys\.get/);
+  assert.match(catalogBuilder, /bioRecords: \[\.\.\.latestMediaByStockId\]/);
+});

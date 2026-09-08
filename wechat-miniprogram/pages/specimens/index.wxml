@@ -36,13 +36,14 @@
     <view class="list-toolbar">
       <view class="list-heading">
         <view class="section-title">选择个体</view>
-        <view class="section-count">{{specimens.length}} 条</view>
+        <view class="section-count">{{filteredSpecimenCount}} 个 · {{specimens.length}} 组</view>
       </view>
       <view class="filter-row">
         <button
           wx:for="{{filterOptions}}"
           wx:key="key"
           class="filter-option {{activeFilter === item.key ? 'active' : ''}}"
+          size="mini"
           data-key="{{item.key}}"
           bindtap="onFilterTap"
         >
@@ -58,7 +59,7 @@
         class="specimen-card"
         hover-class="specimen-card-hover"
         role="button"
-        aria-label="查看选鱼码{{item.displayCode}}的维护详情"
+        aria-label="查看{{item.cardTitle}}的维护详情"
         data-id="{{item.id}}"
         bindtap="onSpecimenTap"
       >
@@ -110,12 +111,12 @@
               </view>
               <view wx:else class="preview-play-icon" aria-hidden="true"></view>
             </button>
-            <view class="specimen-status {{item.statusClass}}">{{item.statusText}}</view>
+            <view wx:if="{{item.grouped}}" class="specimen-status">{{item.quantity}} 个</view>
           </view>
 
           <view class="specimen-info">
             <view class="specimen-top">
-              <view class="specimen-code mono">{{item.displayCode}}</view>
+              <view class="specimen-code {{item.grouped ? '' : 'mono'}}">{{item.cardTitle}}</view>
               <view class="specimen-price-stack">
                 <view wx:if="{{item.isSpecialPrice}}" class="special-price-label">特价</view>
                 <view class="specimen-price">{{item.priceText}}</view>
@@ -123,6 +124,9 @@
               </view>
             </view>
             <view class="specimen-product">{{item.productName}}</view>
+            <view class="specimen-tags">
+              <text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
+            </view>
             <view class="specimen-attributes">
               <view class="attribute">
                 <text class="attribute-label">尺寸</text>
@@ -142,7 +146,7 @@
 
         <view class="latest-record">
           <view class="record-copy">
-            <text class="record-label">最近维护</text>
+            <text class="record-label">{{item.grouped ? '共同维护' : '最近维护'}}</text>
             <text class="record-text two-line">{{item.latestBioText}}</text>
           </view>
           <text class="record-arrow">›</text>
