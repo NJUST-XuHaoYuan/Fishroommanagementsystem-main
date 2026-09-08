@@ -117,6 +117,7 @@
             <button
               wx:if="{{item.hasVideoPreview}}"
               class="media-preview-toggle {{activePreviewId === item.id ? 'playing' : ''}}"
+              size="mini"
               hover-class="media-preview-toggle-hover"
               aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}{{item.name}}的视频预览"
               data-id="{{item.id}}"

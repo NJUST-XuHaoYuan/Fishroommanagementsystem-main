@@ -93,7 +93,8 @@ button::after {
   display: block;
 }
 
-.media-preview-toggle {
+/* Override native button sizing without changing full-width action buttons. */
+.media-preview-toggle[size="mini"] {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -103,8 +104,12 @@ button::after {
   height: 88rpx;
   min-width: 88rpx;
   min-height: 88rpx;
+  max-width: 88rpx;
+  max-height: 88rpx;
   align-items: center;
   justify-content: center;
+  margin: 0;
+  padding: 0;
   border: 2rpx solid rgba(255, 255, 255, 0.9);
   border-radius: 50%;
   background: rgba(10, 19, 17, 0.78);

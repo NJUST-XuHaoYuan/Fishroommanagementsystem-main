@@ -268,7 +268,23 @@ test("product and specimen cards create muted previews only after an explicit ta
     assert.match(pageSource, /onCardImageError\(event\)[\s\S]*?handleCardImageError\(this, event, "(?:products|specimens)"\)/);
   }
 
-  assert.match(appStyles, /\.media-preview-toggle\s*\{[\s\S]*?width:\s*88rpx;[\s\S]*?height:\s*88rpx;/);
   assert.match(previewSource, /createIntersectionObserver/);
   assert.match(previewSource, /intersectionRatio/);
+});
+
+test("preview buttons opt out of native full-width sizing on both card lists", () => {
+  for (const template of [productsTemplate, specimensTemplate]) {
+    const button = template.match(/<button\b[^>]*class="media-preview-toggle[^>]*>/)?.[0];
+    assert.ok(button, "each card list must have a preview toggle");
+    assert.match(button, /size="mini"/, "exclude the native default-size button rule");
+  }
+
+  const rule = appStyles.match(/\.media-preview-toggle\[size="mini"\]\s*\{([^}]+)\}/)?.[1];
+  assert.ok(rule, "scope dimensions above native button attribute selector specificity");
+  for (const property of ["width", "height", "min-width", "min-height", "max-width", "max-height"]) {
+    assert.match(rule, new RegExp(`(?:^|[;\\s])${property}:\\s*88rpx;`));
+  }
+  assert.match(rule, /margin:\s*0;/);
+  assert.match(rule, /padding:\s*0;/);
+  assert.match(rule, /border-radius:\s*50%;/);
 });
