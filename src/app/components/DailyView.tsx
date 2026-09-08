@@ -442,11 +442,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     });
   };
 
-  const speciesIdOfProduct = (productId: string) => product(productId)?.speciesId ?? productId;
-
-  const visibleSpeciesItems = (items: StockItem[], speciesId: string) =>
-    items.filter((item) => speciesIdOfProduct(item.productId) === speciesId);
-
   const enterSelectMode = () => {
     if (!canBatchSelect) {
       permission.requirePermission("create");
@@ -1530,10 +1525,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                             const p = product(productId);
                             const key = `${t.id}-${productId}`;
                             const isExpanded = expandedKeys.has(key);
-                            const speciesId = speciesIdOfProduct(productId);
-                            const sameSpeciesItems = visibleSpeciesItems(items, speciesId);
-                            const sameSpeciesSelected =
-                              sameSpeciesItems.length > 0 && sameSpeciesItems.every((item) => selectedIds.has(item.id));
+                            const groupSelected =
+                              stockItems.length > 0 && stockItems.every((item) => selectedIds.has(item.id));
 
                             const counts = stockItems.reduce((acc, s) => {
                               acc[s.status] = (acc[s.status] ?? 0) + 1;
@@ -1548,6 +1541,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                                   className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 text-left"
                                   onClick={() => toggleExpand(key)}
                                   onKeyDown={(e) => {
+                                    if (e.target !== e.currentTarget) return;
                                     if (e.key === "Enter" || e.key === " ") {
                                       e.preventDefault();
                                       toggleExpand(key);
@@ -1591,14 +1585,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                                     <button
                                       type="button"
                                       className="shrink-0 rounded border border-sky-200 px-1.5 py-0.5 text-xs font-medium text-sky-600 hover:bg-sky-50 disabled:border-border disabled:text-muted-foreground"
-                                      disabled={sameSpeciesItems.length === 0}
-                                      title={`选择当前子缸内同一物种的 ${sameSpeciesItems.length} 条`}
+                                      disabled={stockItems.length === 0}
+                                      aria-pressed={groupSelected}
+                                      title={`${groupSelected ? "取消选择" : "选择"}当前子缸内「${p?.name ?? productId}」本组当前显示的 ${stockItems.length} 条`}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        toggleVisibleSelection(sameSpeciesItems, "该物种没有可选择的鱼");
+                                        toggleVisibleSelection(stockItems, "该商品分组没有可选择的鱼");
                                       }}
                                     >
-                                      {sameSpeciesSelected ? "取消同种" : "选同种"}
+                                      {groupSelected ? "取消本组" : "选本组"}
                                     </button>
                                   )}
                                   <ChevronDown
