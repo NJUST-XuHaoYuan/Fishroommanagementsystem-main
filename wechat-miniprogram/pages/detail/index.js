@@ -21,6 +21,7 @@ Page({
     groupMode: false,
     members: [],
     memberLoading: false,
+    memberListHeight: 44,
     specimen: null,
     timeline: [],
     imagePreview: []
@@ -101,6 +102,7 @@ Page({
         specimen,
         stockItemId,
         members,
+        memberListHeight: Math.max(1, Math.min(3, Math.ceil(members.length / 3))) * 52 - 8,
         timeline,
         imagePreview
       });

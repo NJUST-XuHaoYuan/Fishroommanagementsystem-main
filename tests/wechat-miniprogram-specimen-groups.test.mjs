@@ -105,6 +105,7 @@ test("group detail switches the real selection code and does not permit copying 
   page.setData = (value) => Object.assign(page.data, value);
   await page.loadDetail("one");
   assert.equal(page.data.members.length, 3);
+  assert.equal(page.data.memberListHeight, 44);
   assert.equal(page.data.timeline.filter((item) => item.text === "Shared care record").length, 1);
   const request = page.onMemberTap({ currentTarget: { dataset: { id: "two" } } });
   assert.equal(page.data.memberLoading, true);
@@ -128,7 +129,14 @@ test("return navigation overrides native sizing and all three levels render wrap
   assert.match(styles, /\.back-button\[size="mini"\][\s\S]*?margin:\s*0 auto 0 0/);
   assert.match(styles, /\.back-button\[size="mini"\][\s\S]*?justify-content:\s*flex-start/);
   assert.match(appStyles, /\.specimen-tags\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(await read("pages/detail/index.wxml"), /height: \{\{memberListHeight\}\}px/);
   for (const page of ["products", "specimens", "detail"]) {
     assert.match(await read(`pages/${page}/index.wxml`), /wx:for="\{\{(?:item|specimen)\.tags\}\}"/);
   }
+});
+
+test("a missing compact media summary must not claim that text-only history is absent", () => {
+  const data = fixture();
+  data.bioRecords = [];
+  assert.equal(catalog.buildViewModel(data).specimens[0].latestBioText, "查看维护档案");
 });

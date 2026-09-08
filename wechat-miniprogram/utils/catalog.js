@@ -391,7 +391,7 @@ function buildViewModel(catalog) {
         arrivalDate: formatDate(stock.inDate),
         daysInStore: daysSince(stock.inDate),
         location: stockLocation(stock),
-        latestBioText: latestBio ? latestBio.text || "查看照片与视频记录" : "暂无公开维护记录",
+        latestBioText: latestBio ? latestBio.text || "查看照片与视频记录" : "查看维护档案",
         latestBioDate: latestBio ? formatDate(latestBio.date) : "",
         hasPhoto: Boolean(image)
       });

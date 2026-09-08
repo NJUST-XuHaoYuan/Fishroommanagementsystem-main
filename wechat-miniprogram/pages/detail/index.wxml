@@ -68,7 +68,7 @@
 
     <view wx:if="{{members.length > 1}}" class="group-selection">
       <view class="group-selection-heading">选鱼码 · {{members.length}} 个</view>
-      <scroll-view class="group-members-scroll" scroll-y>
+      <scroll-view class="group-members-scroll" style="height: {{memberListHeight}}px" scroll-y>
         <view class="group-members">
           <button wx:for="{{members}}" wx:key="id" size="mini"
             class="group-member {{stockItemId === item.id ? 'selected' : ''}}"
