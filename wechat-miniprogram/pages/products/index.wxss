@@ -29,7 +29,7 @@
 
 .back-row {
   display: flex;
-  min-height: 76rpx;
+  min-height: 72rpx;
   align-items: center;
   justify-content: space-between;
   gap: 24rpx;
@@ -37,10 +37,13 @@
 
 .back-button {
   display: flex;
-  min-width: 176rpx;
-  min-height: 76rpx;
+  min-width: 0;
+  min-height: 72rpx;
+  flex: 0 0 auto;
   align-items: center;
+  justify-content: flex-start;
   gap: 10rpx;
+  padding: 0;
   color: var(--group-accent);
   font-size: 14px;
   font-weight: 700;

@@ -7,12 +7,14 @@
       class="custom-nav-content"
       style="height: {{navBarHeight}}px; padding-right: {{menuRightPadding}}px;"
     >
-      <view class="nav-brand-mark">
-        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFill" />
-      </view>
-      <view class="nav-brand-copy">
-        <view class="nav-brand-title">海水生物鱼单</view>
-        <view class="nav-brand-subtitle">真实在缸个体 · 持续维护记录</view>
+      <view class="nav-brand-lockup">
+        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFit" />
+        <image
+          class="nav-brand-slogan"
+          src="/assets/brand-slogan.png"
+          mode="aspectFit"
+          aria-label="种一片海，Grow an Ocean"
+        />
       </view>
     </view>
   </view>
