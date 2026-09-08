@@ -47,9 +47,9 @@
         <view class="major-summary">
           <text class="summary-value">{{major.categoryCount}}</text>
           <text> 小类</text>
-          <text class="summary-divider">/</text>
+          <text class="summary-divider">·</text>
           <text class="summary-value">{{major.specimenCount}}</text>
-          <text> {{major.unit}}可选</text>
+          <text> {{major.unit}}</text>
         </view>
       </view>
 
@@ -58,7 +58,8 @@
           wx:for="{{major.categories}}"
           wx:for-item="minor"
           wx:key="key"
-          class="minor-link {{minor.isLastRow ? 'last-row' : ''}}"
+          class="minor-link"
+          size="mini"
           hover-class="minor-link-hover"
           aria-label="查看{{minor.label}}，{{minor.productCount}}款，{{minor.specimenCount}}{{minor.unit}}可选"
           data-category="{{minor.key}}"
