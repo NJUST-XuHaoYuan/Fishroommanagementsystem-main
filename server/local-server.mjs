@@ -133,9 +133,11 @@ import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
 import {
   buildPurchaseBatchDetail,
   buildPurchaseBatchFishHistory,
+  buildPurchaseBatchOrderDetail,
   parseBatchDetailQuery,
   preserveStockEntrySnapshot,
   PURCHASE_BATCH_DETAIL_SQL,
+  PURCHASE_BATCH_ORDER_DETAIL_SQL,
 } from "./purchase-batch-details.mjs";
 import { PUBLIC_SPECIMEN_HISTORY_SQL, publicSpecimenGroupKeys } from "./public-specimen-groups.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
@@ -8141,7 +8143,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" ||
-      url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history") {
+      url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail") {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -10961,10 +10963,11 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if ((url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history") && req.method === "GET") {
+  if ((url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail") && req.method === "GET") {
     try {
       const history = url.pathname === "/api/batches/fish-history";
-      const query = parseBatchDetailQuery(url.searchParams, { history });
+      const orderDetail = url.pathname === "/api/batches/order-detail";
+      const query = parseBatchDetailQuery(url.searchParams, { history, orderDetail });
       // Batch browsing has no create/update/delete requirement. Authorize its
       // persisted site before loading fish, sales, or maintenance evidence.
       const authResult = await pool.query(
@@ -10979,15 +10982,21 @@ async function handleApi(req, res, url) {
       if (matchingBatches.length !== 1 || normalizeSiteId(matchingBatches[0]?.siteId) !== query.siteId) {
         throw httpError(404, "采购批次不存在或无权查看");
       }
-      const result = await pool.query(PURCHASE_BATCH_DETAIL_SQL, [stateId, query.batchId, history ? query.stockItemId : ""]);
+      const result = orderDetail
+        ? await pool.query(PURCHASE_BATCH_ORDER_DETAIL_SQL, [stateId, query.batchId, query.orderId, visibleSiteIdsForAccount(req.auth?.account, authState)])
+        : await pool.query(PURCHASE_BATCH_DETAIL_SQL, [stateId, query.batchId, history ? query.stockItemId : ""]);
       const row = result.rows[0] ?? {};
+      if (orderDetail && Number(row.order_id_count ?? 0) > 1) throw httpError(409, "订单编号不唯一，无法安全关联");
       const state = {
         sites: row.sites, tankGroups: row.tank_groups, batches: row.batches, products: row.products,
         species: row.species, stock: row.stock, orders: row.orders, shipments: row.shipments,
-        bioRecords: row.bio_records, lossRecords: row.loss_records, approvalRequests: row.approval_requests,
+        bioRecords: row.bio_records, lossRecords: row.loss_records, approvalRequests: row.approval_requests, customers: row.customers,
       };
       const options = { ...query, visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), isAdmin: req.auth?.account?.accessRole === "admin" };
-      const detail = history ? buildPurchaseBatchFishHistory(state, options) : buildPurchaseBatchDetail(state, options);
+      const detail = orderDetail ? buildPurchaseBatchOrderDetail(state, options, (order, shipments) => calculateOrderFeeBreakdown(order, {
+        billableShippingFee: getBillableShippingFeeForOrder(order, shipments),
+        damageRefundAdjustment: calcDamageRefundAdjustmentForOrder(order, shipments),
+      })) : history ? buildPurchaseBatchFishHistory(state, options) : buildPurchaseBatchDetail(state, options);
       sendJson(req, res, 200, { ...detail, version: row.version ?? null }, { "Cache-Control": "no-store, private" });
     } catch (error) {
       const statusCode = Number(error?.statusCode ?? 500);

@@ -2119,7 +2119,6 @@ function AdminApp() {
       case "tankGroups": return <TankGroupsView />;
       case "batches":    return (
         <BatchesView
-          onOpenOrder={requestOpenOrder}
           detailRequest={batchDetailRequest?.userKey === currentUserKey ? batchDetailRequest.request : null}
           onDetailRequestChange={(request: BatchDetailRequest | null) => {
             setBatchDetailRequest(request ? { userKey: currentUserKey, request } : null);

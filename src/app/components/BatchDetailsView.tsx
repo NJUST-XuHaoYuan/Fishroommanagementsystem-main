@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronUp, ExternalLink, Loader2, RefreshCw, Search } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ArrowLeft, ChevronDown, ChevronUp, PanelsTopLeft, LayoutGrid, List, Loader2, RefreshCw, Search } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { authJsonHeaders } from "../utils/authSession";
 import { batchPrice, batchRecordDate, batchSaleLabel, type BatchSale } from "../utils/batchDetailDisplay";
+import { BatchOrderDialog } from "./BatchOrderDialog";
 
 type FishStatus = "all" | "inStock" | "sold" | "lost" | "removed" | "restricted";
 type FishSummary = {
@@ -29,9 +30,21 @@ type BatchDetailResponse = {
   batch: { id: string; batchNo: string; supplier: string; arrivalDate: string; siteName: string };
   summary: { total: number; inStock: number; sold: number; lost: number; removed: number; restricted?: number };
   items: FishSummary[];
+  tanks: BatchTank[];
   page: number;
   pageSize: number;
   total: number;
+};
+type BatchTank = {
+  key: string;
+  siteName: string;
+  tankName: string;
+  total: number;
+  inStock: number;
+  sold: number;
+  lost: number;
+  removed: number;
+  restricted: number;
 };
 type FishEvent = {
   id: string;
@@ -65,7 +78,7 @@ function OrderLink({ id, number, siteId, onOpenOrder }: { id: string; number?: s
   return onOpenOrder ? <button type="button" onClick={() => onOpenOrder(id, siteId)}
     className="inline-flex min-h-9 items-center gap-1 break-all text-left font-medium text-teal-800 underline decoration-teal-800/30 underline-offset-4 hover:decoration-teal-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
     aria-label={`查看订单 ${number || id}`}>
-    {number || id}<ExternalLink aria-hidden="true" className="size-3.5 shrink-0" />
+    {number || id}<PanelsTopLeft aria-hidden="true" className="size-3.5 shrink-0" />
   </button> : <span className="break-all font-medium">{number || id}</span>;
 }
 
@@ -105,7 +118,7 @@ function FishHistory({ batchId, siteId, stockItemId, onOpenOrder }: {
       {!loading && !error && <span className="text-xs text-muted-foreground">已显示 {events.length} / {total} 条</span>}
     </div>
     <ol className="space-y-5">
-      {events.map(event => <li key={event.id} className="relative border-l-2 border-teal-100 pl-4">
+      {events.map(event => <li key={event.id} className="relative border-l border-teal-200 pl-4">
         <span aria-hidden="true" className="absolute -left-[5px] top-1.5 size-2 rounded-full bg-teal-700" />
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <h5 className="text-sm font-semibold">{event.title}</h5>
@@ -181,22 +194,32 @@ function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSummary; ba
   </article>;
 }
 
-export function BatchDetailsView({ batchId, siteId, onBack, onOpenOrder }: {
-  batchId: string; siteId: string; onBack: () => void; onOpenOrder?: OpenOrder;
+export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIdentity }: {
+  batchId: string; siteId: string; onBack: () => void; batchInfo?: ReactNode;
+  batchIdentity?: { batchNo: string; supplier: string; arrivalDate: string };
 }) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<FishStatus>("all");
   const [page, setPage] = useState(1);
+  const [viewMode, setViewMode] = useState<"fish" | "tanks">("fish");
+  const [tankKey, setTankKey] = useState("");
+  const [orderRequest, setOrderRequest] = useState<{ batchId: string; siteId: string; orderId: string } | null>(null);
+  const onOpenOrder: OpenOrder = orderId => setOrderRequest({ batchId, siteId, orderId });
   const [retry, setRetry] = useState(0);
   const [result, setResult] = useState<{ key: string; data: BatchDetailResponse } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const query = new URLSearchParams({ batchId, siteId, search, status, page: String(page), pageSize: "50" }).toString();
+  const query = new URLSearchParams({ batchId, siteId, search, status, tankKey, page: String(page), pageSize: "50" }).toString();
   const queryKey = `${query}:${retry}`;
   const data = result?.key === queryKey ? result.data : null;
   const batch = result?.data.batch;
   const summary = result?.data.summary;
+  const tanks = data?.tanks ?? [];
+  const selectedTank = tanks.find(tank => tank.key === tankKey);
+  const identity = batchIdentity || batch;
+  const tankOverview = viewMode === "tanks" && !tankKey;
+  const changeView = (mode: "fish" | "tanks") => { setViewMode(mode); setTankKey(""); setPage(1); };
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
@@ -215,19 +238,29 @@ export function BatchDetailsView({ batchId, siteId, onBack, onOpenOrder }: {
     { value: "removed", label: "已移除", count: summary?.removed },
     ...(summary?.restricted ? [{ value: "restricted" as const, label: "记录受限", count: summary.restricted }] : []),
   ];
-  return <section className="flex flex-col gap-5">
+  return <section className="flex flex-col gap-5 pb-20">
     <div>
       <Button variant="ghost" size="sm" className="mb-3 -ml-2" onClick={onBack}><ArrowLeft className="size-4" aria-hidden="true" />返回采购批次</Button>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h2 className="text-xl font-semibold">批次明细{batch?.batchNo && <span className="ml-3 font-normal text-muted-foreground">{batch.batchNo}</span>}</h2>
-          {batch && <p className="mt-2 text-sm text-muted-foreground">{[batch.siteName, batch.supplier, `到货 ${batchRecordDate(batch.arrivalDate)}`].filter(Boolean).join(" · ")}</p>}
+        <div><h2 className="text-xl font-semibold">批次详情{identity?.batchNo && <span className="ml-3 font-normal text-muted-foreground">{identity.batchNo}</span>}</h2>
+          {identity && <p className="mt-2 text-sm text-muted-foreground">{[batch?.siteName, identity.supplier, `到货 ${batchRecordDate(identity.arrivalDate)}`].filter(Boolean).join(" · ")}</p>}
         </div>
         <Button variant="outline" size="sm" disabled={loading} onClick={() => setRetry(value => value + 1)}><RefreshCw className="size-4" aria-hidden="true" />刷新记录</Button>
       </div>
-      <p className="mt-3 max-w-4xl text-xs leading-relaxed text-muted-foreground">按单条鱼追溯系统已留存的入库、移缸、维护、订单、出库及损耗记录。历史未记录的信息不做推断；订单行价不等于整单实收，也未分摊整单优惠或退款。</p>
+    </div>
+    {batchInfo}
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><h3 className="text-base font-semibold">鱼只记录</h3>
+        <p className="mt-1 max-w-3xl text-xs leading-relaxed text-muted-foreground">点订单号可在本页查看订单。历史缺失信息不做推断；单鱼订单行价未分摊整单优惠或退款。</p>
+      </div>
+      <div role="group" aria-label="明细查看方式" className="inline-flex shrink-0 gap-1 rounded-lg border bg-card p-1">
+        <Button size="sm" variant={viewMode === "fish" ? "default" : "ghost"} aria-pressed={viewMode === "fish"} onClick={() => changeView("fish")}><List aria-hidden="true" className="size-4" />按鱼只</Button>
+        <Button size="sm" variant={viewMode === "tanks" ? "default" : "ghost"} aria-pressed={viewMode === "tanks"} onClick={() => changeView("tanks")}><LayoutGrid aria-hidden="true" className="size-4" />按缸位</Button>
+      </div>
     </div>
     <div className="flex flex-col gap-3 rounded-lg border bg-card p-3 sm:p-4">
       <div role="group" aria-label="按鱼只状态筛选" className="flex flex-wrap gap-2">
+        <span className="flex items-center pr-1 text-xs text-muted-foreground">全批次状态</span>
         {filters.map(filter => <Button key={filter.value} size="sm" variant={status === filter.value ? "default" : "outline"}
           aria-pressed={status === filter.value} onClick={() => { setStatus(filter.value); setPage(1); }}>
           {filter.label}<span className="ml-1 tabular-nums">{filter.count ?? "—"}</span>
@@ -242,15 +275,37 @@ export function BatchDetailsView({ batchId, siteId, onBack, onOpenOrder }: {
     {error && <LoadError error={error} onRetry={() => setRetry(value => value + 1)} />}
     {(loading || (!error && !data)) && <div role="status" className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden="true" />正在加载批次明细…</div>}
     {!loading && !error && data && <>
-      <p role="status" className="text-xs text-muted-foreground">{search || status !== "all" ? "筛选结果" : "可追溯鱼只"} {data.total} 条{search && ` · “${search}”`}</p>
+      {viewMode === "tanks" && <p className="text-xs leading-relaxed text-muted-foreground">按档案当前缸位分组；已售、损耗鱼显示最后留存缸位，不代表出库或死亡发生地。具体地点请展开历史记录核对。</p>}
+      {tankOverview ? <>
+        <p role="status" className="text-xs text-muted-foreground">{tanks.length} 个缸位分组 · {data.total} 条鱼{search && ` · “${search}”`} · 点击缸位查看鱼只</p>
+        {tanks.length ? <div className="batch-tank-grid grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="批次缸位分布">
+          {tanks.map(tank => <button key={tank.key} type="button" onClick={() => { setTankKey(tank.key); setPage(1); }}
+            aria-label={`查看缸位 ${[tank.siteName, tank.tankName].filter(Boolean).join(" ")}，${tank.total} 条鱼`}
+            className="min-w-0 rounded-lg border bg-card p-4 text-left transition-colors hover:border-teal-600 hover:bg-teal-50/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700">
+            <span className="flex items-start justify-between gap-3"><span className="min-w-0"><span className="block text-xs text-muted-foreground">{tank.siteName || "其他记录"}</span>
+              <span className="mt-1 block break-words text-base font-semibold">{tank.tankName || "缸位未记录"}</span></span><span className="shrink-0 text-sm tabular-nums">{tank.total} 条</span></span>
+            <span className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {!!tank.inStock && <span className="text-teal-800">在库 {tank.inStock}</span>}{!!tank.sold && <span>已售 {tank.sold}</span>}
+              {!!tank.lost && <span className="text-red-800">损耗 {tank.lost}</span>}{!!tank.removed && <span>已移除 {tank.removed}</span>}{!!tank.restricted && <span>受限 {tank.restricted}</span>}
+            </span>
+          </button>)}
+        </div> : <div className="rounded-lg border border-dashed px-5 py-10 text-center text-sm text-muted-foreground">没有符合条件的缸位记录，可以清除搜索或切换状态。</div>}
+      </> : <>
+      {viewMode === "tanks" && <div className="flex flex-wrap items-center gap-3 border-b pb-3">
+        <Button variant="outline" size="sm" onClick={() => { setTankKey(""); setPage(1); }}><ArrowLeft aria-hidden="true" className="size-4" />全部缸位</Button>
+        <h4 className="text-sm font-semibold">{selectedTank ? [selectedTank.siteName, selectedTank.tankName].filter(Boolean).join(" · ") : "所选缸位"}</h4>
+      </div>}
+      <p role="status" className="text-xs text-muted-foreground">{search || status !== "all" || tankKey ? "筛选结果" : "可追溯鱼只"} {data.total} 条{search && ` · “${search}”`}</p>
       {data.items.length ? <div className="space-y-3">{data.items.map(fish => <FishRow key={`${queryKey}:${fish.stockItemId}`} fish={fish} batchId={batchId} siteId={siteId} onOpenOrder={onOpenOrder} />)}</div>
         : <div className="rounded-lg border border-dashed px-5 py-12 text-center"><h3 className="text-base font-medium">{search || status !== "all" ? "没有符合条件的鱼" : "暂无可追溯的鱼只"}</h3>
           <p className="mt-2 text-sm text-muted-foreground">{search || status !== "all" ? "可以清除搜索或切换状态查看。" : "此批次尚无单鱼关联记录；批次填写的入库数量不等于系统留存的鱼只档案数量。"}</p></div>}
-      {data.total > data.pageSize && <nav aria-label="鱼只明细分页" className="flex flex-wrap items-center justify-between gap-3">
+      {data.total > data.pageSize && <nav aria-label="鱼只明细分页" className="flex flex-wrap items-center justify-between gap-3 pr-16">
         <span className="text-sm text-muted-foreground">第 {page} / {Math.ceil(data.total / data.pageSize)} 页 · 每页 {data.pageSize} 条</span>
         <div className="flex gap-2"><Button variant="outline" disabled={page <= 1} onClick={() => setPage(value => value - 1)}>上一页</Button>
           <Button variant="outline" disabled={page * data.pageSize >= data.total} onClick={() => setPage(value => value + 1)}>下一页</Button></div>
       </nav>}
+      </>}
     </>}
+    <BatchOrderDialog request={orderRequest} onClose={() => setOrderRequest(null)} />
   </section>;
 }

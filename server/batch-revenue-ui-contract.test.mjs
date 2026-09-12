@@ -4,6 +4,7 @@ import test from "node:test";
 
 const appSource = await readFile(new URL("../src/app/App.tsx", import.meta.url), "utf8");
 const batchesSource = await readFile(new URL("../src/app/components/BatchesView.tsx", import.meta.url), "utf8");
+const infoSource = await readFile(new URL("../src/app/components/BatchInfoSection.tsx", import.meta.url), "utf8");
 const tableSource = await readFile(new URL("../src/app/components/common.tsx", import.meta.url), "utf8");
 
 test("batch page loads aggregate metrics instead of complete order payment records", () => {
@@ -24,7 +25,9 @@ test("batch page presents all three named metrics and never falls back to zero w
     assert.match(batchesSource, new RegExp(label));
   }
   assert.match(batchesSource, /if \(!revenueAvailable\) return "—"/);
-  assert.match(batchesSource, /暂不展示商品数、订单数、折扣及退款数据/);
+  assert.match(infoSource, /回款加载失败，金额暂不展示/);
+  assert.match(infoSource, /revenue \? batchPrice\(revenue\.salesNet\) : "—"/);
+  assert.match(infoSource, /\{revenue && <div/);
   assert.match(batchesSource, /window\.setInterval/);
   assert.match(batchesSource, /visibilitychange/);
   assert.match(batchesSource, /window\.addEventListener\("focus", refresh\)/);

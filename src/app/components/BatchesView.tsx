@@ -19,10 +19,12 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { authJsonHeaders } from "../utils/authSession";
 import { BatchDetailsView } from "./BatchDetailsView";
+import { BatchInfoSection } from "./BatchInfoSection";
+import { MoreHorizontal } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 type BatchDetailRequest = { batchId: string; siteId: string };
 type BatchesViewProps = {
-  onOpenOrder?: (orderId: string, siteId?: string) => void;
   detailRequest?: BatchDetailRequest | null;
   onDetailRequestChange?: (request: BatchDetailRequest | null) => void;
 };
@@ -71,7 +73,7 @@ function money(value: number) {
   return `${amount < 0 ? "-" : ""}¥${Math.abs(amount).toFixed(2)}`;
 }
 
-export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange }: BatchesViewProps = {}) {
+export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesViewProps = {}) {
   const { state, activeSiteId, saveStateTransform } = useStore();
   const [localDetailRequest, setLocalDetailRequest] = useState<BatchDetailRequest | null>(null);
   const requestedDetail = detailRequest === undefined ? localDetailRequest : detailRequest;
@@ -82,7 +84,6 @@ export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange 
   const [editing, setEditing] = useState<PurchaseBatch | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<PurchaseBatch | null>(null);
-  const [detail, setDetail] = useState<PurchaseBatch | null>(null);
   const [proofPreview, setProofPreview] = useState<{ url: string; title: string } | null>(null);
   const [revenueMetrics, setRevenueMetrics] = useState<BatchRevenueMetric[] | null>(null);
   const [loadedRevenueScopeKey, setLoadedRevenueScopeKey] = useState("");
@@ -119,7 +120,6 @@ export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange 
     notes: "",
   });
 
-  const totalCost = (batch: PurchaseBatch) => (batch.bioFee + batch.shippingFee).toFixed(2);
   const lossProofs = (batch: PurchaseBatch | null) =>
     Array.isArray(batch?.lossProof) ? batch.lossProof : [];
   const batchMetricKey = useMemo(
@@ -223,14 +223,20 @@ export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange 
     toast.success("已保存");
   };
 
-  if (requestedDetail && requestedDetail.siteId === activeSiteId) {
-    return <BatchDetailsView key={`${requestedDetail.siteId}:${requestedDetail.batchId}`}
-      batchId={requestedDetail.batchId} siteId={requestedDetail.siteId}
-      onBack={() => openFishDetails(null)} onOpenOrder={onOpenOrder} />;
-  }
+  const detailVisible = requestedDetail?.siteId === activeSiteId;
+  const selectedBatch = detailVisible ? state.batches.find(batch => batch.id === requestedDetail?.batchId) : undefined;
 
   return (
     <div className="flex flex-col gap-4">
+      {detailVisible && requestedDetail ? <BatchDetailsView key={`${requestedDetail.siteId}:${requestedDetail.batchId}`}
+        batchId={requestedDetail.batchId} siteId={requestedDetail.siteId} onBack={() => openFishDetails(null)}
+        batchIdentity={selectedBatch}
+        batchInfo={selectedBatch && <BatchInfoSection batch={selectedBatch}
+          revenue={revenueAvailable ? salesStats(selectedBatch.id) : null}
+          loading={revenueLoading} error={revenueError} onRetry={() => setRevenueRetry(value => value + 1)}
+          onEdit={permission.canUpdate ? () => { setEditing({ ...selectedBatch, lossProof: lossProofs(selectedBatch) }); setOpen(true); } : undefined}
+          onPreview={(url, title) => setProofPreview({ url, title })} />}
+      /> : <>
       <div>
         <h2>采购批次管理</h2>
         <p className="text-sm text-muted-foreground">
@@ -353,133 +359,23 @@ export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange 
           );
         }}
         actions={(row) => (
-          <div className="flex flex-wrap justify-end gap-2" onDoubleClick={(event) => event.stopPropagation()}>
-            <Button size="sm" variant="outline" onClick={() => openFishDetails({ batchId: row.id, siteId: activeSiteId })}>批次明细</Button>
-            <Button size="sm" variant="outline" onClick={() => setDetail(row)}>批次资料</Button>
-            {permission.canUpdate && <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row, lossProof: lossProofs(row) }); setOpen(true); }}>编辑</Button>}
-            {permission.canDelete && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDel(row)}>删除</Button>}
+          <div className="inline-flex min-w-30 flex-nowrap justify-end gap-2 whitespace-nowrap" onDoubleClick={(event) => event.stopPropagation()}>
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => openFishDetails({ batchId: row.id, siteId: activeSiteId })}>查看详情</Button>
+            {(permission.canUpdate || permission.canDelete) && <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="ghost" className="size-8 shrink-0 p-0" aria-label={`更多批次操作 ${row.batchNo}`}><MoreHorizontal aria-hidden="true" className="size-4" /></Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {permission.canUpdate && <DropdownMenuItem className="min-h-10" onSelect={() => { setEditing({ ...row, lossProof: lossProofs(row) }); setOpen(true); }}>编辑批次</DropdownMenuItem>}
+                {permission.canDelete && <DropdownMenuItem className="min-h-10" variant="destructive" onSelect={() => setDel(row)}>删除批次</DropdownMenuItem>}
+              </DropdownMenuContent>
+            </DropdownMenu>}
           </div>
         )}
         onRowDoubleClick={(row) => openFishDetails({ batchId: row.id, siteId: activeSiteId })}
       />
 
-      <Dialog open={!!detail} onOpenChange={(nextOpen) => !nextOpen && setDetail(null)}>
-        <DialogContent aria-describedby={undefined} className="max-w-2xl">
-          <DialogHeader><DialogTitle>批次详情</DialogTitle></DialogHeader>
-          {detail && (
-            <div className="grid gap-4 py-2">
-              {(() => {
-                const stats = salesStats(detail.id);
-                return (
-                  <div className="rounded-lg border p-3">
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div className="rounded-md bg-muted/30 px-3 py-2.5">
-                        <div className="text-xs text-muted-foreground">销售净额</div>
-                        <div className="mt-1 text-lg font-semibold tabular-nums">{metricText(detail.id, "salesNet")}</div>
-                      </div>
-                      <div className="rounded-md bg-amber-50 px-3 py-2.5">
-                        <div className="text-xs text-amber-800">{stats.pendingReceived < 0 ? "待核销退款" : "待核销回款"}</div>
-                        <div className={`mt-1 text-lg font-semibold tabular-nums ${stats.pendingReceived < 0 ? "text-red-700" : "text-amber-800"}`}>
-                          {metricText(detail.id, "pendingReceived")}
-                        </div>
-                      </div>
-                      <div className="rounded-md bg-emerald-50 px-3 py-2.5">
-                        <div className="text-xs text-emerald-800">已核销回款</div>
-                        <div className="mt-1 text-lg font-semibold text-emerald-800 tabular-nums">{metricText(detail.id, "verifiedReceived")}</div>
-                      </div>
-                    </div>
-                    {revenueAvailable ? (
-                      <>
-                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
-                          <span>销售商品：{stats.itemCount} 条</span>
-                          <span>关联订单：{stats.orderCount} 单</span>
-                          <span>折扣分摊：-{money(stats.discount)}</span>
-                          <span>退款调整：-{money(stats.refundAdjustment)}</span>
-                        </div>
-                        {stats.platformOrderCount > 0 && (
-                          <div className="mt-2 border-t pt-2 text-xs text-muted-foreground">
-                            已核销中含平台收入 {money(stats.platformReceived)}（{stats.platformOrderCount} 单，未扣平台费用）
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <div className="mt-3 border-t pt-2 text-xs text-muted-foreground">
-                        回款明细{revenueError ? "加载失败" : "加载中"}，暂不展示商品数、订单数、折扣及退款数据
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">批次号</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{detail.batchNo}</div>
-                </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">到货日期</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{detail.arrivalDate || "—"}</div>
-                </div>
-              </div>
-              <div className="grid gap-1">
-                <Label className="text-xs text-muted-foreground">供应商</Label>
-                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm break-words">{detail.supplier || "—"}</div>
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">生物费用</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">¥{detail.bioFee.toFixed(2)}</div>
-                </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">运输费用</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">¥{detail.shippingFee.toFixed(2)}</div>
-                </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">合计费用</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">¥{totalCost(detail)}</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">入库数量</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{detail.stockedCount} 条</div>
-                </div>
-                <div className="grid gap-1">
-                  <Label className="text-xs text-muted-foreground">报损数量</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{detail.lossCount} 条</div>
-                </div>
-              </div>
-              <div className="grid gap-2">
-                <Label>报损凭证</Label>
-                {lossProofs(detail).length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {lossProofs(detail).map((url, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        className="h-24 w-24 overflow-hidden rounded border bg-muted"
-                        onClick={() => setProofPreview({ url, title: `${detail.batchNo} 报损凭证 ${i + 1}` })}
-                      >
-                        <ImageWithFallback src={url} alt={`报损凭证${i + 1}`} className="size-full object-cover" />
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="rounded-md border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
-                    暂无报损凭证
-                  </div>
-                )}
-              </div>
-              <div className="grid gap-1">
-                <Label className="text-xs text-muted-foreground">备注</Label>
-                <div className="min-h-16 rounded-md border bg-muted/30 px-3 py-2 text-sm whitespace-pre-wrap">{detail.notes || "—"}</div>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDetail(null)}>关闭</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </>}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent

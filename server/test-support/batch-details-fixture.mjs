@@ -28,13 +28,14 @@ export const batchDetailsFixture = {
     sites: [{ id: "nanjing", name: "南京" }, { id: "jiangyin", name: "江阴" }],
     personnel, personnelProfileRequests: [], personnelPrivateAttachments: [], retiredPersonnelUsernames: [],
     batches: [
-      { id: "batch-nj", siteId: "nanjing", batchNo: "PO-QA-001", supplier: "测试供应商", arrivalDate: "2026-08-01", stockedCount: 12, lossCount: 1, bioFee: 2000, shippingFee: 100 },
+      { id: "batch-nj", siteId: "nanjing", batchNo: "PO-QA-001", supplier: "测试供应商", arrivalDate: "2026-08-01", stockedCount: 75, lossCount: 1, bioFee: 2000, shippingFee: 100 },
       { id: "batch-jy", siteId: "jiangyin", batchNo: "PRIVATE_JY_BATCH", supplier: "PRIVATE_JY_SUPPLIER", arrivalDate: "2026-08-01", stockedCount: 1, lossCount: 0, bioFee: 500, shippingFee: 50 },
+      { id: "batch-original-only", siteId: "nanjing", batchNo: "PO-ORIGINAL-ONLY", supplier: "补发原鱼关联测试", arrivalDate: "2026-08-01", stockedCount: 1, lossCount: 0, bioFee: 300, shippingFee: 0 },
     ],
     species: [{ id: "species-tang", name: "黄金吊", category: "刺尾鱼科" }],
     products: [{ id: "product-tang", speciesId: "species-tang", name: "黄金吊", size: "5-7cm", origin: "印尼", defaultPrice: 100 }],
     tankGroups: [
-      { id: "group-n", siteId: "nanjing", name: "南京鱼缸", subTanks: [{ id: "tank-n1", name: "N1" }, { id: "tank-n2", name: "N2" }] },
+      { id: "group-n", siteId: "nanjing", name: "南京鱼缸", subTanks: [{ id: "tank-n1", name: "N1" }, { id: "tank-n2", name: "N2" }, { id: "tank-n3", name: "N3" }] },
       { id: "group-j", siteId: "jiangyin", name: "PRIVATE_JY_TANK", subTanks: [{ id: "tank-j1", name: "J1" }] },
     ],
     stock: [
@@ -45,20 +46,37 @@ export const batchDetailsFixture = {
       fish("fish-original-a", { sold: true }), fish("fish-original-b", { sold: true }),
       fish("fish-replacement-a", { sold: true, inDate: "2026-08-06" }), fish("fish-replacement-b", { sold: true, inDate: "2026-08-06" }),
       fish("fish-jy-other", { siteId: "jiangyin", subTankId: "tank-j1", batchId: "batch-jy", notes: "PRIVATE_OTHER_BATCH_FISH" }),
+      fish("fish-unknown", { subTankId: "missing-legacy-tank" }),
+      ...Array.from({ length: 63 }, (_, index) => fish(`fish-group-${String(index + 1).padStart(3, "0")}`, {
+        code: `GROUP-QA-${String(index + 1).padStart(3, "0")}`, subTankId: `tank-n${1 + index % 3}`,
+      })),
+      fish("fish-only-original", { sold: true, batchId: "batch-original-only", subTankId: "tank-n1" }),
     ],
     orders: [
       order("ORDER-CANCELLED", { date: "2026-08-02", status: "cancelled", items: [line("fish-sold", 120)] }),
-      order("ORDER-SALE", { date: "2026-08-03", status: "completed", discount: 50, packagingFee: 10, shippingFee: 20, items: [line("fish-sold", 200), line("other-batch-fish", 100)] }),
+      order("ORDER-SALE", { date: "2026-08-03", status: "completed", discount: 50, packagingFee: 10, shippingFee: 20, items: [line("fish-sold", 200), line("other-batch-fish", 100)], payments: [
+        { id: "receipt-verified", date: "2026-08-03", type: "balance", amount: 250, verificationStatus: "verified", account: "PRIVATE_PAYMENT_ACCOUNT", notes: "PRIVATE_FINANCE_NOTE", proof: ["/uploads/PRIVATE_FINANCE_PROOF.jpg"] },
+        { id: "receipt-pending", date: "2026-08-04", type: "balance", amount: 50, verificationStatus: "pending", account: "PRIVATE_PAYMENT_ACCOUNT" },
+        { id: "refund-verified", date: "2026-08-05", type: "refund", amount: 20, verificationStatus: "verified", account: "PRIVATE_PAYMENT_ACCOUNT" },
+        { id: "refund-pending", date: "2026-08-06", type: "refund", amount: 5, verificationStatus: "pending", account: "PRIVATE_PAYMENT_ACCOUNT" },
+      ] }),
       order("ORDER-REPLACEMENT", { date: "2026-08-03", status: "shipped", items: [line("fish-replacement-a", 350), line("fish-replacement-b", 450)] }),
       order("PRIVATE_JY_ORDER", { siteId: "jiangyin", date: "2026-08-10", items: [line("fish-cross", 7654)] }),
+      order("ORDER-UNRELATED", { items: [line("other-batch-fish", 8765)], notes: "UNRELATED_ORDER_MUST_NOT_LEAK" }),
+      order("ORDER-ORIGINAL-ONLY", { status: "shipped", items: [line("fish-outside-replacement", 300)] }),
+      order("ORDER-MISSING-PRICE", { status: "cancelled", items: [line("fish-group-063", null)] }),
     ],
     shipments: [
-      { id: "shipment-sold", siteId: "nanjing", orderId: "ORDER-SALE", status: "delivered", shipMethod: "pickup", itemStockIds: ["fish-sold"], createdAt: "2026-08-03T09:00:00+08:00", outboundDate: "2026-08-04", shipDate: "2026-08-04", deliveredAt: "2026-08-04T10:00:00+08:00" },
+      { id: "shipment-sold", siteId: "nanjing", orderId: "ORDER-SALE", status: "delivered", shipMethod: "pickup", itemStockIds: ["fish-sold"], createdAt: "2026-08-03T09:00:00+08:00", outboundDate: "2026-08-04", shipDate: "2026-08-04", deliveredAt: "2026-08-04T10:00:00+08:00", actualShippingFee: 0 },
+      { id: "shipment-other-batch", siteId: "nanjing", orderId: "ORDER-SALE", status: "delivered", shipMethod: "express", carrier: "测试快递", trackingNo: "QA-OTHER-BATCH-SHIPMENT", itemStockIds: ["other-batch-fish"], actualShippingFee: 30, shipDate: "2026-08-05", deliveredAt: "2026-08-06T10:00:00+08:00" },
       { id: "shipment-original", siteId: "nanjing", orderId: "ORDER-REPLACEMENT", status: "damaged", itemStockIds: ["fish-original-a", "fish-original-b"], shipDate: "2026-08-04", damagedAt: "2026-08-07T12:00:00+08:00", damageResolution: "reship", damageAmount: 800, damageReplacements: [
         { originalStockItemId: "fish-original-a", replacementStockItemId: "fish-replacement-a", originalFishCode: "original-a", replacementFishCode: "replacement-a" },
         { originalStockItemId: "fish-original-b", replacementStockItemId: "fish-replacement-b", originalFishCode: "original-b", replacementFishCode: "replacement-b" },
       ] },
       { id: "shipment-replacement", siteId: "nanjing", orderId: "ORDER-REPLACEMENT", status: "shipped", itemStockIds: ["fish-replacement-a", "fish-replacement-b"], shipDate: "2026-08-08" },
+      { id: "shipment-original-only", siteId: "nanjing", orderId: "ORDER-ORIGINAL-ONLY", status: "damaged", itemStockIds: ["fish-only-original"], shipDate: "2026-08-04", damagedAt: "2026-08-07T12:00:00+08:00", damageResolution: "reship", damageReplacements: [
+        { originalStockItemId: "fish-only-original", replacementStockItemId: "fish-outside-replacement" },
+      ] },
     ],
     lossRecords: [{ id: "loss-1", siteId: "nanjing", stockItemId: "fish-lost", date: "2026-08-09", reason: "损耗原因", tankName: "损耗时南京旧缸 / N1", proofPhotos: ["/uploads/batch-loss.jpg"], operator: "测试饲养员" }],
     bioRecords: [

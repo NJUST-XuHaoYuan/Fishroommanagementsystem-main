@@ -5,15 +5,15 @@ import { buildLinkedOrderNavigation } from "./linkedOrderNavigation.ts";
 const base = {
   orderId: "order-1",
   activeSiteId: "nanjing",
-  sourceView: "batches",
+  sourceView: "daily",
   canAccessSite: (siteId) => ["nanjing", "jiangyin"].includes(siteId),
 };
 
-test("batch details open a cross-site order without loading orders first", () => {
+test("linked references open a cross-site order without loading orders first", () => {
   assert.deepEqual(buildLinkedOrderNavigation({ ...base, requestedSiteId: "jiangyin" }), {
     orderId: "order-1",
     targetSiteId: "jiangyin",
-    returnView: "batches",
+    returnView: "daily",
     returnSiteId: "nanjing",
   });
 });
@@ -56,6 +56,10 @@ test("links without a site keep the active site and do not manufacture a return 
     returnView: undefined,
     returnSiteId: "nanjing",
   });
+});
+
+test("batch dialogs no longer register a module navigation return route", () => {
+  assert.equal(buildLinkedOrderNavigation({ ...base, sourceView: "batches" }).returnView, undefined);
 });
 
 test("blank order IDs and a forbidden cached order site are rejected", () => {

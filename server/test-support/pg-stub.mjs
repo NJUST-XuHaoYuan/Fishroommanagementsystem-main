@@ -67,6 +67,7 @@ function publicBioProjectionRow(sql, values = []) {
 function purchaseBatchProjectionRow(sql, values = []) {
   if (!/\bcandidate_ids\s+AS\s+MATERIALIZED\b/i.test(sql)) return null;
   const list = (value) => Array.isArray(value) ? value : [];
+  const isOrderDetail = /\brequested_orders\s+AS\s+MATERIALIZED\b/i.test(sql);
   const batchId = String(values[1] ?? "");
   const fishId = String(values[2] ?? "");
   const changes = list(state.approvalRequests).filter((request) => request.status === "approved")
@@ -85,7 +86,7 @@ function purchaseBatchProjectionRow(sql, values = []) {
   const records = (rows, mediaKeys) => list(rows)
     .filter((row) => candidateIds.has(row.stockItemId) && (!fishId || row.stockItemId === fishId))
     .map((row) => fishId ? row : Object.fromEntries(Object.entries(row).filter(([key]) => !mediaKeys.includes(key))));
-  return {
+  const row = {
     version: revision,
     sites: list(state.sites), tank_groups: list(state.tankGroups), products: list(state.products), species: list(state.species),
     batches: list(state.batches).filter((batch) => batch.id === batchId),
@@ -99,6 +100,18 @@ function purchaseBatchProjectionRow(sql, values = []) {
       resolvedBy: request.resolvedBy, resolvedByName: request.resolvedByName, stockDetails: { items: [change] },
     })),
   };
+  if (isOrderDetail) {
+    row.order_id_count = list(state.orders).filter((order) => order.id === fishId).length;
+    const visibleSites = new Set(list(values[3]));
+    row.orders = row.orders.filter((order) => order.id === fishId && visibleSites.has(String(order.siteId || "nanjing")));
+    const requestedOrderIds = new Set(row.orders.map((order) => order.id));
+    row.shipments = list(state.shipments).filter((shipment) => requestedOrderIds.has(shipment.orderId));
+    const customerIds = new Set(row.orders.map((order) => order.customerId));
+    row.customers = list(state.customers).filter((customer) => customerIds.has(customer.id)).map(({ id, name }) => ({ id, name }));
+    delete row.bio_records;
+    delete row.loss_records;
+  }
+  return row;
 }
 
 function appStateRow(sql, values = []) {

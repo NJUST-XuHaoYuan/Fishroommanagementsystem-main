@@ -1,3 +1,5 @@
+import { paymentVerificationStatus, verifiedPaymentTotals } from "./payment-utils.mjs";
+
 const array = (value) => Array.isArray(value) ? value : [];
 const text = (value) => String(value ?? "").trim();
 const id = text;
@@ -14,7 +16,7 @@ const compareHistoryDate = (left, right) => historyTime(left) - historyTime(righ
 
 // The list loads metadata for one batch, never every fish's media payloads.
 // Expanding a fish enables media only for that exact stock ID.
-export const PURCHASE_BATCH_DETAIL_SQL = `
+const PURCHASE_BATCH_CTES = `
 WITH source AS MATERIALIZED (
   SELECT data, revision::text AS version FROM app_state WHERE id = $1
 ), approved_changes AS MATERIALIZED (
@@ -46,7 +48,9 @@ WITH source AS MATERIALIZED (
     WHERE relation ->> 'originalStockItemId' IN (SELECT stock_id FROM candidate_ids)
        OR relation ->> 'replacementStockItemId' IN (SELECT stock_id FROM candidate_ids)
   )
-)
+)`;
+
+export const PURCHASE_BATCH_DETAIL_SQL = `${PURCHASE_BATCH_CTES}
 SELECT version,
        data -> 'sites' AS sites,
        data -> 'tankGroups' AS tank_groups,
@@ -64,6 +68,35 @@ SELECT version,
        COALESCE((SELECT jsonb_agg(CASE WHEN $3::text <> '' THEN record ELSE record - 'proofPhotos' END)
          FROM jsonb_array_elements(COALESCE(data -> 'lossRecords', '[]'::jsonb)) AS records(record)
          WHERE record ->> 'stockItemId' IN (SELECT stock_id FROM candidate_ids) AND ($3::text = '' OR record ->> 'stockItemId' = $3)), '[]'::jsonb) AS loss_records,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', request -> 'id', 'status', request -> 'status', 'siteId', request -> 'siteId', 'resolvedAt', request -> 'resolvedAt', 'resolvedBy', request -> 'resolvedBy', 'resolvedByName', request -> 'resolvedByName', 'stockDetails', jsonb_build_object('items', jsonb_build_array(change)))) FROM approved_changes), '[]'::jsonb) AS approval_requests
+FROM source`;
+
+// A separate projection loads a single proven-related order and ALL of that
+// order's shipments, including other batches, so its shipping bill is complete.
+// The requested order's persisted site must also belong to the account scope.
+export const PURCHASE_BATCH_ORDER_DETAIL_SQL = `${PURCHASE_BATCH_CTES},
+requested_orders AS MATERIALIZED (
+  SELECT order_item FROM source,
+    LATERAL jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS orders(order_item)
+  WHERE order_item ->> 'id' = $3
+    AND COALESCE(NULLIF(order_item ->> 'siteId', ''), 'nanjing') = ANY($4::text[])
+    AND (EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(order_item -> 'items', '[]'::jsonb)) AS items(item)
+           WHERE item ->> 'stockItemId' IN (SELECT stock_id FROM candidate_ids))
+      OR order_item ->> 'id' IN (SELECT shipment ->> 'orderId' FROM related_shipments))
+)
+SELECT version,
+       (SELECT COUNT(*)::int FROM jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS all_orders(order_item) WHERE order_item ->> 'id' = $3) AS order_id_count,
+       data -> 'sites' AS sites,
+       data -> 'tankGroups' AS tank_groups,
+       data -> 'products' AS products,
+       data -> 'species' AS species,
+       COALESCE((SELECT jsonb_agg(batch) FROM jsonb_array_elements(COALESCE(data -> 'batches', '[]'::jsonb)) AS batches(batch) WHERE batch ->> 'id' = $2), '[]'::jsonb) AS batches,
+       COALESCE((SELECT jsonb_agg(item) FROM jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS stocks(item) WHERE item ->> 'id' IN (SELECT stock_id FROM candidate_ids)), '[]'::jsonb) AS stock,
+       COALESCE((SELECT jsonb_agg(order_item) FROM requested_orders), '[]'::jsonb) AS orders,
+       COALESCE((SELECT jsonb_agg(shipment) FROM jsonb_array_elements(COALESCE(data -> 'shipments', '[]'::jsonb)) AS shipments(shipment)
+         WHERE shipment ->> 'orderId' IN (SELECT order_item ->> 'id' FROM requested_orders)), '[]'::jsonb) AS shipments,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', customer -> 'id', 'name', customer -> 'name')) FROM jsonb_array_elements(COALESCE(data -> 'customers', '[]'::jsonb)) AS customers(customer)
+         WHERE customer ->> 'id' IN (SELECT order_item ->> 'customerId' FROM requested_orders)), '[]'::jsonb) AS customers,
        COALESCE((SELECT jsonb_agg(jsonb_build_object('id', request -> 'id', 'status', request -> 'status', 'siteId', request -> 'siteId', 'resolvedAt', request -> 'resolvedAt', 'resolvedBy', request -> 'resolvedBy', 'resolvedByName', request -> 'resolvedByName', 'stockDetails', jsonb_build_object('items', jsonb_build_array(change)))) FROM approved_changes), '[]'::jsonb) AS approval_requests
 FROM source`;
 
@@ -97,11 +130,12 @@ function indexBy(records, keyForRecord) {
   return result;
 }
 
-export function parseBatchDetailQuery(params, { history = false } = {}) {
+export function parseBatchDetailQuery(params, { history = false, orderDetail = false } = {}) {
   const batchId = text(params.get("batchId"));
   const siteId = text(params.get("siteId"));
   const stockItemId = text(params.get("stockItemId"));
-  if (!batchId || !siteId || siteId === "all" || (history && !stockItemId)) {
+  const orderId = text(params.get("orderId"));
+  if (!batchId || !siteId || siteId === "all" || (history && !stockItemId) || (orderDetail && !orderId)) {
     fail("请选择具体场地、采购批次及需要查看的鱼");
   }
   const integer = (name, fallback, max) => {
@@ -116,7 +150,9 @@ export function parseBatchDetailQuery(params, { history = false } = {}) {
   if (search.length > 100) fail("搜索内容最多 100 个字符");
   const status = text(params.get("status")) || "all";
   if (!["all", "inStock", "sold", "lost", "removed", "restricted"].includes(status)) fail("库存状态筛选无效");
-  return { batchId, siteId, stockItemId, page, pageSize, search, status };
+  const tankKey = text(params.get("tankKey"));
+  if (tankKey.length > 600 || (tankKey && !["restricted", "removed", "unknown"].includes(tankKey) && !/^tank:[^:]+:[^:]+$/.test(tankKey))) fail("缸位筛选无效");
+  return { batchId, siteId, stockItemId, orderId, page, pageSize, search, status, tankKey };
 }
 
 function locationIndex(state) {
@@ -134,7 +170,7 @@ function locationIndex(state) {
   const current = (item) => {
     const tank = tanks.get(id(item?.subTankId));
     const siteId = tank?.siteId || text(item?.siteId) || defaultSite;
-    return { siteId, siteName: siteName(siteId), tankName: tank?.tankName || "" };
+    return { siteId, siteName: siteName(siteId), tankName: tank?.tankName || "", subTankId: tank?.subTankId || "" };
   };
   const historical = (record, fallbackSiteId = "") => {
     const tank = tanks.get(id(record?.subTankId));
@@ -286,12 +322,15 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
   if (item._removed) warnings.push("原库存记录已删除，仅展示留存快照及可核实关联");
   if (!id(item.productId) || !context.products.has(id(item.productId))) warnings.push("商品档案已缺失，无法补全未保存的商品信息");
   const latestLoss = [...losses].sort((a, b) => compareHistoryDate(b.date, a.date))[0];
+  const tankKey = !currentVisible ? "restricted" : item._removed ? "removed" : !current.subTankId ? "unknown"
+    : `tank:${encodeURIComponent(current.siteId)}:${encodeURIComponent(current.subTankId)}`;
   return {
     stockItemId: key, code: text(item.code), productName: text(product.name) || text(item.productName) || "商品档案缺失",
     speciesName: text(species.name) || text(item.speciesName), size: text(product.size) || text(item.size), origin: text(product.origin) || text(item.origin),
     status, statusLabel: { inStock: "在库", sold: "已售", lost: "已损耗", removed: "记录已删除", restricted: "记录受限" }[status],
     inDate: text(entry?.inDate) || text(item.inDate), initialTankName: entryVisible ? entryLocation.tankName : "",
     currentTankName: currentVisible && !item._removed ? current.tankName : "", currentSiteName: currentVisible && !item._removed ? current.siteName : "",
+    currentSubTankId: currentVisible && !item._removed ? current.subTankId : "", tankKey,
     sales, lossDate: date(latestLoss?.date) || (currentVisible && !(context.lossByStock.get(key) ?? []).length ? date(item.lossDate) : ""), recordCount: bio.length, bioRecordCount: bio.length, warnings,
   };
 }
@@ -307,9 +346,93 @@ export function buildPurchaseBatchDetail(state, options) {
     .sort((a, b) => a.inDate.localeCompare(b.inDate) || a.code.localeCompare(b.code, "zh-Hans-CN", { numeric: true }) || a.stockItemId.localeCompare(b.stockItemId));
   const page = options.page ?? 1;
   const pageSize = options.pageSize ?? 50;
+  const tankGroups = new Map();
+  for (const row of filtered) {
+    if (!tankGroups.has(row.tankKey)) tankGroups.set(row.tankKey, {
+      key: row.tankKey,
+      siteName: row.tankKey.startsWith("tank:") ? row.currentSiteName : "",
+      tankName: row.tankKey.startsWith("tank:") ? row.currentTankName : ({ restricted: "记录受限", removed: "记录已删除", unknown: "缸位未记录" })[row.tankKey],
+      total: 0, inStock: 0, sold: 0, lost: 0, removed: 0, restricted: 0,
+    });
+    const group = tankGroups.get(row.tankKey);
+    group.total += 1;
+    group[row.status] += 1;
+  }
+  const tanks = [...tankGroups.values()].sort((a, b) => Number(!a.key.startsWith("tank:")) - Number(!b.key.startsWith("tank:"))
+    || a.siteName.localeCompare(b.siteName, "zh-Hans-CN") || a.tankName.localeCompare(b.tankName, "zh-Hans-CN", { numeric: true }) || a.key.localeCompare(b.key));
+  const selected = options.tankKey ? filtered.filter((row) => row.tankKey === options.tankKey) : filtered;
   return { ok: true, batch: { id: id(context.batch.id), batchNo: text(context.batch.batchNo), supplier: text(context.batch.supplier), arrivalDate: date(context.batch.arrivalDate), siteId: options.siteId, siteName: context.locations.siteName(options.siteId) }, summary,
-    items: filtered.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: filtered.length,
+    tanks, items: selected.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: selected.length,
     warnings: ["仅展示系统当前留存且有明确鱼只关联的记录；历史已删除且无快照的入库或退单明细无法还原"] };
+}
+
+const shipmentStatus = { preparing: "待出库", outbound: "已出库", shipped: "已发货", delivered: "已签收", damaged: "物流报损" };
+const paymentType = { deposit: "定金", balance: "尾款", shipping_fee: "运费", refund: "退款", other: "其他" };
+const money = (value) => value !== "" && value != null && Number.isFinite(Number(value)) ? Number(Number(value).toFixed(2)) : null;
+
+/** Read-only, explicit allowlist: never spread customer/order/payment snapshots. */
+export function buildPurchaseBatchOrderDetail(state, options, feeBreakdownForOrder) {
+  const context = contextFor(state, options);
+  const order = context.orderById.get(options.orderId);
+  const orderSiteId = text(order?.siteId) || defaultSite;
+  if (!order || !context.visible.has(orderSiteId)) fail("订单不存在或无权查看", 404, "BATCH_ORDER_NOT_FOUND");
+  const batchFishIds = new Set(context.candidateById.keys());
+  const shipments = [...uniqueById(state.shipments, "发货单").values()].filter((shipment) => id(shipment.orderId) === id(order.id));
+  const isBatchFish = (key) => batchFishIds.has(id(key));
+  const directlyRelated = array(order.items).some((item) => isBatchFish(item.stockItemId));
+  const shipmentRelated = shipments.some((shipment) => array(shipment.itemStockIds).some(isBatchFish)
+    || array(shipment.damageReplacements).some((relation) => isBatchFish(relation.originalStockItemId) || isBatchFish(relation.replacementStockItemId)));
+  // Check the explicit ID join again in memory: SQL projection is not authority.
+  if (!directlyRelated && !shipmentRelated) fail("订单不属于该采购批次或无权查看", 404, "BATCH_ORDER_NOT_FOUND");
+  const replacements = new Set(shipments.flatMap((shipment) => array(shipment.damageReplacements).map((relation) => id(relation.replacementStockItemId))));
+  const linesByStock = indexBy(array(order.items), (item) => id(item.stockItemId));
+  const warnings = ["金额为整张订单口径，未分摊到本采购批次或单条鱼；商品名称和规格优先使用订单快照，缺失时参考现存商品档案"];
+  if (!directlyRelated) warnings.push("本批次通过发货或原鱼补发记录关联此订单；当前商品行可能已替换为其他批次的补发鱼");
+  if (order.status === "cancelled") warnings.push("该订单已取消，以下是留存账单及资金记录，不代表仍需收款");
+  const items = array(order.items).map((item) => {
+    const product = context.products.get(id(item.productId)) ?? {};
+    const species = context.species.get(id(product.speciesId)) ?? {};
+    const kind = replacements.has(id(item.stockItemId)) ? "replacement" : "sale";
+    const price = itemPrice(item.price);
+    const notes = [];
+    if (kind === "replacement") notes.push("账单行沿用原鱼价格，不是补发鱼的新成交价");
+    if (price == null) notes.push("订单未留存有效行价，不使用商品现价补填");
+    if ((linesByStock.get(id(item.stockItemId)) ?? []).length > 1) notes.push("同一鱼关联了多条账单行，不能作为单条鱼的唯一成交价");
+    return { stockItemId: id(item.stockItemId), code: text(item.fishCode) || text(item.code), productName: text(item.productName) || text(product.name) || "商品档案缺失",
+      speciesName: text(item.speciesName) || text(species.name), size: text(item.size) || text(product.size), origin: text(item.origin) || text(product.origin),
+      price, isBatchFish: isBatchFish(item.stockItemId), kind, note: notes.join("；") };
+  });
+  if (items.some((item) => item.price == null)) warnings.push("部分订单行价缺失，商品合计和应收余额无法可靠还原");
+  if (typeof feeBreakdownForOrder !== "function") fail("订单金额计算未配置", 500);
+  // The route supplies the existing authoritative shipping/damage fee rules.
+  // This feature does not introduce a second receivable calculation.
+  const fees = feeBreakdownForOrder(order, shipments);
+  const totals = Object.fromEntries(["itemSubtotal", "discount", "goodsNetTotal", "packagingFee", "billableShippingFee", "customerShippingFee", "damageRefundAdjustment", "calculatedReceivable"].map((key) => [key, money(fees?.[key])]));
+  if (items.some((item) => item.price == null)) for (const key of ["itemSubtotal", "goodsNetTotal", "calculatedReceivable"]) totals[key] = null;
+  const verified = verifiedPaymentTotals(order.payments);
+  const received = money(verified.received);
+  const refunded = money(verified.refunded);
+  const netReceived = money(received - refunded);
+  Object.assign(totals, { shippingFeeMode: text(fees?.shippingFeeMode), received, refunded, netReceived,
+    pendingReceived: money(verified.pendingReceived), pendingRefunded: money(verified.pendingRefunded),
+    balance: totals.calculatedReceivable == null ? null : money(totals.calculatedReceivable - netReceived) });
+  const customers = uniqueById(state.customers, "客户");
+  const customer = customers.get(id(order.customerId));
+  const payments = array(order.payments).map((payment) => ({ id: id(payment.id), date: date(payment.time || payment.date), type: text(payment.type),
+    typeLabel: paymentType[payment.type] || "资金记录", amount: itemPrice(payment.amount), verificationStatus: paymentVerificationStatus(payment) }))
+    .sort((a, b) => compareHistoryDate(a.date, b.date) || a.id.localeCompare(b.id));
+  const shipping = shipments.map((shipment) => ({ id: id(shipment.id), status: text(shipment.status), statusLabel: shipmentStatus[shipment.status] || text(shipment.status),
+    shipMethod: text(shipment.shipMethod), carrier: text(shipment.carrier), trackingNo: text(shipment.trackingNo),
+    itemCount: new Set(array(shipment.itemStockIds).map(id).filter(Boolean)).size,
+    batchFishCount: new Set(array(shipment.itemStockIds).map(id).filter(isBatchFish)).size,
+    createdAt: date(shipment.createdAt), outboundDate: date(shipment.outboundDate), shipDate: date(shipment.shipDate), shippedAt: date(shipment.shippedAt),
+    deliveredAt: date(shipment.deliveredAt), damagedAt: date(shipment.damagedAt), actualShippingFee: itemPrice(shipment.actualShippingFee),
+    damageResolution: text(shipment.damageResolution), damageRefundAmount: itemPrice(shipment.damageRefundAmount) }))
+    .sort((a, b) => compareHistoryDate(a.createdAt || a.outboundDate || a.shipDate, b.createdAt || b.outboundDate || b.shipDate) || a.id.localeCompare(b.id));
+  return { ok: true, batch: { id: id(context.batch.id), batchNo: text(context.batch.batchNo), siteId: options.siteId, siteName: context.locations.siteName(options.siteId) },
+    order: { id: id(order.id), orderNo: text(order.orderNo), siteId: orderSiteId, siteName: context.locations.siteName(orderSiteId), date: date(order.date),
+      status: text(order.status), statusLabel: orderStatus[order.status] || text(order.status), customerName: text(customer?.name) || text(order.customerName), source: text(order.source),
+      items, totals, payments, shipments: shipping, warnings } };
 }
 
 function safeMedia(value) {
