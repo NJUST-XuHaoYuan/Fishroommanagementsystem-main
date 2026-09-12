@@ -130,6 +130,13 @@ import {
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
 import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
+import {
+  buildPurchaseBatchDetail,
+  buildPurchaseBatchFishHistory,
+  parseBatchDetailQuery,
+  preserveStockEntrySnapshot,
+  PURCHASE_BATCH_DETAIL_SQL,
+} from "./purchase-batch-details.mjs";
 import { PUBLIC_SPECIMEN_HISTORY_SQL, publicSpecimenGroupKeys } from "./public-specimen-groups.mjs";
 import { resolveAssistantSiteScope } from "./assistant-site-scope.mjs";
 import {
@@ -3919,13 +3926,23 @@ function normalizeStockItem(item) {
 function applyStockMutationToState(state = {}, change = {}, operator = "system", options = {}) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-  const upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map(normalizeStockItem);
+  let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map(normalizeStockItem);
   const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
     .map((id) => String(id ?? "").trim());
   if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
   validateStockMutationRelationships(state, { upsert: upsertItems, deleteIds }, {
     visibleSiteIds: options.visibleSiteIds,
   });
+  const entryExistingById = new Map(stock.map((item) => [String(item?.id ?? "").trim(), item]));
+  const entryRecordedAt = new Date().toISOString();
+  upsertItems = upsertItems.map((item) => preserveStockEntrySnapshot({
+    item,
+    existing: entryExistingById.get(item.id),
+    tankGroups: state.tankGroups,
+    sites: getSitesFromState(state),
+    operator,
+    recordedAt: entryRecordedAt,
+  }));
 
   const upsertIds = upsertItems.map((item) => item.id);
   if (new Set(upsertIds).size !== upsertIds.length) throw new Error("入库记录编号重复，请刷新后重试");
@@ -8123,7 +8140,8 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus") {
+  if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" ||
+      url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history") {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -10940,6 +10958,42 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/login-data" && req.method === "GET") {
     const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel FROM app_state WHERE id = $1", [stateId]);
     sendJson(req, res, 200, { personnel: sanitizePersonnelForLoginData(rows[0]?.personnel ?? [], req) });
+    return;
+  }
+
+  if ((url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history") && req.method === "GET") {
+    try {
+      const history = url.pathname === "/api/batches/fish-history";
+      const query = parseBatchDetailQuery(url.searchParams, { history });
+      // Batch browsing has no create/update/delete requirement. Authorize its
+      // persisted site before loading fish, sales, or maintenance evidence.
+      const authResult = await pool.query(
+        `SELECT data -> 'sites' AS sites, data -> 'batches' AS batches
+         FROM app_state WHERE id = $1`,
+        [stateId]
+      );
+      const authState = { sites: authResult.rows[0]?.sites ?? [], batches: authResult.rows[0]?.batches ?? [] };
+      requireVisibleSiteForAuth(req, authState, query.siteId, "不能查看未授权场地的采购批次");
+      const matchingBatches = authState.batches.filter((batch) => String(batch?.id ?? "") === query.batchId);
+      if (matchingBatches.length > 1) throw httpError(409, "采购批次编号不唯一，无法安全查看");
+      if (matchingBatches.length !== 1 || normalizeSiteId(matchingBatches[0]?.siteId) !== query.siteId) {
+        throw httpError(404, "采购批次不存在或无权查看");
+      }
+      const result = await pool.query(PURCHASE_BATCH_DETAIL_SQL, [stateId, query.batchId, history ? query.stockItemId : ""]);
+      const row = result.rows[0] ?? {};
+      const state = {
+        sites: row.sites, tankGroups: row.tank_groups, batches: row.batches, products: row.products,
+        species: row.species, stock: row.stock, orders: row.orders, shipments: row.shipments,
+        bioRecords: row.bio_records, lossRecords: row.loss_records, approvalRequests: row.approval_requests,
+      };
+      const options = { ...query, visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), isAdmin: req.auth?.account?.accessRole === "admin" };
+      const detail = history ? buildPurchaseBatchFishHistory(state, options) : buildPurchaseBatchDetail(state, options);
+      sendJson(req, res, 200, { ...detail, version: row.version ?? null }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      const statusCode = Number(error?.statusCode ?? 500);
+      if (statusCode >= 500) console.error("Failed to load purchase batch detail:", error);
+      sendJson(req, res, statusCode, { ok: false, error: statusCode >= 500 ? "采购批次明细加载失败" : error.message, ...(error?.code ? { code: error.code } : {}) }, { "Cache-Control": "no-store, private" });
+    }
     return;
   }
 
@@ -14058,7 +14112,13 @@ async function handleApi(req, res, url) {
 		            text: `移缸：${subTankDisplayName(state, item.subTankId)} → ${targetName}${notes ? `。备注：${notes}` : ""}`,
 		            photos: [],
 		            videos: [],
-		            sourceType: "manual",
+		            sourceType: "stockMove",
+		            fromSiteId: stockSiteId(item),
+		            fromSubTankId: item.subTankId,
+		            fromTankName: subTankDisplayName(state, item.subTankId),
+		            toSiteId: targetSiteId,
+		            toSubTankId: targetId,
+		            toTankName: targetName,
 		            operator,
 	          }));
 	          nextStock = stock.map((item) =>

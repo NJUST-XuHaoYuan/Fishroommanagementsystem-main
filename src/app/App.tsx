@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
+import { toast } from "sonner";
 import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, BioRecordSaveChange, BioRecordSaveResult, DailyLog, MaintenanceSaveChange, MaintenanceSaveResult, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelAccountEnabled, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
 import type { AuthAccountPermissionSummary } from "./store";
 import { Login } from "./components/Login";
@@ -29,6 +30,10 @@ import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
 import { resolveDashboardView } from "./utils/dashboardAccess";
+import { buildLinkedOrderNavigation } from "./utils/linkedOrderNavigation";
+import type { LinkedOrderSourceView } from "./utils/linkedOrderNavigation";
+import { isViewStateReady } from "./utils/viewReadiness";
+import type { LoadedViewState } from "./utils/viewReadiness";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession, saveAuthSession } from "./utils/authSession";
 import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
 import { changedObjectKeys, hasStateVersionChanged, isCurrentStateRequest, latestStateVersion, mapArrayCopyOnWrite } from "./utils/stateMutation";
@@ -73,7 +78,7 @@ type MutationSession = {
   authSessionKey: string;
   statusSequence: number;
 };
-type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily" | "notifications">;
+type BatchDetailRequest = { batchId: string; siteId: string };
 type OpenOrderRequest = {
   orderId: string;
   requestId: number;
@@ -618,12 +623,17 @@ function AdminApp() {
   const view = resolveDashboardView(requestedView, state.user);
   const [loading, setLoading] = useState(true);
   const [stateLoaded, setStateLoaded] = useState(false);
+  const [loadedViewState, setLoadedViewState] = useState<LoadedViewState | null>(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [stateLoadError, setStateLoadError] = useState("");
   const [stateLoadAttempt, setStateLoadAttempt] = useState(0);
   const [viewLoading, setViewLoading] = useState(false);
   const [loadedKeys, setLoadedKeys] = useState<Set<PersistedKey>>(() => new Set());
   const [openOrderRequest, setOpenOrderRequest] = useState<OpenOrderRequest | null>(null);
+  const [batchDetailRequest, setBatchDetailRequest] = useState<{
+    userKey: string;
+    request: BatchDetailRequest;
+  } | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [activeSiteId, setActiveSiteIdBase] = useState(() => {
     try {
@@ -1926,12 +1936,15 @@ function AdminApp() {
     invalidateStateReadRequests();
     stateLoadStarted.current = false;
     loadedViewRef.current = null;
+    setLoadedViewState(null);
     stateVersionRef.current = "";
     lastSavedState.current = null;
     loadedKeysRef.current = new Set<PersistedKey>();
     setLoadedKeys(new Set<PersistedKey>());
     setStateLoaded(false);
     setStateLoadError("");
+    setOpenOrderRequest(null);
+    setBatchDetailRequest(null);
     if (!state.user) {
       setStateBase((current) => current.user
         ? current
@@ -1983,6 +1996,7 @@ function AdminApp() {
         if (!requestIsCurrent()) return;
         if (!ok) throw new Error("Failed to load initial view state");
         loadedViewRef.current = view;
+        setLoadedViewState({ view, userKey: requestedUserKey });
         setStateLoaded(true);
       })
       .catch((e) => {
@@ -2023,6 +2037,7 @@ function AdminApp() {
         if (!requestIsCurrent()) return;
         if (!ok) throw new Error("Failed to load view state");
         loadedViewRef.current = requestedView;
+        setLoadedViewState({ view: requestedView, userKey: requestedUserKey });
       })
       .catch((error) => {
         if (!requestIsCurrent()) return;
@@ -2102,7 +2117,15 @@ function AdminApp() {
       case "species":    return <SpeciesView />;
       case "products":   return <ProductsView />;
       case "tankGroups": return <TankGroupsView />;
-      case "batches":    return <BatchesView />;
+      case "batches":    return (
+        <BatchesView
+          onOpenOrder={requestOpenOrder}
+          detailRequest={batchDetailRequest?.userKey === currentUserKey ? batchDetailRequest.request : null}
+          onDetailRequestChange={(request: BatchDetailRequest | null) => {
+            setBatchDetailRequest(request ? { userKey: currentUserKey, request } : null);
+          }}
+        />
+      );
       case "stockIn":    return <StockInView allOrders={state.orders} onOpenOrder={requestOpenOrder} />;
       case "daily":      return (
         <DailyView
@@ -2135,23 +2158,26 @@ function AdminApp() {
     }
   };
 
-  function requestOpenOrder(orderId: string) {
-    const sourceView = viewRef.current;
-    const returnView = sourceView === "stockIn" || sourceView === "daily" || sourceView === "notifications"
-      ? sourceView
-      : undefined;
-    const returnSiteId = activeSiteId;
-    const targetOrder = stateRef.current.orders.find((order) => order.id === orderId);
-    const targetSiteId = targetOrder ? normalizeSiteId(targetOrder.siteId) : activeSiteId;
-    if (
-      targetOrder &&
-      targetSiteId !== activeSiteId &&
-      canUserAccessSite(stateRef.current.user, stateRef.current, targetSiteId)
-    ) {
-      setActiveSiteId(targetSiteId);
+  function requestOpenOrder(orderId: string, siteId?: string) {
+    const current = stateRef.current;
+    if (!current.user) return;
+    const targetOrder = current.orders.find((order) => order.id === orderId);
+    const navigation = buildLinkedOrderNavigation({
+      orderId,
+      requestedSiteId: siteId,
+      cachedOrderSiteId: targetOrder ? normalizeSiteId(targetOrder.siteId) : undefined,
+      activeSiteId,
+      sourceView: viewRef.current,
+      canAccessSite: (targetSiteId) => canUserAccessSite(current.user, current, targetSiteId),
+    });
+    if (!navigation) {
+      toast.error("订单不存在或无权查看所属场地");
+      return;
     }
+    const { targetSiteId, ...request } = navigation;
+    if (targetSiteId !== activeSiteId) setActiveSiteId(targetSiteId);
     orderRequestSequence.current += 1;
-    setOpenOrderRequest({ orderId, requestId: orderRequestSequence.current, returnView, returnSiteId });
+    setOpenOrderRequest({ ...request, requestId: orderRequestSequence.current });
     setView("orders");
   }
 
@@ -2159,7 +2185,10 @@ function AdminApp() {
     const returnView = openOrderRequest?.returnView;
     const returnSiteId = openOrderRequest?.returnSiteId;
     setOpenOrderRequest(null);
-    if (returnSiteId && returnSiteId !== activeSiteId) setActiveSiteId(returnSiteId);
+    const current = stateRef.current;
+    if (!current.user) return;
+    if (returnSiteId && returnSiteId !== activeSiteId &&
+        canUserAccessSite(current.user, current, returnSiteId)) setActiveSiteId(returnSiteId);
     if (returnView) setView(returnView);
   }
 
@@ -2168,6 +2197,7 @@ function AdminApp() {
     if (allowedView !== "orders") setOpenOrderRequest(null);
     if (allowedView === viewRef.current) {
       loadedViewRef.current = null;
+      setLoadedViewState(null);
       setStateLoadError("");
       setStateLoadAttempt((attempt) => attempt + 1);
       return;
@@ -2176,7 +2206,8 @@ function AdminApp() {
   };
 
   const loadingView = viewLoading || Boolean(
-    state.user && (!permissionSummaryReady || stateLoading || !stateLoaded)
+    state.user && (!permissionSummaryReady || stateLoading || !stateLoaded ||
+      !isViewStateReady(loadedViewState, view, currentUserKey))
   );
   const viewContent = stateLoadError ? (
     <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-4 text-center">

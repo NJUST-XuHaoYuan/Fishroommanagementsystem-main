@@ -64,7 +64,46 @@ function publicBioProjectionRow(sql, values = []) {
   };
 }
 
+function purchaseBatchProjectionRow(sql, values = []) {
+  if (!/\bcandidate_ids\s+AS\s+MATERIALIZED\b/i.test(sql)) return null;
+  const list = (value) => Array.isArray(value) ? value : [];
+  const batchId = String(values[1] ?? "");
+  const fishId = String(values[2] ?? "");
+  const changes = list(state.approvalRequests).filter((request) => request.status === "approved")
+    .flatMap((request) => list(request.stockDetails?.items).map((change) => ({ request, change })))
+    .filter(({ change }) => change.before?.batchId === batchId || change.after?.batchId === batchId);
+  const candidateIds = new Set([
+    ...list(state.stock).filter((item) => item.batchId === batchId).map((item) => item.id),
+    ...changes.map(({ change }) => change.stockItemId),
+    ...list(state.orders).flatMap((order) => list(order.items).filter((item) => item.batchId === batchId).map((item) => item.stockItemId)),
+  ]);
+  const shipments = list(state.shipments).filter((shipment) =>
+    list(shipment.itemStockIds).some((id) => candidateIds.has(id)) ||
+    list(shipment.damageReplacements).some((relation) => candidateIds.has(relation.originalStockItemId) || candidateIds.has(relation.replacementStockItemId))
+  );
+  const orderIds = new Set(shipments.map((shipment) => shipment.orderId));
+  const records = (rows, mediaKeys) => list(rows)
+    .filter((row) => candidateIds.has(row.stockItemId) && (!fishId || row.stockItemId === fishId))
+    .map((row) => fishId ? row : Object.fromEntries(Object.entries(row).filter(([key]) => !mediaKeys.includes(key))));
+  return {
+    version: revision,
+    sites: list(state.sites), tank_groups: list(state.tankGroups), products: list(state.products), species: list(state.species),
+    batches: list(state.batches).filter((batch) => batch.id === batchId),
+    stock: list(state.stock).filter((item) => candidateIds.has(item.id)),
+    orders: list(state.orders).filter((order) => orderIds.has(order.id) || list(order.items).some((item) => candidateIds.has(item.stockItemId))),
+    shipments,
+    bio_records: records(state.bioRecords, ["photos", "videos"]),
+    loss_records: records(state.lossRecords, ["proofPhotos"]),
+    approval_requests: changes.map(({ request, change }) => ({
+      id: request.id, status: request.status, siteId: request.siteId, resolvedAt: request.resolvedAt,
+      resolvedBy: request.resolvedBy, resolvedByName: request.resolvedByName, stockDetails: { items: [change] },
+    })),
+  };
+}
+
 function appStateRow(sql, values = []) {
+  const purchaseBatchRow = purchaseBatchProjectionRow(sql, values);
+  if (purchaseBatchRow) return purchaseBatchRow;
   const publicBioRow = publicBioProjectionRow(sql, values);
   if (publicBioRow) return publicBioRow;
   const row = {};

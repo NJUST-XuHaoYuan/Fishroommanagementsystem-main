@@ -18,6 +18,14 @@ import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { authJsonHeaders } from "../utils/authSession";
+import { BatchDetailsView } from "./BatchDetailsView";
+
+type BatchDetailRequest = { batchId: string; siteId: string };
+type BatchesViewProps = {
+  onOpenOrder?: (orderId: string, siteId?: string) => void;
+  detailRequest?: BatchDetailRequest | null;
+  onDetailRequestChange?: (request: BatchDetailRequest | null) => void;
+};
 
 type BatchRevenueMetric = {
   batchId: string;
@@ -63,8 +71,14 @@ function money(value: number) {
   return `${amount < 0 ? "-" : ""}¥${Math.abs(amount).toFixed(2)}`;
 }
 
-export function BatchesView() {
+export function BatchesView({ onOpenOrder, detailRequest, onDetailRequestChange }: BatchesViewProps = {}) {
   const { state, activeSiteId, saveStateTransform } = useStore();
+  const [localDetailRequest, setLocalDetailRequest] = useState<BatchDetailRequest | null>(null);
+  const requestedDetail = detailRequest === undefined ? localDetailRequest : detailRequest;
+  const openFishDetails = (request: BatchDetailRequest | null) => {
+    setLocalDetailRequest(request);
+    onDetailRequestChange?.(request);
+  };
   const [editing, setEditing] = useState<PurchaseBatch | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<PurchaseBatch | null>(null);
@@ -209,6 +223,12 @@ export function BatchesView() {
     toast.success("已保存");
   };
 
+  if (requestedDetail && requestedDetail.siteId === activeSiteId) {
+    return <BatchDetailsView key={`${requestedDetail.siteId}:${requestedDetail.batchId}`}
+      batchId={requestedDetail.batchId} siteId={requestedDetail.siteId}
+      onBack={() => openFishDetails(null)} onOpenOrder={onOpenOrder} />;
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -333,13 +353,14 @@ export function BatchesView() {
           );
         }}
         actions={(row) => (
-          <div className="flex justify-end gap-2" onDoubleClick={(event) => event.stopPropagation()}>
-            <Button size="sm" variant="outline" onClick={() => setDetail(row)}>详情</Button>
+          <div className="flex flex-wrap justify-end gap-2" onDoubleClick={(event) => event.stopPropagation()}>
+            <Button size="sm" variant="outline" onClick={() => openFishDetails({ batchId: row.id, siteId: activeSiteId })}>批次明细</Button>
+            <Button size="sm" variant="outline" onClick={() => setDetail(row)}>批次资料</Button>
             {permission.canUpdate && <Button size="sm" variant="outline" onClick={() => { setEditing({ ...row, lossProof: lossProofs(row) }); setOpen(true); }}>编辑</Button>}
             {permission.canDelete && <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setDel(row)}>删除</Button>}
           </div>
         )}
-        onRowDoubleClick={(row) => setDetail(row)}
+        onRowDoubleClick={(row) => openFishDetails({ batchId: row.id, siteId: activeSiteId })}
       />
 
       <Dialog open={!!detail} onOpenChange={(nextOpen) => !nextOpen && setDetail(null)}>
