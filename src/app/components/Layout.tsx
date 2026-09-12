@@ -36,6 +36,7 @@ import { normalizeSiteId, siteName, visibleSitesForUser } from "../utils/sites";
 import { AIAssistantPanel } from "./AIAssistantPanel";
 import { NotificationNavBadge, useNotificationUnreadCount } from "./NotificationCenter";
 import { usePermission } from "../utils/permissions";
+import { canAccessDashboard, resolveDashboardView } from "../utils/dashboardAccess";
 
 export type ViewKey =
   | "dashboard"
@@ -252,7 +253,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
       : NAV.find((s) => s.items.some((i) => i.key === view))?.title;
 
   const navigate = (nextView: ViewKey) => {
-    setView(nextView);
+    setView(resolveDashboardView(nextView, user));
     setMobileNavOpen(false);
   };
 
@@ -270,13 +271,15 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
     <>
       <Brand />
       <nav className="flex-1 overflow-y-auto px-2.5 py-3 flex flex-col gap-2">
-        <button
-          onClick={() => navigate("dashboard")}
-          className={navButtonClass(view === "dashboard", "main")}
-        >
-          <LayoutDashboard className="size-4 shrink-0" />
-          <span>首页概览</span>
-        </button>
+        {canAccessDashboard(user) && (
+          <button
+            onClick={() => navigate("dashboard")}
+            className={navButtonClass(view === "dashboard", "main")}
+          >
+            <LayoutDashboard className="size-4 shrink-0" />
+            <span>首页概览</span>
+          </button>
+        )}
         <button
           onClick={() => navigate("notifications")}
           className={navButtonClass(view === "notifications", "main")}

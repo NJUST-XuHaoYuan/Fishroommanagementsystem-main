@@ -70,6 +70,11 @@ function appStateRow(sql, values = []) {
   const row = {};
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\brevision::text\s+AS\s+version\b/i.test(sql)) row.version = revision;
+  // The general state/slice route quotes camelCase aliases, unlike compact
+  // endpoints that use unquoted snake_case projections below.
+  for (const match of sql.matchAll(/data\s*->\s*'([A-Za-z][A-Za-z0-9_]*)'\s+AS\s+"([A-Za-z][A-Za-z0-9_]*)"/gi)) {
+    row[match[2]] = state[match[1]] ?? null;
+  }
   for (const [stateKey, alias] of [
     ["personnel", "personnel"],
     ["sites", "sites"],
@@ -82,6 +87,8 @@ function appStateRow(sql, values = []) {
     ["orders", "orders"],
     ["shipments", "shipments"],
     ["bioRecords", "bio_records"],
+    ["lossRecords", "loss_records"],
+    ["customers", "customers"],
   ]) {
     const projection = new RegExp(`data\\s*->\\s*'${stateKey}'\\s+AS\\s+${alias}\\b`, "i");
     if (projection.test(sql)) row[alias] = Array.isArray(state[stateKey]) ? state[stateKey] : [];

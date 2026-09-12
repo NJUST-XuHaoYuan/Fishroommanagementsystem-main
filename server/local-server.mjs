@@ -123,6 +123,7 @@ import {
   buildDashboardSalespersonSeries,
   indexShipmentsByOrder,
 } from "./dashboard-summary-aggregates.mjs";
+import { resolveDashboardDateRange } from "./dashboard-date-range.mjs";
 import {
   healthyFishInventoryMetrics,
   isFishInventoryItem,
@@ -280,8 +281,6 @@ const stateId = "main";
 const MAX_OPERATION_LOGS = 10000;
 const STOCK_DUPLICATE_CONFIRMATION_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_FINANCE_DAYS = 30;
-const MIN_FINANCE_DAYS = 7;
-const MAX_FINANCE_DAYS = 730;
 const MAX_IMAGE_UPLOAD_BYTES = numberFromEnv(process.env.MAX_IMAGE_UPLOAD_BYTES, 50 * 1024 * 1024);
 const MAX_PERSONNEL_ATTACHMENT_BYTES = numberFromEnv(process.env.MAX_PERSONNEL_ATTACHMENT_BYTES, 15 * 1024 * 1024);
 const PERSONNEL_ATTACHMENT_DRAFT_RETENTION_MS = numberFromEnv(
@@ -1628,12 +1627,6 @@ function msUntilNextChinaTime(hour = 4, minute = 0) {
   return targetMs - chinaNowMs;
 }
 
-function parseFinanceDays(value) {
-  const days = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(days)) return DEFAULT_FINANCE_DAYS;
-  return Math.min(MAX_FINANCE_DAYS, Math.max(MIN_FINANCE_DAYS, days));
-}
-
 function buildLossRows(state = {}, productById = new Map(), speciesById = new Map()) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const lossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
@@ -1837,7 +1830,7 @@ function isOfflinePickupDashboardOrder(order = {}, orderShipments = []) {
 
 function buildDashboardSummary(state = {}, options = {}) {
   const today = todayInChina();
-  const financeDays = parseFinanceDays(options.financeDays);
+  const { dates: dailyDates, startDate, endDate, financeDays } = resolveDashboardDateRange(options, today);
   const siteId = normalizeSiteScope(options.siteId);
   const scopedState = siteFilteredState(state, siteId);
   const shippedIds = shippedOutStockIds(scopedState);
@@ -1865,11 +1858,7 @@ function buildDashboardSummary(state = {}, options = {}) {
     species,
     outStockIds: shippedIds,
   });
-  const dailyDates = Array.from({ length: financeDays }, (_, index) =>
-    addDaysToDateString(today, index - financeDays + 1)
-  );
-  const dailyFinanceData = buildDashboardFinanceSeries({
-    dates: dailyDates,
+  const financeOptions = {
     orders,
     shipments,
     shipmentsByOrderId,
@@ -1878,17 +1867,23 @@ function buildDashboardSummary(state = {}, options = {}) {
     isPlatformOrderSource,
     isValidSalesOrder: isValidDashboardSalesOrder,
     isOfflinePickupOrder: isOfflinePickupDashboardOrder,
-  });
+  };
+  const dailyFinanceData = buildDashboardFinanceSeries({ ...financeOptions, dates: dailyDates });
   const dailyLossData = buildDashboardLossSeries({
     dates: dailyDates,
-    stock,
-    lossRecords: scopedState.lossRecords,
-    shipments,
-    batches: scopedState.batches,
+    // Resolve the event site before scoping: a stock item may have moved since
+    // its loss record was captured, but that must not rewrite loss history.
+    stock: state.stock,
+    lossRecords: state.lossRecords,
+    shipments: state.shipments,
+    batches: state.batches,
     products,
     species,
-    tankGroups,
-    inventoryProjection: scopedState.inventoryProjection,
+    tankGroups: state.tankGroups,
+    sites: getSitesFromState(state),
+    siteId,
+    defaultSiteId: DEFAULT_SITE_ID,
+    inventoryProjection: state.inventoryProjection,
     isFishInventoryItem,
     normalizeInventoryId: normalizeShipmentInventoryId,
   });
@@ -1919,11 +1914,8 @@ function buildDashboardSummary(state = {}, options = {}) {
         outStockIds: shippedIds,
       })
     : null;
-  const todayFinance = dailyFinanceData[dailyFinanceData.length - 1] ?? {
-    received: 0,
-    unshippedRefund: 0,
-    shippedDamage: 0,
-  };
+  const todayFinance = dailyFinanceData.find((point) => point.date === today)
+    ?? buildDashboardFinanceSeries({ ...financeOptions, dates: [today] })[0];
 
   return {
     today,
@@ -1950,6 +1942,8 @@ function buildDashboardSummary(state = {}, options = {}) {
       .reduce((sum, order) => sum + (Array.isArray(order?.items) ? order.items : []).reduce((itemSum, item) => itemSum + Number(item?.price || 0), 0), 0),
     pendingShipments: shipments.filter((shipment) => shipment?.status === "preparing" || shipment?.status === "outbound" || shipment?.status === "shipped").length,
     financeDays,
+    startDate,
+    endDate,
     siteId,
     dailyFinanceData,
     dailyLossData,
@@ -8115,6 +8109,10 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus") {
+    res.setHeader("Cache-Control", "no-store, private");
+  }
+
   if (!isPublicApiRoute(req, url) && !bearerTokenFromRequest(req)) {
     sendJson(req, res, 401, { ok: false, error: "Authentication required" });
     return;
@@ -11009,6 +11007,22 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-summary" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store, private");
+    if (!isPersonnelAccountEnabled(req.auth?.account) || req.auth?.account?.accessRole !== "admin") {
+      sendJson(req, res, 403, { error: "仅管理员可以查看看板" });
+      return;
+    }
+    let dateRange;
+    try {
+      dateRange = resolveDashboardDateRange({
+        startDate: url.searchParams.get("startDate"),
+        endDate: url.searchParams.get("endDate"),
+        financeDays: url.searchParams.get("financeDays") ?? url.searchParams.get("days"),
+      }, todayInChina());
+    } catch (error) {
+      sendJson(req, res, 400, { error: error.message || "日期范围无效" });
+      return;
+    }
     const { rows } = await pool.query(
       `SELECT
          data -> 'sites' AS sites,
@@ -11042,7 +11056,8 @@ async function handleApi(req, res, url) {
     }, req.auth?.account);
     sendJson(req, res, 200, {
       summary: buildDashboardSummary(data, {
-        financeDays: url.searchParams.get("financeDays") ?? url.searchParams.get("days"),
+        startDate: dateRange.startDate,
+        endDate: dateRange.endDate,
         siteId: url.searchParams.get("siteId") ?? ALL_SITE_ID,
       }),
     });
@@ -11050,6 +11065,11 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-focus" && req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store, private");
+    if (!isPersonnelAccountEnabled(req.auth?.account) || req.auth?.account?.accessRole !== "admin") {
+      sendJson(req, res, 403, { error: "仅管理员可以查看看板" });
+      return;
+    }
     const mode = url.searchParams.get("mode") === "product" ? "product" : "species";
     const focusId = String(url.searchParams.get("id") ?? "").trim();
     if (!focusId) {

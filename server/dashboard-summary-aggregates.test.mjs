@@ -54,6 +54,73 @@ test("salesperson aggregation computes each valid order amount once", () => {
   assert.equal(result.dailySalespersonData[0].total, 30);
 });
 
+test("salesperson ranking and totals count only orders inside the selected dates", () => {
+  const result = buildDashboardSalespersonSeries({
+    dates: ["2026-08-19", "2026-08-20"],
+    personnel: [{ name: "甲" }, { name: "乙" }, { name: "未成交" }],
+    orders: [
+      { id: "older", date: "2026-08-18", contactPerson: "甲", amount: 10000 },
+      { id: "first", date: "2026-08-19", contactPerson: "甲", amount: 10 },
+      { id: "last", date: "2026-08-20", contactPerson: "乙", amount: 20 },
+      { id: "newer", date: "2026-08-21", contactPerson: "甲", amount: 10000 },
+      { id: "outside-person", date: "2026-08-18", contactPerson: "范围外人员", amount: 50000 },
+    ],
+    amountForOrder: (order) => order.amount,
+  });
+  assert.deepEqual(result.salespersonOptions, [
+    { name: "乙", orderCount: 1, amount: 20 },
+    { name: "甲", orderCount: 1, amount: 10 },
+    { name: "未成交", orderCount: 0, amount: 0 },
+  ]);
+  assert.equal(result.dailySalespersonData.reduce((sum, day) => sum + day.total, 0), 30);
+});
+
+test("loss details preserve event site and scope after stock moves to another site", () => {
+  const options = {
+    dates: ["2026-09-01"],
+    sites: [{ id: "nanjing", name: "南京" }, { id: "jiangyin", name: "江阴" }],
+    tankGroups: [
+      { id: "nj", name: "南京缸组", siteId: "nanjing", subTanks: [{ id: "nj1", name: "旧缸" }] },
+      { id: "jy", name: "江阴缸组", siteId: "jiangyin", subTanks: [{ id: "jy1", name: "新缸" }] },
+    ],
+    stock: [{ id: "f1", productId: "p1", inDate: "2026-08-01", siteId: "jiangyin", subTankId: "jy1", lost: true, lossDate: "2026-09-01" }],
+    products: [{ id: "p1", speciesId: "s1" }],
+    species: [{ id: "s1" }],
+    lossRecords: [{ id: "l1", stockItemId: "f1", date: "2026-09-01", siteId: "nanjing", subTankId: "nj1" }],
+  };
+  const all = buildDashboardLossSeries(options)[0];
+  assert.equal(all.lossDetails[0].siteId, "nanjing");
+  assert.equal(all.lossDetails[0].siteName, "南京");
+  assert.equal(all.lossDetails[0].tankName, "南京缸组 / 旧缸");
+  const nanjing = buildDashboardLossSeries({ ...options, siteId: "nanjing" })[0];
+  assert.equal(nanjing.lostCount, 1);
+  assert.equal(nanjing.stockBase, 1);
+  const jiangyin = buildDashboardLossSeries({ ...options, siteId: "jiangyin" })[0];
+  assert.equal(jiangyin.lostCount, 0);
+  assert.equal(jiangyin.stockBase, 0);
+});
+
+test("legacy loss sites fall back to event tank, current tank, then stock site", () => {
+  const result = buildDashboardLossSeries({
+    dates: ["2026-09-01"],
+    sites: [{ id: "nanjing", name: "南京" }, { id: "jiangyin", name: "江阴" }],
+    tankGroups: [{ id: "jy", siteId: "jiangyin", subTanks: [{ id: "jy1" }] }],
+    stock: [
+      { id: "event-tank", productId: "p1", siteId: "nanjing", inDate: "2026-08-01" },
+      { id: "current-tank", productId: "p1", siteId: "nanjing", subTankId: "jy1", inDate: "2026-08-01" },
+      { id: "stock-site", productId: "p1", siteId: "jiangyin", inDate: "2026-08-01", lost: true, lossDate: "2026-09-01" },
+    ],
+    products: [{ id: "p1" }],
+    lossRecords: [
+      { stockItemId: "event-tank", date: "2026-09-01", subTankId: "jy1" },
+      { stockItemId: "current-tank", date: "2026-09-01" },
+    ],
+  })[0];
+  assert.equal(result.lostCount, 3);
+  assert.deepEqual(result.lossDetails.map((row) => row.siteId), ["jiangyin", "jiangyin", "jiangyin"]);
+  assert.deepEqual(result.lossDetails.map((row) => row.siteName), ["江阴", "江阴", "江阴"]);
+});
+
 test("loss inventory base uses actual outbound date before shipment creation date", () => {
   const result = buildDashboardLossSeries({
     dates: ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05"],

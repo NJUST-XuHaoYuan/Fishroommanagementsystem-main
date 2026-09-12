@@ -167,6 +167,8 @@ export function buildDashboardSalespersonSeries({
 
   for (const order of array(orders)) {
     if (!isValidSalesOrder(order)) continue;
+    const date = compactDate(order?.date);
+    if (!dateSet.has(date)) continue;
     const salesperson = normalizeSalespersonName(order?.contactPerson);
     if (resignedNames.has(salesperson)) continue;
     const orderShipments = shipmentsByOrderId.get(String(order?.id ?? "")) ?? [];
@@ -176,8 +178,6 @@ export function buildDashboardSalespersonSeries({
     option.amount = money(option.amount + amount);
     optionByName.set(salesperson, option);
 
-    const date = compactDate(order?.date);
-    if (!dateSet.has(date)) continue;
     const rowsByPerson = dailyRows.get(date);
     const row = rowsByPerson.get(salesperson) ?? {
       salesperson,
@@ -247,6 +247,9 @@ export function buildDashboardLossSeries({
   products = [],
   species = [],
   tankGroups = [],
+  sites = [],
+  siteId = "all",
+  defaultSiteId = "nanjing",
   inventoryProjection = {},
   isFishInventoryItem = () => true,
   normalizeInventoryId = (value) => String(value ?? "").trim(),
@@ -261,12 +264,24 @@ export function buildDashboardLossSeries({
   const speciesById = new Map(array(species).map((item) => [String(item?.id ?? ""), item]));
   const stockById = new Map(array(stock).map((item) => [String(item?.id ?? ""), item]));
   const batchById = new Map(array(batches).map((batch) => [String(batch?.id ?? ""), batch]));
+  const siteNameById = new Map(array(sites).map((site) => [String(site?.id ?? ""), String(site?.name ?? "").trim()]));
   const tankNameById = new Map();
+  const tankSiteById = new Map();
+  const groupSiteById = new Map();
   for (const group of array(tankGroups)) {
+    const groupSiteId = String(group?.siteId ?? "").trim();
+    groupSiteById.set(String(group?.id ?? ""), groupSiteId);
     for (const tank of array(group?.subTanks)) {
       tankNameById.set(String(tank?.id ?? ""), `${String(group?.name ?? "")} / ${String(tank?.name ?? "")}`);
+      tankSiteById.set(String(tank?.id ?? ""), groupSiteId);
     }
   }
+  const stockSiteId = (item = {}) => tankSiteById.get(String(item?.subTankId ?? "")) || String(item?.siteId ?? "").trim() || defaultSiteId;
+  const lossSiteId = (record = {}, item = {}) => String(record?.siteId ?? "").trim()
+    || tankSiteById.get(String(record?.subTankId ?? ""))
+    || groupSiteById.get(String(record?.tankGroupId ?? ""))
+    || stockSiteId(item);
+  const matchesScope = (value) => siteId === "all" || value === siteId;
 
   const explicitIds = new Set(array(lossRecords).map((record) => String(record?.stockItemId ?? "")).filter(Boolean));
   const allLossRecords = [...array(lossRecords)];
@@ -282,29 +297,36 @@ export function buildDashboardLossSeries({
 
   const lossRowsByDate = new Map();
   const earliestLossDateByStockId = new Map();
+  const lossSiteByStockId = new Map();
   const lossStockIdsByBatchId = new Map();
   for (const record of allLossRecords) {
     const stockId = String(record?.stockItemId ?? "");
     const stockItem = stockById.get(stockId);
     if (!stockItem) continue;
+    const recordSiteId = lossSiteId(record, stockItem);
     const product = productById.get(String(stockItem?.productId ?? ""));
     const itemSpecies = product ? speciesById.get(String(product?.speciesId ?? "")) : undefined;
     if (!isFishInventoryItem(product, itemSpecies)) continue;
     const date = compactDate(record?.date ?? stockItem?.lossDate);
     if (!date) continue;
+    const currentLossDate = earliestLossDateByStockId.get(stockId);
+    if (!currentLossDate || date < currentLossDate) {
+      earliestLossDateByStockId.set(stockId, date);
+      lossSiteByStockId.set(stockId, recordSiteId);
+    }
+    if (!matchesScope(recordSiteId)) continue;
     const row = {
       record,
       stockItem,
       product,
       species: itemSpecies,
       date,
+      siteId: recordSiteId,
       estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
     };
     const rows = lossRowsByDate.get(date);
     if (rows) rows.push(row);
     else lossRowsByDate.set(date, [row]);
-    const currentLossDate = earliestLossDateByStockId.get(stockId);
-    if (!currentLossDate || date < currentLossDate) earliestLossDateByStockId.set(stockId, date);
     const batchId = String(stockItem?.batchId ?? "");
     if (batchId) {
       const ids = lossStockIdsByBatchId.get(batchId) ?? new Set();
@@ -342,6 +364,7 @@ export function buildDashboardLossSeries({
   const fishStock = [];
   const fishStockCountByBatchId = new Map();
   for (const item of array(stock)) {
+    if (!matchesScope(lossSiteByStockId.get(String(item?.id ?? "")) || stockSiteId(item))) continue;
     const product = productById.get(String(item?.productId ?? ""));
     const itemSpecies = product ? speciesById.get(String(product?.speciesId ?? "")) : undefined;
     if (!isFishInventoryItem(product, itemSpecies)) continue;
@@ -373,6 +396,7 @@ export function buildDashboardLossSeries({
 
   const batchesByDate = new Map();
   for (const batch of array(batches)) {
+    if (!matchesScope(String(batch?.siteId ?? "").trim() || defaultSiteId)) continue;
     const date = compactDate(batch?.arrivalDate);
     if (!dateSet.has(date)) continue;
     const batchId = String(batch?.id ?? "");
@@ -414,6 +438,11 @@ export function buildDashboardLossSeries({
       const record = row.record ?? {};
       const snapshotTankName = [record?.tankGroupName, record?.subTankName]
         .map((part) => String(part ?? "").trim()).filter(Boolean).join(" / ");
+      const eventTankId = String(record?.subTankId ?? "");
+      const eventTankName = tankSiteById.get(eventTankId) === row.siteId ? tankNameById.get(eventTankId) : "";
+      const currentTankName = stockSiteId(stockItem) === row.siteId
+        ? tankNameById.get(String(stockItem?.subTankId ?? ""))
+        : "";
       return {
         id: String(record?.id ?? stockItem?.id ?? ""),
         stockItemId: String(stockItem?.id ?? ""),
@@ -421,7 +450,9 @@ export function buildDashboardLossSeries({
         speciesName: String(itemSpecies?.name ?? ""),
         size: String(product?.size ?? ""),
         origin: String(product?.origin ?? ""),
-        tankName: String(record?.tankName ?? "").trim() || snapshotTankName || tankNameById.get(String(stockItem?.subTankId ?? "")) || "未知缸位",
+        siteId: row.siteId,
+        siteName: String(record?.siteName ?? "").trim() || siteNameById.get(row.siteId) || ({ nanjing: "南京", jiangyin: "江阴" })[row.siteId] || row.siteId || "未知场地",
+        tankName: String(record?.tankName ?? "").trim() || snapshotTankName || eventTankName || currentTankName || "未知缸位",
         batchNo: String(batch?.batchNo ?? ""),
         supplier: String(batch?.supplier ?? ""),
         arrivalDate: String(batch?.arrivalDate ?? ""),

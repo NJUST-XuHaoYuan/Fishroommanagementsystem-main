@@ -14,11 +14,14 @@ import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderS
 import { getBillableShippingFee } from "../utils/orderFees";
 import { dashboardOrderAdjustmentTotals } from "../../../server/dashboard-sales-metrics.mjs";
 import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-fish-value.mjs";
+import { resolveDashboardDateRange } from "../../../server/dashboard-date-range.mjs";
+import { DashboardDateFilter, DashboardSalespersonFilter, type DashboardDateRange } from "./DashboardFilters";
+import { dashboardSalespersonSelection, rankDashboardSalespeople } from "../utils/dashboardSalespeople";
+import { canAccessDashboard } from "../utils/dashboardAccess";
 
 function todayDateString(): string {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 10);
+  // Dashboard business days follow China time, including when viewed overseas.
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 function formatMoney(value: number): string {
@@ -64,14 +67,6 @@ function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-const FINANCE_DAY_OPTIONS = [14, 30, 90, 180, 365, 730] as const;
-type FinanceDays = typeof FINANCE_DAY_OPTIONS[number];
-const DEFAULT_FINANCE_DAYS: FinanceDays = 30;
-
-function normalizeFinanceDays(value: number): FinanceDays {
-  return FINANCE_DAY_OPTIONS.includes(value as FinanceDays) ? value as FinanceDays : DEFAULT_FINANCE_DAYS;
-}
-
 type DailyFinancePoint = {
   date: string;
   label: string;
@@ -102,6 +97,8 @@ type DailyLossDetail = {
   size: string;
   origin: string;
   tankName: string;
+  siteId?: string;
+  siteName?: string;
   batchNo: string;
   supplier: string;
   arrivalDate: string;
@@ -181,6 +178,8 @@ type DashboardSummary = {
   totalRevenue: number;
   pendingShipments: number;
   financeDays?: number;
+  startDate?: string;
+  endDate?: string;
   dailyFinanceData: DailyFinancePoint[];
   dailyLossData?: DailyLossPoint[];
   dailySalespersonData?: DailySalespersonPoint[];
@@ -944,14 +943,24 @@ function buildDocxFromJpegs(images: Array<{ bytes: Uint8Array; width: number; he
 }
 
 export function Dashboard() {
+  const { state } = useStore();
+  return canAccessDashboard(state.user) ? <AdminDashboard /> : null;
+}
+
+function AdminDashboard() {
   const { state, activeSiteId, saveStateTransform } = useStore();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [financeDays, setFinanceDays] = useState<FinanceDays>(DEFAULT_FINANCE_DAYS);
+  const [financeRange, setFinanceRange] = useState<DashboardDateRange>(() => {
+    const range = resolveDashboardDateRange({}, todayDateString());
+    return { startDate: range.startDate, endDate: range.endDate };
+  });
+  const financeDates: string[] = useMemo(() => resolveDashboardDateRange(financeRange).dates, [financeRange.startDate, financeRange.endDate]);
+  const financeRangeLabel = `${financeRange.startDate} 至 ${financeRange.endDate}`;
   const [dashboardSiteId, setDashboardSiteId] = useState<string>(activeSiteId);
   const [hoveredFinanceIndex, setHoveredFinanceIndex] = useState<number | null>(null);
   const [hoveredSalespersonIndex, setHoveredSalespersonIndex] = useState<number | null>(null);
   const [selectedSalespersonPoint, setSelectedSalespersonPoint] = useState<DailySalespersonPoint | null>(null);
-  const [selectedSalespeople, setSelectedSalespeople] = useState<Set<string>>(new Set());
+  const [selectedSalespeople, setSelectedSalespeople] = useState<Set<string> | null>(null);
   const [hoveredLossIndex, setHoveredLossIndex] = useState<number | null>(null);
   const [selectedLossPoint, setSelectedLossPoint] = useState<DailyLossPoint | null>(null);
   const [exportingFishList, setExportingFishList] = useState(false);
@@ -981,6 +990,7 @@ export function Dashboard() {
   }, [activeSiteId]);
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setSummaryLoading(true);
     setSummaryError("");
     setSummary(null);
@@ -988,17 +998,16 @@ export function Dashboard() {
     setHoveredFinanceIndex(null);
     setHoveredSalespersonIndex(null);
     setSelectedSalespersonPoint(null);
+    setSelectedSalespeople(null);
     setHoveredLossIndex(null);
     setSelectedLossPoint(null);
-    fetch(`/api/dashboard-summary?financeDays=${financeDays}&siteId=${encodeURIComponent(dashboardSiteId)}`, { headers: authJsonHeaders() })
+    const params = new URLSearchParams({ ...financeRange, siteId: dashboardSiteId });
+    fetch(`/api/dashboard-summary?${params}`, { headers: authJsonHeaders(), signal: controller.signal })
       .then((response) => response.json().then((result) => ({ response, result })))
       .then(({ response, result }) => {
         if (cancelled) return;
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
         const nextSummary = result.summary ?? null;
-        if (nextSummary?.financeDays) {
-          setFinanceDays((current) => normalizeFinanceDays(Number(nextSummary.financeDays) || current));
-        }
         setSummary(nextSummary);
         if (!focusId && nextSummary?.defaultFocus) {
           setFocusMode(nextSummary.defaultFocus.mode === "product" ? "product" : "species");
@@ -1019,8 +1028,9 @@ export function Dashboard() {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [financeDays, dashboardSiteId, summaryRetry]);
+  }, [financeRange.startDate, financeRange.endDate, dashboardSiteId, summaryRetry]);
   useEffect(() => {
     if (fishListSettingsOpen) setFishListFooterDraft(fishListFooterText);
   }, [fishListSettingsOpen, fishListFooterText]);
@@ -1130,8 +1140,7 @@ export function Dashboard() {
     .reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.price, 0), 0);
   let pendingShipments = dashboardShipments.filter((s) => s.status === "preparing" || s.status === "outbound" || s.status === "shipped").length;
 
-  let dailyFinanceData = Array.from({ length: financeDays }, (_, index) => {
-    const date = toLocalDateString(addDays(todayDate, index - financeDays + 1));
+  let dailyFinanceData = financeDates.map((date) => {
     const adjustments = dashboardOrderAdjustmentTotals(dashboardOrders, dashboardShipments, date);
     const payments = dashboardOrders.flatMap((order) =>
       (order.payments ?? []).filter((payment) =>
@@ -1318,12 +1327,10 @@ export function Dashboard() {
       : dailyFinanceData;
     dailyLossData = Array.isArray(summary.dailyLossData) ? summary.dailyLossData : dailyLossData;
   }
-  const salespersonOptions = Array.isArray(summary?.salespersonOptions)
+  const salespersonOptions = rankDashboardSalespeople(Array.isArray(summary?.salespersonOptions)
     ? summary.salespersonOptions
-    : [];
-  const selectedSalespersonNames = salespersonOptions
-    .map((option) => option.name)
-    .filter((name) => selectedSalespeople.size === 0 || selectedSalespeople.has(name));
+    : []);
+  const selectedSalespersonNames = dashboardSalespersonSelection(salespersonOptions, selectedSalespeople);
   const selectedSalespersonSet = new Set(selectedSalespersonNames);
   const dailySalespersonData: DailySalespersonPoint[] = (Array.isArray(summary?.dailySalespersonData)
     ? summary.dailySalespersonData
@@ -1357,14 +1364,6 @@ export function Dashboard() {
   const salespersonLabelStep = Math.max(1, Math.ceil(dailySalespersonData.length / 8));
   const salespersonRangeTotal = dailySalespersonData.reduce((sum, point) => sum + point.total, 0);
   const salespersonRangeOrders = dailySalespersonData.reduce((sum, point) => sum + point.orderCount, 0);
-  const toggleSalesperson = (name: string) => {
-    setSelectedSalespeople((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  };
   const maxFinanceValue = Math.max(
     1,
     ...dailyFinanceData.flatMap((point) =>
@@ -2279,21 +2278,9 @@ export function Dashboard() {
           <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h3 className="text-base font-semibold">销售情况</h3>
-              <p className="text-xs text-muted-foreground">最近 {dailyFinanceData.length} 天实际收款、退单金额、报损金额与订单金额</p>
+              <p className="text-xs text-muted-foreground">{financeRangeLabel} · 共 {financeDates.length} 天</p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
-              <label className="flex items-center gap-1.5 text-muted-foreground">
-                <span>范围</span>
-                <select
-                  value={financeDays}
-                  onChange={(event) => setFinanceDays(normalizeFinanceDays(Number(event.target.value)))}
-                  className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:border-sky-400"
-                >
-                  {FINANCE_DAY_OPTIONS.map((days) => (
-                    <option key={days} value={days}>近 {days} 天</option>
-                  ))}
-                </select>
-              </label>
               {FINANCE_SERIES.map((series) => (
                 <span key={series.key} className="flex items-center gap-1.5 text-muted-foreground">
                   <span className="size-2.5 rounded-full" style={{ backgroundColor: series.color }} />
@@ -2302,6 +2289,7 @@ export function Dashboard() {
               ))}
             </div>
           </div>
+          <DashboardDateFilter value={financeRange} today={today} onChange={setFinanceRange} />
           <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
             {financeRangeTotals.map((item) => (
               <div key={item.key} className="rounded-lg border bg-slate-50/60 px-3 py-2">
@@ -2337,7 +2325,7 @@ export function Dashboard() {
                 ))}
               </div>
             )}
-            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailyFinanceData.length}天销售情况趋势图`}>
+            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`${financeRangeLabel}销售情况趋势图`}>
               {financeTicks.map((tick) => (
                 <g key={tick.ratio}>
                   <line x1="64" x2="940" y1={tick.y} y2={tick.y} stroke="#e5e7eb" strokeDasharray="4 4" />
@@ -2480,67 +2468,28 @@ export function Dashboard() {
             <div>
               <h3 className="text-base font-semibold">每日销售人员成交额</h3>
               <p className="text-xs text-muted-foreground">
-                最近 {dailySalespersonData.length} 天按订单下单日期和对接人统计成交总额
+                {financeRangeLabel} · 按下单日期和对接人统计，与上方销售日期同步
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
-                合计 {formatMoney(salespersonRangeTotal)}
+                已选成交额 {formatMoney(salespersonRangeTotal)}
               </span>
               <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
-                订单 {salespersonRangeOrders} 单
+                已选订单 {salespersonRangeOrders} 单
               </span>
-              <label className="flex items-center gap-1.5 text-muted-foreground">
-                <span>范围</span>
-                <select
-                  value={financeDays}
-                  onChange={(event) => setFinanceDays(normalizeFinanceDays(Number(event.target.value)))}
-                  className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:border-sky-400"
-                >
-                  {FINANCE_DAY_OPTIONS.map((days) => (
-                    <option key={days} value={days}>近 {days} 天</option>
-                  ))}
-                </select>
-              </label>
             </div>
           </div>
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setSelectedSalespeople(new Set())}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                selectedSalespeople.size === 0
-                  ? "border-sky-500 bg-sky-50 text-sky-700"
-                  : "bg-white text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              所有人
-            </button>
-            {salespersonOptions.map((option, index) => {
-              const active = selectedSalespeople.has(option.name);
-              const color = SALESPERSON_COLORS[index % SALESPERSON_COLORS.length];
-              return (
-                <button
-                  key={option.name}
-                  type="button"
-                  onClick={() => toggleSalesperson(option.name)}
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                    active
-                      ? "border-sky-500 bg-sky-50 text-sky-700"
-                      : "bg-white text-muted-foreground hover:text-foreground"
-                  }`}
-                  title={`${option.name}：${option.orderCount} 单，${formatMoney(option.amount)}`}
-                >
-                  <span className="size-2.5 rounded-full" style={{ backgroundColor: color }} />
-                  {option.name}
-                  <span className="text-muted-foreground">{option.orderCount}</span>
-                </button>
-              );
-            })}
-            {salespersonOptions.length === 0 && (
-              <span className="text-xs text-muted-foreground">暂无销售人员或订单数据</span>
-            )}
-          </div>
+          <DashboardSalespersonFilter key={`${dashboardSiteId}:${financeRange.startDate}:${financeRange.endDate}`}
+            options={salespersonOptions} selectedNames={selectedSalespersonNames} automatic={selectedSalespeople === null}
+            colors={SALESPERSON_COLORS} onChange={(selection) => {
+              setSelectedSalespeople(selection);
+              setHoveredSalespersonIndex(null);
+              setSelectedSalespersonPoint(null);
+            }} />
+          {selectedSalespersonNames.length === 0 && <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+            {selectedSalespeople === null ? "所选时间范围暂无人员成交记录。" : "尚未选择人员，请通过“选择人员”添加，或恢复前 5 名。"}
+          </p>}
           <div
             className="relative h-80"
             onMouseLeave={() => setHoveredSalespersonIndex(null)}
@@ -2582,7 +2531,7 @@ export function Dashboard() {
                 </div>
               </div>
             )}
-            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailySalespersonData.length}天销售人员成交额折线图`}>
+            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`${financeRangeLabel}销售人员成交额折线图`}>
               {[1, 0.75, 0.5, 0.25, 0].map((ratio) => {
                 const y = 18 + (1 - ratio) * 198;
                 return (
@@ -2677,7 +2626,7 @@ export function Dashboard() {
             <div>
               <h3 className="text-base font-semibold">每日损耗趋势</h3>
               <p className="text-xs text-muted-foreground">
-                最近 {dailyLossData.length} 天死鱼数量、库存占比和预计销售价值
+                {financeRangeLabel} · 死鱼数量、库存占比和预计销售价值
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -2754,7 +2703,7 @@ export function Dashboard() {
                 )}
               </div>
             )}
-            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`最近${dailyLossData.length}天损耗指标折线图`}>
+            <svg viewBox="0 0 960 250" className="size-full" role="img" aria-label={`${financeRangeLabel}损耗指标折线图`}>
               {[18, 67.5, 117, 166.5, 216].map((y) => (
                 <line key={y} x1="64" x2="940" y1={y} y2={y} stroke="#e5e7eb" strokeDasharray="4 4" />
               ))}
@@ -3008,7 +2957,7 @@ export function Dashboard() {
                   <div className="overflow-hidden rounded-lg border">
                     <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr] gap-3 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground">
                       <span>商品</span>
-                      <span>缸位</span>
+                      <span>损耗地点</span>
                       <span>批次</span>
                       <span className="text-right">预计价值</span>
                     </div>
@@ -3024,7 +2973,10 @@ export function Dashboard() {
                           </div>
                           {detail.reason ? <div className="mt-0.5 text-xs text-red-700">原因：{detail.reason}</div> : null}
                         </div>
-                        <div className="text-muted-foreground">{detail.tankName || "未知缸位"}</div>
+                        <div>
+                          <div className="font-medium">{detail.siteName || "未知场地"}</div>
+                          <div className="mt-0.5 text-xs text-muted-foreground">{detail.tankName || "未知缸位"}</div>
+                        </div>
                         <div className="text-muted-foreground">
                           <div>{detail.batchNo || "未关联批次"}</div>
                           <div className="text-xs">{[detail.supplier, detail.arrivalDate].filter(Boolean).join(" · ")}</div>

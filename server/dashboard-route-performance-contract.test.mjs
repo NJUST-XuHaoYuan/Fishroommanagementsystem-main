@@ -13,9 +13,9 @@ test("dashboard mount uses compact summary and focus endpoints, not a raw state 
 });
 
 test("dashboard summary and focus routes project top-level keys instead of SELECT data", () => {
-  const summaryStart = serverSource.indexOf('if (url.pathname === "/api/dashboard-summary"');
-  const summaryEnd = serverSource.indexOf('if (url.pathname === "/api/dashboard-focus"', summaryStart);
-  const focusEnd = serverSource.indexOf('if (url.pathname === "/api/state"', summaryEnd);
+  const summaryStart = serverSource.indexOf('if (url.pathname === "/api/dashboard-summary" && req.method === "GET") {');
+  const summaryEnd = serverSource.indexOf('if (url.pathname === "/api/dashboard-focus" && req.method === "GET") {', summaryStart);
+  const focusEnd = serverSource.indexOf('if (url.pathname === "/api/state" && req.method === "GET") {', summaryEnd);
   const summaryRoute = serverSource.slice(summaryStart, summaryEnd);
   const focusRoute = serverSource.slice(summaryEnd, focusEnd);
   assert.ok(summaryStart >= 0 && summaryEnd > summaryStart && focusEnd > summaryEnd);

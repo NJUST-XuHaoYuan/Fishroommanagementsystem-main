@@ -28,6 +28,7 @@ import { CategorySettingsView } from "./components/CategorySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
 import { normalizePermissions } from "./utils/permissions";
+import { resolveDashboardView } from "./utils/dashboardAccess";
 import { authJsonHeaders, clearAuthSession, getAuthSessionExpiresAt, getValidAuthSession, saveAuthSession } from "./utils/authSession";
 import { DEFAULT_SITE_ID, DEFAULT_SITES, canUserAccessSite, getSites, matchesSite, normalizeSiteId, normalizeVisibleSiteIds, visibleSitesForUser } from "./utils/sites";
 import { changedObjectKeys, hasStateVersionChanged, isCurrentStateRequest, latestStateVersion, mapArrayCopyOnWrite } from "./utils/stateMutation";
@@ -611,7 +612,10 @@ function isPublicSiteHost(): boolean {
 function AdminApp() {
   const [isPublicSite] = useState(() => isPublicSiteHost());
   const [state, setStateBase] = useState<Store>(initialState);
-  const [view, setView] = useState<ViewKey>("dashboard");
+  const [requestedView, setView] = useState<ViewKey>("dashboard");
+  // Resolve during render, before either page rendering or page-data effects run.
+  // This also closes the first-frame gap when restoring or switching accounts.
+  const view = resolveDashboardView(requestedView, state.user);
   const [loading, setLoading] = useState(true);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [stateLoading, setStateLoading] = useState(false);
@@ -874,11 +878,13 @@ function AdminApp() {
     }
   };
 
-  const loadViewState = (targetView: ViewKey, options: StateLoadOptions = {}) =>
-    loadStateKeys(VIEW_STATE_KEYS[targetView] ?? [], {
+  const loadViewState = (targetView: ViewKey, options: StateLoadOptions = {}) => {
+    const allowedView = resolveDashboardView(targetView, stateRef.current.user);
+    return loadStateKeys(VIEW_STATE_KEYS[allowedView] ?? [], {
       ...options,
-      liteSpecies: options.liteSpecies ?? !["species", "products"].includes(targetView),
+      liteSpecies: options.liteSpecies ?? !["species", "products"].includes(allowedView),
     });
+  };
 
   const postStatePatch = async (
     patch: Partial<PersistedStore>,
@@ -2125,7 +2131,7 @@ function AdminApp() {
       case "profile":    return <PersonalCenterView />;
       case "permissions": return <PersonnelAdminView />;
       case "operationLogs": return <OperationLogsView />;
-      default:           return <Dashboard />;
+      default:           return <PersonalCenterView />;
     }
   };
 
@@ -2158,14 +2164,15 @@ function AdminApp() {
   }
 
   const handleSetView = (nextView: ViewKey) => {
-    if (nextView !== "orders") setOpenOrderRequest(null);
-    if (nextView === viewRef.current) {
+    const allowedView = resolveDashboardView(nextView, state.user);
+    if (allowedView !== "orders") setOpenOrderRequest(null);
+    if (allowedView === viewRef.current) {
       loadedViewRef.current = null;
       setStateLoadError("");
       setStateLoadAttempt((attempt) => attempt + 1);
       return;
     }
-    setView(nextView);
+    setView(allowedView);
   };
 
   const loadingView = viewLoading || Boolean(
