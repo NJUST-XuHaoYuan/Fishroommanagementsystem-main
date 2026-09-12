@@ -1,0 +1,31 @@
+<view class="safe-page account-page">
+  <view class="page-back-row">
+    <button class="page-back-button" size="mini" bindtap="onBackTap"><text class="page-back-arrow">‹</text><text>分类目录</text></button>
+  </view>
+  <view class="account-identity">
+    <image class="account-logo" src="/assets/brand-logo.jpg" mode="aspectFit" aria-label="Marine Forest" />
+    <view class="account-heading">{{checking ? '正在确认登录状态' : customer ? customer.label : '欢迎来到 Marine Forest'}}</view>
+    <view wx:if="{{customer}}" class="account-status">已登录</view>
+    <view wx:else class="account-subtitle">种一片海 · Grow an Ocean</view>
+    <view wx:if="{{!customer && !checking}}" class="login-form">
+      <checkbox-group bindchange="onConsentChange">
+        <label class="consent-label"><checkbox value="privacy" checked="{{accepted}}" color="#07544e" />阅读并同意隐私说明</label>
+      </checkbox-group>
+      <button class="login-privacy-link" bindtap="onPrivacyTap">查看隐私说明</button>
+      <button class="account-primary" bindtap="onLoginTap" disabled="{{busy || !accepted}}" loading="{{busy}}">微信登录</button>
+    </view>
+    <view wx:if="{{error}}" class="account-error" role="alert">{{error}}</view>
+  </view>
+  <view class="account-actions">
+    <button class="account-row" open-type="contact" show-message-card="{{true}}" send-message-title="Marine Forest · 海水生物鱼单" send-message-path="/pages/catalog/index">
+      <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text><text class="row-arrow" aria-hidden="true">›</text>
+    </button>
+    <view class="account-row service-account">
+      <view><view class="service-label">客服微信</view><text class="service-id">marineforest2024</text></view>
+      <button class="account-copy" size="mini" bindtap="onCopyServiceAccount">复制</button>
+    </view>
+    <button class="account-row" bindtap="onPrivacyTap"><text>隐私说明</text><text class="row-arrow">›</text></button>
+    <button wx:if="{{customer}}" class="account-row" bindtap="onLogoutTap" disabled="{{busy}}"><text>退出登录</text><text class="row-arrow">›</text></button>
+    <button wx:if="{{customer}}" class="account-row danger-row" bindtap="onDeleteTap" disabled="{{busy}}"><text>注销账号</text><text class="row-arrow">›</text></button>
+  </view>
+</view>

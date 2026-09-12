@@ -224,6 +224,7 @@
   background: var(--group-tint);
 }
 
+
 .product-media {
   flex: 0 0 auto;
   position: relative;

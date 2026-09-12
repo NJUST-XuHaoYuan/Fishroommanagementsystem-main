@@ -30,6 +30,7 @@ function decodeOption(value) {
 Page({
   data: {
     loading: true,
+    refreshing: false,
     error: "",
     productId: "",
     speciesId: "",
@@ -88,6 +89,7 @@ Page({
 
     this.setData({
       loading: !options.refreshing,
+      refreshing: Boolean(options.refreshing),
       error: ""
     });
 
@@ -128,6 +130,7 @@ Page({
       this.viewModel = null;
       this.setData({
         loading: false,
+        refreshing: false,
         error: error && error.message || "可选个体加载失败",
         context: null,
         specimens: [],
@@ -147,6 +150,7 @@ Page({
     }, "all");
     this.setData({
       loading: false,
+      refreshing: false,
       specimens: groupSpecimens(specimens),
       filteredSpecimenCount: specimens.length
     });

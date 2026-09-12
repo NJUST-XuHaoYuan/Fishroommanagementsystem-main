@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
+import { createMiniProgramAuth } from "./miniprogram-auth.mjs";
 import {
   canFastRemuxWechatVideo,
   normalizeVideoTranscodePreset,
@@ -537,6 +538,13 @@ const pool = new Pool(
     : pgConfig
 );
 let schemaReady;
+const miniProgramAuth = createMiniProgramAuth({
+  pool,
+  appId: process.env.WECHAT_MINIPROGRAM_APP_ID || "",
+  appSecret: process.env.WECHAT_MINIPROGRAM_APP_SECRET || "",
+  identitySecret: process.env.WECHAT_MINIPROGRAM_IDENTITY_SECRET || configuredAuthTokenSecret,
+  readBody,
+});
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -8038,6 +8046,12 @@ async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
     res.end();
+    return;
+  }
+
+  const miniResponse = await miniProgramAuth.handle(req, url);
+  if (miniResponse) {
+    sendJson(req, res, miniResponse.status, miniResponse.body, miniResponse.headers);
     return;
   }
 

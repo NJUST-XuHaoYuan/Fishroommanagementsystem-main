@@ -3,7 +3,9 @@
     "pages/catalog/index",
     "pages/products/index",
     "pages/specimens/index",
-    "pages/detail/index"
+    "pages/detail/index",
+    "pages/account/index",
+    "pages/privacy/index"
   ],
   "window": {
     "navigationBarTitleText": "海水生物鱼单",

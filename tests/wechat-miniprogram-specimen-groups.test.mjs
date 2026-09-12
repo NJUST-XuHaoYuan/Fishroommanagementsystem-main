@@ -16,6 +16,7 @@ function load(sourceText, dependencies = {}, globals = {}) {
   return context.module.exports;
 }
 const catalog = load(source, { "./api": { getApiBaseUrl: () => "https://fish.example" } }, { Date });
+const contact = load(await read("utils/contact-card.js"));
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function fixture() {
@@ -90,39 +91,39 @@ test("arrival, feeding and special-price tags appear together and partial produc
   assert.equal(catalog.groupSpecimens(catalog.filterSpecimens(model, { productId: "product" }, "feeding"))[0].quantity, 2);
 });
 
-test("group detail switches the real selection code and does not permit copying a stale code while loading", async () => {
+test("group inquiries keep group identity and direct links locate the exact fish without a selection code step", async () => {
   const model = catalog.buildViewModel(fixture());
   const app = { globalData: { catalogViewModel: model, loadedAt: Date.now() } };
-  const copied = [];
   const api = { fetchCatalog: async () => fixture(), fetchBioRecords: async (id) => fixture().bioRecords.filter((item) => item.stockItemId === id) };
   const refresh = load(refreshSource, {}, { getApp: () => app, setInterval, clearInterval });
   let page;
   load(detailSource, { "../../utils/api": api, "../../utils/catalog": catalog, "../../utils/public-catalog-refresh": refresh,
-    "../../utils/navigation": { returnToParent() {} } }, {
+    "../../utils/navigation": { returnToParent() {} }, "../../utils/contact-card": contact }, {
     getApp: () => app, Page: (value) => { page = value; },
-    wx: { stopPullDownRefresh() {}, setClipboardData: ({ data }) => copied.push(data) },
+    wx: { stopPullDownRefresh() {} },
   });
   page.data = { ...page.data, groupMode: true };
   page.setData = (value) => Object.assign(page.data, value);
   await page.loadDetail("one");
   assert.equal(page.data.members.length, 3);
-  assert.equal(page.data.memberListHeight, 44);
-  assert.equal(page.data.codesExpanded, false);
-  page.onToggleCodes();
-  assert.equal(page.data.codesExpanded, true);
+  assert.match(page.data.contactCard.title, /同款可选 3/);
+  assert.match(page.data.contactCard.path, /stockItemId=one&group=1$/);
+  assert.equal(page.onCopyCode, undefined);
+  assert.equal(page.onMemberTap, undefined);
   assert.equal(page.data.timeline.filter((item) => item.text === "Shared care record").length, 1);
-  const request = page.onMemberTap({ currentTarget: { dataset: { id: "two" } } });
-  assert.equal(page.data.memberLoading, true);
-  page.onCopyCode();
-  assert.equal(copied.length, 0);
+  page.data.groupMode = false;
+  const request = page.loadDetail("two", { refreshing: true });
+  assert.equal(page.data.refreshing, true);
   await request;
   assert.equal(page.data.specimen.id, "two");
   assert.equal(page.data.stockItemId, "two");
-  page.onCopyCode();
-  assert.equal(copied[0], model.specimens[1].selectionCode);
-  assert.match(page.onShareAppMessage().path, /stockItemId=two&group=1$/);
-  page.onMemberTap({ currentTarget: { dataset: { id: "not-public" } } });
-  assert.equal(page.data.stockItemId, "two");
+  assert.equal(page.data.refreshing, false);
+  assert.ok(!page.data.contactCard.title.includes(model.specimens[1].selectionCode));
+  assert.match(page.data.contactCard.path, /stockItemId=two$/);
+  assert.match(page.onShareAppMessage().path, /stockItemId=two$/);
+  await page.loadDetail("not-public", { refreshing: true });
+  assert.equal(page.data.contactCard, null);
+  assert.equal(page.data.specimen, null);
 });
 
 test("stock cards use product names and quantities, never internal IDs as headings", async () => {
@@ -136,8 +137,7 @@ test("stock cards use product names and quantities, never internal IDs as headin
   assert.match(template, /同款可选.*\{\{item.quantity\}\} \{\{item.unit\}\}/);
   assert.doesNotMatch(template, /item\.displayCode|item\.cardTitle|共同维护| 组/);
   const detail = await read("pages/detail/index.wxml");
-  assert.match(detail, /wx:if="\{\{codesExpanded\}\}"/);
-  assert.match(detail, /wx:if="\{\{members.length < 2 \|\| codesExpanded\}\}"/);
+  assert.doesNotMatch(detail, /codesExpanded|selectionCode|选鱼码|onCopyCode/);
   assert.doesNotMatch(detail, /item\.displayCode|共 .* 个|共同维护档案/);
   assert.match(await read("pages/specimens/index.wxss"), /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
 });
@@ -187,7 +187,8 @@ test("return navigation overrides native sizing and all three levels render wrap
   assert.match(styles, /\.back-button\.back-button[\s\S]*?margin:\s*0 auto 0 0/);
   assert.match(styles, /\.back-button\.back-button[\s\S]*?justify-content:\s*flex-start/);
   assert.match(appStyles, /\.specimen-tags\s*\{[^}]*flex-wrap:\s*wrap/);
-  assert.match(await read("pages/detail/index.wxml"), /height: \{\{memberListHeight\}\}px/);
+  assert.match(await read("pages/detail/index.wxml"), /class="detail-contact-button\b/);
+  assert.doesNotMatch(await read("pages/detail/index.wxml"), /memberListHeight|onMemberTap/);
   for (const page of ["products", "specimens", "detail"]) {
     assert.match(await read(`pages/${page}/index.wxml`), /wx:for="\{\{(?:item|specimen)\.tags\}\}"/);
   }

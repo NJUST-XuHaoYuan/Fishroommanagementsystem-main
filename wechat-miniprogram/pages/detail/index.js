@@ -1,5 +1,6 @@
 const { fetchCatalog, fetchBioRecords } = require("../../utils/api");
 const { returnToParent } = require("../../utils/navigation");
+const { specimenContactCard } = require("../../utils/contact-card");
 const {
   buildViewModel,
   findSpecimen,
@@ -17,13 +18,12 @@ const {
 Page({
   data: {
     loading: true,
+    refreshing: false,
     error: "",
     stockItemId: "",
     groupMode: false,
     members: [],
-    memberLoading: false,
-    memberListHeight: 44,
-    codesExpanded: false,
+    contactCard: null,
     specimen: null,
     timeline: [],
     imagePreview: []
@@ -78,6 +78,7 @@ Page({
 
     this.setData({
       loading: !options.refreshing,
+      refreshing: Boolean(options.refreshing),
       error: ""
     });
 
@@ -101,12 +102,13 @@ Page({
 
       this.setData({
         loading: false,
+        refreshing: false,
         specimen,
         stockItemId,
         members,
-        memberListHeight: Math.max(1, Math.min(3, Math.ceil(members.length / 3))) * 52 - 8,
         timeline,
-        imagePreview
+        imagePreview,
+        contactCard: specimenContactCard(specimen, members.length || 1)
       });
     } catch (error) {
       if (!isCurrentPublicCatalogRequest(this, requestGeneration)) return;
@@ -116,15 +118,16 @@ Page({
       app.globalData.loadedAt = 0;
       this.setData({
         loading: false,
+        refreshing: false,
         error: error && error.message || "详情加载失败",
         specimen: null,
         members: [],
+        contactCard: null,
         timeline: [],
         imagePreview: []
       });
     } finally {
       if (isCurrentPublicCatalogRequest(this, requestGeneration)) {
-        this.setData({ memberLoading: false });
         wx.stopPullDownRefresh();
       }
     }
@@ -137,32 +140,6 @@ Page({
   onBackTap() {
     const productId = this.data.specimen && this.data.specimen.productId;
     returnToParent(productId ? "pages/specimens/index" : "pages/catalog/index", productId ? { productId } : {});
-  },
-
-  onToggleCodes() {
-    this.setData({ codesExpanded: !this.data.codesExpanded });
-  },
-
-  onMemberTap(event) {
-    const stockItemId = event.currentTarget.dataset.id;
-    if (stockItemId === this.data.stockItemId || !this.data.members.some((item) => item.id === stockItemId)) return;
-    this.setData({ memberLoading: true });
-    return this.loadDetail(stockItemId, { refreshing: true });
-  },
-
-  onCopyCode() {
-    if (this.data.memberLoading) return;
-    const code = this.data.specimen && this.data.specimen.selectionCode;
-    if (!code) return;
-    wx.setClipboardData({
-      data: code,
-      success() {
-        wx.showToast({
-          title: "已复制选鱼码",
-          icon: "success"
-        });
-      }
-    });
   },
 
   onPreviewImage(event) {
