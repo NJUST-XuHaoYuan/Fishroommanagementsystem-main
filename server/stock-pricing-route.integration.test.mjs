@@ -53,6 +53,10 @@ test("site-limited product editors may update shared product prices but receive 
   assert.ok(result.body.stockPricingUpdates.every((item) => Object.keys(item).sort().join(",") === "basePrice,id,priceMode,priceOverridden"));
   assert.doesNotMatch(JSON.stringify(result.body), /PRIVATE_JY_|jiangyin|同步 7 条/);
   assertPricing(await s.state(), "PRIVATE_JY_FOLLOWER", 200, "product");
+  for (const path of ["/api/state", "/api/state/slice?keys=operationLogs"]) {
+    const read = await s.request(path, { token: s.tokens.editor }); ok(read);
+    assert.ok(read.body.data?.operationLogs == null, "staff cannot retrieve globally scoped operation logs");
+  }
 });
 
 test("unauthorized writes and invalid prices leave both product and stock unchanged", async (t) => {
@@ -212,6 +216,67 @@ test("a product price change while follow-priced new stock awaits approval rejec
   assert.equal(approved.body.code, "STOCK_APPROVAL_PRICING_STALE");
   const state = await s.readPersistedState(); assert.equal(byId(state, "approval-follow"), undefined);
   assert.deepEqual(state.approvalRequests, before.approvalRequests); assert.deepEqual(state.stock, before.stock);
+});
+
+test("restoring lost follow inventory reviews the exact new product price that will be committed", async (t) => {
+  const s = await setup(t); ok(await s.upsert(200));
+  const before = byId(await s.state(), "lost"); assert.equal(before.basePrice, 100);
+  const submitted = await stockWrite(s, [{ ...before, lost: false }], { lost: before }, "editor"); ok(submitted);
+  assert.equal(submitted.body.pendingApproval, true);
+  const pending = (await s.readPersistedState()).approvalRequests.find((request) => request.id === submitted.body.approvalRequestId);
+  assert.equal(pending.payload.upsert[0].basePrice, 200, "review payload must reflect release reconciliation, not pre-release normalization");
+  assert.equal(pending.payload.upsert[0].priceMode, "product");
+  assert.equal(pending.stockDetails.items[0].after.basePrice, 200);
+  assert.equal(pending.stockDetails.items[0].after.priceMode, "product");
+  assertPricing(await s.state(), "lost", 100, "product"); assert.equal(byId(await s.state(), "lost").lost, true);
+  const approved = await s.request("/api/approvals/stock", { token: s.tokens.admin, body: { requestId: pending.id, decision: "approve" } }); ok(approved);
+  const actual = byId(await s.readPersistedState(), "lost");
+  assert.equal(actual.lost, false); assert.equal(actual.basePrice, pending.stockDetails.items[0].after.basePrice); assert.equal(actual.priceMode, pending.stockDetails.items[0].after.priceMode);
+});
+
+test("restoring lost inventory cannot commit a changed follow price after its approval snapshot was submitted", async (t) => {
+  const s = await setup(t); const before = byId(await s.state(), "lost");
+  const submitted = await stockWrite(s, [{ ...before, lost: false }], { lost: before }, "editor"); ok(submitted);
+  assert.equal(submitted.body.pendingApproval, true);
+  ok(await s.upsert(200)); const beforeApproval = await s.readPersistedState();
+  const pending = beforeApproval.approvalRequests.find((request) => request.id === submitted.body.approvalRequestId);
+  assert.equal(pending.stockDetails.items[0].after.basePrice, 100);
+  const approved = await s.request("/api/approvals/stock", { token: s.tokens.admin, body: { requestId: pending.id, decision: "approve" } });
+  assert.equal(approved.response.status, 409, JSON.stringify(approved.body)); assert.equal(approved.body.code, "STOCK_APPROVAL_PRICING_STALE");
+  const afterApproval = await s.readPersistedState();
+  assert.deepEqual(afterApproval.stock, beforeApproval.stock); assert.deepEqual(afterApproval.approvalRequests, beforeApproval.approvalRequests);
+  assert.equal(byId(afterApproval, "lost").lost, true); assertPricing(afterApproval, "lost", 100, "product");
+});
+
+test("clearing a lost flag cannot bypass independent active-order or shipment pricing protection", async (t) => {
+  const fixture = structuredClone(stockPricingFixture);
+  for (const id of ["ordered-confirmed", "shipment-outbound", "shipment-shipped"]) fixture.state.stock.find((item) => item.id === id).lost = true;
+  const s = await setup(t, fixture); ok(await s.upsert(200)); const before = await s.readPersistedState();
+  for (const id of ["ordered-confirmed", "shipment-outbound", "shipment-shipped"]) {
+    const item = byId(before, id);
+    for (const changes of [{ basePrice: 200 }, { priceMode: "manual", priceOverridden: true }]) {
+      const result = await stockWrite(s, [{ ...item, ...changes, lost: false }], { [id]: item }, "editor");
+      assert.equal(result.response.status, 409, `${id}: ${JSON.stringify(result.body)}`);
+      assert.equal(result.body.code, "STOCK_PRICING_PROTECTED");
+    }
+  }
+  const after = await s.readPersistedState(); assert.deepEqual(after.stock, before.stock); assert.deepEqual(after.approvalRequests, before.approvalRequests);
+});
+
+test("restoring lost manual and legacy inventory retains reviewed prices instead of following the new product default", async (t) => {
+  const fixture = structuredClone(stockPricingFixture);
+  const ids = ["manual-different", "legacy-different"];
+  for (const id of ids) fixture.state.stock.find((item) => item.id === id).lost = true;
+  const s = await setup(t, fixture); ok(await s.upsert(200)); const before = await s.readPersistedState();
+  const originals = ids.map((id) => byId(before, id));
+  const submitted = await stockWrite(s, originals.map((item) => ({ ...item, lost: false })), Object.fromEntries(originals.map((item) => [item.id, item])), "editor"); ok(submitted);
+  const pending = (await s.readPersistedState()).approvalRequests.find((request) => request.id === submitted.body.approvalRequestId);
+  assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "manual-different").after.basePrice, 150);
+  assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "legacy-different").after.basePrice, 140);
+  const approved = await s.request("/api/approvals/stock", { token: s.tokens.admin, body: { requestId: pending.id, decision: "approve" } }); ok(approved);
+  const state = await s.readPersistedState();
+  assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 140, "legacy");
+  for (const id of ids) assert.equal(byId(state, id).lost, false);
 });
 
 test("manual equal-price adjustment drafts survive save/load and remain manual after the product default changes", async (t) => {

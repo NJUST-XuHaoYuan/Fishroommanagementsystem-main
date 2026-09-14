@@ -3931,7 +3931,13 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
   const pricingExistingById = new Map(stock.map((item) => [String(item?.id ?? "").trim(), item]));
   const pricingProductById = new Map((Array.isArray(state.products) ? state.products : []).map((item) => [String(item?.id ?? "").trim(), item]));
-  const pricingProtectedIds = stockPricingProtectedIds(state);
+  // A reviewed restoration can clear an inventory-only loss/sold flag. Actual
+  // order and shipment occupancy still protects its price in the proposed state.
+  const proposedPricingItems = new Map((Array.isArray(change?.upsert) ? change.upsert : [])
+    .map((item) => [String(item?.id ?? "").trim(), item]));
+  const pricingProtectedIds = stockPricingProtectedIds({ ...state,
+    stock: stock.map((item) => proposedPricingItems.get(String(item?.id ?? "").trim()) ?? item),
+  });
   let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map((item) => normalizeStockItem(normalizeStockPricing(
     item,
     pricingProductById.get(String(item?.productId ?? "").trim()),
@@ -3941,15 +3947,6 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
       protected: pricingProtectedIds.has(String(item?.id ?? "").trim()),
     },
   )));
-  if (options.requireReviewedPricingSnapshot) {
-    const submittedItems = new Map((change.upsert ?? []).map((item) => [String(item?.id ?? "").trim(), item]));
-    if (upsertItems.some((item) => {
-      const submitted = submittedItems.get(item.id);
-      return Number(item.basePrice) !== Number(submitted?.basePrice) || item.priceMode !== submitted?.priceMode;
-    })) {
-      throw httpError(409, "待审批库存的商品价格或价格来源已变化，请退回后重新提交审批", "STOCK_APPROVAL_PRICING_STALE");
-    }
-  }
   const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
     .map((id) => String(id ?? "").trim());
   if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
@@ -4056,6 +4053,14 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   const nextBatches = refreshBatchStockCounts(batches, nextStock);
   const upsertIdSet = new Set(upsertItems.map((item) => String(item?.id ?? "")));
   const stockUpdates = nextStock.filter((item) => upsertIdSet.has(String(item?.id ?? "")));
+  const finalStockById = new Map(stockUpdates.map((item) => [String(item.id), item]));
+  upsertItems = upsertItems.map((item) => finalStockById.get(String(item.id)) ?? item);
+  if (options.requireReviewedPricingSnapshot && upsertItems.some((item) => {
+    const submitted = proposedPricingItems.get(item.id);
+    return Number(item.basePrice) !== Number(submitted?.basePrice) || item.priceMode !== submitted?.priceMode;
+  })) {
+    throw httpError(409, "待审批库存的商品价格或价格来源已变化，请退回后重新提交审批", "STOCK_APPROVAL_PRICING_STALE");
+  }
   const previousBatchById = new Map(batches.map((batch) => [String(batch?.id ?? ""), batch]));
   const batchUpdates = nextBatches.filter((batch) =>
     stableJson(batch) !== stableJson(previousBatchById.get(String(batch?.id ?? "")))
