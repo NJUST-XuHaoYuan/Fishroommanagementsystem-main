@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
 
 const fixture = JSON.parse(process.env.FISHROOM_TEST_DATABASE_FIXTURE_JSON || "{}");
-const state = fixture.state && typeof fixture.state === "object" ? fixture.state : {};
-const revision = String(fixture.revision ?? "1");
+let state = fixture.state && typeof fixture.state === "object" ? fixture.state : {};
+let revision = String(fixture.revision ?? "1");
+const persistWrites = process.env.FISHROOM_TEST_PERSIST_WRITES === "1";
+let writeLock = Promise.resolve();
+// Test-only IPC reads the committed backing store, bypassing response redaction
+// without inventing a debug HTTP route in the application.
+if (persistWrites && typeof process.send === "function") process.on("message", (message) => {
+  if (message?.type === "fishroom-test-state-read") process.send({ type: "fishroom-test-state", requestId: message.requestId, state, revision });
+});
 const settlements = Array.isArray(fixture.platformSettlements)
   ? fixture.platformSettlements
   : [];
@@ -120,6 +127,21 @@ function appStateRow(sql, values = []) {
   const publicBioRow = publicBioProjectionRow(sql, values);
   if (publicBioRow) return publicBioRow;
   const row = {};
+  if (/\bstock_target\.stock_item_count\b/.test(sql) || /\btarget_stock\s+AS\s+MATERIALIZED\b/.test(sql)) {
+    const list = (value) => Array.isArray(value) ? value : [];
+    const stockId = String(values[1] ?? "");
+    const matches = list(state.stock).filter((item) => String(item.id).trim() === stockId);
+    const item = matches[0] ?? null;
+    const shipped = list(state.shipments).some((shipment) => shipment.status !== "preparing" && list(shipment.itemStockIds).includes(stockId));
+    const ordered = (statuses) => list(state.orders).some((order) => statuses(order.status) && list(order.items).some((line) => line.stockItemId === stockId && !String(line.inventoryRemovedAt ?? "").trim()));
+    row.stock_item_count = matches.length;
+    row.stock_item = item;
+    row.bio_records = list(state.bioRecords).filter((record) => /\btarget_stock\s+AS\s+MATERIALIZED\b/.test(sql)
+      ? record.stockItemId === stockId : record.id === String(values[2] ?? ""));
+    if (/\bAS\s+stock_is_out\b/i.test(sql)) row.stock_is_out = Boolean(values[3]) && (shipped || ordered((status) => status === "completed"));
+    if (/\bAS\s+stock_price_protected\b/i.test(sql)) row.stock_price_protected = ordered((status) => status !== "cancelled");
+    if (/\bAS\s+stock_product\b/i.test(sql)) row.stock_product = list(state.products).find((product) => product.id === item?.productId) ?? null;
+  }
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\brevision::text\s+AS\s+version\b/i.test(sql)) row.version = revision;
   // The general state/slice route quotes camelCase aliases, unlike compact
@@ -222,17 +244,48 @@ function runQuery(query, values = []) {
     return result([{ database: "fishroom_route_test", user: "fishroom_route_test" }]);
   }
   if (/^\s*(?:INSERT|UPDATE|DELETE)\b/i.test(sql)) {
+    if (persistWrites && /\b(?:UPDATE|INTO)\s+app_state\b/i.test(sql)) {
+      if (/\bSET\s+data\s*=\s*\$2::jsonb/i.test(sql) || /\bVALUES\s*\(\$1,\s*\$2::jsonb/i.test(sql)) {
+        state = JSON.parse(values[1]);
+      } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
+        state = structuredClone(state);
+        for (const match of sql.matchAll(/'\{([A-Za-z]+)\}',\s*\$(\d+)::jsonb,\s*true/gi)) state[match[1]] = JSON.parse(values[Number(match[2]) - 1]);
+        const stockReplace = sql.match(/stock_row\.stock_item\s*->>\s*'id'[\s\S]*?=\s*\$(\d+)\s+THEN\s*\$(\d+)::jsonb/);
+        if (stockReplace) state.stock = (state.stock ?? []).map((item) => item.id === values[Number(stockReplace[1]) - 1] ? JSON.parse(values[Number(stockReplace[2]) - 1]) : item);
+        const appendRecord = sql.match(/data\s*->\s*'bioRecords'[\s\S]*?\|\|\s*jsonb_build_array\(\$(\d+)::jsonb\)/);
+        if (appendRecord) state.bioRecords = [...(state.bioRecords ?? []), JSON.parse(values[Number(appendRecord[1]) - 1])];
+      }
+    }
     return result([], 1);
   }
   return result();
 }
 
 class TestClient {
-  query(query, values) {
-    return Promise.resolve(runQuery(query, values));
+  async query(query, values) {
+    if (!persistWrites) return runQuery(query, values);
+    const sql = String(query?.text ?? query ?? "").trim();
+    if (/^BEGIN\b/i.test(sql)) { this.inTransaction = true; return result(); }
+    if (/^COMMIT\b/i.test(sql)) {
+      if (this.workingState) { state = this.workingState; revision = String(Number(revision) + 1); }
+      this.finish(); return result();
+    }
+    if (/^ROLLBACK\b/i.test(sql)) { this.finish(); return result(); }
+    if (this.inTransaction && /\bFOR UPDATE\b/i.test(sql) && !this.releaseLock) {
+      const previous = writeLock;
+      writeLock = new Promise((resolve) => { this.releaseLock = resolve; });
+      await previous;
+      this.workingState = structuredClone(state);
+    }
+    if (!this.workingState) return runQuery(query, values);
+    const persisted = state;
+    state = this.workingState;
+    try { return runQuery(query, values); }
+    finally { this.workingState = state; state = persisted; }
   }
 
-  release() {}
+  finish() { this.inTransaction = false; this.workingState = null; this.releaseLock?.(); this.releaseLock = null; }
+  release() { this.finish(); }
 }
 
 export class Pool {

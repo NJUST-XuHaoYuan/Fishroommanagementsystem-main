@@ -32,6 +32,8 @@ import { getInventoryOutStockIds, isVisibleInStockInventory, normalizeInventoryI
 import { orderItemKeepsInventory } from "../utils/stockOrders";
 import { matchesSite } from "../utils/sites";
 import { usePermission } from "../utils/permissions";
+import { newStockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
+import { StockPriceField } from "./StockPriceField";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -322,6 +324,8 @@ export function InventoryAdjustmentDialog() {
       status: "healthy",
       inDate: batch?.arrivalDate ?? today,
       basePrice: Number(product?.defaultPrice ?? 0),
+      priceMode: "product",
+      priceOverridden: false,
       code: "",
       notes: "",
     };
@@ -455,11 +459,16 @@ export function InventoryAdjustmentDialog() {
           status: "healthy" as const,
           inDate: batch?.arrivalDate ?? today,
           basePrice: Number(product?.defaultPrice ?? 0),
+          priceMode: "product" as const,
+          priceOverridden: false,
           code: "",
           notes: "",
         };
       });
-      const migratedAdditions = exactAdditions.length > 0 ? exactAdditions : legacyAdditions;
+      const migratedAdditions = (exactAdditions.length > 0 ? exactAdditions : legacyAdditions).map(addition => {
+        const priceMode = newStockPriceMode(addition, productById.get(addition.productId));
+        return { ...addition, priceMode, priceOverridden: priceMode === "manual" };
+      });
       setDraft(loaded);
       setWorkSiteId(selectedSiteId);
       setSelectedSubTankId(loadedTankId);
@@ -545,12 +554,14 @@ export function InventoryAdjustmentDialog() {
   const changeAdditionProduct = (productId: string) => {
     setAdditionForm((current) => {
       if (!current) return current;
-      const previousDefault = productById.get(current.productId)?.defaultPrice ?? 0;
+      const priceMode = newStockPriceMode(current, productById.get(current.productId));
       const nextDefault = productById.get(productId)?.defaultPrice ?? 0;
       return {
         ...current,
         productId,
-        basePrice: !current.basePrice || current.basePrice === previousDefault ? nextDefault : current.basePrice,
+        priceMode,
+        priceOverridden: priceMode === "manual",
+        basePrice: priceMode === "product" ? nextDefault : current.basePrice,
       };
     });
   };
@@ -579,11 +590,15 @@ export function InventoryAdjustmentDialog() {
     if (additionForm.inDate > today) return toast.error("入库日期不能晚于今天");
     const arrivalDate = batchById.get(additionForm.batchId)?.arrivalDate;
     if (arrivalDate && additionForm.inDate < arrivalDate) return toast.error("入库日期不能早于采购批次到货日期");
-    if (!(Number(additionForm.basePrice) > 0)) return toast.error("请填写大于 0 的单条售价");
+    const priceMode = newStockPriceMode(additionForm, productById.get(additionForm.productId));
+    const basePrice = Number(priceMode === "product" ? productById.get(additionForm.productId)?.defaultPrice : additionForm.basePrice);
+    if (!Number.isFinite(basePrice) || basePrice <= 0) return toast.error("请填写大于 0 的单条售价");
     const normalized: InventoryAdjustmentAddition = {
       ...additionForm,
       quantity: Number(additionForm.quantity),
-      basePrice: Number(Number(additionForm.basePrice).toFixed(2)),
+      basePrice: Number(basePrice.toFixed(2)),
+      priceMode,
+      priceOverridden: priceMode === "manual",
       code: additionForm.quantity === 1 ? String(additionForm.code ?? "").trim() : "",
       notes: String(additionForm.notes ?? "").trim(),
     };
@@ -678,7 +693,9 @@ export function InventoryAdjustmentDialog() {
       subTankId: addition.subTankId,
       status: addition.status,
       inDate: addition.inDate,
-      basePrice: addition.basePrice,
+      basePrice: newStockPriceMode(addition, productById.get(addition.productId)) === "product" ? Number(productById.get(addition.productId)?.defaultPrice ?? 0) : addition.basePrice,
+      priceMode: newStockPriceMode(addition, productById.get(addition.productId)),
+      priceOverridden: newStockPriceMode(addition, productById.get(addition.productId)) === "manual",
       commissionRate: 0,
       code: addition.quantity === 1 ? addition.code ?? "" : "",
       notes: [addition.notes, notes.trim() ? `盘库说明：${notes.trim()}` : ""]
@@ -834,6 +851,9 @@ export function InventoryAdjustmentDialog() {
                       <div className="truncate font-medium">{productById.get(addition.productId)?.name ?? "未知商品"} × {addition.quantity}</div>
                       <div className="mt-0.5 truncate text-muted-foreground">
                         {tankById.get(addition.subTankId)?.label} · {batchById.get(addition.batchId)?.batchNo}
+                      </div>
+                      <div className="mt-1 text-muted-foreground">
+                        {stockPriceModeLabel(newStockPriceMode(addition, productById.get(addition.productId)))} · ¥{Number(newStockPriceMode(addition, productById.get(addition.productId)) === "product" ? productById.get(addition.productId)?.defaultPrice ?? 0 : addition.basePrice).toFixed(2)}
                       </div>
                     </div>
                     <button type="button" onClick={() => editAddition(addition)} title="编辑待增加项"><Pencil className="size-3.5" /></button>
@@ -1099,16 +1119,12 @@ export function InventoryAdjustmentDialog() {
                           onChange={(event) => setAdditionForm({ ...additionForm, quantity: Number(event.target.value) })}
                         />
                       </div>
-                      <div className="grid gap-1.5">
-                        <Label>单条售价（¥）*</Label>
-                        <Input
-                          type="number"
-                          min={0.01}
-                          step={0.01}
-                          value={additionForm.basePrice || ""}
-                          onChange={(event) => setAdditionForm({ ...additionForm, basePrice: Number(event.target.value) })}
-                        />
-                      </div>
+                      <StockPriceField mode={newStockPriceMode(additionForm, productById.get(additionForm.productId))} value={additionForm.basePrice}
+                        productPrice={productById.get(additionForm.productId)?.defaultPrice} allowDirectOverride
+                        onModeChange={mode => setAdditionForm({ ...additionForm, priceMode: mode, priceOverridden: mode === "manual",
+                          basePrice: mode === "product" || newStockPriceMode(additionForm, productById.get(additionForm.productId)) === "product"
+                            ? productById.get(additionForm.productId)?.defaultPrice ?? 0 : additionForm.basePrice })}
+                        onPriceChange={value => setAdditionForm({ ...additionForm, basePrice: Number(value), priceMode: "manual", priceOverridden: true })} />
                       <div className="grid gap-1.5">
                         <Label>状态</Label>
                         <Select value={additionForm.status} onValueChange={(value: StockStatus) => setAdditionForm({ ...additionForm, status: value })}>

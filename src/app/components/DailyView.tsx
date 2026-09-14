@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, BioRecord, DailyLog, MaintenanceSaveResult, Order, Shipment, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
+import { useStore, BioRecord, DailyLog, MaintenanceSaveResult, Order, Shipment, StockStatus, StockItem, StockPriceMode, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -26,7 +26,8 @@ import { authJsonHeaders } from "../utils/authSession";
 import { normalizeSiteId, siteName } from "../utils/sites";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
-import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { buildStockPriceBaselines, buildStockPriceDetailsPatch, isStockSpecialPrice, stockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
+import { StockPriceField } from "./StockPriceField";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
@@ -80,6 +81,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [q, setQ] = useState("");
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
+  const [filterPriceMode, setFilterPriceMode] = useState<StockPriceMode | "all">("all");
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState("visual");
@@ -95,6 +97,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [bioItemId, setBioItemId] = useState<string | null>(null);
   const [bioStatus, setBioStatus] = useState<StockStatus>("healthy");
   const [bioBasePrice, setBioBasePrice] = useState("");
+  const [bioPriceMode, setBioPriceMode] = useState<StockPriceMode>("legacy");
+  const [bioPriceChanged, setBioPriceChanged] = useState(false);
+  const bioPricingOriginalRef = useRef<Pick<StockItem, "basePrice" | "priceMode" | "priceOverridden"> | null>(null);
   const [bioCode, setBioCode] = useState("");
   const [bioNotes, setBioNotes] = useState("");
   const [newRecord, setNewRecord] = useState<RecordDraft>({
@@ -328,7 +333,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   // 是否有任何过滤条件激活
   const term = normalizeSearchText(q);
-  const anyFilter = filterStatuses.size > 0 || filterSoldOnly || term.length > 0;
+  const anyFilter = filterStatuses.size > 0 || filterSoldOnly || filterPriceMode !== "all" || term.length > 0;
+  const matchesPriceMode = (item: StockItem) => filterPriceMode === "all" || stockPriceMode(item, product(item.productId)) === filterPriceMode;
 
   const tankMatchesTerm = (group: (typeof state.tankGroups)[number], tank: (typeof state.tankGroups)[number]["subTanks"][number]) => {
     if (!term) return false;
@@ -345,6 +351,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   // 单条鱼是否通过过滤
   const itemMatches = (s: StockItem): boolean => {
     if (!isPhysicallyInTank(s, shippedOutStockIds)) return false;
+    if (!matchesPriceMode(s)) return false;
     if (filterStatuses.size > 0 || filterSoldOnly) {
       const matchesStatus = filterStatuses.has(s.status) && !s.sold;
       const matchesSold = filterSoldOnly && Boolean(s.sold);
@@ -365,13 +372,13 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   };
 
   const subTankMatchesFilters = (g: (typeof state.tankGroups)[number], t: (typeof state.tankGroups)[number]["subTanks"][number]) => {
-    if (term && tankMatchesTerm(g, t)) return true;
+    if (filterPriceMode === "all" && term && tankMatchesTerm(g, t)) return true;
     return state.stock.some((s) => s.subTankId === t.id && itemMatches(s));
   };
 
   const filteredGroups = state.tankGroups.filter((g) => {
     if (!anyFilter) return true;
-    if (term && normalizeSearchText(g.name).includes(term)) return true;
+    if (filterPriceMode === "all" && term && normalizeSearchText(g.name).includes(term)) return true;
     return g.subTanks.some((t) => subTankMatchesFilters(g, t));
   });
 
@@ -386,6 +393,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     return state.stock.filter((s) =>
       s.subTankId === subId &&
       isPhysicallyInTank(s, shippedOutStockIds) &&
+      matchesPriceMode(s) &&
       (!anyFilter || matchedByTank || itemMatches(s))
     );
   };
@@ -840,6 +848,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setBioItemId(item.id);
     setBioStatus(item.status);
     setBioBasePrice(item.basePrice && item.basePrice > 0 ? String(item.basePrice) : "");
+    setBioPriceMode(stockPriceMode(item, product(item.productId)));
+    setBioPriceChanged(false);
+    bioPricingOriginalRef.current = { basePrice: item.basePrice, ...(item.priceMode !== undefined ? { priceMode: item.priceMode } : {}), priceOverridden: item.priceOverridden };
     setBioCode(item.code ?? "");
     setBioNotes(item.notes ?? "");
     setNewRecord({ date: nowDatetimeLocal(), text: "", photos: [], videos: [] });
@@ -877,6 +888,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     setQ("");
     setFilterStatuses(new Set());
     setFilterSoldOnly(false);
+    setFilterPriceMode("all");
     setHighlightStockId(target.id);
     setExpandedKeys((prev) => {
       const next = new Set(prev);
@@ -967,6 +979,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   const bioItem = bioItemId ? state.stock.find((s) => s.id === bioItemId) : null;
   const bioProduct = bioItem ? product(bioItem.productId) : null;
+  const bioPriceLocked = Boolean(bioItem && (bioItem.sold || bioItem.lost || shippedOutStockIds.has(bioItem.id) ||
+    timelineOrders.some(order => order.status !== "cancelled" && order.items.some(item => item.stockItemId === bioItem.id && !String(item.inventoryRemovedAt ?? "").trim()))));
   const timeline = bioItem ? buildTimeline(bioItem) : [];
   const editingRecord = editingRecordId
     ? state.bioRecords.find((record) => record.id === editingRecordId) ?? null
@@ -1006,35 +1020,41 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
         return toast.error("记录时间不能早于入库日期");
       }
     }
-    const price = Number(bioBasePrice);
-    if (!bioBasePrice.trim() || Number.isNaN(price) || price <= 0) {
-      return toast.error("请填写大于 0 的销售默认价");
+    const currentItem = stockItem(bioItemId);
+    if (!currentItem) return toast.error("生物不存在，请刷新后重试");
+    if (bioPriceChanged && bioPriceLocked) return toast.error("已售、损耗或关联订单的库存不能改价，请重新打开详情核对");
+    let pricingPatch;
+    try {
+      pricingPatch = buildStockPriceDetailsPatch(bioPricingOriginalRef.current ?? currentItem, {
+        changed: bioPriceChanged,
+        mode: bioPriceMode,
+        price: Number(bioPriceMode === "product" ? bioProduct?.defaultPrice : bioBasePrice),
+      });
+    } catch (error) {
+      return toast.error(error instanceof Error ? error.message : "价格信息无效");
     }
     if (!confirmWrite(
       "修改",
       savePendingRecord
         ? "将保存鱼的信息，并新增当前填写的观察/治疗记录及媒体。"
-        : "将保存鱼的状态、售价、编号和备注。",
+        : bioPriceChanged ? "将保存鱼的状态、价格来源、售价、编号和备注。" : "将保存鱼的状态、编号和备注，价格保持不变。",
     )) return;
-    const normalizedPrice = Number(price.toFixed(2));
     const pendingRecord = savePendingRecord
       ? bioRecordFromDraft(newRecord, { id: newRecordIdRef.current, stockItemId: bioItemId, date: pendingRecordTime })
       : null;
-    const currentItem = stockItem(bioItemId);
-    if (!currentItem) return toast.error("生物不存在，请刷新后重试");
     setRecordActionSaving(true);
     const result = await saveBioRecordChange({
       action: "saveDetails",
       stockItemId: bioItemId,
       details: {
         status: bioStatus,
-        basePrice: normalizedPrice,
+        ...pricingPatch.details,
         code: bioCode.trim(),
         notes: bioNotes,
       },
       expectedDetails: {
         status: currentItem.status,
-        basePrice: currentItem.basePrice,
+        ...pricingPatch.expectedDetails,
         code: currentItem.code ?? "",
         notes: currentItem.notes ?? "",
       },
@@ -1378,6 +1398,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   className="h-8 w-full pl-9 sm:w-72"
                 />
               </div>
+              <Select value={filterPriceMode} onValueChange={(value: StockPriceMode | "all") => setFilterPriceMode(value)}>
+                <SelectTrigger className="h-8 w-full sm:w-44" aria-label="筛选价格来源"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">价格来源：全部</SelectItem>
+                  <SelectItem value="product">跟随商品价</SelectItem>
+                  <SelectItem value="manual">单独定价</SelectItem>
+                  <SelectItem value="legacy">历史价格待确认</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -1624,7 +1653,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                                               ? "ring-4 ring-cyan-500 ring-offset-2 ring-offset-white"
                                               : selected ? "ring-2 ring-emerald-500 ring-offset-2" : statusRingClass(s.status, s.sold)
                                           }`}
-                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)}${isSpecialPrice(s) ? "（特殊价格）" : ""} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
+                                          title={`${p?.name ?? ""}${s.code ? ` · 编号：${s.code}` : ""} · 售价：¥${Number(s.basePrice ?? 0).toFixed(2)} · ${stockPriceModeLabel(stockPriceMode(s, p))} · ${statusMeta[s.status].label}${s.notes ? " · " + s.notes : ""}`}
                                         >
                                           {iconUrl ? (
                                             <ImageWithFallback src={iconUrl} alt={p?.name ?? ""} className="size-full object-cover" />
@@ -1768,7 +1797,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
           <div className="overflow-y-auto flex-1 min-h-0 flex flex-col gap-5 pr-1">
             {/* 状态 & 备注 */}
-            <div className="grid gap-3 p-4 bg-muted/30 rounded-lg border md:grid-cols-4">
+            <div className="grid items-start gap-3 p-4 bg-muted/30 rounded-lg border md:grid-cols-4">
               <div className="grid gap-2">
                 <Label className="flex items-center gap-2">
                   当前状态
@@ -1790,17 +1819,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid gap-2">
-                <Label><span className="text-red-500">*</span> 销售默认价(¥)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  value={bioBasePrice}
-                  onChange={(e) => setBioBasePrice(e.target.value)}
-                  placeholder="0.00"
-                />
-              </div>
+              <StockPriceField label="销售默认价（¥）" mode={bioPriceMode} value={bioBasePrice} productPrice={bioProduct?.defaultPrice}
+                disabled={bioPriceLocked || !permission.canUpdate || recordActionSaving}
+                disabledReason={bioPriceLocked ? "已售、损耗或关联订单的库存保留原价，历史订单价不受影响。" : "当前不能修改价格。"}
+                onModeChange={mode => {
+                  setBioPriceMode(mode);
+                  if (mode === "product" || bioPriceMode === "product") setBioBasePrice(String(bioProduct?.defaultPrice ?? 0));
+                  setBioPriceChanged(true);
+                }}
+                onPriceChange={value => { setBioBasePrice(value); setBioPriceMode("manual"); setBioPriceChanged(true); }} />
               <div className="grid gap-2">
                 <Label>编号</Label>
                 <Input

@@ -1,3 +1,5 @@
+import { stockPriceModeLabel } from "./stockPricing.ts";
+
 export type LatestRequestToken = Readonly<{
   notificationId: string;
   sequence: number;
@@ -72,6 +74,7 @@ export type StockApprovalComparableItem = {
   sold?: unknown;
   lost?: unknown;
   basePrice?: unknown;
+  priceMode?: unknown;
   priceOverridden?: unknown;
   commissionRate?: unknown;
   lossDate?: unknown;
@@ -81,7 +84,7 @@ export type StockApprovalComparableItem = {
 };
 
 export type StockChangeFieldDifference = {
-  field: "siteId" | "product" | "tank" | "batch" | "inDate" | "status" | "sold" | "lost" | "basePrice" |
+  field: "siteId" | "product" | "tank" | "batch" | "inDate" | "status" | "sold" | "lost" | "basePrice" | "priceMode" |
     "priceOverridden" | "commissionRate" | "lossDate" | "lossReason" | "lossProof" | "code" | "notes";
   label: string;
   beforeValue: string;
@@ -142,6 +145,7 @@ function reviewSafeStockItem(item: StockApprovalComparableItem | null): StockApp
     sold: item.sold,
     lost: item.lost,
     basePrice: item.basePrice,
+    priceMode: item.priceMode,
     priceOverridden: item.priceOverridden,
     commissionRate: item.commissionRate,
     lossDate: item.lossDate,
@@ -217,6 +221,13 @@ function moneyComparable(value: unknown): string {
   if (value === "" || value == null) return "";
   const amount = Number(value);
   return Number.isFinite(amount) ? String(amount) : textValue(value);
+}
+
+/** Approval review shows persisted evidence only, never infers a source from matching prices. */
+export function stockApprovalPriceModeLabel(value: unknown): string {
+  return value === "product" || value === "manual" || value === "legacy"
+    ? stockPriceModeLabel(value)
+    : textValue(value) ? "价格来源未识别" : "历史未标记";
 }
 
 function statusDisplay(value: unknown): string {
@@ -296,6 +307,7 @@ function stockUpdateDifferences(
   add(Boolean(before?.sold) !== Boolean(after?.sold), "sold", "已售", booleanDisplay(before?.sold), booleanDisplay(after?.sold));
   add(Boolean(before?.lost) !== Boolean(after?.lost), "lost", "损耗", booleanDisplay(before?.lost), booleanDisplay(after?.lost));
   add(moneyComparable(before?.basePrice) !== moneyComparable(after?.basePrice), "basePrice", "售价", moneyDisplay(before?.basePrice), moneyDisplay(after?.basePrice));
+  add(textValue(before?.priceMode) !== textValue(after?.priceMode), "priceMode", "价格来源", stockApprovalPriceModeLabel(before?.priceMode), stockApprovalPriceModeLabel(after?.priceMode));
   add(Boolean(before?.priceOverridden) !== Boolean(after?.priceOverridden), "priceOverridden", "特殊售价", booleanDisplay(before?.priceOverridden), booleanDisplay(after?.priceOverridden));
   add(rateComparable(before?.commissionRate) !== rateComparable(after?.commissionRate), "commissionRate", "提成比例", rateDisplay(before?.commissionRate), rateDisplay(after?.commissionRate));
   add(textValue(before?.lossDate) !== textValue(after?.lossDate), "lossDate", "损耗日期", displayedValue(before?.lossDate), displayedValue(after?.lossDate));

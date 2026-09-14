@@ -11,7 +11,31 @@ import {
   stockApprovalDetailsReady,
   stockApprovalReviewState,
   stockApprovalSnapshotIdentityFields,
+  stockApprovalPriceModeLabel,
 } from "./notificationCenter.ts";
+
+test("stock approval exposes price-source-only changes even when the amount stays equal", () => {
+  const [projected] = projectStockChangeItems([{
+    operation: "update", stockItemId: "stock-price-mode",
+    before: { basePrice: 100, priceMode: "product" },
+    after: { basePrice: 100, priceMode: "manual" },
+  }]);
+  assert.equal(projected.before.priceMode, "product");
+  assert.equal(projected.after.priceMode, "manual");
+  assert.deepEqual(projected.differences, [{ field: "priceMode", label: "价格来源", beforeValue: "跟随商品价", afterValue: "单独定价" }]);
+  assert.equal(projected.reviewableUpdate, true);
+});
+
+test("approval snapshots distinguish unmarked history from an explicit historical price source", () => {
+  const [projected] = projectStockChangeItems([{
+    operation: "update", stockItemId: "stock-legacy-mode",
+    before: { basePrice: 100 }, after: { basePrice: 100, priceMode: "legacy" },
+  }]);
+  assert.deepEqual(projected.differences, [{ field: "priceMode", label: "价格来源", beforeValue: "历史未标记", afterValue: "历史价格待确认" }]);
+  assert.equal(stockApprovalPriceModeLabel(undefined), "历史未标记");
+  assert.equal(stockApprovalPriceModeLabel(""), "历史未标记");
+  assert.equal(stockApprovalPriceModeLabel("unsupported"), "价格来源未识别");
+});
 
 test("a newer detail request aborts and invalidates every older request", () => {
   const coordinator = createLatestRequestCoordinator();

@@ -56,6 +56,7 @@ export function stockConcurrencySnapshot(item = {}) {
     lossProof: (Array.isArray(item?.lossProof) ? item.lossProof : []).map(optionalString),
     inDate: id(item?.inDate),
     basePrice: Number(item?.basePrice ?? item?.cost ?? 0),
+    priceMode: id(item?.priceMode),
     priceOverridden: Boolean(item?.priceOverridden),
     commissionRate: Number(item?.commissionRate ?? 0),
     code: id(item?.code),

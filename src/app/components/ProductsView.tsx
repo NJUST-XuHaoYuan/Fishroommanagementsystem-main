@@ -598,16 +598,19 @@ export function ProductsView() {
       minReturnPrice: Number(minReturnPrice.toFixed(2)),
       commissionRate: 0,
     };
-    if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存商品信息的修改。" : "将新增一个商品。")) return;
+    const priceChanged = Boolean(editing.id && Number(state.products.find(item => item.id === editing.id)?.defaultPrice) !== Number(finalEditing.defaultPrice));
+    if (!confirmWrite(editing.id ? "修改" : "新增", priceChanged
+      ? "商品默认价所有场地共用，改价将同步到各场地跟随商品价的普通未售库存；单独定价、历史待确认价格及已售、损耗、出库或订单占用的库存保留原价，不修改订单成交价。"
+      : editing.id ? "将保存商品信息的修改。" : "将新增一个商品。")) return;
     setSavingProduct(true);
-    const ok = await saveProduct(finalEditing);
+    const ok = await saveProduct(finalEditing, editing.id ? editing.defaultPrice : undefined);
     setSavingProduct(false);
     if (!ok) {
       toast.error("保存失败，请不要关闭弹窗，稍后重试");
       return;
     }
     setOpen(false);
-    toast.success("已保存");
+    if (!priceChanged) toast.success("已保存");
   };
 
   const confirmDelete = async () => {
@@ -792,6 +795,9 @@ export function ProductsView() {
                   onChange={(e) => setPriceStr(e.target.value)}
                   placeholder="0.00"
                 />
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  商品默认价所有场地共用，改价将同步到各场地“跟随商品价”的普通未售库存。单独定价、历史价格待确认及已售、损耗、出库或订单占用的库存保留原价，订单成交价不变。
+                </p>
               </div>
               <div className="grid gap-2">
                 <Label>最低回厂价格(¥)</Label>

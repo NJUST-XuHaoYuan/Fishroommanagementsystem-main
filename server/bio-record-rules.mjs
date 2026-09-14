@@ -1,4 +1,5 @@
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
+import { normalizeStockPricing } from "./stock-pricing.mjs";
 
 const BIO_RECORD_ID_MAX_LENGTH = 160;
 const BIO_RECORD_TEXT_MAX_LENGTH = 10_000;
@@ -179,18 +180,22 @@ function normalizedDetails(input = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("鱼的信息格式不正确");
   }
-  const allowedKeys = new Set(["status", "basePrice", "code", "notes"]);
+  const allowedKeys = new Set(["status", "basePrice", "priceMode", "code", "notes"]);
   const keys = Object.keys(input);
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key))) {
     throw new Error("鱼的信息包含不支持的字段");
   }
   const details = {};
+  if (Object.prototype.hasOwnProperty.call(input, "priceMode")) {
+    if (!["product", "manual", "legacy"].includes(input.priceMode)) throw new Error("请选择有效的定价方式");
+    details.priceMode = input.priceMode;
+  }
   if (Object.prototype.hasOwnProperty.call(input, "status")) {
     const status = String(input.status ?? "").trim();
     if (!STOCK_STATUSES.has(status)) throw new Error("请选择有效的鱼状态");
     details.status = status;
   }
-  if (Object.prototype.hasOwnProperty.call(input, "basePrice")) {
+  if (Object.prototype.hasOwnProperty.call(input, "basePrice") && input.priceMode !== "product") {
     const basePrice = Number(input.basePrice);
     if (!Number.isFinite(basePrice) || basePrice <= 0 || basePrice > STOCK_PRICE_MAX) {
       throw new Error("请填写有效的销售默认价");
@@ -225,17 +230,6 @@ function assertExpectedDetails(stockItem, expected, details) {
   }
 }
 
-function applyDetails(stockItem, details) {
-  const next = { ...stockItem, ...details };
-  if (Object.prototype.hasOwnProperty.call(details, "basePrice")) {
-    const previousPrice = Number(stockItem?.basePrice ?? 0);
-    next.priceOverridden = Math.abs(details.basePrice - previousPrice) > 0.005
-      ? true
-      : stockItem?.priceOverridden;
-  }
-  return next;
-}
-
 export function planBioRecordSave({
   action,
   stockItem,
@@ -245,6 +239,8 @@ export function planBioRecordSave({
   expectedRecord,
   details,
   expectedDetails,
+  product,
+  pricingProtected = false,
   operator,
   now,
 } = {}) {
@@ -308,13 +304,23 @@ export function planBioRecordSave({
 
   if (normalizedAction === "saveDetails") {
     const nextDetails = normalizedDetails(details);
+    const changesPricing = Object.prototype.hasOwnProperty.call(nextDetails, "basePrice") || Object.prototype.hasOwnProperty.call(nextDetails, "priceMode");
+    let proposed = { ...stockItem, ...nextDetails };
+    if (changesPricing) {
+      // Do not turn an inherited current mode into explicit client intent.
+      // A pre-mode client that really changes basePrice requests a manual price.
+      if (!Object.prototype.hasOwnProperty.call(nextDetails, "priceMode")) delete proposed.priceMode;
+      proposed = normalizeStockPricing(proposed, product, { existing: stockItem, protected: pricingProtected });
+      nextDetails.basePrice = proposed.basePrice;
+      nextDetails.priceMode = proposed.priceMode;
+    }
     let nextStockItem = stockItem;
     const desiredSnapshot = detailSnapshot(nextDetails, Object.keys(nextDetails));
     const currentSnapshot = detailSnapshot(stockItem, Object.keys(nextDetails));
     const detailsAlreadyApplied = stable(currentSnapshot) === stable(desiredSnapshot);
     if (!detailsAlreadyApplied) {
       assertExpectedDetails(stockItem, expectedDetails, nextDetails);
-      nextStockItem = applyDetails(stockItem, nextDetails);
+      nextStockItem = proposed;
     }
 
     let recordPlan = null;

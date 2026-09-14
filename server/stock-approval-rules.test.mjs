@@ -11,10 +11,28 @@ import {
   stockApprovalDetailsForResponse,
   stockApprovalReviewDetails,
   stockChangeAdjustmentSignature,
+  stockChangeSnapshotNeedsCanonicalRebuild,
   STOCK_CHANGE_SNAPSHOT_SCHEMA_VERSION,
   STOCK_BATCH_APPROVAL_DELAY_MS,
 } from "./stock-approval-rules.mjs";
 import { stockConcurrencySnapshot } from "./stock-mutation-relationships.mjs";
+
+test("mode-only pricing changes remain effective and are bound into canonical approval review", () => {
+  const current = { id: "stock-mode", productId: "p", batchId: "b", subTankId: "t", siteId: "nanjing", basePrice: 100, priceMode: "product", priceOverridden: false };
+  const next = { ...current, priceMode: "manual" };
+  const effective = filterEffectiveStockMutation({ stock: [current], upsertItems: [next] });
+  assert.equal(effective.upsertItems.length, 1);
+  const snapshot = buildStockChangeSnapshot({ stock: [current], upsertItems: [next] });
+  assert.deepEqual(snapshot.items[0].changedFields, ["priceMode"]);
+  assert.equal(snapshot.items[0].before.priceMode, "product");
+  assert.equal(snapshot.items[0].after.priceMode, "manual");
+  assert.equal(stockChangeSnapshotNeedsCanonicalRebuild(snapshot), false);
+  const oldSnapshot = structuredClone(snapshot);
+  delete oldSnapshot.items[0].before.priceMode;
+  assert.equal(stockChangeSnapshotNeedsCanonicalRebuild(oldSnapshot), true);
+  const alternative = buildStockChangeSnapshot({ stock: [current], upsertItems: [{ ...next, priceMode: "legacy" }] });
+  assert.notEqual(stockChangeAdjustmentSignature(snapshot), stockChangeAdjustmentSignature(alternative));
+});
 
 test("canonical no-op stock upserts are filtered while creates, deletes and real edits remain", () => {
   const legacySold = {
@@ -579,6 +597,7 @@ test("stock deletion approvals preserve complete inventory details", () => {
     sold: true,
     lost: false,
     basePrice: 260,
+    priceMode: "",
     notes: "观察中",
     siteId: "nanjing",
     missing: false,

@@ -1070,13 +1070,15 @@ function AdminApp() {
     }
   };
 
-  const saveProduct = async (product: Product): Promise<boolean> => {
+  const saveProduct = async (product: Product, expectedDefaultPrice?: number): Promise<boolean> => {
     clearTimeout(saveTimer.current);
     if (saveAbort.current) {
       saveAbort.current.abort();
       saveAbort.current = null;
     }
 
+    const previousProduct = stateRef.current.products.find((item) => item.id === product.id);
+    const priceChanged = previousProduct && Number(product.defaultPrice) !== Number(expectedDefaultPrice ?? previousProduct.defaultPrice);
     const mutationSession = beginMutation();
     try {
       const response = await fetch(`${API}/products/upsert`, {
@@ -1084,6 +1086,7 @@ function AdminApp() {
         headers: authJsonHeaders(),
         body: JSON.stringify({
           product,
+          ...(previousProduct ? { expectedDefaultPrice: expectedDefaultPrice ?? previousProduct.defaultPrice } : {}),
           operator: state.user?.username ?? "system",
         }),
       });
@@ -1092,9 +1095,12 @@ function AdminApp() {
         throw new Error(result.error || `HTTP ${response.status}`);
       }
       setStateForMutation(mutationSession, (current) => {
+        const priceUpdates = new Map<string, Partial<StockItem>>((Array.isArray(result.stockPricingUpdates) ? result.stockPricingUpdates : [])
+          .map((item: StockItem) => [item.id, { basePrice: item.basePrice, priceMode: item.priceMode, priceOverridden: item.priceOverridden }]));
         const next = {
           ...current,
           products: Array.isArray(result.products) ? result.products : current.products,
+          stock: current.stock.map((item) => priceUpdates.has(item.id) ? { ...item, ...priceUpdates.get(item.id) } : item),
           productOrigins: Array.isArray(result.productOrigins) ? result.productOrigins : current.productOrigins,
 	          operationLogs: result.operationLog
 	            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, idx, arr) =>
@@ -1105,10 +1111,18 @@ function AdminApp() {
         lastSavedState.current = withoutUser(next);
         return next;
       });
+      if (priceChanged && isMutationSessionCurrent(mutationSession)) {
+        const summary = result.pricingSummary;
+        toast.success(`商品价格已保存；你可见场地的 ${Number(summary?.priceUpdated ?? 0)} 条跟随库存已同步`, {
+          description: "单独定价、历史待确认及已售、损耗、订单占用库存保留原价，历史订单金额不变。",
+          duration: 6500,
+        });
+      }
       settleMutation(mutationSession, "saved", 2000);
       return true;
     } catch (error) {
       console.error("Failed to save product:", error);
+      if (isMutationSessionCurrent(mutationSession)) toast.error(error instanceof Error ? error.message : "商品保存失败");
       settleMutation(mutationSession, "error", 3000);
       return false;
     }

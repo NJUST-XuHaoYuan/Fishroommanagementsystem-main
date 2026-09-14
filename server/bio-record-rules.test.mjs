@@ -239,6 +239,51 @@ test("rejects stale stock details instead of overwriting another writer", () => 
   }), (error) => error instanceof BioRecordConflictError && error.code === "BIO_DETAILS_STALE");
 });
 
+test("explicit product mode uses the server price and checks both old price and stored mode", () => {
+  const planned = planBioRecordSave({ action: "saveDetails", stockItem: { ...stockItem, priceMode: "manual", priceOverridden: true },
+    product: { defaultPrice: 160 }, details: { priceMode: "product", basePrice: 1 },
+    expectedDetails: { priceMode: "manual", basePrice: 120 } });
+  assert.equal(planned.stockItem.basePrice, 160);
+  assert.equal(planned.stockItem.priceMode, "product");
+  assert.equal(planned.stockItem.priceOverridden, false);
+  for (const expectedDetails of [{ basePrice: 120 }, { basePrice: 119, priceMode: "manual" }, { priceMode: "manual" }]) {
+    assert.throws(() => planBioRecordSave({ action: "saveDetails", stockItem: { ...stockItem, priceMode: "manual" }, product: { defaultPrice: 160 },
+      details: { priceMode: "product" }, expectedDetails }), (error) => error.code === "BIO_DETAILS_STALE");
+  }
+});
+
+test("old clients may switch price to manual but cannot overwrite a subsequently frozen mode", () => {
+  const details = { basePrice: 130, status: "feeding" };
+  const expectedDetails = { basePrice: 120, status: "healthy" };
+  const planned = planBioRecordSave({ action: "saveDetails", stockItem, product: { defaultPrice: 120 }, details, expectedDetails });
+  assert.equal(planned.stockItem.priceMode, "manual");
+  assert.throws(() => planBioRecordSave({ action: "saveDetails", stockItem: { ...stockItem, priceMode: "product" }, product: { defaultPrice: 120 }, details, expectedDetails }),
+    (error) => error.code === "BIO_DETAILS_STALE");
+});
+
+test("saving notes with an unchanged historical price retains legacy and never marks it manual", () => {
+  const planned = planBioRecordSave({ action: "saveDetails", stockItem, product: { defaultPrice: 100 },
+    details: { basePrice: 120, notes: "new" }, expectedDetails: { basePrice: 120, notes: "old" } });
+  assert.equal(planned.stockItem.basePrice, 120);
+  assert.equal(planned.stockItem.priceMode, "legacy");
+  assert.notEqual(planned.stockItem.priceOverridden, true);
+  const retry = planBioRecordSave({ action: "saveDetails", stockItem: planned.stockItem, product: { defaultPrice: 100 },
+    details: { basePrice: 120, notes: "new" }, expectedDetails: { basePrice: 120, notes: "old" } });
+  assert.equal(retry.idempotent, true);
+});
+
+test("protected fish reject price changes and mode changes but accept unrelated details", () => {
+  const current = { ...stockItem, priceMode: "manual" };
+  for (const details of [{ basePrice: 130 }, { priceMode: "product" }]) {
+    assert.throws(() => planBioRecordSave({ action: "saveDetails", stockItem: current, product: { defaultPrice: 100 }, pricingProtected: true,
+      details, expectedDetails: { basePrice: 120, priceMode: "manual" } }), (error) => error.code === "STOCK_PRICING_PROTECTED");
+  }
+  const planned = planBioRecordSave({ action: "saveDetails", stockItem: current, pricingProtected: true,
+    details: { notes: "new" }, expectedDetails: { notes: "old" } });
+  assert.equal(planned.stockItem.notes, "new");
+  assert.equal(planned.stockItem.basePrice, 120);
+});
+
 test("rejects records outside the stock lifetime or with no content", () => {
   assert.throws(() => planBioRecordSave({
     action: "create",

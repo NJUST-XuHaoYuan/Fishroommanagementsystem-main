@@ -173,6 +173,7 @@ export type PurchaseBatch = {
 };
 
 export type StockStatus = "healthy" | "sick" | "feeding";
+export type StockPriceMode = "product" | "manual" | "legacy";
 
 export type StockItem = {
   id: string;
@@ -191,6 +192,8 @@ export type StockItem = {
   inDate: string;
   /** 这条鱼进入销售订单时默认带出的售价。 */
   basePrice: number;
+  /** product 跟随商品价；manual 单独定价；legacy 历史价格待确认。 */
+  priceMode?: StockPriceMode;
   /** 是否在日常管理中手工改过单条售价。 */
   priceOverridden?: boolean;
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
@@ -224,7 +227,7 @@ export type BioRecordExpectedSnapshot = Pick<
   "id" | "stockItemId" | "date" | "text" | "photos" | "videos"
 >;
 
-export type BioDetailsPatch = Partial<Pick<StockItem, "status" | "basePrice" | "code" | "notes">>;
+export type BioDetailsPatch = Partial<Pick<StockItem, "status" | "basePrice" | "priceMode" | "code" | "notes">>;
 
 export type BioRecordSaveChange =
   | { action: "create"; stockItemId: string; record: BioRecordExpectedSnapshot }
@@ -399,6 +402,8 @@ export type InventoryAdjustmentAddition = {
   status: StockStatus;
   inDate: string;
   basePrice: number;
+  priceMode?: StockPriceMode;
+  priceOverridden?: boolean;
   code?: string;
   notes?: string;
 };
@@ -1037,7 +1042,7 @@ export type StoreContextType = {
   setActiveSiteId: React.Dispatch<React.SetStateAction<string>>;
   setState: React.Dispatch<React.SetStateAction<Store>>;
   savePatch: (patch: Partial<Omit<Store, "user">>) => Promise<boolean>;
-  saveProduct: (product: Product) => Promise<boolean>;
+  saveProduct: (product: Product, expectedDefaultPrice?: number) => Promise<boolean>;
   deleteProduct: (productId: string) => Promise<ProductDeleteResult>;
   saveStockChange: (change: StockChangeRequest) => Promise<StockChangeResult>;
   saveMaintenanceAction: (change: MaintenanceSaveChange) => Promise<MaintenanceSaveResult>;

@@ -130,6 +130,7 @@ import {
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
 import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
+import { normalizeStockPricing, stockPricingProtectedIds, syncProductStockPrices, reconcileReleasedStockPricing } from "./stock-pricing.mjs";
 import {
   buildPurchaseBatchDetail,
   buildPurchaseBatchFishHistory,
@@ -3928,7 +3929,27 @@ function normalizeStockItem(item) {
 function applyStockMutationToState(state = {}, change = {}, operator = "system", options = {}) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
-  let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map(normalizeStockItem);
+  const pricingExistingById = new Map(stock.map((item) => [String(item?.id ?? "").trim(), item]));
+  const pricingProductById = new Map((Array.isArray(state.products) ? state.products : []).map((item) => [String(item?.id ?? "").trim(), item]));
+  const pricingProtectedIds = stockPricingProtectedIds(state);
+  let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map((item) => normalizeStockItem(normalizeStockPricing(
+    item,
+    pricingProductById.get(String(item?.productId ?? "").trim()),
+    {
+      existing: pricingExistingById.get(String(item?.id ?? "").trim()),
+      previousProduct: pricingProductById.get(String(pricingExistingById.get(String(item?.id ?? "").trim())?.productId ?? "").trim()),
+      protected: pricingProtectedIds.has(String(item?.id ?? "").trim()),
+    },
+  )));
+  if (options.requireReviewedPricingSnapshot) {
+    const submittedItems = new Map((change.upsert ?? []).map((item) => [String(item?.id ?? "").trim(), item]));
+    if (upsertItems.some((item) => {
+      const submitted = submittedItems.get(item.id);
+      return Number(item.basePrice) !== Number(submitted?.basePrice) || item.priceMode !== submitted?.priceMode;
+    })) {
+      throw httpError(409, "待审批库存的商品价格或价格来源已变化，请退回后重新提交审批", "STOCK_APPROVAL_PRICING_STALE");
+    }
+  }
   const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
     .map((id) => String(id ?? "").trim());
   if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
@@ -4031,7 +4052,7 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   for (const item of upsertItems) {
     if (!existingIds.has(item.id)) changedStock.push(item);
   }
-  const nextStock = setStockSoldForOrders({ ...state, stock: changedStock }, nextOrders);
+  const nextStock = setStockSoldForOrders({ ...state, stock: changedStock, shipments: nextShipments }, nextOrders, state);
   const nextBatches = refreshBatchStockCounts(batches, nextStock);
   const upsertIdSet = new Set(upsertItems.map((item) => String(item?.id ?? "")));
   const stockUpdates = nextStock.filter((item) => upsertIdSet.has(String(item?.id ?? "")));
@@ -4164,6 +4185,8 @@ function normalizeInventoryAdjustmentDraft(state = {}, input = {}, req, existing
       status: ["healthy", "feeding", "sick"].includes(addition?.status) ? addition.status : "healthy",
       inDate: String(addition?.inDate ?? "").trim(),
       basePrice: Number(addition?.basePrice ?? 0),
+      ...(addition?.priceMode !== undefined ? { priceMode: addition.priceMode } : {}),
+      ...(addition?.priceOverridden !== undefined ? { priceOverridden: addition.priceOverridden } : {}),
       code: String(addition?.code ?? "").trim().slice(0, 100),
       notes: String(addition?.notes ?? "").trim().slice(0, 500),
     };
@@ -4179,11 +4202,11 @@ function normalizeInventoryAdjustmentDraft(state = {}, input = {}, req, existing
     if (batchArrivalDate && normalized.inDate < batchArrivalDate) {
       throw new Error("盘库增加项的入库日期不能早于采购批次到货日期");
     }
-    if (!Number.isFinite(normalized.basePrice) || normalized.basePrice <= 0) {
+    if (normalized.priceMode !== "product" && (!Number.isFinite(normalized.basePrice) || normalized.basePrice <= 0)) {
       throw new Error("盘库增加项的单条售价必须大于 0");
     }
     if (quantity > 1) normalized.code = "";
-    return normalized;
+    return normalizeStockPricing(normalized, (state.products ?? []).find((product) => String(product?.id ?? "") === normalized.productId));
   });
   if (new Set(additions.map((item) => item.id)).size !== additions.length) {
     throw new Error("盘库增加项编号重复，请刷新后重试");
@@ -5602,8 +5625,15 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
   };
 }
 
-function setStockSoldForOrders(state = {}, orders = []) {
+function setStockSoldForOrders(state = {}, orders = [], previousState = state) {
   const activeOrderIds = new Set();
+  const previousOrderIds = new Set();
+  for (const order of Array.isArray(previousState.orders) ? previousState.orders : []) {
+    if (!order || order.status === "cancelled") continue;
+    for (const item of Array.isArray(order.items) ? order.items : []) {
+      if (orderItemKeepsInventory(item) && String(item?.stockItemId ?? "")) previousOrderIds.add(String(item.stockItemId));
+    }
+  }
   for (const order of orders) {
     if (!order || order.status === "cancelled") continue;
     for (const item of Array.isArray(order.items) ? order.items : []) {
@@ -5612,11 +5642,12 @@ function setStockSoldForOrders(state = {}, orders = []) {
       if (stockId) activeOrderIds.add(stockId);
     }
   }
-  return (Array.isArray(state.stock) ? state.stock : []).map((stockItem) =>
+  const stock = (Array.isArray(state.stock) ? state.stock : []).map((stockItem) =>
     activeOrderIds.has(String(stockItem?.id ?? ""))
       ? { ...stockItem, sold: true }
-      : { ...stockItem, sold: false }
+      : previousOrderIds.has(String(stockItem?.id ?? "")) ? { ...stockItem, sold: false } : stockItem
   );
+  return reconcileReleasedStockPricing(previousState, { ...state, orders, stock }).stock;
 }
 
 function deletedIdsByKey(current = [], next = []) {
@@ -6008,6 +6039,9 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
+    if (stableJson(currentOrder.items ?? []) !== stableJson(nextOrder.items ?? [])) {
+      throw httpError(409, "订单鱼明细必须通过订单编辑专用接口修改，请刷新后重试");
+    }
 
     validateOrderBusinessFieldsForPatch(currentOrder, nextOrder, next);
     validateOrderStatusForPatch(req, currentOrder, nextOrder, nextShipments);
@@ -11345,7 +11379,20 @@ async function handleApi(req, res, url) {
            data -> 'tankGroups' AS tank_groups,
            stock_target.stock_item_count,
            stock_target.stock_item,
+           (SELECT product_row.product_item
+              FROM jsonb_array_elements(COALESCE(data -> 'products', '[]'::jsonb)) AS product_row(product_item)
+              WHERE product_row.product_item ->> 'id' = stock_target.stock_item ->> 'productId'
+              LIMIT 1) AS stock_product,
            record_target.bio_records,
+           ($4::boolean AND EXISTS (
+             SELECT 1 FROM jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS price_orders(price_order)
+             WHERE COALESCE(price_order ->> 'status', '') <> 'cancelled'
+               AND EXISTS (
+                 SELECT 1 FROM jsonb_array_elements(COALESCE(price_order -> 'items', '[]'::jsonb)) AS price_items(price_item)
+                 WHERE btrim(COALESCE(price_item ->> 'stockItemId', '')) = $2
+                   AND btrim(COALESCE(price_item ->> 'inventoryRemovedAt', '')) = ''
+               )
+           )) AS stock_price_protected,
            ($4::boolean AND (
              EXISTS (
                SELECT 1
@@ -11424,6 +11471,8 @@ async function handleApi(req, res, url) {
       const plan = planBioRecordSave({
         action,
         stockItem,
+        product: rows[0]?.stock_product ?? {},
+        pricingProtected: Boolean(storedStockItem.sold || storedStockItem.lost || storedStockItem.status === "sold" || rows[0]?.stock_is_out || rows[0]?.stock_price_protected),
         records: state.bioRecords,
         record: body?.record,
         recordId: body?.recordId,
@@ -12587,7 +12636,7 @@ async function handleApi(req, res, url) {
       const nextOrders = orders.filter((item) => String(item?.id ?? "") !== orderId);
       const nextShipments = (Array.isArray(state.shipments) ? state.shipments : [])
         .filter((shipment) => String(shipment?.orderId ?? "") !== orderId);
-      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders);
+      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders, state);
       const nextNotifications = resolveCreditSaleNotifications(
         currentStationNotifications(state),
         orderId,
@@ -13215,7 +13264,7 @@ async function handleApi(req, res, url) {
         if (item.status === "completed" || item.status === "cancelled" || item.status === "damaged") return item;
         return { ...item, status: remainingActiveShipments.length > 0 ? "shipped" : "pending" };
       });
-      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders);
+      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders, state);
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -13352,6 +13401,17 @@ async function handleApi(req, res, url) {
 	        });
 	      }
 	      const validationState = buildStatePatch(current, rawPatch, basePatch, [], req);
+
+          if (Object.prototype.hasOwnProperty.call(rawPatch, "products")) {
+            const beforeProducts = new Map((current.products ?? []).map((product) => [String(product.id), product]));
+            const afterProducts = Array.isArray(validationState.products) ? validationState.products : [];
+            if (afterProducts.length !== beforeProducts.size || afterProducts.some((product) => {
+              const before = beforeProducts.get(String(product.id));
+              return !before || Number(before.defaultPrice) !== Number(product.defaultPrice);
+            })) {
+              throw httpError(409, "商品新增、删除或默认价修改必须通过商品管理专用接口，请刷新后重试");
+            }
+          }
 
 	      validateStatePatchActions(req, current, validationState, Object.keys(rawPatch));
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
@@ -13516,6 +13576,7 @@ async function handleApi(req, res, url) {
         mutation = applyStockMutationToState(state, payload, resolvedBy, {
           operationLog: null,
           visibleSiteIds: creatorVisibleSiteIds,
+          requireReviewedPricingSnapshot: true,
         });
         stateAfterMutation = mutation.nextState;
       }
@@ -15017,7 +15078,7 @@ async function handleApi(req, res, url) {
 	  if (url.pathname === "/api/products/upsert" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const { product } = JSON.parse(body);
+	      const { product, expectedDefaultPrice } = JSON.parse(body);
       const operator = authenticatedOperator(req);
       if (!product || typeof product !== "object") {
         sendJson(req, res, 400, { error: "Missing product" });
@@ -15027,7 +15088,7 @@ async function handleApi(req, res, url) {
         sendJson(req, res, 400, { error: "Product id, speciesId, name, size and origin are required" });
         return;
       }
-      if (!(Number(product.defaultPrice) > 0)) {
+      if (!Number.isFinite(Number(product.defaultPrice)) || !Number.isSafeInteger(Math.round(Number(product.defaultPrice) * 100)) || !(Math.round(Number(product.defaultPrice) * 100) > 0)) {
         sendJson(req, res, 400, { error: "Product defaultPrice must be greater than 0" });
         return;
       }
@@ -15048,6 +15109,14 @@ async function handleApi(req, res, url) {
 	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
 	        const productExists = products.some((item) => String(item?.id ?? "") === String(product.id ?? ""));
 	        requireModulePermissionForAuth(req, "products", productExists ? "update" : "create");
+        const matchingProducts = products.filter((item) => String(item?.id ?? "") === String(product.id ?? ""));
+        if (matchingProducts.length > 1) throw httpError(409, "商品编号不唯一，无法安全更新库存价格");
+        const previousProduct = matchingProducts[0];
+        const newDefaultPrice = Math.round((Number(product.defaultPrice) + Number.EPSILON) * 100) / 100;
+        const priceChanged = previousProduct && Number(previousProduct.defaultPrice) !== newDefaultPrice;
+        if (priceChanged && (expectedDefaultPrice == null || Number(expectedDefaultPrice) !== Number(previousProduct.defaultPrice))) {
+          throw httpError(409, "商品默认价已变化或页面版本过旧，请刷新后重新确认价格");
+        }
 
 	        const normalizedProduct = await externalizeDataUrls({
           ...withoutLegacyProductVisibility(product),
@@ -15056,7 +15125,7 @@ async function handleApi(req, res, url) {
           origin: String(product.origin).trim(),
           imageUrl: String(product.imageUrl ?? ""),
           notes: String(product.notes ?? "").trim(),
-          defaultPrice: Number(product.defaultPrice),
+          defaultPrice: newDefaultPrice,
           minReturnPrice: normalizeMinReturnPrice(minReturnPriceInput),
           commissionRate: 0,
         });
@@ -15065,17 +15134,19 @@ async function handleApi(req, res, url) {
           ? products.map((item) => item.id === normalizedProduct.id ? normalizedProduct : item)
           : [...products, normalizedProduct];
         const nextOrigins = mergeProductOrigins(productOrigins, nextProducts);
+        const priceSync = previousProduct ? syncProductStockPrices(state, previousProduct, normalizedProduct) : null;
         const operationLog = {
           id: uid("log"),
           time: new Date().toISOString(),
           operator,
           module: "商品管理",
           action: exists ? "修改记录" : "添加记录",
-          detail: `${exists ? "修改" : "新增"}商品「${normalizedProduct.name}」`,
+          detail: `${exists ? "修改" : "新增"}商品「${normalizedProduct.name}」${priceChanged ? `；默认价 ${previousProduct.defaultPrice} → ${newDefaultPrice}，同步普通未售跟随库存，保留单独定价、历史待确认及已锁定库存` : ""}`,
         };
 	        const nextState = {
 	          ...state,
 	          products: nextProducts,
+	          stock: priceSync ? priceSync.stock : (Array.isArray(state.stock) ? state.stock : []),
 	          productOrigins: nextOrigins,
 	          operationLogs: pushOperationLog(operationLogs, operationLog),
 	        };
@@ -15085,12 +15156,19 @@ async function handleApi(req, res, url) {
           [stateId, JSON.stringify(nextState)]
         );
         await client.query("COMMIT");
+        const visibleBefore = siteVisibilityFilteredState(state, req.auth?.account);
+        const visibleAfter = siteVisibilityFilteredState(nextState, req.auth?.account);
+        const visibleStockIds = new Set((visibleAfter.stock ?? []).map(item => String(item.id)));
+        const visibleSync = previousProduct ? syncProductStockPrices({ ...state, stock: visibleBefore.stock }, previousProduct, normalizedProduct) : null;
         sendJson(req, res, 200, {
           ok: true,
           product: normalizedProduct,
+          pricingSummary: visibleSync?.counts ?? null,
+          stockPricingUpdates: (priceSync?.updatedStock ?? []).filter(item => visibleStockIds.has(String(item.id)))
+            .map(item => ({ id: item.id, basePrice: item.basePrice, priceMode: item.priceMode, priceOverridden: item.priceOverridden })),
           products: nextProducts,
           productOrigins: nextOrigins,
-          operationLog,
+          operationLog: priceChanged ? { ...operationLog, detail: `修改商品「${normalizedProduct.name}」；默认价 ${previousProduct.defaultPrice} → ${newDefaultPrice}，同步你可见场地 ${visibleSync.counts.priceUpdated} 条普通未售库存，其他价格保留` } : operationLog,
         });
       } catch (error) {
         await client.query("ROLLBACK");
@@ -15099,7 +15177,7 @@ async function handleApi(req, res, url) {
         client.release();
       }
     } catch (error) {
-      sendJson(req, res, 400, { error: `Failed to save product: ${error.message}` });
+      sendJson(req, res, Number(error?.statusCode ?? 400), { error: `保存商品失败：${error.message}` });
     }
     return;
   }

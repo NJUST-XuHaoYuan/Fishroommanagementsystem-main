@@ -25,6 +25,16 @@ const baseState = {
   }],
 };
 
+test("pricing modes participate in stock CAS even when the numeric price is unchanged", () => {
+  const original = { ...baseState.stock[0], basePrice: 100 };
+  const state = { ...baseState, stock: [original] };
+  const change = { upsert: [{ ...original, notes: "update" }] };
+  const expectation = buildStockMutationExpectation(state, change);
+  assert.equal(expectation.expectedBefore[original.id].priceMode, "");
+  assert.throws(() => assertStockMutationExpectation({ ...state, stock: [{ ...original, priceMode: "product" }] }, change, expectation),
+    (error) => error.code === "STOCK_APPROVAL_STALE" || error.statusCode === 409);
+});
+
 test("stock mutations require one product, batch, sub-tank and explicit current site", () => {
   assert.equal(authoritativeStockMutationSiteId(baseState, baseState.stock[0]), "nanjing");
   assert.throws(

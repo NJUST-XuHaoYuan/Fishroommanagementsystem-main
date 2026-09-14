@@ -27,6 +27,7 @@ import {
   type PurchaseBatch,
   type Shipment,
   type StockItem,
+  type StockPriceMode,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
 import {
@@ -39,6 +40,7 @@ import {
   stockApprovalDetailsReady,
   stockApprovalReviewState,
   stockApprovalSnapshotIdentityFields,
+  stockApprovalPriceModeLabel,
   type StockApprovalComparableItem,
 } from "../utils/notificationCenter";
 import { Badge } from "./ui/badge";
@@ -83,6 +85,7 @@ type StockApprovalItemDetail = {
   sold?: boolean;
   lost?: boolean;
   basePrice?: number;
+  priceMode?: StockPriceMode;
   priceOverridden?: boolean;
   commissionRate?: number;
   lossDate?: string;
@@ -457,6 +460,7 @@ function StockItemReviewSnapshot({
     ["已售", item.sold === true ? "是" : "否"],
     ["损耗", item.lost === true ? "是" : "否"],
     ["售价", stockMoneyReviewValue(item.basePrice)],
+    ["价格来源", stockApprovalPriceModeLabel(item.priceMode)],
     ["特殊售价", item.priceOverridden === true ? "是" : "否"],
     ["提成比例", stockRateReviewValue(item.commissionRate)],
     ["损耗日期", reviewValue(item.lossDate)],
@@ -1754,6 +1758,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                             <div className="text-muted-foreground">入库日期 / 底价</div>
                             <div className="mt-0.5 font-medium">{item.inDate || "未记录"}</div>
                             <div className="mt-0.5">¥{Number(item.basePrice ?? 0).toFixed(2)}</div>
+                            <div className="mt-0.5 text-muted-foreground">{stockApprovalPriceModeLabel(item.priceMode)}</div>
                           </div>
                         </div>
                       )}
@@ -1828,6 +1833,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                             <>
                               <div>{item.inDate || "未记录"}</div>
                               <div className="mt-1 font-medium">¥{Number(item.basePrice ?? 0).toFixed(2)}</div>
+                              <div className="mt-1 text-muted-foreground">{stockApprovalPriceModeLabel(item.priceMode)}</div>
                             </>
                           )}
                         </td>

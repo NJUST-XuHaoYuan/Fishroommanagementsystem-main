@@ -22,7 +22,8 @@ import {
 import { toast } from "sonner";
 import { getInventoryOutStockIds, isVisibleInStockInventory, normalizeInventoryId } from "../utils/inventory";
 import { usePermission } from "../utils/permissions";
-import { buildStockPriceBaselines, isStockSpecialPrice } from "../utils/stockPricing";
+import { buildStockPriceBaselines, isStockSpecialPrice, stockPriceMode } from "../utils/stockPricing";
+import { StockPriceField } from "./StockPriceField";
 import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
 import { orderSourceLabel } from "../utils/orderSources";
 import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
@@ -408,6 +409,8 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
       status: "healthy",
       inDate: today,
       basePrice: defaultProduct?.defaultPrice ?? 0,
+      priceMode: "product",
+      priceOverridden: false,
       commissionRate: 0,
       code: "",
       notes: "",
@@ -416,9 +419,8 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
 
   const changeProduct = (productId: string) => {
     if (!editing) return;
-    const currentDefault = product(editing.productId)?.defaultPrice ?? 0;
     const nextDefault = product(productId)?.defaultPrice ?? 0;
-    const shouldUseProductDefault = !editing.basePrice || editing.basePrice === currentDefault;
+    const shouldUseProductDefault = stockPriceMode(editing, product(editing.productId)) === "product";
     setEditing({
       ...editing,
       productId,
@@ -548,8 +550,10 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
     if (editing.inDate > today) return toast.error("入库日期不能晚于今天");
     const currentBatch = batch(editing.batchId);
     if (currentBatch && editing.inDate < currentBatch.arrivalDate) return toast.error("入库日期不能早于采购批次到货日期");
-    const basePrice = Number(editing.basePrice || product(editing.productId)?.defaultPrice || 0);
-    if (!basePrice || basePrice <= 0) return toast.error("请填写单条售价");
+    const priceMode = stockPriceMode(editing, product(editing.productId));
+    const basePrice = Number(!editing.id && priceMode === "product" ? product(editing.productId)?.defaultPrice : editing.basePrice);
+    if (!Number.isFinite(basePrice) || basePrice <= 0) return toast.error("请填写单条售价");
+    if (!editing.id && priceMode === "legacy") return toast.error("请选择跟随商品价或单独定价");
     if (!fromSubTank && !selectedGroupId) return toast.error("请选择缸组");
     if (!editing.subTankId) return toast.error("请选择子缸");
     const parsedQty = Number(quantity);
@@ -557,7 +561,9 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
       return toast.error("请填写大于 0 的入库数量");
     }
     const qty = fromSubTank && !editing.id ? parsedQty : 1;
-    const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: 0 }, qty);
+    const stockItems = buildStockItems({ ...editing, basePrice: Number(basePrice.toFixed(2)), commissionRate: 0,
+      ...(!editing.id ? { priceMode, priceOverridden: priceMode === "manual" } : {}),
+    }, qty);
     if (editing.id && (!editingBaseline || editingBaseline.id !== editing.id)) {
       return toast.error("库存原始数据已失效，请关闭后重新打开");
     }
@@ -1446,19 +1452,11 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                       onChange={(e) => changeInDate(e.target.value)}
                     />
                   </div>
-                  <div className="grid gap-2">
-                    <Label><span className="text-red-500">*</span> 单条售价(¥)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={editing.basePrice === 0 ? "" : editing.basePrice}
-                      onChange={(e) => setEditing({ ...editing, basePrice: e.target.value === "" ? 0 : Number(e.target.value) })}
-                      placeholder="0.00"
-                    />
-                    <span className="text-xs text-muted-foreground">
-                      入库时设置基础售价；已入库后的单条改价请到日常管理的鱼详情里操作。
-                    </span>
-                  </div>
+                  <StockPriceField mode={stockPriceMode(editing, product(editing.productId))} value={editing.basePrice}
+                    productPrice={product(editing.productId)?.defaultPrice} allowDirectOverride
+                    onModeChange={mode => setEditing({ ...editing, priceMode: mode, priceOverridden: mode === "manual",
+                      basePrice: mode === "product" || stockPriceMode(editing, product(editing.productId)) === "product" ? product(editing.productId)?.defaultPrice ?? 0 : editing.basePrice })}
+                    onPriceChange={value => setEditing({ ...editing, basePrice: value === "" ? 0 : Number(value), priceMode: "manual", priceOverridden: true })} />
                 </div>
               )}
 
