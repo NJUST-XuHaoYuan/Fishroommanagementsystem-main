@@ -1,6 +1,6 @@
 const array = (value) => Array.isArray(value) ? value : [];
 const id = (value) => String(value ?? "").trim();
-const MODES = new Set(["product", "manual", "legacy"]);
+const MODES = new Set(["product", "manual"]);
 const has = (item, key) => Object.prototype.hasOwnProperty.call(item ?? {}, key);
 
 function cents(value) {
@@ -22,13 +22,15 @@ function positivePrice(value, label) {
   return amount / 100;
 }
 
-/** Resolve legacy evidence against the product BEFORE its price is changed. */
-export function resolveStockPriceMode(stock = {}, product = {}) {
-  if (MODES.has(stock?.priceMode)) return stock.priceMode;
+/** Old unclassified prices now follow the product unless manual intent is explicit. */
+export function resolveStockPriceMode(stock = {}) {
+  const mode = id(stock?.priceMode);
+  if (MODES.has(mode)) return mode;
+  // The explicit old mode takes precedence over a stale override flag.
+  if (mode === "legacy") return "product";
+  if (mode) throw pricingError("库存定价方式无法识别，请先核对记录");
   if (stock?.priceOverridden === true) return "manual";
-  const base = cents(stock?.basePrice);
-  const fallback = cents(product?.defaultPrice);
-  return base != null && fallback != null && base === fallback ? "product" : "legacy";
+  return "product";
 }
 
 /** Orders keep inventory unless cancelled or the particular line was removed. */
@@ -55,13 +57,75 @@ function withMode(item, mode) {
 }
 
 /**
+ * One-time, repeatable migration of old pricing modes. Historical amounts and
+ * every non-pricing field remain untouched; free candidates use a unique valid
+ * product price. Established product/manual records are deliberately not swept.
+ */
+export function migrateLegacyStockPricingState(state = {}) {
+  const protectedIds = stockPricingProtectedIds(state);
+  const productsById = new Map();
+  for (const product of array(state.products)) {
+    const productId = id(product?.id);
+    if (!productId) continue;
+    const matches = productsById.get(productId) ?? [];
+    matches.push(product);
+    productsById.set(productId, matches);
+  }
+  const counts = { total: 0, candidates: 0, legacyConverted: 0, unclassifiedConverted: 0,
+    manualPreserved: 0, productPreserved: 0, protected: 0, priceUpdated: 0, modeUpdated: 0, exceptionCount: 0 };
+  const exceptions = [];
+  let changed = false;
+  const stock = array(state.stock).map((item) => {
+    counts.total += 1;
+    const stockId = id(item?.id);
+    const isProtected = protectedIds.has(stockId);
+    const report = (reason) => exceptions.push({ stockId, reason, protected: isProtected });
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      report("INVALID_STOCK");
+      return item;
+    }
+    const mode = id(item.priceMode);
+    if (mode && !MODES.has(mode) && mode !== "legacy") {
+      report("UNKNOWN_PRICE_MODE");
+      return item;
+    }
+    if (mode === "manual" || (!mode && item.priceOverridden === true)) {
+      counts.manualPreserved += 1;
+      return item;
+    }
+    if (mode === "product") {
+      counts.productPreserved += 1;
+      return item;
+    }
+    counts.candidates += 1;
+    counts[mode === "legacy" ? "legacyConverted" : "unclassifiedConverted"] += 1;
+    if (isProtected) counts.protected += 1;
+    const next = withMode(item, "product");
+    const matches = productsById.get(id(item.productId)) ?? [];
+    const productPrice = matches.length === 1 ? cents(matches[0].defaultPrice) : null;
+    if (matches.length === 0) report("PRODUCT_MISSING");
+    else if (matches.length > 1) report("PRODUCT_DUPLICATE");
+    else if (productPrice == null) report("PRODUCT_PRICE_INVALID");
+    else if (!isProtected && cents(item.basePrice) !== productPrice) {
+      next.basePrice = productPrice / 100;
+      counts.priceUpdated += 1;
+    }
+    counts.modeUpdated += 1;
+    changed = true;
+    return next;
+  });
+  counts.exceptionCount = exceptions.length;
+  return { state: changed ? { ...state, stock } : state, changed, counts, exceptions };
+}
+
+/**
  * Normalize a proposed stock write using server-owned product data.
  * Old clients without a mode remain supported: changing an existing price is
  * manual intent, while an unchanged legacy price never becomes manual by accident.
  */
 export function normalizeStockPricing(item = {}, product = {}, { existing, previousProduct = product, protected: isProtected = false } = {}) {
   const requested = id(item.priceMode);
-  if (requested && !MODES.has(requested)) throw pricingError("请选择有效的定价方式");
+  if (requested && !MODES.has(requested) && requested !== "legacy") throw pricingError("请选择有效的定价方式");
   const existingMode = existing ? resolveStockPriceMode(existing, previousProduct) : "";
   const priceChanged = existing && has(item, "basePrice") && cents(item.basePrice) !== cents(existing.basePrice);
   const productChanged = existing && id(item.productId) !== id(existing.productId);
@@ -72,8 +136,10 @@ export function normalizeStockPricing(item = {}, product = {}, { existing, previ
       : cents(item.basePrice) != null && cents(item.basePrice) === cents(product.defaultPrice) ? "product"
       : !has(item, "basePrice") ? "product" : "manual");
   } else if (requested === "legacy") {
-    if (existingMode !== "legacy" || priceChanged || productChanged) throw pricingError("历史保留价只能原样保留；调价请明确选择跟随商品或单独定价");
-    mode = "legacy";
+    if (existingMode !== "product" || priceChanged || productChanged) {
+      throw pricingError("历史价格已改为跟随商品价，请刷新后重新确认", 409, "STOCK_PRICING_STALE");
+    }
+    mode = "product";
   } else {
     mode = requested || (priceChanged ? "manual" : existingMode);
   }
@@ -88,7 +154,7 @@ export function normalizeStockPricing(item = {}, product = {}, { existing, previ
   return withMode({ ...item, basePrice }, mode);
 }
 
-/** Product edit: freeze all old classifications, then update only free followers. */
+/** Product edit: preserve explicit manual prices and update only free followers. */
 export function syncProductStockPrices(state = {}, oldProduct = {}, newProduct = {}) {
   const productId = id(newProduct.id);
   if (!productId || (oldProduct?.id && id(oldProduct.id) !== productId)) throw pricingError("商品编号不匹配");
@@ -121,15 +187,18 @@ export function reconcileReleasedStockPricing(previousState = {}, nextState = {}
   const previouslyProtected = stockPricingProtectedIds(previousState);
   const stillProtected = stockPricingProtectedIds(nextState);
   const previousStock = new Map(array(previousState.stock).map((item) => [id(item?.id), item]));
-  const previousProducts = new Map(array(previousState.products).map((item) => [id(item?.id), item]));
-  const currentProducts = new Map(array(nextState.products).map((item) => [id(item?.id), item]));
+  const currentProducts = new Map();
+  for (const product of array(nextState.products)) {
+    const productId = id(product?.id);
+    currentProducts.set(productId, currentProducts.has(productId) ? null : product);
+  }
   let changed = false;
   const stock = array(nextState.stock).map((item) => {
     const stockId = id(item?.id);
     if (!previouslyProtected.has(stockId) || stillProtected.has(stockId)) return item;
     const previous = previousStock.get(stockId);
     if (!previous || id(previous.productId) !== id(item.productId)) return item;
-    const mode = MODES.has(item.priceMode) ? item.priceMode : resolveStockPriceMode(previous, previousProducts.get(id(previous.productId)));
+    const mode = resolveStockPriceMode(id(item.priceMode) || item.priceOverridden === true ? item : previous);
     const next = withMode(item, mode);
     const defaultCents = cents(currentProducts.get(id(item.productId))?.defaultPrice);
     if (mode === "product" && defaultCents != null) next.basePrice = defaultCents / 100;

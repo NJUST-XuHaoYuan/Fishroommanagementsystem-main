@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startMutableRouteServer } from "./test-support/mutable-route-server.mjs";
 import { stockPricingFixture, PRICING_TEST_PASSWORD } from "./test-support/stock-pricing-fixture.mjs";
+import { migrateLegacyStockPricingState } from "./stock-pricing.mjs";
 
 async function setup(t, fixture = stockPricingFixture) {
   const server = await startMutableRouteServer(fixture);
@@ -29,29 +30,29 @@ const assertPricing = (state, id, price, mode) => {
   assert.equal(item.basePrice, price, `${id} price`); assert.equal(item.priceMode, mode, `${id} mode`);
 };
 
-test("product upsert atomically follows old-price evidence across sites and preserves manual, legacy, held and historical order values", async (t) => {
+test("product upsert follows historical defaults across sites and preserves manual, held and historical order values", async (t) => {
   const s = await setup(t); const before = await s.state();
   const result = await s.upsert(200); ok(result);
-  assert.deepEqual(result.body.pricingSummary, { total: 25, product: 18, manual: 4, legacy: 3, protected: 13, priceUpdated: 7, modeFrozen: 5 });
+  assert.deepEqual(result.body.pricingSummary, { total: 25, product: 21, manual: 4, legacy: 0, protected: 13, priceUpdated: 8, modeFrozen: 5 });
   let state = await s.state();
   for (const id of ["follower", "follower-stale", "PRIVATE_JY_FOLLOWER", "legacy-equal", "shipment-preparing", "cancelled-order", "removed-order-item"]) assertPricing(state, id, 200, "product");
   for (const id of ["sold", "lost", "status-sold", "ordered-confirmed", "ordered-completed", "ordered-pending", "shipment-outbound", "shipment-shipped", "shipment-delivered", "shipment-damaged", "release-follower"]) assertPricing(state, id, 100, "product");
-  assertPricing(state, "legacy-different", 140, "legacy"); assertPricing(state, "legacy-equal-new", 200, "legacy");
+  assertPricing(state, "legacy-different", 200, "product"); assertPricing(state, "legacy-equal-new", 200, "product");
   assertPricing(state, "legacy-override", 100, "manual"); assertPricing(state, "manual-equal", 100, "manual");
   assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "release-manual", 145, "manual");
-  assertPricing(state, "release-legacy", 145, "legacy"); assertPricing(state, "other-product-fish", 777, "product");
+  assertPricing(state, "release-legacy", 145, "product"); assertPricing(state, "other-product-fish", 777, "product");
   assert.deepEqual(state.orders, before.orders); assert.deepEqual(state.shipments, before.shipments);
   ok(await s.upsert(250, 200)); state = await s.state();
-  assertPricing(state, "follower", 250, "product"); assertPricing(state, "legacy-equal-new", 200, "legacy");
+  assertPricing(state, "follower", 250, "product"); assertPricing(state, "legacy-equal-new", 250, "product");
   assertPricing(state, "manual-equal", 100, "manual"); assert.deepEqual(state.orders, before.orders);
 });
 
 test("site-limited product editors may update shared product prices but receive only visible stock counts and IDs", async (t) => {
   const s = await setup(t); const result = await s.upsert(200, 100, "editor"); ok(result);
-  assert.equal(result.body.pricingSummary.total, 24); assert.equal(result.body.pricingSummary.priceUpdated, 6);
+  assert.equal(result.body.pricingSummary.total, 24); assert.equal(result.body.pricingSummary.priceUpdated, 7);
   assert.equal(result.body.stockPricingUpdates.length, 10);
   assert.ok(result.body.stockPricingUpdates.every((item) => Object.keys(item).sort().join(",") === "basePrice,id,priceMode,priceOverridden"));
-  assert.doesNotMatch(JSON.stringify(result.body), /PRIVATE_JY_|jiangyin|同步 7 条/);
+  assert.doesNotMatch(JSON.stringify(result.body), /PRIVATE_JY_|jiangyin|同步 8 条/);
   assertPricing(await s.state(), "PRIVATE_JY_FOLLOWER", 200, "product");
   for (const path of ["/api/state", "/api/state/slice?keys=operationLogs"]) {
     const read = await s.request(path, { token: s.tokens.editor }); ok(read);
@@ -131,8 +132,63 @@ test("old maintenance clients cannot overwrite frozen modes, but notes remain ed
   assert.equal(missingMode.response.status, 409, JSON.stringify(missingMode.body));
   assertPricing(await s.state(), "follower", 200, "product");
   ok(await s.bio("legacy-equal-new", { notes: "旧客户端备注" }, { notes: "" }));
-  assertPricing(await s.state(), "legacy-equal-new", 200, "legacy");
-  ok(await s.upsert(300, 200)); assertPricing(await s.state(), "follower", 300, "product"); assertPricing(await s.state(), "legacy-equal-new", 200, "legacy");
+  assertPricing(await s.state(), "legacy-equal-new", 200, "product");
+  ok(await s.upsert(300, 200)); assertPricing(await s.state(), "follower", 300, "product"); assertPricing(await s.state(), "legacy-equal-new", 300, "product");
+});
+
+test("after migration stale legacy clients cannot restore historical prices or the removed pricing mode", async (t) => {
+  const fixture = structuredClone(stockPricingFixture);
+  byId(fixture.state, "legacy-different").priceMode = "legacy";
+  const staleItem = structuredClone(byId(fixture.state, "legacy-different"));
+  fixture.state = migrateLegacyStockPricingState(fixture.state).state;
+  const s = await setup(t, fixture);
+  assertPricing(await s.state(), "legacy-different", 100, "product");
+  const staleMaintenance = await s.bio("legacy-different", { basePrice: 140, priceMode: "legacy", notes: "旧页面" },
+    { basePrice: 140, priceMode: "legacy", notes: "" });
+  assert.equal(staleMaintenance.response.status, 409, JSON.stringify(staleMaintenance.body));
+  const staleInventory = await stockWrite(s, [{ ...staleItem, notes: "旧库存页面" }], { [staleItem.id]: staleItem });
+  assert.equal(staleInventory.response.status, 409, JSON.stringify(staleInventory.body));
+  assertPricing(await s.state(), "legacy-different", 100, "product");
+  assert.equal(byId(await s.state(), "legacy-different").notes, "");
+
+  // A compatible old payload with the current amount may be a harmless retry,
+  // but it must never persist the retired third mode again.
+  ok(await s.bio("legacy-different", { basePrice: 100, priceMode: "legacy" }, { basePrice: 100, priceMode: "product" }));
+  assertPricing(await s.state(), "legacy-different", 100, "product");
+  const manualAttempt = await s.bio("manual-different", { basePrice: 150, priceMode: "legacy" }, { basePrice: 150, priceMode: "manual" });
+  assert.equal(manualAttempt.response.status, 409, JSON.stringify(manualAttempt.body));
+  assertPricing(await s.state(), "manual-different", 150, "manual");
+  ok(await s.upsert(225)); assertPricing(await s.state(), "legacy-different", 225, "product");
+  assert.ok((await s.readPersistedState()).stock.every((item) => item.priceMode !== "legacy"));
+});
+
+test("migrating historical stock and subsequent product edits leave orders, payments, refunds and shipment amounts intact", async (t) => {
+  const fixture = structuredClone(stockPricingFixture);
+  const historicalOrder = fixture.state.orders.find((order) => order.id === "ORDER-COMPLETED");
+  historicalOrder.payments = [{ id: "paid-before-migration", amount: 123.45, date: "2026-09-01", channel: "wechat" }];
+  historicalOrder.refunds = [{ id: "refund-before-migration", amount: 10.5, date: "2026-09-02", reason: "历史售后" }];
+  historicalOrder.discount = 7.25;
+  historicalOrder.shippingFee = 18;
+  byId(fixture.state, "ordered-completed").priceMode = "legacy";
+  byId(fixture.state, "ordered-completed").basePrice = 88;
+  byId(fixture.state, "shipment-shipped").priceMode = "legacy";
+  byId(fixture.state, "shipment-shipped").basePrice = 91;
+  const originalOrders = structuredClone(fixture.state.orders);
+  const originalShipments = structuredClone(fixture.state.shipments);
+  fixture.state = migrateLegacyStockPricingState(fixture.state).state;
+  assert.deepEqual(fixture.state.orders, originalOrders);
+  assert.deepEqual(fixture.state.shipments, originalShipments);
+  const s = await setup(t, fixture);
+  const before = await s.readPersistedState();
+  ok(await s.upsert(300));
+  ok(await s.bio("legacy-different", { notes: "已迁移，保留成交历史" }, { notes: "" }));
+  const after = await s.readPersistedState();
+  assertPricing(after, "ordered-completed", 88, "product");
+  assertPricing(after, "shipment-shipped", 91, "product");
+  assertPricing(after, "legacy-different", 300, "product");
+  assertPricing(after, "manual-different", 150, "manual");
+  assert.deepEqual(after.orders, before.orders);
+  assert.deepEqual(after.shipments, before.shipments);
 });
 
 test("held inventory rejects maintenance price/mode changes and hidden stock cannot be edited by visible-site staff", async (t) => {
@@ -150,7 +206,7 @@ test("releasing an order resumes only product-priced fish at the current product
   const s = await setup(t); ok(await s.upsert(200)); const before = await s.state();
   const result = await s.request("/api/orders/delete", { token: s.tokens.admin, body: { orderId: "ORDER-RELEASE" } }); ok(result);
   const state = await s.state();
-  assertPricing(state, "release-follower", 200, "product"); assertPricing(state, "release-manual", 145, "manual"); assertPricing(state, "release-legacy", 145, "legacy");
+  assertPricing(state, "release-follower", 200, "product"); assertPricing(state, "release-manual", 145, "manual"); assertPricing(state, "release-legacy", 200, "product");
   for (const id of ["release-follower", "release-manual", "release-legacy"]) assert.equal(byId(state, id).sold, false);
   assert.deepEqual(state.orders, before.orders.filter((order) => order.id !== "ORDER-RELEASE"));
 });
@@ -263,7 +319,7 @@ test("clearing a lost flag cannot bypass independent active-order or shipment pr
   const after = await s.readPersistedState(); assert.deepEqual(after.stock, before.stock); assert.deepEqual(after.approvalRequests, before.approvalRequests);
 });
 
-test("restoring lost manual and legacy inventory retains reviewed prices instead of following the new product default", async (t) => {
+test("restoring lost manual inventory retains its price while historical defaults review and resume the product price", async (t) => {
   const fixture = structuredClone(stockPricingFixture);
   const ids = ["manual-different", "legacy-different"];
   for (const id of ids) fixture.state.stock.find((item) => item.id === id).lost = true;
@@ -272,10 +328,11 @@ test("restoring lost manual and legacy inventory retains reviewed prices instead
   const submitted = await stockWrite(s, originals.map((item) => ({ ...item, lost: false })), Object.fromEntries(originals.map((item) => [item.id, item])), "editor"); ok(submitted);
   const pending = (await s.readPersistedState()).approvalRequests.find((request) => request.id === submitted.body.approvalRequestId);
   assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "manual-different").after.basePrice, 150);
-  assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "legacy-different").after.basePrice, 140);
+  assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "legacy-different").after.basePrice, 200);
+  assert.equal(pending.stockDetails.items.find((item) => item.stockItemId === "legacy-different").after.priceMode, "product");
   const approved = await s.request("/api/approvals/stock", { token: s.tokens.admin, body: { requestId: pending.id, decision: "approve" } }); ok(approved);
   const state = await s.readPersistedState();
-  assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 140, "legacy");
+  assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 200, "product");
   for (const id of ids) assert.equal(byId(state, id).lost, false);
 });
 
@@ -290,7 +347,7 @@ test("manual equal-price adjustment drafts survive save/load and remain manual a
   const adminDraft = await s.request("/api/stock/adjustment-draft", { token: s.tokens.admin }); ok(adminDraft); assert.equal(adminDraft.body.draft, null);
 });
 
-test("cross-site maintenance movement preserves all three price modes and future product sync respects them", async (t) => {
+test("cross-site maintenance movement preserves manual prices and follows product defaults for converted historical stock", async (t) => {
   const s = await setup(t); ok(await s.upsert(200));
   const before = await s.state(); const itemIds = ["follower", "manual-different", "legacy-different"];
   const result = await s.request("/api/maintenance/save", { token: s.tokens.admin, body: {
@@ -300,7 +357,7 @@ test("cross-site maintenance movement preserves all three price modes and future
   } }); ok(result);
   let state = await s.state();
   for (const id of itemIds) { assert.equal(byId(state, id).siteId, "jiangyin"); assert.equal(byId(state, id).batchId, "batch-n"); }
-  assertPricing(state, "follower", 200, "product"); assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 140, "legacy");
+  assertPricing(state, "follower", 200, "product"); assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 200, "product");
   ok(await s.upsert(300, 200)); state = await s.state();
-  assertPricing(state, "follower", 300, "product"); assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 140, "legacy");
+  assertPricing(state, "follower", 300, "product"); assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 300, "product");
 });

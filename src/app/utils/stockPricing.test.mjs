@@ -4,22 +4,27 @@ import { buildStockPriceDetailsPatch, isStockSpecialPrice, newStockPriceMode, st
 
 const product = { defaultPrice: 100 };
 
-test("explicit source survives equal prices and future product price changes", () => {
-  for (const priceMode of ["product", "manual", "legacy"]) {
+test("explicit product and manual sources survive equal prices and future product price changes", () => {
+  for (const priceMode of ["product", "manual"]) {
     assert.equal(stockPriceMode({ basePrice: 100, priceMode }, product), priceMode);
     assert.equal(stockPriceMode({ basePrice: 100, priceMode }, { defaultPrice: 200 }), priceMode);
   }
 });
 
-test("unmarked legacy stock follows only an equal positive price without manual override", () => {
+test("existing legacy and unmarked stock follow products unless explicitly priced manually", () => {
   assert.equal(stockPriceMode({ basePrice: 100 }, product), "product");
   assert.equal(stockPriceMode({ basePrice: 100, priceOverridden: false }, product), "product");
   assert.equal(stockPriceMode({ basePrice: 100, priceOverridden: true }, product), "manual");
-  assert.equal(stockPriceMode({ basePrice: 80 }, product), "legacy");
-  assert.equal(stockPriceMode({ basePrice: 0 }, product), "legacy");
-  assert.equal(stockPriceMode({ basePrice: 100 }), "legacy");
+  assert.equal(stockPriceMode({ basePrice: 80 }, product), "product");
+  assert.equal(stockPriceMode({ basePrice: 0 }, product), "product");
+  assert.equal(stockPriceMode({ basePrice: 100 }), "product");
   assert.equal(stockPriceMode({ basePrice: 1.005 }, { defaultPrice: 1.01 }), "product");
-  assert.equal(stockPriceMode({ basePrice: Number.MAX_VALUE }, { defaultPrice: Number.MAX_VALUE }), "legacy");
+  assert.equal(stockPriceMode({ basePrice: Number.MAX_VALUE }, { defaultPrice: Number.MAX_VALUE }), "product");
+  for (const priceOverridden of [undefined, false, true]) {
+    assert.equal(stockPriceMode({ basePrice: 80, priceMode: "legacy", priceOverridden }, product), "product");
+  }
+  assert.equal(stockPriceMode({ basePrice: 100, priceMode: "manual", priceOverridden: false }, product), "manual");
+  assert.equal(stockPriceMode({ basePrice: 80, priceMode: "product", priceOverridden: true }, product), "product");
 });
 
 test("untouched maintenance omits pricing fields even with stale draft price or historical null mode", () => {
@@ -52,12 +57,19 @@ test("new stock and restored additions retain manual prices, including a manuall
   assert.equal(newStockPriceMode({ basePrice: 100, priceMode: "manual" }, product), "manual");
   assert.equal(newStockPriceMode({ basePrice: 80 }, product), "manual");
   assert.equal(newStockPriceMode({ basePrice: 80, priceMode: "legacy" }, product), "manual");
+  assert.equal(newStockPriceMode({ basePrice: 100, priceMode: "legacy" }, product), "manual");
+  assert.equal(newStockPriceMode({ basePrice: 100, priceOverridden: true }, product), "manual");
+  assert.equal(newStockPriceMode({ basePrice: 100 }, product), "product");
+  assert.equal(newStockPriceMode({ basePrice: 0 }, product), "manual");
+  assert.equal(newStockPriceMode({ basePrice: 80 }), "manual");
 });
 
 test("effective sale price remains the persisted price and explicit manual source owns the special-price badge", () => {
   assert.equal(stockSalePrice({ basePrice: 80, priceMode: "product" }, product), 80);
+  assert.equal(stockSalePrice({ basePrice: 80, priceMode: "legacy" }, product), 80);
   assert.equal(isStockSpecialPrice({ basePrice: 100, priceMode: "manual", priceOverridden: false }, product), true);
   assert.equal(isStockSpecialPrice({ basePrice: 100, priceMode: "product", priceOverridden: true }, product), false);
   assert.equal(isStockSpecialPrice({ basePrice: 80, priceOverridden: true }, product), true);
   assert.deepEqual(["product", "manual", "legacy"].map(stockPriceModeLabel), ["跟随商品价", "单独定价", "历史价格待确认"]);
+  assert.equal(stockPriceModeLabel(stockPriceMode({ basePrice: 80, priceMode: "legacy" }, product)), "跟随商品价");
 });

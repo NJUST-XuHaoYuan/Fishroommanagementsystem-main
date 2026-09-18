@@ -192,7 +192,7 @@ export type StockItem = {
   inDate: string;
   /** 这条鱼进入销售订单时默认带出的售价。 */
   basePrice: number;
-  /** product 跟随商品价；manual 单独定价；legacy 历史价格待确认。 */
+  /** product 跟随商品价；manual 单独定价；legacy 仅兼容历史审批快照，现存库存按 product 处理。 */
   priceMode?: StockPriceMode;
   /** 是否在日常管理中手工改过单条售价。 */
   priceOverridden?: boolean;

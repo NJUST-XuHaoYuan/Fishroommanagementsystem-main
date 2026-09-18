@@ -1114,7 +1114,7 @@ function AdminApp() {
       if (priceChanged && isMutationSessionCurrent(mutationSession)) {
         const summary = result.pricingSummary;
         toast.success(`商品价格已保存；你可见场地的 ${Number(summary?.priceUpdated ?? 0)} 条跟随库存已同步`, {
-          description: "单独定价、历史待确认及已售、损耗、订单占用库存保留原价，历史订单金额不变。",
+          description: "单独定价及已售、损耗、出库或订单占用库存保留原价，历史订单金额不变。",
           duration: 6500,
         });
       }

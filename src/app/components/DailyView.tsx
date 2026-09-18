@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from "react";
-import { useStore, BioRecord, DailyLog, MaintenanceSaveResult, Order, Shipment, StockStatus, StockItem, StockPriceMode, TankGroup, isPersonnelResigned, uid } from "../store";
+import { useStore, BioRecord, DailyLog, MaintenanceSaveResult, Order, Shipment, StockStatus, StockItem, TankGroup, isPersonnelResigned, uid } from "../store";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Input } from "./ui/input";
@@ -81,7 +81,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [q, setQ] = useState("");
   const [filterStatuses, setFilterStatuses] = useState<Set<StockStatus>>(new Set());
   const [filterSoldOnly, setFilterSoldOnly] = useState(false);
-  const [filterPriceMode, setFilterPriceMode] = useState<StockPriceMode | "all">("all");
+  const [filterPriceMode, setFilterPriceMode] = useState<"product" | "manual" | "all">("all");
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState("visual");
@@ -97,7 +97,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [bioItemId, setBioItemId] = useState<string | null>(null);
   const [bioStatus, setBioStatus] = useState<StockStatus>("healthy");
   const [bioBasePrice, setBioBasePrice] = useState("");
-  const [bioPriceMode, setBioPriceMode] = useState<StockPriceMode>("legacy");
+  const [bioPriceMode, setBioPriceMode] = useState<"product" | "manual">("product");
   const [bioPriceChanged, setBioPriceChanged] = useState(false);
   const bioPricingOriginalRef = useRef<Pick<StockItem, "basePrice" | "priceMode" | "priceOverridden"> | null>(null);
   const [bioCode, setBioCode] = useState("");
@@ -1398,13 +1398,12 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   className="h-8 w-full pl-9 sm:w-72"
                 />
               </div>
-              <Select value={filterPriceMode} onValueChange={(value: StockPriceMode | "all") => setFilterPriceMode(value)}>
+              <Select value={filterPriceMode} onValueChange={(value: "product" | "manual" | "all") => setFilterPriceMode(value)}>
                 <SelectTrigger className="h-8 w-full sm:w-44" aria-label="筛选价格来源"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">价格来源：全部</SelectItem>
                   <SelectItem value="product">跟随商品价</SelectItem>
                   <SelectItem value="manual">单独定价</SelectItem>
-                  <SelectItem value="legacy">历史价格待确认</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1824,7 +1823,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                 disabledReason={bioPriceLocked ? "已售、损耗或关联订单的库存保留原价，历史订单价不受影响。" : "当前不能修改价格。"}
                 onModeChange={mode => {
                   setBioPriceMode(mode);
-                  if (mode === "product" || bioPriceMode === "product") setBioBasePrice(String(bioProduct?.defaultPrice ?? 0));
+                  if ((mode === "product" || bioPriceMode === "product") && Number.isFinite(bioProduct?.defaultPrice) && Number(bioProduct?.defaultPrice) > 0) setBioBasePrice(String(bioProduct?.defaultPrice));
                   setBioPriceChanged(true);
                 }}
                 onPriceChange={value => { setBioBasePrice(value); setBioPriceMode("manual"); setBioPriceChanged(true); }} />

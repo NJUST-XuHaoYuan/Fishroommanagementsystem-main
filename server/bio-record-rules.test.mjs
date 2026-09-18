@@ -261,14 +261,14 @@ test("old clients may switch price to manual but cannot overwrite a subsequently
     (error) => error.code === "BIO_DETAILS_STALE");
 });
 
-test("saving notes with an unchanged historical price retains legacy and never marks it manual", () => {
+test("saving notes with an unchanged historical price adopts the product default and never marks it manual", () => {
   const planned = planBioRecordSave({ action: "saveDetails", stockItem, product: { defaultPrice: 100 },
     details: { basePrice: 120, notes: "new" }, expectedDetails: { basePrice: 120, notes: "old" } });
-  assert.equal(planned.stockItem.basePrice, 120);
-  assert.equal(planned.stockItem.priceMode, "legacy");
+  assert.equal(planned.stockItem.basePrice, 100);
+  assert.equal(planned.stockItem.priceMode, "product");
   assert.notEqual(planned.stockItem.priceOverridden, true);
   const retry = planBioRecordSave({ action: "saveDetails", stockItem: planned.stockItem, product: { defaultPrice: 100 },
-    details: { basePrice: 120, notes: "new" }, expectedDetails: { basePrice: 120, notes: "old" } });
+    details: { priceMode: "product", notes: "new" }, expectedDetails: { basePrice: 120, notes: "old" } });
   assert.equal(retry.idempotent, true);
 });
 

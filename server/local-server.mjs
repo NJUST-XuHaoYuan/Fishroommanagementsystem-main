@@ -15146,7 +15146,7 @@ async function handleApi(req, res, url) {
           operator,
           module: "商品管理",
           action: exists ? "修改记录" : "添加记录",
-          detail: `${exists ? "修改" : "新增"}商品「${normalizedProduct.name}」${priceChanged ? `；默认价 ${previousProduct.defaultPrice} → ${newDefaultPrice}，同步普通未售跟随库存，保留单独定价、历史待确认及已锁定库存` : ""}`,
+          detail: `${exists ? "修改" : "新增"}商品「${normalizedProduct.name}」${priceChanged ? `；默认价 ${previousProduct.defaultPrice} → ${newDefaultPrice}，同步普通未售跟随库存，保留单独定价及已锁定库存` : ""}`,
         };
 	        const nextState = {
 	          ...state,

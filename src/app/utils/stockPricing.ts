@@ -17,21 +17,26 @@ function positivePriceCents(value: unknown): number | null {
   return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
 }
 
-export function stockPriceMode(stock: PriceSource, product?: Pick<Product, "defaultPrice">): StockPriceMode {
-  if (stock.priceMode === "product" || stock.priceMode === "manual" || stock.priceMode === "legacy") return stock.priceMode;
+/** Existing unconfirmed historical prices now follow products; explicit manual prices stay independent. */
+export function stockPriceMode(stock: PriceSource, _product?: Pick<Product, "defaultPrice">): "product" | "manual" {
+  if (stock.priceMode === "manual") return "manual";
+  if (stock.priceMode === "product" || stock.priceMode === "legacy") return "product";
   if (stock.priceOverridden === true) return "manual";
-  const price = positivePriceCents(stock.basePrice);
-  const defaultPrice = positivePriceCents(product?.defaultPrice);
-  return price != null && defaultPrice != null && price === defaultPrice ? "product" : "legacy";
+  return "product";
 }
 
+/** Keep the legacy label for immutable historical approval/audit records, not current price controls. */
 export function stockPriceModeLabel(mode: StockPriceMode): string {
   return { product: "跟随商品价", manual: "单独定价", legacy: "历史价格待确认" }[mode];
 }
 
 /** Old unsaved additions with a different price retain that price as manual; new stock is never legacy. */
 export function newStockPriceMode(stock: PriceSource, product?: Pick<Product, "defaultPrice">): "product" | "manual" {
-  return stockPriceMode(stock, product) === "product" ? "product" : "manual";
+  if (stock.priceMode === "product" || stock.priceMode === "manual") return stock.priceMode;
+  if (stock.priceMode === "legacy" || stock.priceOverridden === true) return "manual";
+  const price = positivePriceCents(stock.basePrice);
+  const defaultPrice = positivePriceCents(product?.defaultPrice);
+  return price != null && defaultPrice != null && price === defaultPrice ? "product" : "manual";
 }
 
 /** No pricing fields on an untouched maintenance save: a product price may have changed meanwhile. */
