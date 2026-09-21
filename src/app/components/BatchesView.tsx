@@ -20,6 +20,7 @@ import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { authJsonHeaders } from "../utils/authSession";
 import { BatchDetailsView } from "./BatchDetailsView";
 import { BatchInfoSection } from "./BatchInfoSection";
+import { sortBatchesNewestFirst } from "../utils/batchSorting";
 import { MoreHorizontal } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
@@ -94,6 +95,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
   const permission = usePermission("batches");
 
   const today = new Date().toISOString().slice(0, 10);
+  const sortedBatches = useMemo(() => sortBatchesNewestFirst(state.batches), [state.batches]);
 
   const generateBatchNo = () => {
     const year = new Date().getFullYear();
@@ -259,7 +261,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         </div>
       )}
       <DataTable
-        data={state.batches}
+        data={sortedBatches}
         searchKeys={["batchNo", "supplier", "arrivalDate"]}
         searchPlaceholder="搜索批次号、供应商..."
         onAdd={permission.canCreate ? () => { setEditing(empty()); setOpen(true); } : undefined}
