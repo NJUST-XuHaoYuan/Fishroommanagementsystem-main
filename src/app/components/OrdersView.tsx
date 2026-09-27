@@ -9,6 +9,7 @@ import {
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
+import { mergeAcquisitionOrderTags, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
@@ -237,6 +238,7 @@ type CreditSaleRequiredPayload = {
   eligibleApprovers?: CreditSaleApprover[];
   selectedApproverUsernames?: string[];
   requesterIsOrderOwner?: boolean;
+  order?: Order;
 };
 
 type CreditSaleRequestDialogState = {
@@ -1305,6 +1307,7 @@ function OrderStatusTags({
           {tag.label}
         </span>
       ))}
+      <OrderAcquisitionBadge marked={order.isAcquisitionOrder} />
     </span>
   );
 }
@@ -4320,6 +4323,9 @@ function OrderDetailDialog({
   const [creditSaleRequest, setCreditSaleRequest] = useState<CreditSaleRequestDialogState | null>(null);
   const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
+  const [acquisitionTagSaving, setAcquisitionTagSaving] = useState(false);
+  const acquisitionTagRequestPending = useRef(false);
+  const [acquisitionTagError, setAcquisitionTagError] = useState<{ orderId: string; message: string } | null>(null);
   const personnel = state.personnel ?? [];
   const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel);
@@ -4508,6 +4514,53 @@ function OrderDetailDialog({
   };
 
   const cancelEdit = () => { setEditMode(false); setEditForm(null); };
+
+  const applyAcquisitionTagResult = (result: { order: Order; operationLog?: Store["operationLogs"][number] }) => {
+    setState((current) => {
+      if (!current.orders.some((item) => item.id === result.order.id)) return current;
+      return {
+        ...current,
+        orders: mergeAcquisitionOrderTags(current.orders, result.order),
+        operationLogs: mergeOperationLog(current, result.operationLog),
+      };
+    });
+  };
+
+  const toggleAcquisitionTag = async () => {
+    if (!order || acquisitionTagRequestPending.current) return;
+    if (!permission.isAdmin) {
+      toast.error("只有管理员可以修改获新订单标记");
+      return;
+    }
+    const orderId = order.id;
+    const isAcquisitionOrder = order.isAcquisitionOrder !== true;
+    acquisitionTagRequestPending.current = true;
+    setAcquisitionTagSaving(true);
+    setAcquisitionTagError(null);
+    try {
+      const result = await postOrderApi("orders/acquisition-tag", {
+        orderId,
+        isAcquisitionOrder,
+        expectedIsAcquisitionOrder: order.isAcquisitionOrder === true,
+        expectedAcquisitionOrderUpdatedAt: order.acquisitionOrderUpdatedAt ?? "",
+      });
+      if (result.order?.id !== orderId || result.order.isAcquisitionOrder !== isAcquisitionOrder) {
+        throw new Error("服务端未返回已保存的标记，请刷新订单确认后重试");
+      }
+      applyAcquisitionTagResult(result);
+      toast.success(isAcquisitionOrder ? "已标记为获新订单" : "已取消获新订单标记");
+    } catch (error) {
+      if (error instanceof OrderApiError && error.code === "ORDER_ACQUISITION_TAG_CONFLICT" && error.payload.order?.id === orderId) {
+        applyAcquisitionTagResult({ order: error.payload.order });
+      }
+      const message = error instanceof Error ? error.message : "获新订单标记保存失败，请重试";
+      setAcquisitionTagError({ orderId, message });
+      toast.error(message);
+    } finally {
+      acquisitionTagRequestPending.current = false;
+      setAcquisitionTagSaving(false);
+    }
+  };
 
   const saveEdit = async () => {
     if (!order || !editForm) return;
@@ -4997,6 +5050,15 @@ function OrderDetailDialog({
           </DialogHeader>
 
           <div className="flex-1 overflow-y-auto flex flex-col gap-5 pr-1">
+
+            <OrderAcquisitionTag
+              order={order}
+              isAdmin={permission.isAdmin}
+              saving={acquisitionTagSaving}
+              error={acquisitionTagError?.orderId === order.id ? acquisitionTagError.message : ""}
+              updatedAtLabel={formatLocalDateTimeMinute(order.acquisitionOrderUpdatedAt, "")}
+              onToggle={toggleAcquisitionTag}
+            />
 
             {/* ── 基本信息 ── */}
             {editMode && editForm ? (
@@ -7392,6 +7454,7 @@ export function OrdersView({
         platformOrderNoForOrder(order),
         order.plannedShipDate,
         getOrderStatusText(order, state.shipments),
+        order.isAcquisitionOrder === true ? "获新订单" : "",
         customer?.name,
         customer?.phone,
         customer?.wechat,

@@ -18,6 +18,11 @@ import {
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import {
+  assertOrderAcquisitionTagUnchanged,
+  planOrderAcquisitionTag,
+  requireLockedAcquisitionTagAdmin,
+} from "./order-acquisition-tag.mjs";
+import {
   ORDER_SOURCE_VALUES,
   isPlatformOrderSource,
   isPlatformPaymentChannel,
@@ -6043,6 +6048,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentOrder = currentOrdersById.get(orderId);
     if (!currentOrder) throw new Error("新建订单必须通过订单专用接口");
     if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
+    assertOrderAcquisitionTagUnchanged(currentOrder, nextOrder);
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
     if (stableJson(currentOrder.items ?? []) !== stableJson(nextOrder.items ?? [])) {
@@ -11900,6 +11906,55 @@ async function handleApi(req, res, url) {
         ok: false,
         ...(error?.code ? { code: error.code } : {}),
         error: error.message || "确认赊销失败",
+      });
+    } finally {
+      client.release();
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/acquisition-tag" && req.method === "POST") {
+    const client = await pool.connect();
+    let currentOrder = null;
+    try {
+      const body = JSON.parse(await readBody(req, 16 * 1024));
+      await client.query("BEGIN");
+      // No stock/media/financial collections are needed for this classification.
+      const { rows } = await client.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+                data -> 'orders' AS orders, data -> 'operationLogs' AS "operationLogs"
+         FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]
+      );
+      const state = rows[0] ?? {};
+      const account = requireLockedAcquisitionTagAdmin(state, req.auth);
+      req.auth = { ...req.auth, account };
+      const target = resolveAuthorizedLockedOrderTarget(req, state, body?.orderId);
+      currentOrder = target.order;
+      const result = planOrderAcquisitionTag(currentOrder, body, account);
+      if (result.unchanged) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder });
+        return;
+      }
+      const nextOrder = result.order;
+      const nextOrders = target.orders.map((order) => order.id === currentOrder.id ? nextOrder : order);
+      const operationLog = createOperationLog(req, "订单管理", "获新订单标记",
+        `${nextOrder.isAcquisitionOrder ? "标记" : "取消标记"}订单「${nextOrder.orderNo || nextOrder.id}」为获新订单`);
+      await client.query(
+        `UPDATE app_state SET data = jsonb_set(
+           jsonb_set(data, '{orders}', $2::jsonb, true), '{operationLogs}', $3::jsonb, true
+         ), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(nextOrders), JSON.stringify(pushOperationLog(state.operationLogs, operationLog))]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message,
+        ...(error?.code === "ORDER_ACQUISITION_TAG_CONFLICT" && currentOrder ? { order: currentOrder } : {}),
       });
     } finally {
       client.release();

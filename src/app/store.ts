@@ -627,6 +627,12 @@ export type Order = {
   discount: number;
   status: OrderStatus;
   notes: string;
+  /** 管理员手动设置的获新订单标记，与成交状态及金额无关。 */
+  isAcquisitionOrder?: boolean;
+  /** 获新标记最近一次修改的服务端审计信息。 */
+  acquisitionOrderUpdatedAt?: string;
+  acquisitionOrderUpdatedBy?: string;
+  acquisitionOrderUpdatedByName?: string;
   /** 负责人提成率；未设置时使用财务模块的全局默认值。 */
   commissionRate?: number;
   /** 管理员或订单负责人审批的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */
