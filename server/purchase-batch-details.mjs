@@ -1,4 +1,5 @@
 import { paymentVerificationStatus, verifiedPaymentTotals } from "./payment-utils.mjs";
+import { buildBatchStockValuations, batchStockUnavailableIds } from "./batch-stock-valuations.mjs";
 
 const array = (value) => Array.isArray(value) ? value : [];
 const text = (value) => String(value ?? "").trim();
@@ -281,6 +282,7 @@ function contextFor(state, options) {
     addSale(originalId, { orderId: id(order.id), orderNo: text(order.orderNo), siteId: text(order.siteId) || defaultSite, date: date(order.date), price: null, status: text(order.status), statusLabel: orderStatus[order.status] || text(order.status), kind: "originalReplaced", note: "原鱼已安排补发，原商品行已替换；未保留的原单条售价不能从补发总额推算" });
   }
   return { state, options, batch, visible, locations, candidateById, products, species, orderById, shipmentsByStock, replacements, salesByStock, changesByStock,
+    unavailableStockIds: batchStockUnavailableIds(state),
     bioByStock: indexBy(bioRecords, (record) => id(record.stockItemId)), lossByStock: indexBy(lossRecords, (record) => id(record.stockItemId)) };
 }
 
@@ -313,7 +315,7 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
   const product = context.products.get(id(item.productId)) ?? {};
   const species = context.species.get(id(product.speciesId)) ?? {};
   const { key, current, currentVisible, bio, losses, entry, entryLocation, entryVisible, sales } = evidence;
-  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost ? "lost" : item.sold || sales.some((sale) => sale.status !== "cancelled") ? "sold" : "inStock";
+  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost ? "lost" : context.unavailableStockIds.has(key) ? "sold" : "inStock";
   const warnings = [];
   if (!entry || !entryVisible || !entryLocation.tankName) warnings.push("未留存可核实的初始入库缸位；当前缸位不代表初始缸位");
   if (!currentVisible) warnings.push("该鱼当前信息及部分历史不在账户可见范围内，已隐藏");
@@ -337,6 +339,7 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
 
 export function buildPurchaseBatchDetail(state, options) {
   const context = contextFor(state, options);
+  const valuation = buildBatchStockValuations({ ...state, batches: [context.batch], visibleSiteIds: options.visibleSiteIds }).metrics[0];
   const rows = [...context.candidateById.values()].map((item) => rowForFish(context, item));
   const summary = { total: rows.length, inStock: 0, sold: 0, lost: 0, removed: 0, restricted: 0 };
   rows.forEach((row) => { summary[row.status] += 1; });
@@ -362,7 +365,7 @@ export function buildPurchaseBatchDetail(state, options) {
     || a.siteName.localeCompare(b.siteName, "zh-Hans-CN") || a.tankName.localeCompare(b.tankName, "zh-Hans-CN", { numeric: true }) || a.key.localeCompare(b.key));
   const selected = options.tankKey ? filtered.filter((row) => row.tankKey === options.tankKey) : filtered;
   return { ok: true, batch: { id: id(context.batch.id), batchNo: text(context.batch.batchNo), supplier: text(context.batch.supplier), arrivalDate: date(context.batch.arrivalDate), siteId: options.siteId, siteName: context.locations.siteName(options.siteId) }, summary,
-    tanks, items: selected.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: selected.length,
+    valuation, tanks, items: selected.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: selected.length,
     warnings: ["仅展示系统当前留存且有明确鱼只关联的记录；历史已删除且无快照的入库或退单明细无法还原"] };
 }
 

@@ -43,8 +43,10 @@ test("batch revenue metrics projects only the required app-state JSONB keys", ()
   assert.deepEqual(projectedKeys, [
     "batches",
     "orders",
+    "products",
     "shipments",
     "sites",
+    "species",
     "stock",
     "tankGroups",
   ]);

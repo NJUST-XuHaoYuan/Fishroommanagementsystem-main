@@ -5,6 +5,8 @@ import { Input } from "./ui/input";
 import { authJsonHeaders } from "../utils/authSession";
 import { batchPrice, batchRecordDate, batchSaleLabel, type BatchSale } from "../utils/batchDetailDisplay";
 import { BatchOrderDialog } from "./BatchOrderDialog";
+import { BatchStockValuationSection } from "./BatchStockValuationSection";
+import type { BatchStockValuation } from "../utils/batchStockValuation";
 
 type FishStatus = "all" | "inStock" | "sold" | "lost" | "removed" | "restricted";
 type FishSummary = {
@@ -29,6 +31,7 @@ type BatchDetailResponse = {
   ok: boolean;
   batch: { id: string; batchNo: string; supplier: string; arrivalDate: string; siteName: string };
   summary: { total: number; inStock: number; sold: number; lost: number; removed: number; restricted?: number };
+  valuation?: BatchStockValuation;
   items: FishSummary[];
   tanks: BatchTank[];
   page: number;
@@ -207,14 +210,16 @@ export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIden
   const [orderRequest, setOrderRequest] = useState<{ batchId: string; siteId: string; orderId: string } | null>(null);
   const onOpenOrder: OpenOrder = orderId => setOrderRequest({ batchId, siteId, orderId });
   const [retry, setRetry] = useState(0);
-  const [result, setResult] = useState<{ key: string; data: BatchDetailResponse } | null>(null);
+  const [result, setResult] = useState<{ key: string; scope: string; data: BatchDetailResponse } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const query = new URLSearchParams({ batchId, siteId, search, status, tankKey, page: String(page), pageSize: "50" }).toString();
   const queryKey = `${query}:${retry}`;
+  const scope = `${siteId}\0${batchId}`;
   const data = result?.key === queryKey ? result.data : null;
   const batch = result?.data.batch;
   const summary = result?.data.summary;
+  const valuation = result?.scope === scope ? result.data.valuation : undefined;
   const tanks = data?.tanks ?? [];
   const selectedTank = tanks.find(tank => tank.key === tankKey);
   const identity = batchIdentity || batch;
@@ -225,11 +230,11 @@ export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIden
     setLoading(true);
     setError("");
     readBatchApi<BatchDetailResponse>(`/api/batches/detail?${query}`, controller.signal)
-      .then(value => { if (!controller.signal.aborted) setResult({ key: queryKey, data: value }); })
+      .then(value => { if (!controller.signal.aborted) setResult({ key: queryKey, scope, data: value }); })
       .catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "批次明细加载失败"); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [query, queryKey]);
+  }, [query, queryKey, scope]);
   const filters: { value: FishStatus; label: string; count?: number }[] = [
     { value: "all", label: "全部", count: summary?.total },
     { value: "inStock", label: "在库", count: summary?.inStock },
@@ -249,6 +254,7 @@ export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIden
       </div>
     </div>
     {batchInfo}
+    <BatchStockValuationSection valuation={valuation} loading={loading} error={error} />
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h3 className="text-base font-semibold">鱼只记录</h3>
         <p className="mt-1 max-w-3xl text-xs leading-relaxed text-muted-foreground">点订单号可在本页查看订单。历史缺失信息不做推断；单鱼订单行价未分摊整单优惠或退款。</p>

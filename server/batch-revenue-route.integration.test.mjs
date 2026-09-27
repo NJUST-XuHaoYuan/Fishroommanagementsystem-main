@@ -289,7 +289,7 @@ test("authorized request aggregates cross-batch payments and site-scoped settlem
   assert.equal(body.ok, true);
   assert.equal(body.siteId, "nanjing");
   assert.equal(body.version, "73");
-  assert.deepEqual(body.metrics, [
+  assert.deepEqual(body.metrics.map(({ valuation, ...revenue }) => revenue), [
     {
       batchId: "batch-nj-a",
       earliestStockInDate: "2026-08-03",
@@ -333,7 +333,7 @@ test("an admin request sees the other site's independent aggregate only", async 
   const { response, body } = await getMetrics("jiangyin", adminToken);
   assert.equal(response.status, 200, JSON.stringify(body));
   assert.equal(body.siteId, "jiangyin");
-  assert.deepEqual(body.metrics, [{
+  assert.deepEqual(body.metrics.map(({ valuation, ...revenue }) => revenue), [{
     batchId: "batch-jy",
     earliestStockInDate: "2026-08-05",
     salesNet: 999,

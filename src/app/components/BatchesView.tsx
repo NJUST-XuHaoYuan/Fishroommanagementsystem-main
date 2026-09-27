@@ -20,6 +20,8 @@ import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { authJsonHeaders } from "../utils/authSession";
 import { BatchDetailsView } from "./BatchDetailsView";
 import { BatchInfoSection } from "./BatchInfoSection";
+import { BatchValuationListSummary, BatchValuationScopeWarning, BatchValuationValue } from "./BatchStockValuationSection";
+import type { BatchStockValuation } from "../utils/batchStockValuation";
 import { sortBatchesNewestFirst } from "../utils/batchSorting";
 import { MoreHorizontal } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -43,6 +45,7 @@ type BatchRevenueMetric = {
   itemCount: number;
   orderCount: number;
   platformOrderCount: number;
+  valuation?: BatchStockValuation;
 };
 
 type BatchRevenueResponse = {
@@ -161,7 +164,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
       .catch((error) => {
         if (error?.name === "AbortError") return;
         console.error("Failed to load batch revenue metrics:", error);
-        setRevenueError(error instanceof Error ? error.message : "采购批次回款加载失败");
+        setRevenueError(error instanceof Error ? error.message : "采购批次统计加载失败");
       })
       .finally(() => {
         if (!controller.signal.aborted) setRevenueLoading(false);
@@ -248,7 +251,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
       {revenueError && (
         <div role="alert" className="flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between">
           <span>
-            {revenueAvailable ? "批次回款刷新失败，当前显示上次成功数据" : "批次回款加载失败，当前金额暂不展示"}：{revenueError}
+            {revenueAvailable ? "批次统计刷新失败，当前显示上次成功数据" : "批次统计加载失败，当前金额暂不展示"}：{revenueError}
           </span>
           <Button size="sm" variant="outline" onClick={() => setRevenueRetry((value) => value + 1)}>
             重新加载
@@ -266,7 +269,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         searchPlaceholder="搜索批次号、供应商..."
         onAdd={permission.canCreate ? () => { setEditing(empty()); setOpen(true); } : undefined}
         addLabel="新增批次"
-        tableMinWidth="960px"
+        tableMinWidth="1120px"
         columns={[
           { key: "batchNo", title: "批次号", width: "8rem", render: (r) => <span className="whitespace-nowrap">{r.batchNo}</span> },
           {
@@ -317,6 +320,12 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
             render: (r) => <span className="whitespace-nowrap font-medium text-emerald-700 tabular-nums">{metricText(r.id, "verifiedReceived")}</span>,
           },
           {
+            key: "estimatedSaleValue",
+            title: <span className="whitespace-nowrap" title="未销售与已损耗鱼只的预计售价，不是实际销售额；按品种明细请打开批次详情">预计售价</span>,
+            width: "10rem",
+            render: (r) => <BatchValuationListSummary valuation={salesStats(r.id).valuation} />,
+          },
+          {
             key: "inventoryCounts",
             title: <span className="whitespace-nowrap">入库 / 报损</span>,
             width: "7rem",
@@ -351,6 +360,11 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
                   </div>
                 </div>
               </div>
+              <dl className="batch-mobile-two-columns grid grid-cols-2 gap-3 border-b pb-3">
+                <div><dt className="text-xs text-muted-foreground">未销售预计售价</dt><dd className="mt-1"><BatchValuationValue value={stats.valuation?.unsold} compact /></dd></div>
+                <div><dt className="text-xs text-muted-foreground">已损耗预计售价</dt><dd className="mt-1"><BatchValuationValue value={stats.valuation?.lost} compact /></dd></div>
+              </dl>
+              <BatchValuationScopeWarning valuation={stats.valuation} />
               <div className="batch-mobile-three-columns grid grid-cols-3 gap-2 text-xs">
                 <div><span className="text-muted-foreground">采购成本</span><div className="mt-0.5 font-medium tabular-nums">{money(row.bioFee + row.shippingFee)}</div></div>
                 <div><span className="text-muted-foreground">入库</span><div className="mt-0.5 font-medium">{row.stockedCount} 条</div></div>

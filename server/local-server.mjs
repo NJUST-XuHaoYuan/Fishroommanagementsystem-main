@@ -130,6 +130,7 @@ import {
   isFishInventoryItem,
 } from "./dashboard-healthy-fish-value.mjs";
 import { buildBatchRevenueMetrics } from "./batch-revenue-metrics.mjs";
+import { buildBatchStockValuations } from "./batch-stock-valuations.mjs";
 import { normalizeStockPricing, stockPricingProtectedIds, syncProductStockPrices, reconcileReleasedStockPricing } from "./stock-pricing.mjs";
 import {
   buildPurchaseBatchDetail,
@@ -11060,6 +11061,8 @@ async function handleApi(req, res, url) {
                 data -> 'sites' AS sites,
                 data -> 'tankGroups' AS tank_groups,
                 data -> 'batches' AS batches,
+                data -> 'products' AS products,
+                data -> 'species' AS species,
                 data -> 'stock' AS stock,
                 data -> 'orders' AS orders,
                 data -> 'shipments' AS shipments
@@ -11072,6 +11075,8 @@ async function handleApi(req, res, url) {
         sites: Array.isArray(row.sites) ? row.sites : [],
         tankGroups: Array.isArray(row.tank_groups) ? row.tank_groups : [],
         batches: Array.isArray(row.batches) ? row.batches : [],
+        products: Array.isArray(row.products) ? row.products : [],
+        species: Array.isArray(row.species) ? row.species : [],
         stock: Array.isArray(row.stock) ? row.stock : [],
         orders: Array.isArray(row.orders) ? row.orders : [],
         shipments: Array.isArray(row.shipments) ? row.shipments : [],
@@ -11105,6 +11110,15 @@ async function handleApi(req, res, url) {
         shipments: scopedState.shipments,
         platformSettlements: settlementResult.rows,
       });
+      // Batch membership survives a transfer. Use the authoritative full stock
+      // and lifecycle state, but disclose values only for authorized locations.
+      const valuations = buildBatchStockValuations({
+        ...state,
+        batches: scopedState.batches,
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+      });
+      const valuationByBatch = new Map(valuations.metrics.map((metric) => [metric.batchId, metric]));
+      result.metrics = result.metrics.map((metric) => ({ ...metric, valuation: valuationByBatch.get(metric.batchId) }));
       sendJson(req, res, 200, {
         ok: true,
         siteId,
