@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
 import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
 import { MAX_ACTUAL_SHIPPING_FEE, normalizedPositiveShippingFee } from "../utils/shipmentFee";
+import { selectExpectedStockLocations, type ExpectedStockLocations, type StockLocationSnapshot } from "../utils/orderOutbound";
 
 function todayDateString(): string {
   const now = new Date();
@@ -27,6 +28,7 @@ export type ShipFormData = {
   actualShippingFee: number;
   notes: string;
   selectedItemIds: string[]; // stockItemIds included in this shipment
+  expectedStockLocations?: ExpectedStockLocations;
 };
 
 type ItemMeta = {
@@ -45,6 +47,8 @@ export function ShipDialog({
   unshippedItems,      // items not yet in any shipment
   getProductName,
   getTankName,
+  getStockLocation,
+  orderSiteName,
   pickupOnly = false,
 }: {
   order: Order | null;
@@ -54,6 +58,8 @@ export function ShipDialog({
   unshippedItems: OrderItem[];
   getProductName: (productId: string) => string;
   getTankName: (stockItemId: string) => string;
+  getStockLocation?: (stockItemId: string) => StockLocationSnapshot | undefined;
+  orderSiteName?: string;
   pickupOnly?: boolean;
 }) {
   const { state } = useStore();
@@ -68,6 +74,7 @@ export function ShipDialog({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [actualShippingFeeError, setActualShippingFeeError] = useState("");
+  const [locationSnapshots, setLocationSnapshots] = useState<ExpectedStockLocations>({});
   const shipMethod: "express" | "pickup" = pickupOnly ? "pickup" : "express";
   const shippingFeeMode = orderShippingFeeMode(order);
 
@@ -89,6 +96,10 @@ export function ShipDialog({
       );
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
+      setLocationSnapshots(Object.fromEntries(unshippedItems.flatMap((item) => {
+        const location = getStockLocation?.(item.stockItemId);
+        return location ? [[item.stockItemId, { ...location }]] : [];
+      })));
       setSaving(false);
       setActualShippingFeeError("");
     }
@@ -131,6 +142,10 @@ export function ShipDialog({
       setActualShippingFee(submittedActualShippingFee);
     }
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
+    const expectedStockLocations = getStockLocation
+      ? selectExpectedStockLocations([...selectedIds], locationSnapshots)
+      : undefined;
+    if (expectedStockLocations === null) return toast.error("库存位置暂不可用，请关闭出库窗口并刷新后重试");
     setSaving(true);
     try {
       const ok = await onShip({
@@ -141,6 +156,7 @@ export function ShipDialog({
         actualShippingFee: submittedActualShippingFee,
         notes,
         selectedItemIds: [...selectedIds],
+        ...(expectedStockLocations ? { expectedStockLocations } : {}),
       });
       if (ok !== false) onOpenChange(false);
     } finally {
@@ -162,6 +178,12 @@ export function ShipDialog({
         </DialogHeader>
 
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-4 py-1 pr-1 pb-3">
+
+          {orderSiteName && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              按商品当前场地与缸位{pickupOnly ? "自提" : "出库"}；订单仍归属{orderSiteName}，金额不变。位置变更后需重新确认。
+            </p>
+          )}
 
           {/* Item selection */}
           <div className="rounded-lg border bg-card">

@@ -17,6 +17,7 @@ import {
   selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
+import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "./order-fulfillment-stock.mjs";
 import {
   assertOrderAcquisitionTagUnchanged,
   planOrderAcquisitionTag,
@@ -5370,6 +5371,19 @@ function requireOrderPermissionForAuth(req, action = "update") {
   }
 }
 
+function refreshLockedOrderMutationAuth(req, state = {}) {
+  const matches = (Array.isArray(state.personnel) ? state.personnel : []).filter((account) =>
+    String(account?.username ?? "") === req.auth?.user?.username);
+  const account = matches.length === 1 ? matches[0] : null;
+  if (!account || !isPersonnelAccountEnabled(account) ||
+      String(account.id ?? "") !== String(req.auth?.account?.id ?? "") ||
+      sessionVersionForAccount(account) !== sessionVersionForAccount(req.auth?.account) ||
+      (account.accessRole === "admin" ? "admin" : "staff") !== req.auth?.user?.role) {
+    throw httpError(403, "当前账号权限已变化，请重新登录后重试", "ORDER_ACCOUNT_CHANGED");
+  }
+  req.auth = { ...req.auth, account };
+}
+
 function normalizeStockLookupCode(value) {
   return String(value ?? "")
     .trim()
@@ -5452,7 +5466,7 @@ function paymentMethodAllowedForOrderSource(method, source) {
     : !isPlatformPaymentChannel(method?.channel);
 }
 
-function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null) {
+function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null, { visibleSiteIds } = {}) {
   const incomingSiteId = body.siteId === ALL_SITE_ID ? DEFAULT_SITE_ID : body.siteId;
   const siteId = normalizeSiteId(incomingSiteId ?? currentOrder?.siteId);
   if (currentOrder && siteId !== normalizeSiteId(currentOrder.siteId)) {
@@ -5553,8 +5567,11 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null)
     const existingItem = (Array.isArray(currentOrder?.items) ? currentOrder.items : [])
       .find((orderItem) => String(orderItem?.stockItemId ?? "") === stockId);
     if (!stockItem && !existingItem) throw new Error(`库存鱼不存在或已被删除：${stockId}`);
-    if (stockItem && stockSiteId(state, stockItem) !== siteId) {
-      throw new Error("订单商品与所属场地不一致，请先移除错误场地的商品");
+    if (stockItem && orderItemKeepsInventory(existingItem)) {
+      // A sold fish may have moved after the order was placed. Retaining that
+      // exact existing line must not require changing the order's ownership.
+      // Adding another fish still goes through normalizeOrderItemInput above.
+      resolveOrderFulfillmentStock(state, stockId, { visibleSiteIds });
     }
     const productId = String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim();
     const product = findProductById(state, productId);
@@ -5931,8 +5948,10 @@ function shipmentBlocksOrderItemRemoval(shipment = {}) {
   return shipmentBlocksInventory(shipment) && !(shipment?.status === "damaged" && shipment?.damageResolution === "reship");
 }
 
-function validateOrderBusinessFieldsForPatch(currentOrder = {}, nextOrder = {}, nextState = {}) {
-  const normalized = normalizeOrderMutationInput(nextState, nextOrder, currentOrder);
+function validateOrderBusinessFieldsForPatch(currentOrder = {}, nextOrder = {}, nextState = {}, req = {}) {
+  const normalized = normalizeOrderMutationInput(nextState, nextOrder, currentOrder, {
+    visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, nextState),
+  });
   if (stableJson(normalized) !== stableJson(orderMutableFieldsComparable(nextOrder, nextState, currentOrder))) {
     throw new Error("订单字段必须符合订单专用接口的服务端校验结果");
   }
@@ -6055,7 +6074,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
       throw httpError(409, "订单鱼明细必须通过订单编辑专用接口修改，请刷新后重试");
     }
 
-    validateOrderBusinessFieldsForPatch(currentOrder, nextOrder, next);
+    validateOrderBusinessFieldsForPatch(currentOrder, nextOrder, next, req);
     validateOrderStatusForPatch(req, currentOrder, nextOrder, nextShipments);
 
     const paymentAction = paymentChangeAction(currentOrder.payments ?? [], nextOrder.payments ?? []);
@@ -12041,6 +12060,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
       const orders = Array.isArray(state.orders) ? state.orders : [];
       const orderId = String(body.orderId ?? body.id ?? "");
@@ -12056,7 +12076,9 @@ async function handleApi(req, res, url) {
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑");
       requireVisibleSiteForAuth(req, state, currentOrder.siteId, "不能修改未授权场地的订单");
 
-      const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder);
+      const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder, {
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+      });
       const nextItemIds = new Set(nextOrderInput.items.map((item) => item.stockItemId));
       const removedItemIds = (Array.isArray(currentOrder.items) ? currentOrder.items : [])
         .map((item) => String(item?.stockItemId ?? ""))
@@ -12766,6 +12788,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
       const shipments = Array.isArray(state.shipments) ? state.shipments : [];
       const requestedOrderId = String(body.orderId ?? "").trim();
@@ -12795,8 +12818,10 @@ async function handleApi(req, res, url) {
       if (duplicatedShipmentIds.length > 0) throw new Error("所选商品已经出库或发货，请刷新后重试");
       const shippedIds = shippedOutStockIds(state);
       for (const stockId of selectedItemIds) {
-        const stockItem = (Array.isArray(state.stock) ? state.stock : []).find((item) => String(item?.id ?? "") === stockId);
-        if (!stockItem) throw new Error("所选库存不存在，请刷新后重试");
+        const { stock: stockItem } = resolveOrderFulfillmentStock(state, stockId, {
+          visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+          expectedLocation: expectedOrderFulfillmentLocation(body, stockId),
+        });
         if (!isPhysicallyInTank(stockItem, shippedIds)) throw new Error("所选商品已不在缸内，不能出库");
         if (stockItem.lost) throw new Error("已损耗商品不能出库，请先从订单中删除");
       }

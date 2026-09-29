@@ -37,6 +37,7 @@ import {
   CircleDollarSign, UploadCloud,
 } from "lucide-react";
 import { ShipDialog, ShipFormData } from "./ShipDialog";
+import { currentTankLocationLabel, orderOutboundItems, stockLocationSnapshot } from "../utils/orderOutbound";
 import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
@@ -2991,11 +2992,22 @@ function ReportDamageDialog({
 // ─── StockItemDetailDialog ────────────────────────────────────────────────────
 
 function StockItemDetailDialog({
-  stockItemId, open, onOpenChange,
-}: { stockItemId: string | null; open: boolean; onOpenChange: (o: boolean) => void }) {
+  stockItemId, stockItem, currentTankName, open, onOpenChange,
+}: {
+  stockItemId: string | null;
+  stockItem: StockItem | undefined;
+  currentTankName: string;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
   const { state, setState } = useStore();
+  const [loadedRecords, setLoadedRecords] = useState<{ stockItemId: string; records: BioRecord[] } | null>(null);
+  const setStateRef = useRef(setState);
+  useEffect(() => { setStateRef.current = setState; }, [setState]);
+  const viewerKey = `${state.user?.username ?? ""}:${state.user?.role ?? ""}`;
   useEffect(() => {
-    if (!open || !stockItemId) return;
+    setLoadedRecords(null);
+    if (!open || !stockItemId || stockItem?.id !== stockItemId) return;
     let cancelled = false;
     fetch(`/api/bio-records?stockItemId=${encodeURIComponent(stockItemId)}`, { headers: authJsonHeaders() })
       .then((response) => response.json().then((result) => ({ response, result })))
@@ -3003,7 +3015,8 @@ function StockItemDetailDialog({
         if (cancelled) return;
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
         const records = Array.isArray(result.bioRecords) ? result.bioRecords : [];
-        setState((current) => ({
+        setLoadedRecords({ stockItemId, records });
+        setStateRef.current((current) => ({
           ...current,
           stock: result.stockItem
             ? current.stock.map((stock) => stock.id === stockItemId ? { ...stock, ...result.stockItem } : stock)
@@ -3023,23 +3036,17 @@ function StockItemDetailDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, stockItemId, setState]);
+  }, [open, stockItemId, stockItem?.id, viewerKey]);
   if (!stockItemId) return null;
-  const s = state.stock.find((x) => x.id === stockItemId);
+  const s = stockItem?.id === stockItemId ? stockItem : undefined;
   if (!s) return null;
   const p = state.products.find((x) => x.id === s.productId);
   const batch = state.batches.find((x) => x.id === s.batchId);
-  const bioRecs = state.bioRecords
+  const bioRecs = (loadedRecords?.stockItemId === stockItemId ? loadedRecords.records : state.bioRecords)
     .filter((r) => r.stockItemId === stockItemId)
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  const tankName = (() => {
-    for (const g of state.tankGroups) {
-      const t = g.subTanks.find((x) => x.id === s.subTankId);
-      if (t) return `${g.name} / ${t.name}`;
-    }
-    return "—";
-  })();
+  const tankName = currentTankName;
 
   const statusLabel: Record<string, string> = { healthy: "正常", sick: "病弱", feeding: "开口", sold: "已售", lost: "已损耗" };
   const statusColor: Record<string, string> = {
@@ -4260,6 +4267,8 @@ function ItemsWithShipments({
 
       <StockItemDetailDialog
         stockItemId={detailId}
+        stockItem={detailId ? getStockItem(detailId) : undefined}
+        currentTankName={detailId && getStockItem(detailId) ? subTankName(getStockItem(detailId)!.subTankId) : "缸位暂不可见"}
         open={!!detailId}
         onOpenChange={(o) => { if (!o) setDetailId(null); }}
       />
@@ -4693,18 +4702,7 @@ function OrderDetailDialog({
 
   const getProduct = (id: string) => state.products.find((p) => p.id === id);
   const subTankName = (id: string) => {
-    for (const g of accessibleTankGroups) {
-      const t = g.subTanks.find((x) => x.id === id);
-      if (t) {
-        const currentSiteId = String(g.siteId ?? "nanjing");
-        const orderSiteId = String(order?.siteId ?? "nanjing");
-        const currentSiteName = state.sites.find((site) => site.id === currentSiteId)?.name ?? currentSiteId;
-        return currentSiteId === orderSiteId
-          ? `${g.name} / ${t.name}`
-          : `${currentSiteName} · ${g.name} / ${t.name}`;
-      }
-    }
-    return "—";
+    return currentTankLocationLabel(id, accessibleTankGroups, state.sites);
   };
 
   const customer = (state.customers ?? []).find(
@@ -4756,15 +4754,8 @@ function OrderDetailDialog({
     ? activeOrderShipments.filter((shipment) => shipmentHasPendingActualShippingFee(order, shipment)).length
     : 0;
   const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
-  const shippedItemIds = new Set(activeOrderShipments.flatMap((s) => s.itemStockIds ?? []));
-  const inventoryActiveItems = (order?.items ?? []).filter((item) => !item.inventoryRemovedAt);
-  const unshippedItems = inventoryActiveItems.filter((i) => !shippedItemIds.has(i.stockItemId));
-  const lostUnshippedItems = unshippedItems.filter((i) => getAccessibleStockItem(i.stockItemId)?.lost);
-  const unavailableUnshippedItems = unshippedItems.filter((i) => !getAccessibleStockItem(i.stockItemId));
-  const shippableUnshippedItems = unshippedItems.filter((i) => {
-    const stockItem = getAccessibleStockItem(i.stockItemId);
-    return Boolean(stockItem) && !stockItem?.lost;
-  });
+  const { shippedItemIds, inventoryActiveItems, unshippedItems, lostUnshippedItems,
+    unavailableUnshippedItems, shippableUnshippedItems } = orderOutboundItems(order?.items ?? [], orderShipments, accessibleStock);
   const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || s.status === "damaged"
@@ -4997,6 +4988,7 @@ function OrderDetailDialog({
         actualShippingFee: data.shipMethod === "pickup" ? 0 : data.actualShippingFee,
         notes: data.notes,
         selectedItemIds: data.selectedItemIds,
+        expectedStockLocations: data.expectedStockLocations,
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -5683,6 +5675,8 @@ function OrderDetailDialog({
           const s = getAccessibleStockItem(sid);
           return s ? subTankName(s.subTankId) : "—";
         }}
+        getStockLocation={(sid) => stockLocationSnapshot(getAccessibleStockItem(sid), accessibleTankGroups)}
+        orderSiteName={state.sites.find((site) => site.id === (order.siteId || "nanjing"))?.name ?? order.siteId ?? "南京"}
         pickupOnly={isPickupOrderSource(order.source)}
       />
 
