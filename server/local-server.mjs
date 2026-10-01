@@ -159,6 +159,7 @@ import {
 } from "./order-pricing-rules.mjs";
 import { isSupportedImageMime, validateImageUploadBuffer } from "./media-upload-rules.mjs";
 import { createConcurrencyLimiter } from "./concurrency-limiter.mjs";
+import { createPublicCosStreamHandler } from "./public-cos-stream.mjs";
 import { resolveCreateRecordId } from "./record-id-rules.mjs";
 import {
   resolveUniqueOrderMutationTarget,
@@ -343,7 +344,6 @@ const COS_UPLOAD_TIMEOUT_MS = Math.min(
   15 * 60 * 1000,
   Math.max(30_000, Math.floor(numberFromEnv(process.env.COS_UPLOAD_TIMEOUT_MS, 5 * 60 * 1000)))
 );
-const PUBLIC_MEDIA_LEASE_TIMEOUT_MS = COS_REQUEST_TIMEOUT_MS + 1_000;
 const videoTranscodeLimiter = createConcurrencyLimiter({
   concurrency: VIDEO_TRANSCODE_CONCURRENCY,
   maxPending: VIDEO_TRANSCODE_MAX_PENDING,
@@ -364,15 +364,11 @@ const publicProjectionLimiter = createConcurrencyLimiter({
   maxPending: 16,
   queueFullMessage: "公开鱼单查询繁忙，请稍后重试",
 });
-const publicImageMediaLimiter = createConcurrencyLimiter({
-  concurrency: 2,
-  maxPending: 32,
-  queueFullMessage: "公开图片加载繁忙，请稍后重试",
-});
-const publicVideoMediaLimiter = createConcurrencyLimiter({
-  concurrency: 1,
-  maxPending: 8,
-  queueFullMessage: "公开视频加载繁忙，请稍后重试",
+const streamPublicCosObject = createPublicCosStreamHandler({
+  getSignedUrl: (key, { method }) => signedCosObjectUrl(key, { method, expires: 600 }),
+  resolveContentType: safePublicMediaContentType,
+  inferContentType: (key) => mimeForExtension(extname(key)),
+  headerTimeoutMs: COS_REQUEST_TIMEOUT_MS,
 });
 const PUBLIC_PROJECTION_CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_BIO_CACHE_MAX_ENTRIES = 2_000;
@@ -1477,6 +1473,7 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
   const latestMediaByStockId = selection.latestMediaByStockId;
   const completeCategoryMajorMap = selection.completeCategoryMajorMap;
   const sellableStock = Array.isArray(scopedState.stock) ? scopedState.stock : [];
+  const siteNames = new Map(getSitesFromState(scopedState).map((site) => [site.id, site.name]));
   const specimenGroupKeys = publicSpecimenGroupKeys(
     sellableStock, state.specimenHistoryDigests, authTokenSecret
   );
@@ -1531,9 +1528,12 @@ function buildPublicCatalog(state = {}, siteId = ALL_SITE_ID) {
       })),
     stock: sellableStock.map((item) => {
       const tank = findSubTank(scopedState, item?.subTankId);
+      const effectiveSiteId = stockSiteId(scopedState, item);
       return {
         id: String(item?.id ?? ""),
         productId: String(item?.productId ?? ""),
+        siteId: effectiveSiteId,
+        siteName: siteNames.get(effectiveSiteId) || effectiveSiteId,
         code: String(item?.code ?? ""),
         notes: typeof item?.notes === "string" ? item.notes.trim() : "",
         specimenGroupKey: specimenGroupKeys.get(String(item?.id ?? "")) || "",
@@ -6290,7 +6290,6 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
     return;
   }
   let releaseTranscodeSlot = null;
-  let releasePublicMediaSlot = null;
   let mediaOperationExpired = false;
   const acquisitionAbort = new AbortController();
   const abortAcquisition = () => acquisitionAbort.abort();
@@ -6304,7 +6303,6 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
   const releaseSlots = () => {
     removeAbortListeners();
     releaseTranscodeSlot?.();
-    releasePublicMediaSlot?.();
   };
   const expireMediaOperation = (reason) => {
     const firstExpiration = !mediaOperationExpired;
@@ -6321,17 +6319,6 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
   req.once("aborted", abortAcquisition);
   res.once("close", abortAcquisition);
   try {
-    if (options.publicMedia) {
-      const inferredMime = String(mimeForExtension(extname(key)) ?? "");
-      const limiter = inferredMime.startsWith("video/")
-        ? publicVideoMediaLimiter
-        : publicImageMediaLimiter;
-      releasePublicMediaSlot = await limiter.acquire({
-        signal: acquisitionAbort.signal,
-        leaseTimeoutMs: PUBLIC_MEDIA_LEASE_TIMEOUT_MS,
-        onLeaseExpired: expireMediaOperation,
-      });
-    }
     if (options.wechatVideo) {
       releaseTranscodeSlot = await videoTranscodeLimiter.acquire({
         signal: acquisitionAbort.signal,
@@ -6342,7 +6329,7 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
     releaseSlots();
     if (error?.name === "AbortError" || req.aborted || res.destroyed) return;
     sendJson(req, res, error?.statusCode || 503, {
-      error: error.message || (options.publicMedia ? "公开媒体加载繁忙，请稍后重试" : "视频处理中，请稍后重试"),
+      error: error.message || "视频处理中，请稍后重试",
     });
     return;
   }
@@ -6382,17 +6369,7 @@ async function sendCosObject(req, res, key, cacheControl = "private, max-age=360
     }
     const body = isHeadRequest ? Buffer.alloc(0) : (data.Body ?? Buffer.alloc(0));
     let contentType = data.ContentType || upstreamHeader(data.headers, "content-type") || mimeForExtension(extname(key));
-    if (options.publicMedia) {
-      contentType = safePublicMediaContentType(contentType, key);
-      if (!contentType) {
-        releaseSlots();
-        sendJson(req, res, 415, { error: "Unsupported public media type" }, {
-          "X-Content-Type-Options": "nosniff",
-        });
-        return;
-      }
-    }
-    const safeHeaders = options.publicMedia ? { "X-Content-Type-Options": "nosniff" } : {};
+    const safeHeaders = {};
     if (options.wechatVideo && String(contentType).startsWith("video/")) {
       transcodeVideoToWechatMp4(body, contentType, { slotAcquired: true })
         .then((mp4Buffer) => {
@@ -6450,6 +6427,7 @@ async function signedCosObjectUrl(key, options = {}) {
       Region: cosConfig.region,
       Key: key,
       Sign: true,
+      ...(normalizedOptions.method ? { Method: normalizedOptions.method } : {}),
       Expires: Math.min(3600, Math.max(60, Number(normalizedOptions.expires) || 3600)),
     };
     if (normalizedOptions.queryString) params.QueryString = normalizedOptions.queryString;
@@ -8326,7 +8304,7 @@ async function handleApi(req, res, url) {
         return;
       }
       const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt, { now });
-      sendCosObject(req, res, key, `public, max-age=${maxAge}`, { publicMedia: true });
+      await streamPublicCosObject(req, res, key, `public, max-age=${maxAge}`);
     } catch (error) {
       sendJson(req, res, 500, { ok: false, error: error.message || "Failed to load public media" });
     }

@@ -44,6 +44,11 @@ function isCompressibleContentType(contentType = "") {
 function proxyApi(req, res) {
   const target = new URL(req.url || "/", backendUrl);
   const transport = target.protocol === "https:" ? httpsRequest : httpRequest;
+  let upstreamResponse;
+  const cancelUpstream = () => {
+    upstreamResponse?.destroy();
+    proxyReq.destroy();
+  };
   const proxyReq = transport(
     {
       protocol: target.protocol,
@@ -58,6 +63,8 @@ function proxyApi(req, res) {
       },
     },
     (proxyRes) => {
+      upstreamResponse = proxyRes;
+      if (res.destroyed) { cancelUpstream(); return; }
       const headers = { ...proxyRes.headers };
       const shouldGzip =
         acceptsGzip(req) &&
@@ -73,18 +80,27 @@ function proxyApi(req, res) {
       }
 
       res.writeHead(proxyRes.statusCode || 502, headers);
-      if (shouldGzip) {
-        pipeline(proxyRes, createGzip(), res, (error) => {
-          if (error && !res.destroyed) res.destroy(error);
-        });
-        return;
-      }
-      proxyRes.pipe(res);
+      const responseStreams = shouldGzip ? [proxyRes, createGzip(), res] : [proxyRes, res];
+      // pipeline handles an upstream truncation for media as well as JSON, and
+      // propagates a closed viewer connection back through the backend to COS.
+      pipeline(...responseStreams, (error) => {
+        if (!error) return;
+        cancelUpstream();
+        if (!res.destroyed) res.destroy(error);
+      });
     }
   );
 
   proxyReq.on("error", (error) => {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) { res.destroy(error); return; }
     send(res, 502, `Backend proxy error: ${error.message}`);
+  });
+  req.once("aborted", cancelUpstream);
+  req.once("error", cancelUpstream);
+  res.once("close", () => {
+    if (!res.writableFinished) cancelUpstream();
+    req.removeListener("aborted", cancelUpstream);
   });
 
   req.pipe(proxyReq);
@@ -139,6 +155,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Fishroom frontend: http://${host}:${port}`);
+  console.log(`Fishroom frontend: http://${host}:${server.address().port}`);
   console.log(`Proxying /api to ${backendUrl.href}`);
 });

@@ -86,12 +86,13 @@ test("only passive image and supported video MIME types are public-inline safe",
   }
 });
 
-test("COS media downloads have a bounded timeout and a limiter lease failsafe", () => {
+test("COS media downloads keep a bounded header timeout and use the streaming public handler", () => {
   assert.match(localServerSource, /COS_REQUEST_TIMEOUT_MS[\s\S]*?120_000[\s\S]*?5_000[\s\S]*?30_000/);
   assert.match(localServerSource, /Timeout:\s*COS_REQUEST_TIMEOUT_MS/);
   assert.match(localServerSource, /getCosClient\("download"\)/);
-  assert.match(localServerSource, /leaseTimeoutMs:\s*PUBLIC_MEDIA_LEASE_TIMEOUT_MS/);
-  assert.match(localServerSource, /onLeaseExpired:\s*expireMediaOperation/);
+  assert.match(localServerSource, /createPublicCosStreamHandler\([\s\S]*?headerTimeoutMs:\s*COS_REQUEST_TIMEOUT_MS/);
+  assert.match(localServerSource, /await streamPublicCosObject\(req, res, key/);
+  assert.doesNotMatch(localServerSource, /PUBLIC_MEDIA_LEASE_TIMEOUT_MS/);
 });
 
 test("large COS uploads use a separate finite timeout instead of the 30 second download deadline", () => {

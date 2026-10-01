@@ -19,6 +19,7 @@ const databaseFixture = {
     sites: [
       { id: "nanjing", name: "南京" },
       { id: "jiangyin", name: "江阴" },
+      { id: "site-new", name: "新场地" },
     ],
     personnel: [],
     tankGroups: [{
@@ -138,6 +139,10 @@ const databaseFixture = {
       { id: "released-cancelled", productId: "reservation-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy", sold: false },
       { id: "released-removed", productId: "reservation-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy", sold: false },
       { id: "archived-stock", productId: "archived-tang", siteId: "nanjing", subTankId: "tank-nj", status: "healthy" },
+      { id: "moved-to-jiangyin", productId: "eligibility-tang", siteId: "nanjing", subTankId: "tank-jy", status: "healthy" },
+      { id: "orphan-jiangyin", productId: "eligibility-tang", siteId: "jiangyin", subTankId: "missing-tank", status: "healthy" },
+      { id: "legacy-site", productId: "eligibility-tang", subTankId: "missing-legacy-tank", status: "healthy" },
+      { id: "custom-site", productId: "eligibility-tang", siteId: "site-new", subTankId: "missing-new-tank", status: "healthy" },
     ],
     orders: [
       {
@@ -348,6 +353,56 @@ test("the public catalog exposes only the cap winner chosen by latest maintenanc
   assert.equal(body.catalog.products.some((item) => item.id === "gold-tang"), true);
   assert.equal(body.catalog.products.some((item) => item.id === "archived-tang"), false);
   assert.equal(body.catalog.stock.some((item) => item.id === "archived-stock"), false);
+});
+
+test("public stock labels follow the current tank's city and match every scoped catalog", async () => {
+  const all = await publicGet("/api/public/catalog?siteId=all");
+  assert.equal(all.response.status, 200);
+  const find = (id) => all.body.catalog.stock.find((item) => item.id === id);
+  for (const [id, siteId, siteName] of [
+    ["fish-new", "nanjing", "南京"],
+    ["moved-to-jiangyin", "jiangyin", "江阴"],
+    ["orphan-jiangyin", "jiangyin", "江阴"],
+    ["legacy-site", "nanjing", "南京"],
+    ["custom-site", "site-new", "新场地"],
+  ]) {
+    assert.ok(find(id), `${id} remains public`);
+    assert.equal(find(id).siteId, siteId, `${id}: the current tank takes priority over the stored city`);
+    assert.equal(find(id).siteName, siteName);
+  }
+  for (const siteId of ["nanjing", "jiangyin", "site-new"]) {
+    const scoped = await publicGet(`/api/public/catalog?siteId=${siteId}`);
+    assert.equal(scoped.response.status, 200);
+    assert.deepEqual(
+      scoped.body.catalog.stock.map((item) => item.id),
+      all.body.catalog.stock.filter((item) => item.siteId === siteId).map((item) => item.id),
+      `${siteId}: labels and API scope must identify the same public stock`
+    );
+    assert.ok(scoped.body.catalog.stock.every((item) => item.siteId === siteId));
+  }
+  const wrongCityDetail = await publicGet("/api/public/bio-records?siteId=nanjing&stockItemId=moved-to-jiangyin");
+  assert.equal(wrongCityDetail.response.status, 404);
+  const currentCityDetail = await publicGet("/api/public/bio-records?siteId=jiangyin&stockItemId=moved-to-jiangyin");
+  assert.equal(currentCityDetail.response.status, 200);
+});
+
+test("location fields survive cached projections while the public stock whitelist stays narrow", async () => {
+  const first = await publicGet("/api/public/catalog?siteId=all");
+  const second = await publicGet("/api/public/catalog?siteId=all");
+  assert.equal(first.response.status, 200);
+  assert.equal(second.response.status, 200);
+  assert.deepEqual(second.body.catalog.stock, first.body.catalog.stock);
+  const publicKeys = [
+    "id", "productId", "siteId", "siteName", "code", "notes", "specimenGroupKey",
+    "status", "inDate", "basePrice", "tankGroupName", "subTankName", "tankLocation",
+  ].sort();
+  for (const item of second.body.catalog.stock) {
+    assert.deepEqual(Object.keys(item).sort(), publicKeys);
+    assert.ok(item.siteId);
+    assert.ok(item.siteName);
+  }
+  assert.equal(second.body.catalog.sites, undefined, "the internal site registry is not added to the public payload");
+  assert.doesNotMatch(JSON.stringify(second.body), /PRIVATE CUSTOMER NOTE|PRIVATE PRODUCT NOTE/);
 });
 
 test("a compact video-only latest record retains the fish's newest real photo for its idle card", async () => {
