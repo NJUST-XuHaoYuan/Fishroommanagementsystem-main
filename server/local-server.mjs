@@ -17,11 +17,11 @@ import {
   selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
+import { newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
+import { reconcileCommissionLedger, personalCommissionSummary, monthlyCommissionSummary, invalidateCommissionAllocations } from "./commission-ledger.mjs";
 import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "./order-fulfillment-stock.mjs";
 import {
   assertOrderAcquisitionTagUnchanged,
-  planOrderAcquisitionTag,
-  requireLockedAcquisitionTagAdmin,
 } from "./order-acquisition-tag.mjs";
 import {
   ORDER_SOURCE_VALUES,
@@ -33,11 +33,8 @@ import {
   platformPaymentChannelForOrderSource,
 } from "./order-source-rules.mjs";
 import {
-  DEFAULT_COMMISSION_RATE,
-  calculateOrderCommission,
   calculateOrderFeeBreakdown,
   configuredOrderPackagingFee,
-  normalizeCommissionRate,
   normalizeExternalOrderNo,
   normalizeShippingFeeMode,
   parseDouyinSettlementCsv,
@@ -77,11 +74,13 @@ import {
   ensureApprovalNotifications,
   ensureCreditSaleNotifications,
   ensurePersonnelProfileApprovalNotifications,
+  ensureNewCustomerApprovalNotifications,
   markNotificationsRead,
   notificationsForRecipient,
   resolveApprovalNotifications,
   resolveCreditSaleNotifications,
   resolvePersonnelProfileApprovalNotifications,
+  resolveNewCustomerApprovalNotifications,
 } from "./station-notifications.mjs";
 import {
   buildStockChangeSnapshot,
@@ -2152,6 +2151,8 @@ function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
   delete next.notifications;
+  // The commission journal is private. Staff receive only their own monthly aggregate.
+  delete next.commissionLedgerV1;
   delete next.approvalRequests;
   delete next.personnelProfileRequests;
   delete next.personnelPrivateAttachments;
@@ -2920,6 +2921,7 @@ const stationNotificationStateProjection = `jsonb_build_object(
   'personnelProfileRequests', COALESCE(data->'personnelProfileRequests', '[]'::jsonb),
   'orders', COALESCE(data->'orders', '[]'::jsonb),
   'personnel', COALESCE(data->'personnel', '[]'::jsonb),
+  'customers', COALESCE(data->'customers', '[]'::jsonb),
   'sites', COALESCE(data->'sites', '[]'::jsonb)
 )`;
 
@@ -2944,6 +2946,15 @@ function visibleOrdersForNotificationAuth(state = {}, account = {}) {
 function stationNotificationForAuth(state = {}, req, notification = {}, options = {}) {
   const safeNotification = stationNotificationListRecord(notification);
   const includeStockDetails = options.includeStockDetails === true;
+  if (notification?.type === "new_customer_approval") {
+    const order = visibleOrdersForNotificationAuth(state, req.auth?.account)
+      .find((item) => String(item?.id ?? "") === String(notification?.orderId ?? ""));
+    const detail = order ? newCustomerApprovalDetail(state, order, req.auth?.account) : null;
+    const matchesRequest = order?.newCustomerApproval?.requestId === notification.approvalRequestId;
+    return { ...safeNotification, canApprove: notification.notificationRole === "approver" &&
+      notification.status === "pending" && matchesRequest && detail?.canApprove === true,
+      ...(includeStockDetails && detail ? { newCustomerReview: detail } : {}) };
+  }
   if (notification?.type === "credit_sale_confirmation") {
     const ordersById = options.ordersById instanceof Map
       ? options.ordersById
@@ -4751,13 +4762,6 @@ function roundFinance(value) {
   return Number(Number(value || 0).toFixed(2));
 }
 
-function financeDefaultCommissionRate(state = {}) {
-  return normalizeCommissionRate(
-    state?.systemSettings?.financeDefaultCommissionRate,
-    DEFAULT_COMMISSION_RATE
-  );
-}
-
 function financePaymentTotals(order = {}) {
   return verifiedPaymentTotals(order?.payments);
 }
@@ -5067,6 +5071,7 @@ function buildFinanceOverview(
   transferRows = [],
   statementRows = [],
   statementBatchRows = [],
+  commissionsByOrder = new Map(),
 ) {
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const shipments = Array.isArray(state.shipments) ? state.shipments : [];
@@ -5076,7 +5081,6 @@ function buildFinanceOverview(
     .map((product) => [String(product?.id ?? ""), product]));
   const stockItems = new Map((Array.isArray(state.stock) ? state.stock : [])
     .map((item) => [String(item?.id ?? ""), item]));
-  const defaultCommissionRate = financeDefaultCommissionRate(state);
   const settlements = settlementRows.map(settlementRecordFromRow);
   const settlementsByExternalOrderNo = new Map();
   for (const settlement of settlements) {
@@ -5128,7 +5132,7 @@ function buildFinanceOverview(
       : 0;
     const receivable = order?.status === "cancelled" ? 0 : feeBreakdown.calculatedReceivable;
     const balance = roundFinance(receivable - recognizedNet);
-    const commission = calculateOrderCommission(order, defaultCommissionRate);
+    const commission = commissionsByOrder.get(String(order?.id ?? "")) ?? {};
     const customer = customers.get(String(order?.customerId ?? ""));
     const items = (Array.isArray(order?.items) ? order.items : []).map((item) => {
       const stockItem = stockItems.get(String(item?.stockItemId ?? ""));
@@ -5312,13 +5316,13 @@ function buildFinanceOverview(
     unreconciledOrders: orderRows.filter((order) =>
       order.financeStatus !== "已核销" && order.financeStatus !== "已取消"
     ).length,
-    commissionTotal: roundFinance(orderRows.reduce((sum, order) => sum + order.commissionAmount, 0)),
+    commissionTotal: roundFinance(orderRows.reduce((sum, order) => sum + Number(order.commissionAmount ?? 0), 0)),
     unmatchedSettlementCount,
     unmatchedStatementCount: statements.filter((statement) => statement.matchStatus === "unmatched").length,
   };
 
   return {
-    settings: { defaultCommissionRate },
+    settings: { commissionPolicyEffectiveDate: "2026-10-01" },
     summary,
     orders: orderRows.sort((left, right) =>
       String(right.date).localeCompare(String(left.date)) || String(right.orderNo).localeCompare(String(left.orderNo))
@@ -5382,6 +5386,72 @@ function refreshLockedOrderMutationAuth(req, state = {}) {
     throw httpError(403, "当前账号权限已变化，请重新登录后重试", "ORDER_ACCOUNT_CHANGED");
   }
   req.auth = { ...req.auth, account };
+}
+
+function commissionCurrentMonth(now = new Date()) {
+  return new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 7);
+}
+
+// Reconcile under the same row lock used by financial mutations. Only this
+// private key is written, preserving orders and the rest of the application.
+async function loadReconciledCommissions(req, authorize = () => {}, includeFinanceState = false) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(includeFinanceState
+      ? "SELECT data FROM app_state WHERE id = $1 FOR UPDATE"
+      : `SELECT data -> 'orders' AS orders, data -> 'shipments' AS shipments,
+                data -> 'personnel' AS personnel, data -> 'customers' AS customers,
+                data -> 'commissionLedgerV1' AS "commissionLedgerV1"
+         FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]);
+    const state = normalizePickupShipmentsForState((includeFinanceState ? rows[0]?.data : rows[0]) ?? {});
+    refreshLockedOrderMutationAuth(req, state);
+    authorize();
+    const settlements = await client.query(
+      `SELECT data, batch_id, created_at, site_id
+       FROM finance_platform_settlements WHERE state_id = $1
+       ORDER BY settlement_time, created_at`, [stateId]
+    );
+    const now = new Date();
+    const result = reconcileCommissionLedger(state, settlements.rows, now);
+    if (result.changed) {
+      await client.query("UPDATE app_state SET data = jsonb_set(data, '{commissionLedgerV1}', $2::jsonb, true), updated_at = now() WHERE id = $1", [
+        stateId, JSON.stringify(result.ledger),
+      ]);
+    }
+    await client.query("COMMIT");
+    return { ...result, state, month: commissionCurrentMonth(now) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Capture both sides of a financial edit in its existing transaction. This
+// makes journal creation independent of whether anyone opens the homepage.
+async function commissionStateForMutation(client, before, after) {
+  const { rows } = await client.query(
+    `SELECT data, batch_id, created_at, site_id FROM finance_platform_settlements
+     WHERE state_id = $1 ORDER BY settlement_time, created_at`, [stateId]
+  );
+  const now = new Date();
+  const initial = reconcileCommissionLedger(before, rows, now);
+  const previousOrders = new Map((before.orders ?? []).map((order) => [order.id, order]));
+  const repricedOrders = (after.orders ?? []).filter((order) => {
+    const previous = previousOrders.get(order.id);
+    if (!previous) return false;
+    const prices = new Map((previous.items ?? []).map((item) => [item.stockItemId, Number(item.price)]));
+    // Removing a returned item is NOT a price correction: its pending refund
+    // must wait for verification. Explicit price/fee corrections are different.
+    return ["discount", "packagingFee", "shippingFee", "shippingFeeMode"].some((key) => String(previous[key] ?? "") !== String(order[key] ?? "")) ||
+      (order.items ?? []).some((item) => prices.has(item.stockItemId) && prices.get(item.stockItemId) !== Number(item.price)) ||
+      getBillableShippingFeeForOrder(previous, before.shipments ?? []) !== getBillableShippingFeeForOrder(order, after.shipments ?? []);
+  }).map((order) => order.id);
+  const journal = repricedOrders.length ? invalidateCommissionAllocations(initial.ledger, repricedOrders) : initial.ledger;
+  const updated = reconcileCommissionLedger({ ...after, commissionLedgerV1: journal }, rows, now);
+  return { ...after, commissionLedgerV1: updated.ledger };
 }
 
 function normalizeStockLookupCode(value) {
@@ -9184,11 +9254,47 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/commissions/me" && req.method === "GET") {
+    try {
+      const result = await loadReconciledCommissions(req);
+      sendJson(req, res, 200, {
+        ok: true,
+        ...personalCommissionSummary(result.ledger, String(req.auth.account.id), result.month),
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error?.statusCode || 500, { ok: false, error: error.message || "个人提成加载失败" }, { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/commissions/summary" && req.method === "GET") {
+    try {
+      const month = url.searchParams.get("month") || commissionCurrentMonth();
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || month < "2026-10" || month > commissionCurrentMonth()) {
+        throw httpError(400, "请选择 2026 年 10 月至本月之间的月份", "COMMISSION_MONTH_INVALID");
+      }
+      const result = await loadReconciledCommissions(req, () => {
+        if (req.auth.account.accessRole !== "admin") throw httpError(403, "仅管理员可以查看提成汇总及团队公共池", "COMMISSION_ADMIN_REQUIRED");
+      });
+      sendJson(req, res, 200, {
+        ok: true,
+        ...monthlyCommissionSummary(result.ledger, result.state.personnel, month),
+        reviewRequiredOrderCount: new Set(result.diagnostics.filter((item) =>
+          item.code !== "PLATFORM_REPLACES_ORDER_PAYMENTS" &&
+          result.byOrder.get(item.orderId)?.commissionEligible
+        ).map((item) => item.orderId)).size,
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error?.statusCode || 500, { ok: false, error: error.message || "提成汇总加载失败" }, { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/finance/overview" && req.method === "GET") {
     try {
       requireFinanceAccessForAuth(req);
-      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
-      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      const commissionResult = await loadReconciledCommissions(req, () => requireFinanceAccessForAuth(req), true);
+      const state = commissionResult.state;
       const scope = financeSiteScope(
         state,
         req.auth?.account,
@@ -9239,18 +9345,24 @@ async function handleApi(req, res, url) {
           [stateId, scope.siteIds]
         ),
       ]);
-      sendJson(req, res, 200, {
-        ok: true,
-        siteId: scope.requested,
-        ...buildFinanceOverview(
+      const overview = buildFinanceOverview(
           scope.state,
           settlementResult.rows,
           batchResult.rows,
           transferResult.rows,
           statementResult.rows,
           statementBatchResult.rows,
-        ),
-      });
+          commissionResult.byOrder,
+        );
+      if (req.auth.account.accessRole !== "admin") {
+        delete overview.summary.commissionTotal;
+        for (const order of overview.orders) {
+          for (const key of Object.keys(order)) {
+            if (/commission/i.test(key)) delete order[key];
+          }
+        }
+      }
+      sendJson(req, res, 200, { ok: true, siteId: scope.requested, ...overview }, { "Cache-Control": "no-store, private" });
     } catch (error) {
       sendJson(req, res, 403, { ok: false, error: error.message || "财务数据加载失败" });
     }
@@ -9432,7 +9544,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await client.query("COMMIT");
       sendJson(req, res, 200, {
@@ -9562,7 +9674,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await refreshStatementBatchMatchCounts(client, statement.batchId);
       await client.query("COMMIT");
@@ -9727,93 +9839,11 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (url.pathname === "/api/finance/settings" && req.method === "POST") {
-    const client = await pool.connect();
-    try {
-      requireModulePermissionForAuth(req, "finance", "update");
-      const body = JSON.parse(await readBody(req) || "{}");
-      const rawRate = Number(body.defaultCommissionRate);
-      if (!Number.isFinite(rawRate) || rawRate < 0 || rawRate > 100) {
-        throw new Error("默认提成比例必须在 0% 到 100% 之间");
-      }
-      const defaultCommissionRate = normalizeCommissionRate(rawRate);
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const state = rows[0]?.data ?? {};
-      const operationLog = createOperationLog(
-        req,
-        "财务管理",
-        "修改记录",
-        `默认订单负责人提成比例调整为 ${defaultCommissionRate}%`
-      );
-      const nextState = {
-        ...state,
-        systemSettings: {
-          ...(state.systemSettings && typeof state.systemSettings === "object" ? state.systemSettings : {}),
-          financeDefaultCommissionRate: defaultCommissionRate,
-        },
-        operationLogs: pushOperationLog(state.operationLogs, operationLog),
-      };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
-        stateId,
-        JSON.stringify(nextState),
-      ]);
-      await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, defaultCommissionRate, operationLog });
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "提成设置保存失败" });
-    } finally {
-      client.release();
-    }
-    return;
-  }
-
-  if (url.pathname === "/api/finance/order-commission" && req.method === "POST") {
-    const client = await pool.connect();
-    try {
-      requireModulePermissionForAuth(req, "finance", "update");
-      const body = JSON.parse(await readBody(req) || "{}");
-      const orderId = String(body.orderId ?? "").trim();
-      const rawRate = Number(body.commissionRate);
-      if (!orderId) throw new Error("缺少订单信息");
-      if (!Number.isFinite(rawRate) || rawRate < 0 || rawRate > 100) {
-        throw new Error("订单提成比例必须在 0% 到 100% 之间");
-      }
-      const commissionRate = normalizeCommissionRate(rawRate);
-      await client.query("BEGIN");
-      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
-      const state = rows[0]?.data ?? {};
-      const scope = financeSiteScope(state, req.auth?.account, ALL_SITE_ID);
-      const order = (Array.isArray(scope.state.orders) ? scope.state.orders : [])
-        .find((item) => String(item?.id ?? "") === orderId);
-      if (!order) throw new Error("订单不存在或当前账户不可见");
-      const orders = (Array.isArray(state.orders) ? state.orders : []).map((item) =>
-        String(item?.id ?? "") === orderId ? { ...item, commissionRate } : item
-      );
-      const operationLog = createOperationLog(
-        req,
-        "财务管理",
-        "修改记录",
-        `订单「${order.orderNo}」负责人提成比例调整为 ${commissionRate}%`
-      );
-      const nextState = {
-        ...state,
-        orders,
-        operationLogs: pushOperationLog(state.operationLogs, operationLog),
-      };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
-        stateId,
-        JSON.stringify(nextState),
-      ]);
-      await client.query("COMMIT");
-      sendJson(req, res, 200, { ok: true, order: { ...order, commissionRate }, operationLog });
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, 400, { ok: false, error: error.message || "订单提成比例保存失败" });
-    } finally {
-      client.release();
-    }
+  if (["/api/finance/settings", "/api/finance/order-commission"].includes(url.pathname) && req.method === "POST") {
+    sendJson(req, res, 410, {
+      ok: false, code: "LEGACY_COMMISSION_SETTINGS_RETIRED",
+      error: "旧提成比例设置已停用。2026 年 10 月起使用新客审批和固定提成规则。",
+    });
     return;
   }
 
@@ -9892,7 +9922,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await refreshFinanceBatchMatchCounts(client, nextState, scope.requested);
       await client.query("COMMIT");
@@ -10070,7 +10100,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await client.query("COMMIT");
       sendJson(req, res, 200, {
@@ -10261,7 +10291,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await client.query("COMMIT");
       await removePersonnelAttachmentFiles(retiredAttachmentIds);
@@ -10463,7 +10493,7 @@ async function handleApi(req, res, url) {
          VALUES ($1, $2::jsonb, now())
          ON CONFLICT (id)
          DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-        [stateId, JSON.stringify(nextState)]
+        [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]
       );
       await client.query("COMMIT");
       const currentUserChanged = Boolean(existing) && previousUsername === String(req.auth?.user?.username ?? "");
@@ -11911,23 +11941,51 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/orders/acquisition-tag" && req.method === "POST") {
+    sendJson(req, res, 410, { ok: false, code: "ACQUISITION_TAG_RETIRED", error: "获新订单已改为新客提成审批，请由订单负责人提交申请，再由管理员审批" });
+    return;
+  }
+
+  if (url.pathname === "/api/orders/new-customer/detail" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+                data -> 'orders' AS orders, data -> 'customers' AS customers
+         FROM app_state WHERE id = $1`, [stateId]
+      );
+      const state = rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const { order } = resolveUniqueOrderMutationTarget(state, url.searchParams.get("orderId"));
+      requireVisibleSiteForAuth(req, state, order.siteId, "不能查看未授权场地的订单");
+      sendJson(req, res, 200, { ok: true, ...newCustomerApprovalDetail(state, order, req.auth.account) }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error?.statusCode || 400, { ok: false, code: error.code, error: error.message });
+    }
+    return;
+  }
+
+  if (["/api/orders/new-customer/request", "/api/orders/new-customer/review"].includes(url.pathname) && req.method === "POST") {
     const client = await pool.connect();
     let currentOrder = null;
     try {
       const body = JSON.parse(await readBody(req, 16 * 1024));
       await client.query("BEGIN");
-      // No stock/media/financial collections are needed for this classification.
+      // This approval never rewrites prices, payments, stock, or the whole state.
       const { rows } = await client.query(
         `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
-                data -> 'orders' AS orders, data -> 'operationLogs' AS "operationLogs"
+                data -> 'orders' AS orders, data -> 'customers' AS customers,
+                data -> 'shipments' AS shipments, data -> 'commissionLedgerV1' AS "commissionLedgerV1",
+                data -> 'notifications' AS "notifications", data -> 'operationLogs' AS "operationLogs"
          FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]
       );
       const state = rows[0] ?? {};
-      const account = requireLockedAcquisitionTagAdmin(state, req.auth);
-      req.auth = { ...req.auth, account };
+      refreshLockedOrderMutationAuth(req, state);
+      const account = req.auth.account;
       const target = resolveAuthorizedLockedOrderTarget(req, state, body?.orderId);
       currentOrder = target.order;
-      const result = planOrderAcquisitionTag(currentOrder, body, account);
+      const review = url.pathname.endsWith("/review");
+      const now = new Date().toISOString();
+      const result = review ? planNewCustomerReview(state, currentOrder, account, body, now)
+        : planNewCustomerRequest(state, currentOrder, account, body, { requestId: uid("new-customer"), now });
       if (result.unchanged) {
         await client.query("COMMIT");
         sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder });
@@ -11935,13 +11993,28 @@ async function handleApi(req, res, url) {
       }
       const nextOrder = result.order;
       const nextOrders = target.orders.map((order) => order.id === currentOrder.id ? nextOrder : order);
-      const operationLog = createOperationLog(req, "订单管理", "获新订单标记",
-        `${nextOrder.isAcquisitionOrder ? "标记" : "取消标记"}订单「${nextOrder.orderNo || nextOrder.id}」为获新订单`);
+      const approval = nextOrder.newCustomerApproval;
+      const notificationResult = review
+        ? resolveNewCustomerApprovalNotifications(currentStationNotifications(state), approval.requestId, {
+          resolution: approval.status, resolvedAt: now, resolvedBy: account.username,
+          resolvedByName: account.name || account.username, resolutionNote: approval.reviewNote,
+        })
+        : ensureNewCustomerApprovalNotifications(currentStationNotifications(state), {
+          approvalRequestId: approval.requestId, orderId: nextOrder.id, orderNo: nextOrder.orderNo,
+          siteId: nextOrder.siteId, createdAt: now, createdBy: account.username,
+          createdByName: account.name || account.username, reason: approval.reason,
+          requester: { username: account.username, name: account.name || account.username },
+          recipients: activeAdministratorRecipients(state.personnel),
+        });
+      const operationLog = createOperationLog(req, "订单管理", review ? "审批新客提成" : "申请新客提成",
+        `订单「${nextOrder.orderNo || nextOrder.id}」${review ? approval.status === "approved" ? "新客 5% 提成已批准" : "新客提成申请已驳回" : "提交新客 5% 提成申请"}（申请 ${approval.requestId}）${approval.reviewNote ? `：${approval.reviewNote}` : ""}`);
+      const commissionState = await commissionStateForMutation(client, state, { ...state, orders: nextOrders });
       await client.query(
-        `UPDATE app_state SET data = jsonb_set(
-           jsonb_set(data, '{orders}', $2::jsonb, true), '{operationLogs}', $3::jsonb, true
-         ), updated_at = now() WHERE id = $1`,
-        [stateId, JSON.stringify(nextOrders), JSON.stringify(pushOperationLog(state.operationLogs, operationLog))]
+        `UPDATE app_state SET data = jsonb_set(jsonb_set(
+           jsonb_set(jsonb_set(data, '{orders}', $2::jsonb, true), '{operationLogs}', $3::jsonb, true),
+           '{notifications}', $4::jsonb, true
+         ), '{commissionLedgerV1}', $5::jsonb, true), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(nextOrders), JSON.stringify(pushOperationLog(state.operationLogs, operationLog)), JSON.stringify(notificationResult.notifications), JSON.stringify(commissionState.commissionLedgerV1)]
       );
       await client.query("COMMIT");
       sendJson(req, res, 200, { ok: true, order: nextOrder, operationLog });
@@ -11951,7 +12024,7 @@ async function handleApi(req, res, url) {
         ok: false,
         ...(error?.code ? { code: error.code } : {}),
         error: error.message,
-        ...(error?.code === "ORDER_ACQUISITION_TAG_CONFLICT" && currentOrder ? { order: currentOrder } : {}),
+        ...(error?.statusCode === 409 && currentOrder ? { order: currentOrder } : {}),
       });
     } finally {
       client.release();
@@ -12003,7 +12076,7 @@ async function handleApi(req, res, url) {
         stock: nextStock,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12103,7 +12176,7 @@ async function handleApi(req, res, url) {
         notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12248,7 +12321,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
@@ -12394,7 +12467,7 @@ async function handleApi(req, res, url) {
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
 
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       if (action === "verify") {
         const verifiedPayment = nextPayments.find((payment) => String(payment?.id ?? "") === String(body.paymentId ?? body.payment?.id ?? ""));
         if (verifiedPayment?.statementId) {
@@ -12491,7 +12564,7 @@ async function handleApi(req, res, url) {
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [
         stateId,
-        JSON.stringify(nextState),
+        JSON.stringify(await commissionStateForMutation(client, state, nextState)),
       ]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
@@ -12594,7 +12667,7 @@ async function handleApi(req, res, url) {
         stock: nextStock,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12670,7 +12743,7 @@ async function handleApi(req, res, url) {
         orders: nextOrders,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12711,13 +12784,19 @@ async function handleApi(req, res, url) {
       const nextShipments = (Array.isArray(state.shipments) ? state.shipments : [])
         .filter((shipment) => String(shipment?.orderId ?? "") !== orderId);
       const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders, state);
-      const nextNotifications = resolveCreditSaleNotifications(
+      let nextNotifications = resolveCreditSaleNotifications(
         currentStationNotifications(state),
         orderId,
         "order_deleted",
         operator,
         new Date().toISOString()
       ).notifications;
+      if (order.newCustomerApproval?.status === "pending") {
+        nextNotifications = resolveNewCustomerApprovalNotifications(nextNotifications, order.newCustomerApproval.requestId, {
+          resolution: "rejected", resolvedAt: new Date().toISOString(), resolvedBy: operator,
+          resolvedByName: authenticatedOperatorName(req), resolutionNote: "订单已删除，新客提成申请自动关闭",
+        }).notifications;
+      }
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -12734,7 +12813,7 @@ async function handleApi(req, res, url) {
         notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12885,7 +12964,7 @@ async function handleApi(req, res, url) {
         notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -12918,7 +12997,7 @@ async function handleApi(req, res, url) {
       } catch {
         throw new ShipmentActualShippingFeeError("请求 JSON 格式不正确");
       }
-      const result = await updateLockedAppState(client, stateId, (state) => {
+      const result = await updateLockedAppState(client, stateId, async (state) => {
         const planned = planActualShippingFeeUpdate({
           state,
           request: body,
@@ -12933,11 +13012,11 @@ async function handleApi(req, res, url) {
           `订单「${planned.order.orderNo || planned.order.id}」发货单「${planned.updatedShipment.id}」实际运费 ¥${previousFee.toFixed(2)} → ¥${planned.updatedShipment.actualShippingFee.toFixed(2)}`
         );
         return {
-          nextState: {
+          nextState: await commissionStateForMutation(client, state, {
             ...state,
             shipments: planned.shipments,
             operationLogs: pushOperationLog(state.operationLogs, operationLog),
-          },
+          }),
           shipment: planned.updatedShipment,
           operationLog,
         };
@@ -13039,7 +13118,7 @@ async function handleApi(req, res, url) {
         notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -13288,7 +13367,7 @@ async function handleApi(req, res, url) {
         stock: nextStock,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -13357,7 +13436,7 @@ async function handleApi(req, res, url) {
         stock: nextStock,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
-      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
       await client.query("COMMIT");
       const visibleNextState = siteVisibilityFilteredState(nextState, req.auth?.account);
       sendJson(req, res, 200, {
@@ -13524,6 +13603,18 @@ async function handleApi(req, res, url) {
       if (persistedKeys.length > 0 || appliedOperationLogs.length > 0) {
         let dataExpression = "data";
         const updateValues = [stateId];
+        if (persistedKeys.some((key) => ["orders", "shipments", "customers", "personnel"].includes(key))) {
+          const { rows: commissionRows } = await client.query(
+            `SELECT data -> 'orders' AS orders, data -> 'shipments' AS shipments,
+                    data -> 'personnel' AS personnel, data -> 'customers' AS customers,
+                    data -> 'commissionLedgerV1' AS "commissionLedgerV1"
+             FROM app_state WHERE id = $1`, [stateId]);
+          const before = commissionRows[0] ?? {};
+          const after = { ...before, ...Object.fromEntries(persistedKeys.map((key) => [key, nextState[key]])) };
+          const commissionState = await commissionStateForMutation(client, before, after);
+          updateValues.push(JSON.stringify(commissionState.commissionLedgerV1));
+          dataExpression = `jsonb_set(${dataExpression}, '{commissionLedgerV1}', $${updateValues.length}::jsonb, true)`;
+        }
         for (const key of persistedKeys) {
           updateValues.push(JSON.stringify(nextState[key] ?? null));
           dataExpression = `jsonb_set(${dataExpression}, '{${key}}', $${updateValues.length}::jsonb, true)`;

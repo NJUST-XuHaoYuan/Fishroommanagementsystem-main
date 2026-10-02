@@ -9,7 +9,7 @@ import {
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { mergeAcquisitionOrderTags, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
+import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
@@ -659,20 +659,6 @@ function normalizeMinReturnPrice(value: unknown): number {
   return normalizeMoneyAmount(value);
 }
 
-function itemCommissionAmount(item: { price?: number; minReturnPrice?: number }): number {
-  return Math.max(0, normalizeMoneyAmount(item.price) - normalizeMinReturnPrice(item.minReturnPrice));
-}
-
-function orderCommissionTotalWithProducts(
-  order: Pick<Order, "items">,
-  getProduct: (productId: string) => Pick<Product, "minReturnPrice"> | undefined
-): number {
-  return (order.items ?? []).reduce((sum, item) => {
-    const minReturnPrice = orderItemMinReturnPrice(item, getProduct(item.productId));
-    return sum + itemCommissionAmount({ ...item, minReturnPrice });
-  }, 0);
-}
-
 function isMinimumReturnPriceExempt(
   item: { minReturnPriceExempt?: boolean },
   stockItem?: Pick<StockItem, "status"> | null
@@ -1308,7 +1294,7 @@ function OrderStatusTags({
           {tag.label}
         </span>
       ))}
-      <OrderAcquisitionBadge marked={order.isAcquisitionOrder} />
+      <OrderAcquisitionBadge marked={order.isAcquisitionOrder} approvalStatus={order.newCustomerApproval?.status} />
     </span>
   );
 }
@@ -4050,7 +4036,6 @@ function ItemsWithShipments({
     const damageRefunded = !!options?.damageRefunded;
     const minReturnPrice = orderItemMinReturnPrice(item, p);
     const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
-    const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
     return (
       <tr
         key={item.stockItemId ?? idx}
@@ -4090,7 +4075,6 @@ function ItemsWithShipments({
             </div>
           ) : `¥${minReturnPrice.toFixed(2)}`}
         </td>
-        <td className="px-4 py-2.5 text-sm text-right text-emerald-700">¥{commissionAmount.toFixed(2)}</td>
         <td className="px-3 py-2.5 text-right">
           {isUnshipped && canReturnItem ? (
             <Button
@@ -4127,7 +4111,6 @@ function ItemsWithShipments({
         <th className="text-left px-4 py-2 text-xs text-muted-foreground font-medium">缸位</th>
         <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">售价</th>
         <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">最低回厂价</th>
-        <th className="text-right px-4 py-2 text-xs text-muted-foreground font-medium">可提成</th>
         <th className="w-12 px-3 py-2" />
       </tr>
     </thead>
@@ -4332,9 +4315,6 @@ function OrderDetailDialog({
   const [creditSaleRequest, setCreditSaleRequest] = useState<CreditSaleRequestDialogState | null>(null);
   const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
-  const [acquisitionTagSaving, setAcquisitionTagSaving] = useState(false);
-  const acquisitionTagRequestPending = useRef(false);
-  const [acquisitionTagError, setAcquisitionTagError] = useState<{ orderId: string; message: string } | null>(null);
   const personnel = state.personnel ?? [];
   const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
   const editContactOptions = getContactPersonOptions(personnel);
@@ -4524,53 +4504,6 @@ function OrderDetailDialog({
 
   const cancelEdit = () => { setEditMode(false); setEditForm(null); };
 
-  const applyAcquisitionTagResult = (result: { order: Order; operationLog?: Store["operationLogs"][number] }) => {
-    setState((current) => {
-      if (!current.orders.some((item) => item.id === result.order.id)) return current;
-      return {
-        ...current,
-        orders: mergeAcquisitionOrderTags(current.orders, result.order),
-        operationLogs: mergeOperationLog(current, result.operationLog),
-      };
-    });
-  };
-
-  const toggleAcquisitionTag = async () => {
-    if (!order || acquisitionTagRequestPending.current) return;
-    if (!permission.isAdmin) {
-      toast.error("只有管理员可以修改获新订单标记");
-      return;
-    }
-    const orderId = order.id;
-    const isAcquisitionOrder = order.isAcquisitionOrder !== true;
-    acquisitionTagRequestPending.current = true;
-    setAcquisitionTagSaving(true);
-    setAcquisitionTagError(null);
-    try {
-      const result = await postOrderApi("orders/acquisition-tag", {
-        orderId,
-        isAcquisitionOrder,
-        expectedIsAcquisitionOrder: order.isAcquisitionOrder === true,
-        expectedAcquisitionOrderUpdatedAt: order.acquisitionOrderUpdatedAt ?? "",
-      });
-      if (result.order?.id !== orderId || result.order.isAcquisitionOrder !== isAcquisitionOrder) {
-        throw new Error("服务端未返回已保存的标记，请刷新订单确认后重试");
-      }
-      applyAcquisitionTagResult(result);
-      toast.success(isAcquisitionOrder ? "已标记为获新订单" : "已取消获新订单标记");
-    } catch (error) {
-      if (error instanceof OrderApiError && error.code === "ORDER_ACQUISITION_TAG_CONFLICT" && error.payload.order?.id === orderId) {
-        applyAcquisitionTagResult({ order: error.payload.order });
-      }
-      const message = error instanceof Error ? error.message : "获新订单标记保存失败，请重试";
-      setAcquisitionTagError({ orderId, message });
-      toast.error(message);
-    } finally {
-      acquisitionTagRequestPending.current = false;
-      setAcquisitionTagSaving(false);
-    }
-  };
-
   const saveEdit = async () => {
     if (!order || !editForm) return;
     if (!permission.requirePermission("update")) return;
@@ -4731,7 +4664,6 @@ function OrderDetailDialog({
   const displayDiscount  = (editMode && editForm ? editForm.discount     : order?.discount)     ?? 0;
   const displayGoodsNetTotal = orderGoodsNetTotal(displayItemsTotal, displayDiscount);
   const displayMinimumReturnTotal = orderMinimumReturnTotal(displayItemsWithMinimumReturn);
-  const displayCommissionTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + itemCommissionAmount(i), 0);
   const displayBelowMinimumReturn = displayItemsWithMinimumReturn.length > 0 && displayGoodsNetTotal <= displayMinimumReturnTotal;
   const draftCustomerShipping = displayShippingMode === "prepaid" ? displayShipping : 0;
   const draftShippingDiscount = displayShippingMode === "free" ? displayShipping : 0;
@@ -5045,11 +4977,10 @@ function OrderDetailDialog({
 
             <OrderAcquisitionTag
               order={order}
-              isAdmin={permission.isAdmin}
-              saving={acquisitionTagSaving}
-              error={acquisitionTagError?.orderId === order.id ? acquisitionTagError.message : ""}
-              updatedAtLabel={formatLocalDateTimeMinute(order.acquisitionOrderUpdatedAt, "")}
-              onToggle={toggleAcquisitionTag}
+              onOrderUpdated={(updatedOrder) => setState((current) => ({
+                ...current,
+                orders: mergeNewCustomerApproval(current.orders, updatedOrder),
+              }))}
             />
 
             {/* ── 基本信息 ── */}
@@ -5294,7 +5225,6 @@ function OrderDetailDialog({
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
                     <span className="text-slate-600">最低回厂价 ¥{displayMinimumReturnTotal.toFixed(2)}</span>
-                    <span className="text-emerald-700">可提成 ¥{displayCommissionTotal.toFixed(2)}</span>
                   </div>
                 )}
               </div>
@@ -5310,7 +5240,6 @@ function OrderDetailDialog({
                           <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
                           <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
                           <th className="text-right px-4 py-2 text-xs text-muted-foreground">最低回厂价</th>
-                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">可提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
@@ -5322,7 +5251,6 @@ function OrderDetailDialog({
                           const isLost = !!s?.lost;
                           const minReturnPrice = orderItemMinReturnPrice(item, p);
                           const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
-                          const commissionAmount = itemCommissionAmount({ ...item, minReturnPrice });
                           return (
                             <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
                               <td className="px-4 py-2">
@@ -5359,9 +5287,6 @@ function OrderDetailDialog({
                                     <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
                                   </div>
                                 ) : `¥${minReturnPrice.toFixed(2)}`}
-                              </td>
-                              <td className="px-4 py-2 text-sm text-right text-emerald-700">
-                                ¥{commissionAmount.toFixed(2)}
                               </td>
 	                              <td className="px-2 py-2">
 	                                {!isShipped && (
@@ -5460,7 +5385,6 @@ function OrderDetailDialog({
                   {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 折扣</span><span>¥{displayDiscount.toFixed(2)}</span></div>}
                   <div className="flex justify-between"><span className="text-muted-foreground">商品折后金额</span><span>¥{displayGoodsNetTotal.toFixed(2)}</span></div>
                   <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
-                  <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
                   {displayBelowMinimumReturn && (
                     <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                       商品折后金额必须高于最低回厂价合计。
@@ -5483,7 +5407,6 @@ function OrderDetailDialog({
                 {displayDiscount > 0 && <div className="flex justify-between text-orange-600"><span>折扣 / 优惠</span><span>− ¥{displayDiscount.toFixed(2)}</span></div>}
                 <div className="flex justify-between"><span className="text-muted-foreground">商品折后金额</span><span>¥{displayGoodsNetTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{displayMinimumReturnTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-emerald-700"><span>可提成金额</span><span>¥{displayCommissionTotal.toFixed(2)}</span></div>
                 {!isPickupOrderSource(order.source) && (
                   <div className="flex justify-between"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(displayShippingMode)}</span></div>
                 )}
@@ -6515,7 +6438,6 @@ function NewOrderDialog({
   const minimumReturnTotal = orderMinimumReturnTotal(Array.from(selectedItems.values()));
   const goodsNetTotal = orderGoodsNetTotal(itemsTotal, discount);
   const belowMinimumReturn = selectedItems.size > 0 && goodsNetTotal <= minimumReturnTotal;
-  const commissionTotal = Array.from(selectedItems.values()).reduce((s, item) => s + itemCommissionAmount(item), 0);
   const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
   const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
@@ -6652,8 +6574,7 @@ function NewOrderDialog({
       const product = state.products.find((item) => item.id === stockItem.productId);
       const minReturnPrice = normalizeMinReturnPrice(draftItem.minReturnPrice);
       const minReturnPriceExempt = isMinimumReturnPriceExempt(draftItem, stockItem);
-      const commissionAmount = itemCommissionAmount({ ...draftItem, minReturnPrice });
-      return [{ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }];
+      return [{ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt }];
     })
   ), [selectedItems, state.stock, state.products]);
 
@@ -6846,7 +6767,7 @@ function NewOrderDialog({
                 </span>
                 {selectedItems.size > 0 && (
                   <span className="text-sm text-muted-foreground">
-                    小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)} · 预计可提成 ¥{commissionTotal.toFixed(2)}
+                    小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -6860,7 +6781,7 @@ function NewOrderDialog({
                 ) : (
                   <>
                     <div className="flex flex-col divide-y md:hidden">
-                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }) => (
+                      {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt }) => (
                         <div key={stockItemId} className="p-3">
                           <div className="flex items-start gap-2">
                             <div className="size-10 shrink-0 overflow-hidden rounded border bg-muted">
@@ -6908,9 +6829,6 @@ function NewOrderDialog({
                               </div>
                             </div>
                           </div>
-                          <div className="mt-2 text-right text-sm text-emerald-700">
-                            可提成 ¥{commissionAmount.toFixed(2)}
-                          </div>
                         </div>
                       ))}
                     </div>
@@ -6921,12 +6839,11 @@ function NewOrderDialog({
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">缸位</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">售价（¥）</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-muted-foreground">最低回厂价</th>
-                          <th className="px-4 py-2 text-right text-xs font-medium text-muted-foreground">可提成</th>
                           <th className="w-10 px-2 py-2" />
                         </tr>
                       </thead>
                       <tbody>
-                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt, commissionAmount }) => (
+                        {selectedRows.map(({ stockItemId, stockItem, product, draftItem, minReturnPrice, minReturnPriceExempt }) => (
                           <tr key={stockItemId} className="border-t">
                             <td className="px-4 py-2.5">
                               <div className="flex items-center gap-2">
@@ -6962,9 +6879,6 @@ function NewOrderDialog({
                                 </div>
                               ) : <span className="text-sm">¥{minReturnPrice.toFixed(2)}</span>}
                             </td>
-                            <td className="px-4 py-2.5 text-right text-sm text-emerald-700">
-                              ¥{commissionAmount.toFixed(2)}
-                            </td>
                             <td className="px-2 py-2.5">
                               <button
                                 type="button"
@@ -6993,7 +6907,7 @@ function NewOrderDialog({
                 </button>
                 {selectedItems.size > 0 && (
                   <span className="text-xs text-muted-foreground">
-                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)} · 预计可提成 ¥{commissionTotal.toFixed(2)}
+                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -7054,7 +6968,6 @@ function NewOrderDialog({
                 {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品折后金额</span><span>¥{goodsNetTotal.toFixed(2)}</span></div>
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{minimumReturnTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-sm text-emerald-700"><span>预计可提成</span><span>¥{commissionTotal.toFixed(2)}</span></div>
                 {belowMinimumReturn && (
                   <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                     商品折后金额必须高于最低回厂价合计。
@@ -7426,7 +7339,6 @@ export function OrdersView({
           item.plannedShipDate,
           item.price,
           orderItemMinReturnPrice(item, product),
-          itemCommissionAmount({ ...item, minReturnPrice: orderItemMinReturnPrice(item, product) }),
           product?.name,
           product?.size,
           product?.origin,
@@ -7466,7 +7378,6 @@ export function OrdersView({
           shipment.notes,
         ]),
         calcAmountDue(order, state.shipments).toFixed(2),
-        orderCommissionTotalWithProducts(order, (productId) => productMap.get(productId)).toFixed(2),
         ...itemSearchText,
       ].filter(Boolean).join(" ");
       return { ...order, searchText, fishSearchCodes, fishDisplayCodes };
@@ -7617,7 +7528,6 @@ export function OrdersView({
   const renderMobileOrderCard = (order: OrderListRow) => {
     const customer = getCustomer(order.customerId);
     const due = calcAmountDue(order, state.shipments);
-    const commission = orderCommissionTotalWithProducts(order, (productId) => mobileProductById.get(productId));
     const orderShipments = state.shipments.filter((shipment) => shipment.orderId === order.id);
     const activeShipments = orderShipments.filter(countsAsFulfillmentShipment);
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
@@ -7700,10 +7610,6 @@ export function OrdersView({
               <div>
                 <div className="text-xs text-muted-foreground">订单应收</div>
                 <div className="mt-0.5 font-semibold text-sky-700">¥{due.toFixed(2)}</div>
-              </div>
-              <div>
-                <div className="text-xs text-muted-foreground">可提成</div>
-                <div className="mt-0.5 font-semibold text-emerald-700">¥{commission.toFixed(2)}</div>
               </div>
             </div>
 
@@ -8315,15 +8221,6 @@ export function OrdersView({
             title: "订单应收",
             render: (r) => (
               <span className="text-sky-700 font-medium">¥{calcAmountDue(r, state.shipments).toFixed(2)}</span>
-            ),
-          },
-          {
-            key: "commission",
-            title: "可提成",
-            render: (r) => (
-              <span className="font-medium text-emerald-700">
-                ¥{orderCommissionTotalWithProducts(r, (productId) => state.products.find((product) => product.id === productId)).toFixed(2)}
-              </span>
             ),
           },
           {

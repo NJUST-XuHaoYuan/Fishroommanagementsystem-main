@@ -124,7 +124,6 @@ const EMPTY_PERSISTED_STATE: PersistedStore = {
   ...withoutUser(initialState),
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
-    financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
     shippingCarriers: DEFAULT_SHIPPING_CARRIER_SETTINGS.map((carrier) => ({ ...carrier })),
     orderPackagingFee: DEFAULT_ORDER_PACKAGING_FEE,

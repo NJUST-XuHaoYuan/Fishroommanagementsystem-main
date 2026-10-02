@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   createLatestRequestCoordinator,
+  newCustomerApprovalDetailFromPayload,
+  newCustomerRequestActionReady,
+  newCustomerReviewActionReady,
   projectStockChangeItems,
   profileApprovalActionReady,
   profileApprovalDetailsReady,
@@ -13,6 +16,58 @@ import {
   stockApprovalSnapshotIdentityFields,
   stockApprovalPriceModeLabel,
 } from "./notificationCenter.ts";
+
+test("new-customer detail parser accepts direct and notification payloads but rejects incomplete data", () => {
+  const detail = {
+    ok: true,
+    orderId: "order-a",
+    approval: null,
+    canRequest: true,
+    canApprove: false,
+    customerEvidence: { identityKnown: true, otherOrderCount: 0, priorOrders: [] },
+    currentOrder: { id: "order-a", orderNo: "SO-1" },
+    policyEffectiveDate: "2026-10-01",
+  };
+  assert.strictEqual(newCustomerApprovalDetailFromPayload(detail), detail);
+  assert.strictEqual(newCustomerApprovalDetailFromPayload({
+    ok: true,
+    notification: { id: "notice-a", newCustomerReview: detail },
+  }), detail);
+  assert.equal(newCustomerApprovalDetailFromPayload({ ok: true, orderId: "order-a" }), null);
+});
+
+test("new-customer request requires server authority and a 5 to 1000 character reason", () => {
+  const base = { orderId: "order-a", canRequest: true };
+  assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单" }), true);
+  assert.equal(newCustomerRequestActionReady({ ...base, reason: "首单" }), false);
+  assert.equal(newCustomerRequestActionReady({ ...base, reason: "a".repeat(1001) }), false);
+  assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单", canRequest: false }), false);
+  assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单", processing: true }), false);
+});
+
+test("new-customer review requires a reasoned rejection and explicit confirmation for unknown identity", () => {
+  const base = { requestId: "request-a", canApprove: true };
+  assert.equal(newCustomerReviewActionReady({
+    ...base,
+    decision: "approve",
+    identityKnown: true,
+  }), true);
+  assert.equal(newCustomerReviewActionReady({
+    ...base,
+    decision: "approve",
+    identityKnown: false,
+    confirmCustomerIdentity: false,
+  }), false);
+  assert.equal(newCustomerReviewActionReady({
+    ...base,
+    decision: "approve",
+    identityKnown: false,
+    confirmCustomerIdentity: true,
+  }), true);
+  assert.equal(newCustomerReviewActionReady({ ...base, decision: "reject", note: "信息不足" }), true);
+  assert.equal(newCustomerReviewActionReady({ ...base, decision: "reject", note: "   " }), false);
+  assert.equal(newCustomerReviewActionReady({ ...base, decision: "approve", identityKnown: true, processing: true }), false);
+});
 
 test("stock approval exposes price-source-only changes even when the amount stays equal", () => {
   const [projected] = projectStockChangeItems([{

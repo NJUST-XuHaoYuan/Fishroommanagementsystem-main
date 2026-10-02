@@ -43,6 +43,7 @@ import {
   SelectValue,
 } from "./ui/select";
 import { Textarea } from "./ui/textarea";
+import { currentCommissionMonth } from "./PersonalCommissionDashboard";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -57,7 +58,6 @@ import {
   ReceiptText,
   RefreshCw,
   Search,
-  Settings2,
   Trash2,
   Upload,
   X,
@@ -132,11 +132,14 @@ type FinanceOrderRow = {
   platformFees: number;
   netSettlement: number;
   settlementCount: number;
-  commissionRate: number;
   commissionBase: number;
   minimumReturnTotal: number;
-  commissionCap: number;
   commissionAmount: number;
+  personalCommissionAmount: number;
+  teamCommissionAmount: number;
+  newCustomerCommissionAmount: number;
+  commissionPolicyLabel: string;
+  commissionEligible: boolean;
   items: FinanceOrderItem[];
   payments: FinancePayment[];
 };
@@ -260,7 +263,6 @@ type StatementImportBatch = {
 };
 
 type FinanceOverview = {
-  settings: { defaultCommissionRate: number };
   summary: {
     receivable: number;
     actualInflow: number;
@@ -566,8 +568,6 @@ function OrderFinanceDialog({
   const [paymentFormOpen, setPaymentFormOpen] = useState(false);
   const [savingPayment, setSavingPayment] = useState(false);
   const [verifyingPaymentId, setVerifyingPaymentId] = useState("");
-  const [savingCommission, setSavingCommission] = useState(false);
-  const [commissionRate, setCommissionRate] = useState(1);
   const [draft, setDraft] = useState<PaymentDraft>({
     id: "",
     type: "balance",
@@ -584,10 +584,9 @@ function OrderFinanceDialog({
 
   useEffect(() => {
     if (!open || !order) return;
-    setCommissionRate(order.commissionRate);
     setPaymentFormOpen(false);
     setEditingPaymentId("");
-  }, [open, order?.id, order?.commissionRate]);
+  }, [open, order?.id]);
 
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const orderPaymentAccount = String(order?.paymentAccount ?? "").trim();
@@ -765,27 +764,6 @@ function OrderFinanceDialog({
       toast.success("已解除流水关联，可重新匹配订单");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "解除流水关联失败");
-    }
-  };
-
-  const saveCommission = async () => {
-    if (!order || savingCommission || !permission.requirePermission("update")) return;
-    if (!Number.isFinite(commissionRate) || commissionRate < 0 || commissionRate > 100) {
-      toast.error("提成比例必须在 0% 到 100% 之间");
-      return;
-    }
-    setSavingCommission(true);
-    try {
-      await requestJson("/api/finance/order-commission", {
-        method: "POST",
-        body: JSON.stringify({ orderId: order.id, commissionRate }),
-      });
-      await onRefresh();
-      toast.success("订单提成比例已保存");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "提成比例保存失败");
-    } finally {
-      setSavingCommission(false);
     }
   };
 
@@ -995,40 +973,7 @@ function OrderFinanceDialog({
                   </section>
                 )}
 
-                <section className="border-b px-4 py-4 sm:px-5">
-                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold">订单负责人提成</h3>
-                      <p className="mt-1 text-xs text-muted-foreground">按商品折后金额计算，不超过最低回厂价以上空间。</p>
-                    </div>
-                    <div className="flex items-end gap-2">
-                      <label className="grid gap-1 text-xs text-muted-foreground">
-                        提成比例
-                        <span className="flex items-center gap-1">
-                          <Input
-                            type="number"
-                            min={0}
-                            max={100}
-                            step={0.1}
-                            value={commissionRate}
-                            onChange={(event) => setCommissionRate(Number(event.target.value))}
-                            className="h-8 w-20 text-right"
-                          />
-                          %
-                        </span>
-                      </label>
-                      <Button size="sm" onClick={saveCommission} disabled={savingCommission || !permission.canUpdate}>
-                        {savingCommission ? <Loader2 className="size-4 animate-spin" /> : "保存"}
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-sm">
-                    <div><span className="text-muted-foreground">计算基数：</span>{money(order.commissionBase)}</div>
-                    <div><span className="text-muted-foreground">最低回厂：</span>{money(order.minimumReturnTotal)}</div>
-                    <div><span className="text-muted-foreground">提成上限：</span>{money(order.commissionCap)}</div>
-                    <div className="font-semibold text-emerald-700"><span className="font-normal text-muted-foreground">负责人提成：</span>{money(order.commissionAmount)}</div>
-                  </div>
-                </section>
+                {permission.isAdmin && <OrderCommissionDetails order={order} />}
 
                 <section className="px-4 py-4 sm:px-5">
                   <div className="mb-3 flex items-center justify-between gap-3">
@@ -1851,6 +1796,151 @@ function EmptyState({ children }: { children: string }) {
   );
 }
 
+export function OrderCommissionDetails({ order }: {
+  order: Pick<FinanceOrderRow, "commissionEligible" | "commissionPolicyLabel" | "commissionBase" | "personalCommissionAmount" | "newCustomerCommissionAmount">;
+}) {
+  return (
+    <section className="border-b px-4 py-4 sm:px-5">
+      <h3 className="text-sm font-semibold">订单个人提成 · 累计</h3>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</p>
+      {order.commissionEligible ? (
+        <>
+          <dl className="mt-3 space-y-2 text-sm">
+            <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">已核销商品净实收</dt><dd className="tabular-nums">{money(order.commissionBase)}</dd></div>
+            <div className="flex flex-wrap justify-between gap-2"><dt>累计个人提成</dt><dd className="font-semibold tabular-nums">{money(order.personalCommissionAmount)}</dd></div>
+            {order.newCustomerCommissionAmount !== 0 && <div className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">其中新客提成</dt><dd className="tabular-nums">{money(order.newCustomerCommissionAmount)}</dd></div>}
+          </dl>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">这是该订单全周期累计值，不是当月提成。按核销月份计入实收或扣回退款，月度金额请查看提成汇总。</p>
+        </>
+      ) : <p className="mt-3 text-sm text-muted-foreground">此订单不参与新提成制度，不按旧算法计算提成。</p>}
+    </section>
+  );
+}
+
+export type CommissionSummary = {
+  ok: true;
+  month: string;
+  policyEffectiveDate: "2026-10-01";
+  personalTotal: number;
+  newCustomerTotal: number;
+  regularPersonalTotal: number;
+  teamPoolTotal: number;
+  orderCount: number;
+  reviewRequiredOrderCount: number;
+  rows: Array<{ personnelId: string; name: string; personalAmount: number; newCustomerAmount: number; regularPersonalAmount: number }>;
+};
+
+export function parseCommissionSummary(value: unknown): CommissionSummary {
+  const data = value as Partial<CommissionSummary> | null;
+  if (!data || data.ok !== true || !/^\d{4}-(0[1-9]|1[0-2])$/.test(data.month ?? "")
+    || data.policyEffectiveDate !== "2026-10-01"
+    || ![data.personalTotal, data.newCustomerTotal, data.regularPersonalTotal, data.teamPoolTotal, data.orderCount]
+      .every((amount) => typeof amount === "number" && Number.isFinite(amount))
+    || !Number.isInteger(data.reviewRequiredOrderCount) || data.reviewRequiredOrderCount! < 0
+    || !Array.isArray(data.rows) || !data.rows.every((row) => row && typeof row.personnelId === "string" && typeof row.name === "string"
+      && [row.personalAmount, row.newCustomerAmount, row.regularPersonalAmount].every((amount) => typeof amount === "number" && Number.isFinite(amount)))) {
+    throw new Error("月度提成数据不完整，请刷新重试");
+  }
+  return data as CommissionSummary;
+}
+
+export function CommissionSummaryContent({ data }: { data: CommissionSummary }) {
+  return (
+    <>
+      {data.reviewRequiredOrderCount > 0 && (
+        <p role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 sm:px-5">
+          有 {data.reviewRequiredOrderCount} 笔订单存在需核对项（如核销时间、金额或负责人），请先核对再确认提成。
+        </p>
+      )}
+      <dl className="flex flex-wrap gap-x-10 gap-y-4 border-b px-4 py-4 sm:px-5">
+        <div><dt className="text-sm text-muted-foreground">个人提成合计</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{money(data.personalTotal)}</dd></div>
+        <div><dt className="text-sm text-muted-foreground">普通订单个人提成</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{money(data.regularPersonalTotal)}</dd></div>
+        <div><dt className="text-sm text-muted-foreground">新客首单个人提成</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{money(data.newCustomerTotal)}</dd></div>
+        <div><dt className="text-sm text-muted-foreground">公共团队池</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{money(data.teamPoolTotal)}</dd><p className="mt-1 text-xs text-muted-foreground">单独记账，不计入任何个人提成</p></div>
+      </dl>
+      {data.rows.length === 0 ? (
+        <p className="px-4 py-6 text-sm text-muted-foreground sm:px-5">该月暂无符合新制度的核销提成记录。</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[520px] text-sm">
+            <caption className="sr-only">{data.month} 全场地人员提成汇总</caption>
+            <thead className="bg-muted/40 text-xs text-muted-foreground"><tr>
+              <th scope="col" className="px-4 py-3 text-left font-medium">人员</th>
+              <th scope="col" className="px-4 py-3 text-right font-medium">普通订单 · 0.2%</th>
+              <th scope="col" className="px-4 py-3 text-right font-medium">已批准新客 · 5%</th>
+              <th scope="col" className="px-4 py-3 text-right font-medium">个人合计</th>
+            </tr></thead>
+            <tbody className="divide-y">{data.rows.map((row) => (
+              <tr key={row.personnelId}>
+                <th scope="row" className="px-4 py-3 text-left font-medium">{row.name || "未命名人员"}</th>
+                <td className="px-4 py-3 text-right tabular-nums">{money(row.regularPersonalAmount)}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{money(row.newCustomerAmount)}</td>
+                <td className="px-4 py-3 text-right font-semibold tabular-nums">{money(row.personalAmount)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+function CommissionSummarySection({ refreshKey }: { refreshKey: unknown }) {
+  const [month, setMonth] = useState(currentCommissionMonth);
+  const [data, setData] = useState<CommissionSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshVersion, setRefreshVersion] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setData(null);
+    setError("");
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || month < "2026-10" || month > currentCommissionMonth()) {
+      setError("请选择 2026 年 10 月至本月之间的月份");
+      setLoading(false);
+      return () => controller.abort();
+    }
+    setLoading(true);
+    void (async () => {
+      try {
+        const result = await requestJson(`/api/commissions/summary?month=${encodeURIComponent(month)}`, { signal: controller.signal, cache: "no-store" });
+        const summary = parseCommissionSummary(result);
+        if (summary.month !== month) throw new Error("返回月份不匹配，请刷新重试");
+        if (!controller.signal.aborted) setData(summary);
+      } catch (cause) {
+        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "月度提成加载失败");
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [month, refreshKey, refreshVersion]);
+
+  return (
+    <section className="order-1 rounded-lg border bg-card" aria-label="月度提成汇总" aria-busy={loading}>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-4 sm:px-5">
+        <div>
+          <h3 className="font-semibold">月度提成汇总</h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">全场地汇总，不受顶部场地选择影响。按北京时间的核销月份统计，退款在核销月份扣回。</p>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="grid gap-1 text-xs text-muted-foreground">提成月份
+            <Input className="h-10 w-40" type="month" min="2026-10" max={currentCommissionMonth()} value={month} onChange={(event) => setMonth(event.target.value)} />
+          </label>
+          <Button variant="outline" className="min-h-10" disabled={loading} onClick={() => setRefreshVersion((value) => value + 1)}><RefreshCw className="size-4" aria-hidden="true" />刷新</Button>
+        </div>
+      </div>
+      {loading ? (
+        <div className="px-4 py-6 sm:px-5" role="status"><div className="h-8 w-48 rounded bg-muted motion-safe:animate-pulse" /><p className="mt-3 text-sm text-muted-foreground">正在汇总月度提成…</p></div>
+      ) : error ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-5 sm:px-5" role="alert"><p className="text-sm text-destructive">{error}</p><Button variant="outline" className="min-h-10" onClick={() => setRefreshVersion((value) => value + 1)}>重试</Button></div>
+      ) : data ? <CommissionSummaryContent data={data} /> : null}
+      <p className="border-t px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">仅 2026 年 10 月 1 日起新建的订单参与。普通订单：个人 0.2% + 公共团队池 0.3%；经批准的新客首单：个人 5%，不叠加普通提成或团队池。</p>
+    </section>
+  );
+}
+
 export function FinanceView() {
   const { activeSiteId, state } = useStore();
   const permission = usePermission("finance");
@@ -1870,10 +1960,7 @@ export function FinanceView() {
   const [selectedTransferId, setSelectedTransferId] = useState("");
   const [transferDialogOpen, setTransferDialogOpen] = useState(false);
   const [verifyingTransferId, setVerifyingTransferId] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [csvPanelOpen, setCsvPanelOpen] = useState(false);
-  const [defaultCommissionRate, setDefaultCommissionRate] = useState(1);
-  const [savingSettings, setSavingSettings] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -1894,7 +1981,6 @@ export function FinanceView() {
     try {
       const result = await requestJson(`/api/finance/overview?siteId=${encodeURIComponent(activeSiteId)}`);
       setData(result as FinanceOverview);
-      setDefaultCommissionRate(Number(result.settings?.defaultCommissionRate ?? 1));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "财务数据加载失败");
     } finally {
@@ -1974,28 +2060,6 @@ export function FinanceView() {
     () => (data?.reconciliations ?? []).filter((row) => row.status !== "已匹配"),
     [data?.reconciliations],
   );
-
-  const saveDefaultCommissionRate = async () => {
-    if (!permission.requirePermission("update") || savingSettings) return;
-    if (!Number.isFinite(defaultCommissionRate) || defaultCommissionRate < 0 || defaultCommissionRate > 100) {
-      toast.error("默认提成比例必须在 0% 到 100% 之间");
-      return;
-    }
-    setSavingSettings(true);
-    try {
-      await requestJson("/api/finance/settings", {
-        method: "POST",
-        body: JSON.stringify({ defaultCommissionRate }),
-      });
-      setSettingsOpen(false);
-      await loadOverview(true);
-      toast.success("默认提成比例已保存");
-    } catch (saveError) {
-      toast.error(saveError instanceof Error ? saveError.message : "默认提成比例保存失败");
-    } finally {
-      setSavingSettings(false);
-    }
-  };
 
   const chooseCsv = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".csv")) {
@@ -2119,7 +2183,7 @@ export function FinanceView() {
         <div>
           <h2>财务台账</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            逐单核对订单应收、收款、退款、平台扣费和订单负责人提成
+            {permission.isAdmin ? "逐单核对订单应收、收款、退款、平台扣费和订单负责人提成" : "逐单核对订单应收、收款、退款和平台扣费"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -2145,11 +2209,6 @@ export function FinanceView() {
               <Upload className="size-4" /> 导入抖店结算
             </Button>
           )}
-          {permission.canUpdate && (
-            <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
-              <Settings2 className="size-4" /> 提成设置
-            </Button>
-          )}
           <Button variant="outline" size="icon" onClick={() => void loadOverview(true)} disabled={refreshing} title="刷新财务数据">
             <RefreshCw className={`size-4 ${refreshing ? "animate-spin" : ""}`} />
           </Button>
@@ -2162,6 +2221,8 @@ export function FinanceView() {
           <Button size="sm" variant="outline" onClick={() => void loadOverview()}>重试</Button>
         </div>
       )}
+
+      {permission.isAdmin && <CommissionSummarySection key={state.user?.username} refreshKey={data} />}
 
       <section className="order-2 flex flex-col gap-3">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -2248,7 +2309,7 @@ export function FinanceView() {
                 <div className="hidden overflow-x-auto rounded-lg border bg-card md:block">
                   <table className="w-full min-w-[1180px] table-fixed text-sm [&_td]:px-2.5 [&_th]:px-2.5">
                     <colgroup>
-                      <col style={{ width: "10%" }} />
+                      <col style={{ width: permission.isAdmin ? "10%" : "18%" }} />
                       <col style={{ width: "16%" }} />
                       <col style={{ width: "9%" }} />
                       <col style={{ width: "9%" }} />
@@ -2256,7 +2317,7 @@ export function FinanceView() {
                       <col style={{ width: "7%" }} />
                       <col style={{ width: "7%" }} />
                       <col style={{ width: "8%" }} />
-                      <col style={{ width: "8%" }} />
+                      {permission.isAdmin && <col style={{ width: "8%" }} />}
                       <col style={{ width: "6%" }} />
                       <col style={{ width: "7%" }} />
                       <col style={{ width: "5%" }} />
@@ -2271,7 +2332,7 @@ export function FinanceView() {
                         <th className="px-3 py-3 text-right font-semibold">已退</th>
                         <th className="px-3 py-3 text-right font-semibold">平台费用</th>
                         <th className="px-3 py-3 text-right font-semibold">余额</th>
-                        <th className="px-3 py-3 text-right font-semibold leading-5">订单负责人<br />提成</th>
+                        {permission.isAdmin && <th className="px-3 py-3 text-right font-semibold leading-5">累计个人<br />提成</th>}
                         <th className="px-3 py-3 text-left font-semibold">物流</th>
                         <th className="px-3 py-3 text-left font-semibold">财务</th>
                         <th className="px-3 py-3 text-right font-semibold">操作</th>
@@ -2301,10 +2362,10 @@ export function FinanceView() {
                           <td className={`whitespace-nowrap px-3 py-2.5 text-right font-medium tabular-nums ${order.balance > 0.01 ? "text-amber-700" : order.balance < -0.01 ? "text-rose-700" : ""}`}>
                             {money(order.balance)}
                           </td>
-                          <td className="px-3 py-2.5 text-right">
-                            <div className="whitespace-nowrap font-medium tabular-nums">{money(order.commissionAmount)}</div>
-                            <div className="text-xs text-muted-foreground">{order.commissionRate}%</div>
-                          </td>
+                          {permission.isAdmin && <td className="px-3 py-2.5 text-right">
+                            <div className="whitespace-nowrap font-medium tabular-nums">{order.commissionEligible ? money(order.personalCommissionAmount) : "不参与"}</div>
+                            <div className="text-xs text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</div>
+                          </td>}
                           <td className="px-3 py-2.5 text-muted-foreground">{order.logisticsStatus}</td>
                           <td className="px-3 py-2.5">
                             <Badge variant="outline" className={financeStatusClass(order.financeStatus)}>
@@ -2349,12 +2410,13 @@ export function FinanceView() {
                           {order.financeStatus}
                         </Badge>
                       </div>
-                      <div className="finance-mobile-two-columns mt-3 grid grid-cols-4 gap-2 text-xs sm:grid-cols-4">
+                      <div className={`finance-mobile-two-columns mt-3 grid gap-2 text-xs ${permission.isAdmin ? "grid-cols-4 sm:grid-cols-4" : "grid-cols-3"}`}>
                         <div><div className="text-muted-foreground">订单应收</div><div className="mt-0.5 font-medium">{money(order.receivable)}</div></div>
                         <div><div className="text-muted-foreground">已收</div><div className="mt-0.5 font-medium text-emerald-700">{money(order.received)}</div></div>
                         <div><div className="text-muted-foreground">余额</div><div className="mt-0.5 font-medium">{money(order.balance)}</div></div>
-                        <div><div className="text-muted-foreground">提成</div><div className="mt-0.5 font-medium">{money(order.commissionAmount)}</div></div>
+                        {permission.isAdmin && <div><div className="text-muted-foreground">累计个人提成</div><div className="mt-0.5 font-medium">{order.commissionEligible ? money(order.personalCommissionAmount) : "不参与"}</div></div>}
                       </div>
+                      {permission.isAdmin && <p className="mt-2 text-xs text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</p>}
                     </button>
                   ))}
                 </div>
@@ -2889,39 +2951,6 @@ export function FinanceView() {
         onSaved={() => loadOverview(true)}
       />
 
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent aria-describedby={undefined} className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>订单负责人提成设置</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label>默认提成比例</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  value={defaultCommissionRate}
-                  onChange={(event) => setDefaultCommissionRate(Number(event.target.value))}
-                />
-                <span className="text-sm text-muted-foreground">%</span>
-              </div>
-            </div>
-            <p className="text-xs leading-5 text-muted-foreground">
-              默认按商品折后金额计算，并受最低回厂价以上的可提成空间限制。单个订单可以在订单财务详情中覆盖该比例。
-            </p>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSettingsOpen(false)}>取消</Button>
-            <Button onClick={saveDefaultCommissionRate} disabled={savingSettings}>
-              {savingSettings && <Loader2 className="size-4 animate-spin" />}
-              保存设置
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

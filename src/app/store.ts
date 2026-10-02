@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import type { PublicCatalogPolicy } from "./utils/publicCatalogPolicy";
+import type { NewCustomerApprovalRecord } from "./utils/notificationCenter";
 import { copyPublicCatalogPolicy } from "./utils/publicCatalogPolicy";
 
 export type { PublicCatalogPolicy } from "./utils/publicCatalogPolicy";
@@ -487,7 +488,7 @@ export type OrderItem = {
   price: number;
   /** 下单时固化的商品最低回厂价。 */
   minReturnPrice?: number;
-  /** 下单时为疾病状态，可不受最低回厂价限制；原最低回厂价仍保留用于提成核算。 */
+  /** 下单时为疾病状态，可不受最低回厂价限制；保留原最低回厂价用于历史价格追溯。 */
   minReturnPriceExempt?: boolean;
   minReturnPriceExemptReason?: "sick";
   /** 旧字段兼容：历史版本曾用百分比计算销售提成。 */
@@ -627,13 +628,15 @@ export type Order = {
   discount: number;
   status: OrderStatus;
   notes: string;
-  /** 管理员手动设置的获新订单标记，与成交状态及金额无关。 */
+  /** 历史获新标记，仅供追溯，不作为新规则提成依据。 */
   isAcquisitionOrder?: boolean;
+  /** 新客首单提成审批：仅由专用服务端审批接口写入。 */
+  newCustomerApproval?: NewCustomerApprovalRecord | null;
   /** 获新标记最近一次修改的服务端审计信息。 */
   acquisitionOrderUpdatedAt?: string;
   acquisitionOrderUpdatedBy?: string;
   acquisitionOrderUpdatedByName?: string;
-  /** 负责人提成率；未设置时使用财务模块的全局默认值。 */
+  /** 已停用的历史提成配置；新规则由服务端固定费率计算。 */
   commissionRate?: number;
   /** 管理员或订单负责人审批的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */
   creditSaleApproval?: CreditSaleApproval;
@@ -887,7 +890,7 @@ export const DEFAULT_FISH_LIST_FOOTER_TEXT = `【包装费运费规则】
 
 export type SystemSettings = {
   fishListFooterText: string;
-  /** 财务模块默认负责人提成率，百分比数值，例如 1 表示 1%。 */
+  /** 已停用的历史配置，不参与 2026 年 10 月起的新提成规则。 */
   financeDefaultCommissionRate?: number;
   /** 后台配置的可用付款方式及默认收款账户。 */
   paymentMethods?: PaymentMethodSetting[];
@@ -1125,7 +1128,6 @@ export const initialState: Store = {
   user: null,
   systemSettings: {
     fishListFooterText: DEFAULT_FISH_LIST_FOOTER_TEXT,
-    financeDefaultCommissionRate: 1,
     paymentMethods: DEFAULT_PAYMENT_METHOD_SETTINGS.map((method) => ({ ...method })),
     shippingCarriers: DEFAULT_SHIPPING_CARRIER_SETTINGS.map((carrier) => ({ ...carrier })),
     orderPackagingFee: DEFAULT_ORDER_PACKAGING_FEE,

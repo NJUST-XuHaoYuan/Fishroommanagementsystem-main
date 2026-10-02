@@ -12,6 +12,124 @@ export type LatestRequestCoordinator = {
   isCurrent: (token: LatestRequestToken) => boolean;
 };
 
+export type NewCustomerApprovalStatus = "pending" | "approved" | "rejected";
+
+export type NewCustomerApprovalRecord = {
+  status: NewCustomerApprovalStatus;
+  requestId: string;
+  requestedAt: string;
+  requestedBy: string;
+  requestedByName?: string;
+  reason: string;
+  customerId?: string;
+  contactPersonnelId?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewedByName?: string;
+  reviewNote?: string;
+  version: number;
+  customerSnapshot?: unknown;
+  customerIdentityConfirmed?: boolean;
+};
+
+export type NewCustomerApprovalDetail = {
+  ok?: boolean;
+  orderId: string;
+  approval?: NewCustomerApprovalRecord | null;
+  canRequest: boolean;
+  canApprove: boolean;
+  customerEvidence: {
+    customerId?: string;
+    identityKnown: boolean;
+    creationTimesKnown?: boolean;
+    firstOrderId?: string;
+    otherOrderCount: number;
+    priorOrders: Array<{
+      id: string;
+      orderNo?: string;
+      date?: string;
+      status?: string;
+    }>;
+    warning?: string;
+  };
+  currentOrder: {
+    id: string;
+    orderNo?: string;
+    date?: string;
+    createdAt?: string;
+    customerId?: string;
+    contactPersonnelId?: string;
+    contactPerson?: string;
+  };
+  policyEffectiveDate: string;
+  policyNote?: string;
+  requestBlockedReason?: string;
+};
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** Supports both the order endpoint and the nested notification-detail contract. */
+export function newCustomerApprovalDetailFromPayload(payload: unknown): NewCustomerApprovalDetail | null {
+  const root = objectValue(payload);
+  if (!root) return null;
+  const notification = objectValue(root.notification);
+  const candidate = objectValue(notification?.newCustomerReview) ?? objectValue(root.newCustomerReview) ?? root;
+  const currentOrder = objectValue(candidate.currentOrder);
+  const evidence = objectValue(candidate.customerEvidence);
+  const orderId = String(candidate.orderId ?? currentOrder?.id ?? "").trim();
+  if (!orderId || !currentOrder || !evidence) return null;
+  return candidate as NewCustomerApprovalDetail;
+}
+
+export function newCustomerRequestActionReady({
+  orderId,
+  canRequest,
+  reason,
+  processing,
+}: {
+  orderId?: unknown;
+  canRequest?: boolean;
+  reason?: unknown;
+  processing?: boolean;
+}): boolean {
+  const normalizedReason = String(reason ?? "").trim();
+  return Boolean(
+    String(orderId ?? "").trim() &&
+    canRequest === true &&
+    normalizedReason.length >= 5 &&
+    normalizedReason.length <= 1000 &&
+    !processing
+  );
+}
+
+export function newCustomerReviewActionReady({
+  requestId,
+  decision,
+  canApprove,
+  note,
+  identityKnown,
+  confirmCustomerIdentity,
+  processing,
+}: {
+  requestId?: unknown;
+  decision?: unknown;
+  canApprove?: boolean;
+  note?: unknown;
+  identityKnown?: boolean;
+  confirmCustomerIdentity?: boolean;
+  processing?: boolean;
+}): boolean {
+  const normalizedDecision = String(decision ?? "").trim();
+  if (!String(requestId ?? "").trim() || canApprove !== true || processing) return false;
+  if (normalizedDecision === "reject") return Boolean(String(note ?? "").trim());
+  if (normalizedDecision !== "approve") return false;
+  return identityKnown === true || confirmCustomerIdentity === true;
+}
+
 export function createLatestRequestCoordinator(): LatestRequestCoordinator {
   let sequence = 0;
   let activeNotificationId = "";

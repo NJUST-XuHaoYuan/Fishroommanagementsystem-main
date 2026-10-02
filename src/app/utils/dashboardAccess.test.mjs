@@ -1,23 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canAccessDashboard, resolveDashboardView } from "./dashboardAccess.ts";
+import { canAccessAdminDashboard, canAccessDashboard, resolveDashboardView } from "./dashboardAccess.ts";
 
 const admin = { username: "admin", role: "admin" };
 const staff = { username: "keeper", role: "staff" };
 
-test("dashboard access is reserved for authenticated administrators", () => {
+test("home is available to authenticated users but business dashboard stays admin-only", () => {
   assert.equal(canAccessDashboard(admin), true);
-  assert.equal(canAccessDashboard(staff), false);
+  assert.equal(canAccessDashboard(staff), true);
   assert.equal(canAccessDashboard(null), false);
-  assert.equal(canAccessDashboard({ ...staff, permissions: { dashboard: true } }), false);
+  assert.equal(canAccessAdminDashboard(admin), true);
+  assert.equal(canAccessAdminDashboard(staff), false);
+  assert.equal(canAccessAdminDashboard(null), false);
+  assert.equal(canAccessAdminDashboard({ ...staff, permissions: { dashboard: true } }), false);
 });
 
 test("restored dashboard routes and direct navigation use the current account role", () => {
   assert.equal(resolveDashboardView("dashboard", null), "daily");
   assert.equal(resolveDashboardView("dashboard", admin), "dashboard");
-  // The previous account's selected route must not survive an admin-to-staff switch.
-  assert.equal(resolveDashboardView("dashboard", staff), "daily");
-  assert.equal(resolveDashboardView("dashboard", { ...admin, role: "staff" }), "daily");
+  // Role changes retain home navigation, but never grant business dashboard access.
+  assert.equal(resolveDashboardView("dashboard", staff), "dashboard");
+  assert.equal(resolveDashboardView("dashboard", { ...admin, role: "staff" }), "dashboard");
+  assert.equal(canAccessAdminDashboard({ ...admin, role: "staff" }), false);
 });
 
 test("the dashboard restriction preserves all existing non-dashboard navigation", () => {

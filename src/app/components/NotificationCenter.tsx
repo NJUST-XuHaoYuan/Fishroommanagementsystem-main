@@ -41,8 +41,13 @@ import {
   stockApprovalReviewState,
   stockApprovalSnapshotIdentityFields,
   stockApprovalPriceModeLabel,
+  type NewCustomerApprovalDetail,
   type StockApprovalComparableItem,
 } from "../utils/notificationCenter";
+import {
+  NewCustomerApprovalPanel,
+  type NewCustomerApprovalUpdatedOrder,
+} from "./NewCustomerApprovalPanel";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -205,6 +210,7 @@ type StationNotification = {
   stockDetails?: StockApprovalDetails | null;
   profileRequestId?: string;
   profileChanges?: PersonnelProfileChange[];
+  newCustomerReview?: NewCustomerApprovalDetail;
 };
 
 type NotificationFilter = "all" | "unread" | "pending" | "completed";
@@ -252,7 +258,7 @@ function formatNotificationTime(value?: string): string {
 
 function notificationResultLabel(notification: StationNotification): string {
   if (notification.status === "pending") {
-    return ["stock_approval", "credit_sale_confirmation", "personnel_profile_approval"].includes(notification.type)
+    return ["stock_approval", "credit_sale_confirmation", "personnel_profile_approval", "new_customer_approval"].includes(notification.type)
       ? "待审批"
       : "待处理";
   }
@@ -290,6 +296,7 @@ function notificationTypeLabel(notification: StationNotification): string {
   if (notification.type === "approval_result") return "审批结果";
   if (notification.type === "credit_sale_confirmation") return "赊销确认";
   if (notification.type === "personnel_profile_approval") return "人员资料审批";
+  if (notification.type === "new_customer_approval") return "新客首单审批";
   return "系统消息";
 }
 
@@ -424,12 +431,6 @@ function stockCountReviewValue(value: unknown): string {
   return Number.isSafeInteger(count) && count > 0 ? `${count} 份` : "无";
 }
 
-function stockRateReviewValue(value: unknown): string {
-  if (value === "" || value == null) return "未填写";
-  const rate = Number(value);
-  return Number.isFinite(rate) ? `${rate}%` : reviewValue(value);
-}
-
 function stockCodeReviewValue(item: StockApprovalComparableItem): string {
   const value = Object.prototype.hasOwnProperty.call(item, "rawCode") ? item.rawCode : item.code;
   return reviewValue(value);
@@ -462,7 +463,6 @@ function StockItemReviewSnapshot({
     ["售价", stockMoneyReviewValue(item.basePrice)],
     ["价格来源", stockApprovalPriceModeLabel(item.priceMode)],
     ["特殊售价", item.priceOverridden === true ? "是" : "否"],
-    ["提成比例", stockRateReviewValue(item.commissionRate)],
     ["损耗日期", reviewValue(item.lossDate)],
     ["损耗原因", reviewValue(item.lossReason)],
     ["损耗凭证", stockCountReviewValue(item.lossProofCount)],
@@ -568,6 +568,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [approvalDetailError, setApprovalDetailError] = useState("");
   const [loadedStockDetailNotificationId, setLoadedStockDetailNotificationId] = useState("");
   const [selectedProfileApproval, setSelectedProfileApproval] = useState<StationNotification | null>(null);
+  const [selectedNewCustomerApproval, setSelectedNewCustomerApproval] = useState<StationNotification | null>(null);
   const [profileDecision, setProfileDecision] = useState<"approve" | "reject" | null>(null);
   const [profileNote, setProfileNote] = useState("");
   const [processingProfileApproval, setProcessingProfileApproval] = useState(false);
@@ -733,6 +734,25 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     if (!notification.orderId) return;
     if (notification.siteId) setActiveSiteId(notification.siteId);
     onOpenOrder(notification.orderId);
+  };
+
+  const openNewCustomerApproval = (notification: StationNotification) => {
+    if (!notification.orderId) return;
+    setSelectedNewCustomerApproval(notification);
+    void markRead(notification);
+  };
+
+  const applyNewCustomerOrder = (order: NewCustomerApprovalUpdatedOrder) => {
+    setState((current) => ({
+      ...current,
+      orders: mergeEntityChanges<Order>(current.orders, [order as Order]),
+    }));
+  };
+
+  const finishNewCustomerApproval = async () => {
+    setSelectedNewCustomerApproval(null);
+    notifyNotificationRefresh();
+    await loadNotifications(true);
   };
 
   const startCreditConfirmation = (notification: StationNotification) => {
@@ -1362,6 +1382,16 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <FileUser className="size-3.5" />查看资料变更
                         </Button>
                       )}
+                      {notification.type === "new_customer_approval" && notification.orderId && notification.approvalRequestId && (
+                        <Button
+                          variant={pending && notification.canApprove === true ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => openNewCustomerApproval(notification)}
+                        >
+                          <UserRound className="size-3.5" />
+                          {pending && notification.canApprove === true ? "审核新客首单" : "查看新客申请"}
+                        </Button>
+                      )}
                       {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                           <HandCoins className="size-3.5" />同意赊销
@@ -1441,6 +1471,28 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               {confirming ? "提交中" : "同意赊销"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!selectedNewCustomerApproval} onOpenChange={(nextOpen) => {
+        if (!nextOpen) setSelectedNewCustomerApproval(null);
+      }}>
+        <DialogContent aria-describedby={undefined} className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>新客首单审批 · {selectedNewCustomerApproval?.orderNo || "订单"}</DialogTitle>
+            <DialogDescription>
+              核对客户身份、首单证据和申请理由。批准后按商品实收与退款核销月份执行新规则。
+            </DialogDescription>
+          </DialogHeader>
+          {selectedNewCustomerApproval?.orderId && (
+            <NewCustomerApprovalPanel
+              orderId={selectedNewCustomerApproval.orderId}
+              notificationId={selectedNewCustomerApproval.id}
+              approvalRequestId={selectedNewCustomerApproval.approvalRequestId}
+              onOrderUpdated={applyNewCustomerOrder}
+              onChanged={() => finishNewCustomerApproval()}
+            />
+          )}
         </DialogContent>
       </Dialog>
 

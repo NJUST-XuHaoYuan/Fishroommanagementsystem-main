@@ -1,92 +1,162 @@
-import { Tag } from "lucide-react";
+import { Clock3, History, ShieldCheck, XCircle } from "lucide-react";
 import type { Order } from "../store";
+import type {
+  NewCustomerApprovalDetail,
+  NewCustomerApprovalRecord,
+  NewCustomerApprovalStatus,
+} from "../utils/notificationCenter";
+import {
+  NewCustomerApprovalPanel,
+  type NewCustomerApprovalPanelProps,
+  type NewCustomerApprovalUpdatedOrder,
+} from "./NewCustomerApprovalPanel";
 import { Badge } from "./ui/badge";
-import { Button } from "./ui/button";
 
-type AcquisitionOrderFields = Pick<Order,
-  "id" | "isAcquisitionOrder" | "acquisitionOrderUpdatedAt" | "acquisitionOrderUpdatedBy" | "acquisitionOrderUpdatedByName"
->;
+export type OrderNewCustomerApprovalFields = {
+  id: string;
+  newCustomerApproval?: NewCustomerApprovalRecord | null;
+};
 
-/** Apply only this operation's fields; never reinsert an order removed from the current view. */
-export function mergeAcquisitionOrderTags<T extends AcquisitionOrderFields>(orders: T[], incoming: AcquisitionOrderFields): T[] {
+type LegacyAcquisitionOrderFields = {
+  id: string;
+  isAcquisitionOrder?: boolean;
+  acquisitionOrderUpdatedAt?: string;
+  acquisitionOrderUpdatedBy?: string;
+  acquisitionOrderUpdatedByName?: string;
+};
+
+type AcquisitionOrderFields = OrderNewCustomerApprovalFields & LegacyAcquisitionOrderFields;
+
+/** Merge only approval metadata; a response cannot overwrite current order edits or reinsert a missing order. */
+export function mergeNewCustomerApproval<T extends OrderNewCustomerApprovalFields>(
+  orders: T[],
+  incoming: OrderNewCustomerApprovalFields
+): T[] {
   return orders.map((order) => {
-    if (order.id !== incoming.id) return order;
-    const currentVersion = Date.parse(order.acquisitionOrderUpdatedAt ?? "") || 0;
-    const incomingVersion = Date.parse(incoming.acquisitionOrderUpdatedAt ?? "") || 0;
-    if (currentVersion > incomingVersion) return order;
-    return {
-      ...order,
-      isAcquisitionOrder: incoming.isAcquisitionOrder,
-      acquisitionOrderUpdatedAt: incoming.acquisitionOrderUpdatedAt,
-      acquisitionOrderUpdatedBy: incoming.acquisitionOrderUpdatedBy,
-      acquisitionOrderUpdatedByName: incoming.acquisitionOrderUpdatedByName,
-    };
+    if (order.id !== incoming.id || !Object.prototype.hasOwnProperty.call(incoming, "newCustomerApproval")) return order;
+    const currentVersion = Number(order.newCustomerApproval?.version ?? -1);
+    const incomingVersion = Number(incoming.newCustomerApproval?.version ?? -1);
+    if (Number.isFinite(currentVersion) && Number.isFinite(incomingVersion) && currentVersion > incomingVersion) return order;
+    return { ...order, newCustomerApproval: incoming.newCustomerApproval };
   });
 }
 
-export function OrderAcquisitionBadge({ marked }: { marked?: boolean }) {
+/** Backward-compatible alias that also preserves the old, non-paying history marker. */
+export function mergeAcquisitionOrderTags<T extends AcquisitionOrderFields>(
+  orders: T[],
+  incoming: AcquisitionOrderFields
+): T[] {
+  return orders.map((order) => {
+    if (order.id !== incoming.id) return order;
+    let next = order;
+    if (Object.prototype.hasOwnProperty.call(incoming, "newCustomerApproval")) {
+      [next] = mergeNewCustomerApproval([next], incoming);
+    }
+    if (Object.prototype.hasOwnProperty.call(incoming, "isAcquisitionOrder")) {
+      const currentVersion = Date.parse(order.acquisitionOrderUpdatedAt ?? "") || 0;
+      const incomingVersion = Date.parse(incoming.acquisitionOrderUpdatedAt ?? "") || 0;
+      if (currentVersion <= incomingVersion) {
+        next = {
+          ...next,
+          isAcquisitionOrder: incoming.isAcquisitionOrder,
+          acquisitionOrderUpdatedAt: incoming.acquisitionOrderUpdatedAt,
+          acquisitionOrderUpdatedBy: incoming.acquisitionOrderUpdatedBy,
+          acquisitionOrderUpdatedByName: incoming.acquisitionOrderUpdatedByName,
+        };
+      }
+    }
+    return next;
+  });
+}
+
+export function OrderAcquisitionBadge({
+  marked,
+  approvalStatus,
+}: {
+  marked?: boolean;
+  approvalStatus?: NewCustomerApprovalStatus;
+}) {
+  if (approvalStatus === "approved") {
+    return (
+      <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
+        <ShieldCheck aria-hidden="true" />新客首单已批准
+      </Badge>
+    );
+  }
+  if (approvalStatus === "pending") {
+    return (
+      <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">
+        <Clock3 aria-hidden="true" />新客首单待审批
+      </Badge>
+    );
+  }
+  if (approvalStatus === "rejected") {
+    return (
+      <Badge variant="outline" className="border-red-200 bg-red-50 text-red-800">
+        <XCircle aria-hidden="true" />新客申请已驳回
+      </Badge>
+    );
+  }
   if (marked !== true) return null;
   return (
-    <Badge variant="outline" className="border-teal-200 bg-teal-50 text-teal-800">
-      <Tag aria-hidden="true" />获新订单
+    <Badge
+      variant="outline"
+      className="border-slate-200 bg-slate-50 text-slate-700"
+      title="历史获新标记，不作为新规则提成依据"
+    >
+      <History aria-hidden="true" />历史获新标记
     </Badge>
   );
 }
 
+export type OrderAcquisitionTagProps = {
+  order: Pick<Order, "id" | "isAcquisitionOrder"> & {
+    newCustomerApproval?: NewCustomerApprovalRecord | null;
+  };
+  initialDetail?: NewCustomerApprovalDetail | null;
+  onOrderUpdated?: (order: NewCustomerApprovalUpdatedOrder) => void;
+  onApprovalChanged?: NewCustomerApprovalPanelProps["onChanged"];
+  /** @deprecated Accepted temporarily so the parent can remove the old toggle wiring independently. */
+  isAdmin?: boolean;
+  /** @deprecated The new component owns mutation state. */
+  saving?: boolean;
+  /** @deprecated The new component owns server errors. */
+  error?: string;
+  /** @deprecated Historical tag timestamps are no longer an approval input. */
+  updatedAtLabel?: string;
+  /** @deprecated The legacy acquisition-tag endpoint is retired. */
+  onToggle?: () => void;
+};
+
 export function OrderAcquisitionTag({
   order,
-  isAdmin,
-  saving,
-  error,
-  updatedAtLabel,
-  onToggle,
-}: {
-  order: Pick<Order, "id" | "isAcquisitionOrder" | "acquisitionOrderUpdatedBy" | "acquisitionOrderUpdatedByName">;
-  isAdmin: boolean;
-  saving: boolean;
-  error: string;
-  updatedAtLabel: string;
-  onToggle: () => void;
-}) {
-  if (!isAdmin && order.isAcquisitionOrder !== true) return null;
-  const marked = order.isAcquisitionOrder === true;
-  const helperId = `order-acquisition-help-${order.id}`;
-  const operator = order.acquisitionOrderUpdatedByName || order.acquisitionOrderUpdatedBy;
-
+  initialDetail,
+  onOrderUpdated,
+  onApprovalChanged,
+}: OrderAcquisitionTagProps) {
   return (
-    <section aria-label="获新订单标记" className="border-b pb-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="font-medium">订单标记</span>
-            {marked ? <OrderAcquisitionBadge marked /> : <span className="text-muted-foreground">未标记</span>}
-          </div>
-          <p id={helperId} className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            由管理员手动标记，立即保存；不影响金额、状态或提成。
-          </p>
-          {operator && updatedAtLabel && (
-            <p className="mt-1 break-words text-xs text-muted-foreground">
-              最近调整：{operator} · {updatedAtLabel}
-            </p>
-          )}
+    <section aria-label="新客首单提成申请" className="border-b pb-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">新客首单提成</h3>
+          <p className="mt-1 text-xs text-muted-foreground">负责人发起申请，管理员核验后生效。</p>
         </div>
-        {isAdmin && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-10 w-full sm:w-auto"
-            aria-describedby={helperId}
-            aria-busy={saving}
-            disabled={saving}
-            onClick={onToggle}
-          >
-            <Tag className="size-3.5" aria-hidden="true" />
-            {saving ? "保存中…" : marked ? "取消获新标记" : "标记为获新订单"}
-          </Button>
-        )}
+        <OrderAcquisitionBadge
+          marked={order.isAcquisitionOrder}
+          approvalStatus={order.newCustomerApproval?.status}
+        />
       </div>
-      {error && <p role="alert" className="mt-2 text-sm text-red-700">{error}</p>}
+      {order.isAcquisitionOrder === true && (
+        <div className="mb-3 rounded-md border bg-muted/20 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          此订单保留“历史获新”标记，仅用于追溯；它不等于新客首单已批准，也不会触发 5% 提成。
+        </div>
+      )}
+      <NewCustomerApprovalPanel
+        orderId={order.id}
+        initialDetail={initialDetail}
+        onOrderUpdated={onOrderUpdated}
+        onChanged={onApprovalChanged}
+      />
     </section>
   );
 }

@@ -143,6 +143,10 @@ function appStateRow(sql, values = []) {
     if (/\bAS\s+stock_product\b/i.test(sql)) row.stock_product = list(state.products).find((product) => product.id === item?.productId) ?? null;
   }
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
+  if (/\bSELECT\s+jsonb_build_object\([\s\S]*?\)\s+AS\s+data\s+FROM\s+app_state\b/i.test(sql)) {
+    row.data = Object.fromEntries([...sql.matchAll(/'([A-Za-z]+)',\s*COALESCE\(data\s*->\s*'\1'/g)]
+      .map((match) => [match[1], state[match[1]] ?? []]));
+  }
   if (/\brevision::text\s+AS\s+version\b/i.test(sql)) row.version = revision;
   // The general state/slice route quotes camelCase aliases, unlike compact
   // endpoints that use unquoted snake_case projections below.
@@ -237,6 +241,16 @@ function runQuery(query, values = []) {
   ) {
     return result(aggregatedSettlementRows(sql, values));
   }
+  if (/^\s*SELECT\b/i.test(sql) && /\bFROM\s+finance_platform_settlements\b/i.test(sql)) {
+    const scoped = settlements.filter((row) => {
+      if (/\bstate_id\s*=\s*\$1\b/i.test(sql) && String(row.state_id ?? "default") !== String(values[0] ?? "")) return false;
+      if (/\bsite_id\s*=\s*ANY\(\$2::text\[\]\)/i.test(sql) && !values[1]?.includes(row.site_id)) return false;
+      if (/\bsite_id\s*=\s*\$2\b/i.test(sql) && row.site_id !== values[1]) return false;
+      if (/\bplatform\s*=\s*'douyin'/i.test(sql) && row.platform !== "douyin") return false;
+      return true;
+    });
+    return result(scoped);
+  }
   if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
     return result([appStateRow(sql, values)]);
   }
@@ -249,7 +263,7 @@ function runQuery(query, values = []) {
         state = JSON.parse(values[1]);
       } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
         state = structuredClone(state);
-        for (const match of sql.matchAll(/'\{([A-Za-z]+)\}',\s*\$(\d+)::jsonb,\s*true/gi)) state[match[1]] = JSON.parse(values[Number(match[2]) - 1]);
+        for (const match of sql.matchAll(/'\{([A-Za-z][A-Za-z0-9]*)\}',\s*\$(\d+)::jsonb,\s*true/gi)) state[match[1]] = JSON.parse(values[Number(match[2]) - 1]);
         const stockReplace = sql.match(/stock_row\.stock_item\s*->>\s*'id'[\s\S]*?=\s*\$(\d+)\s+THEN\s*\$(\d+)::jsonb/);
         if (stockReplace) state.stock = (state.stock ?? []).map((item) => item.id === values[Number(stockReplace[1]) - 1] ? JSON.parse(values[Number(stockReplace[2]) - 1]) : item);
         const appendRecord = sql.match(/data\s*->\s*'bioRecords'[\s\S]*?\|\|\s*jsonb_build_array\(\$(\d+)::jsonb\)/);

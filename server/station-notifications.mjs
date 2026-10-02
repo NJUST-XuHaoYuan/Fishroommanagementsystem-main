@@ -24,7 +24,7 @@ function normalizeCompletedNotificationReadState(notification) {
     notification.status !== "completed" ||
     notification.readAt ||
     notification.notificationRole === "requester" ||
-    !["credit_sale_confirmation", "stock_approval", "personnel_profile_approval"].includes(notification.type)
+    !["credit_sale_confirmation", "stock_approval", "personnel_profile_approval", "new_customer_approval"].includes(notification.type)
   ) return notification;
   return {
     ...notification,
@@ -327,6 +327,39 @@ export function resolveApprovalNotifications(notifications = [], approvalRequest
     };
   });
   return { notifications: sortedNotifications(next), changed };
+}
+
+export function ensureNewCustomerApprovalNotifications(notifications = [], input = {}) {
+  const current = Array.isArray(notifications) ? notifications : [];
+  const scoped = current.filter((notification) => notification?.type === "new_customer_approval")
+    .map((notification) => ({ ...notification, type: "stock_approval" }));
+  const result = ensureApprovalNotifications(scoped, {
+    ...input, approvalAction: "new_customer",
+    title: `订单 ${input.orderNo} 新客提成待审批`,
+    message: `负责人 ${input.createdByName || input.createdBy} 申请新客订单 5% 提成。依据：${input.reason}`,
+  });
+  const withOrder = (notification) => ({ ...notification, type: "new_customer_approval",
+    ...(notification.approvalRequestId === input.approvalRequestId ? { orderId: input.orderId, orderNo: input.orderNo } : {}) });
+  return { ...result,
+    notifications: sortedNotifications([...current.filter((notification) => notification?.type !== "new_customer_approval"), ...result.notifications.map(withOrder)]),
+    notificationsCreated: result.notificationsCreated.map(withOrder),
+  };
+}
+
+export function resolveNewCustomerApprovalNotifications(notifications = [], requestId = "", input = {}) {
+  const current = Array.isArray(notifications) ? notifications : [];
+  const scoped = current.filter((notification) => notification?.type === "new_customer_approval")
+    .map((notification) => ({ ...notification, type: "stock_approval" }));
+  const result = resolveApprovalNotifications(scoped, requestId, {
+    ...input,
+    resultTitle: input.resolution === "approved" ? "新客提成申请已批准" : "新客提成申请已驳回",
+    resultMessage: input.resolution === "approved" ? "管理员已批准新客提成；按政策计提，不追溯重算 2026 年 10 月以前月份。"
+      : `管理员已驳回新客提成申请：${input.resolutionNote || "请核对后重新提交"}`,
+  });
+  return { ...result, notifications: sortedNotifications([
+    ...current.filter((notification) => notification?.type !== "new_customer_approval"),
+    ...result.notifications.map((notification) => ({ ...notification, type: "new_customer_approval" })),
+  ]) };
 }
 
 export function ensurePersonnelProfileApprovalNotifications(notifications = [], input = {}) {

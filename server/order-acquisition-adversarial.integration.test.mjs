@@ -10,6 +10,7 @@ async function setup(t) {
   const fixture = structuredClone(stockPricingFixture);
   const order = fixture.state.orders.find((item) => item.id === "ORDER-PENDING");
   Object.assign(order, { source: "平台下单", platformOrderNo: "ACQ-ADVERSARIAL", douyinOrderNo: "ACQ-ADVERSARIAL",
+    createdAt: "2026-10-01T09:00:00+08:00",
     paymentChannel: "douyin", paymentAccount: "synthetic-account", plannedShipDate: "2026-09-15",
     contactPersonnelId: "pricing-admin", contactPerson: "价格测试admin" });
   fixture.state.orders = [order];
@@ -25,10 +26,13 @@ async function setup(t) {
   const readOrder = async () => (await server.readPersistedState()).orders.find((item) => item.id === order.id);
   const mark = async (value, previous = null) => {
     const before = previous ?? await readOrder();
-    return server.request("/api/orders/acquisition-tag", { token: admin, body: {
-      orderId: order.id, isAcquisitionOrder: value,
-      expectedIsAcquisitionOrder: before.isAcquisitionOrder === true,
-      expectedAcquisitionOrderUpdatedAt: before.acquisitionOrderUpdatedAt ?? "",
+    const request = await server.request("/api/orders/new-customer/request", { token: admin, body: {
+      orderId: order.id, reason: "核实平台客户为首次购买", expectedApprovalVersion: before.newCustomerApproval?.version ?? 0,
+    } }); ok(request);
+    return server.request("/api/orders/new-customer/review", { token: admin, body: {
+      orderId: order.id, requestId: request.body.order.newCustomerApproval.requestId,
+      expectedApprovalVersion: request.body.order.newCustomerApproval.version,
+      decision: value ? "approve" : "reject", note: "独立审批", confirmCustomerIdentity: true,
     } });
   };
   return { ...server, admin, staff, readOrder, mark, original: result.body.order };

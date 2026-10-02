@@ -1,6 +1,7 @@
 import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
 
 export const ORDER_ACQUISITION_TAG_FIELDS = [
+  "newCustomerApproval",
   "isAcquisitionOrder",
   "acquisitionOrderUpdatedAt",
   "acquisitionOrderUpdatedBy",

@@ -811,7 +811,7 @@ export function ProductsView() {
                   disabled={!isAdmin}
                 />
                 <span className="text-xs text-muted-foreground">
-                  {isAdmin ? "订单商品折后金额必须高于所选商品的最低回厂价合计；超出部分作为销售提成。" : "仅管理员可修改最低回厂价格"}
+                  {isAdmin ? "订单商品折后金额必须高于所选商品的最低回厂价合计；该价格仅用于售价校验，提成按销售提成规则另行计算。" : "仅管理员可修改最低回厂价格"}
                 </span>
               </div>
               <div className="grid gap-2">

@@ -277,7 +277,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             className={navButtonClass(view === "dashboard", "main")}
           >
             <LayoutDashboard className="size-4 shrink-0" />
-            <span>首页概览</span>
+            <span>{user?.role === "admin" ? "首页概览" : "首页 · 我的提成"}</span>
           </button>
         )}
         <button

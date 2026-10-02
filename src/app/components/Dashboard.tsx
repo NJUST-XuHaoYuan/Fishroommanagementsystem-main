@@ -17,7 +17,8 @@ import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-f
 import { resolveDashboardDateRange } from "../../../server/dashboard-date-range.mjs";
 import { DashboardDateFilter, DashboardSalespersonFilter, type DashboardDateRange } from "./DashboardFilters";
 import { dashboardSalespersonSelection, rankDashboardSalespeople } from "../utils/dashboardSalespeople";
-import { canAccessDashboard } from "../utils/dashboardAccess";
+import { canAccessAdminDashboard, canAccessDashboard } from "../utils/dashboardAccess";
+import { PersonalCommissionDashboard } from "./PersonalCommissionDashboard";
 
 function todayDateString(): string {
   // Dashboard business days follow China time, including when viewed overseas.
@@ -944,7 +945,10 @@ function buildDocxFromJpegs(images: Array<{ bytes: Uint8Array; width: number; he
 
 export function Dashboard() {
   const { state } = useStore();
-  return canAccessDashboard(state.user) ? <AdminDashboard /> : null;
+  if (!canAccessDashboard(state.user)) return null;
+  return canAccessAdminDashboard(state.user)
+    ? <AdminDashboard />
+    : <PersonalCommissionDashboard key={state.user?.username} />;
 }
 
 function AdminDashboard() {
