@@ -19,6 +19,7 @@ import {
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import { newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
 import { reconcileCommissionLedger, personalCommissionSummary, monthlyCommissionSummary, invalidateCommissionAllocations } from "./commission-ledger.mjs";
+import { lossPricingSnapshot, lossStockPricingUpdate, planLossPriceUpdate } from "./stock-loss-price.mjs";
 import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "./order-fulfillment-stock.mjs";
 import {
   assertOrderAcquisitionTagUnchanged,
@@ -128,6 +129,7 @@ import {
   buildDashboardLossSeries,
   buildDashboardSalespersonSeries,
   indexShipmentsByOrder,
+  lossStockPriceDetail,
 } from "./dashboard-summary-aggregates.mjs";
 import { resolveDashboardDateRange } from "./dashboard-date-range.mjs";
 import {
@@ -1677,7 +1679,7 @@ function buildLossRows(state = {}, productById = new Map(), speciesById = new Ma
         product,
         species: itemSpecies,
         date: String(record?.date ?? stockItem?.lossDate ?? "").slice(0, 10),
-        estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
+        ...lossStockPriceDetail(stockItem),
         isFish: isFishInventoryItem(product, itemSpecies),
       };
     })
@@ -1797,6 +1799,9 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
         arrivalDate: String(batch?.arrivalDate ?? ""),
         reason: String(row.record?.reason ?? stockItem?.lossReason ?? ""),
         estimatedValue: Number(row.estimatedValue || 0),
+        isPriceMissing: row.isPriceMissing === true,
+        pricingSnapshot: lossPricingSnapshot(stockItem),
+        canEditPrice: stockItem.lost === true,
         code: String(stockItem?.code ?? ""),
       };
     });
@@ -8255,7 +8260,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" ||
+  if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail") {
     res.setHeader("Cache-Control", "no-store, private");
   }
@@ -13855,6 +13860,57 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/stock/loss-price" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      if (!isPersonnelAccountEnabled(req.auth?.account) || req.auth?.account?.accessRole !== "admin") {
+        throw httpError(403, "仅管理员可以更正死亡鱼的预计价值", "LOSS_PRICE_ADMIN_REQUIRED");
+      }
+      const body = JSON.parse(await readBody(req, 16 * 1024) || "{}");
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'stock' AS stock,
+                data -> 'operationLogs' AS "operationLogs"
+         FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]
+      );
+      const state = rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      if (!isPersonnelAccountEnabled(req.auth?.account) || req.auth?.account?.accessRole !== "admin") {
+        throw httpError(403, "仅管理员可以更正死亡鱼的预计价值", "LOSS_PRICE_ADMIN_REQUIRED");
+      }
+      const change = planLossPriceUpdate(state.stock, body);
+      const stockPricingUpdate = lossStockPricingUpdate(change.updated);
+      if (change.unchanged) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, unchanged: true, stockPricingUpdate }, { "Cache-Control": "no-store, private" });
+        return;
+      }
+      const previousPrice = change.current.basePrice == null ? "未设置" : String(change.current.basePrice);
+      const operationLog = createOperationLog(req, "损耗管理", "更正预计价值",
+        `死亡鱼「${change.current.code || change.current.id}」（库存 ${change.current.id}）预计价值由 ${previousPrice} 元更正为 ${change.updated.basePrice} 元；仅更正损耗预计价值，不改变订单或款项`);
+      const stock = state.stock.map((item) => item === change.current ? change.updated : item);
+      // This dedicated path leaves generic pricing guards intact and replaces
+      // only the lost item's three pricing fields, never order/payment/ledger state.
+      await client.query(
+        `UPDATE app_state SET data = jsonb_set(jsonb_set(data, '{stock}', $2::jsonb, true),
+           '{operationLogs}', $3::jsonb, true), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(stock), JSON.stringify(pushOperationLog(state.operationLogs, operationLog))]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, stockPricingUpdate, operationLog }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ok: false, error: error.message || "更正损耗预计价值失败",
+        ...(error?.code ? { code: error.code } : {}),
+        ...(error?.stockPricingUpdate ? { stockPricingUpdate: error.stockPricingUpdate } : {}),
+        ...(error?.currentPricingSnapshot ? { currentPricingSnapshot: error.currentPricingSnapshot } : {}),
+      }, { "Cache-Control": "no-store, private" });
+    } finally {
+      client.release();
+    }
+    return;
+  }
 			  if (url.pathname === "/api/stock/save" && req.method === "POST") {
 			    try {
 			      const rawChange = JSON.parse(await readBody(req) || "{}");

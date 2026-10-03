@@ -5,6 +5,7 @@ import {
   shipmentDamagedAt,
   unshippedRefundRecordedAt,
 } from "./dashboard-sales-metrics.mjs";
+import { lossPricingSnapshot } from "./stock-loss-price.mjs";
 
 function array(value) {
   return Array.isArray(value) ? value : [];
@@ -13,6 +14,18 @@ function array(value) {
 function money(value) {
   const amount = Number(value ?? 0);
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
+}
+
+/** Lost-fish valuation is retained on the stock row; never infer it from a mutable product default. */
+export function lossStockPriceDetail(stockItem = {}) {
+  const raw = stockItem?.basePrice;
+  const supported = typeof raw === "number" || typeof raw === "string";
+  const amount = supported && String(raw).trim() ? Number(raw) : Number.NaN;
+  const cents = Number.isFinite(amount) && amount > 0
+    ? Math.round((amount + Number.EPSILON) * 100)
+    : Number.NaN;
+  const isPriceMissing = !Number.isSafeInteger(cents) || cents <= 0;
+  return { estimatedValue: isPriceMissing ? 0 : cents / 100, isPriceMissing };
 }
 
 function compactDate(value) {
@@ -322,7 +335,7 @@ export function buildDashboardLossSeries({
       species: itemSpecies,
       date,
       siteId: recordSiteId,
-      estimatedValue: Number(stockItem?.basePrice ?? product?.defaultPrice ?? 0),
+      ...lossStockPriceDetail(stockItem),
     };
     const rows = lossRowsByDate.get(date);
     if (rows) rows.push(row);
@@ -458,6 +471,9 @@ export function buildDashboardLossSeries({
         arrivalDate: String(batch?.arrivalDate ?? ""),
         reason: String(record?.reason ?? stockItem?.lossReason ?? ""),
         estimatedValue: Number(row.estimatedValue || 0),
+        isPriceMissing: row.isPriceMissing === true,
+        pricingSnapshot: lossPricingSnapshot(stockItem),
+        canEditPrice: stockItem.lost === true,
         code: String(stockItem?.code ?? ""),
       };
     });

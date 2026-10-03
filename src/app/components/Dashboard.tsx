@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { configuredOrderPackagingFee, DEFAULT_FISH_LIST_FOOTER_TEXT, Customer, isPaymentVerified, isPersonnelResigned, Order, Personnel, Product, PurchaseBatch, Shipment, Species, StockItem, StockLossRecord, TankGroup, useStore } from "../store";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
@@ -19,6 +19,8 @@ import { DashboardDateFilter, DashboardSalespersonFilter, type DashboardDateRang
 import { dashboardSalespersonSelection, rankDashboardSalespeople } from "../utils/dashboardSalespeople";
 import { canAccessAdminDashboard, canAccessDashboard } from "../utils/dashboardAccess";
 import { PersonalCommissionDashboard } from "./PersonalCommissionDashboard";
+import { LossPriceEditor } from "./LossPriceEditor";
+import { applyLossPricingUpdate, type LossPricingSnapshot, type LossPricingUpdate } from "../utils/lossPricing";
 
 function todayDateString(): string {
   // Dashboard business days follow China time, including when viewed overseas.
@@ -106,6 +108,9 @@ type DailyLossDetail = {
   reason: string;
   estimatedValue: number;
   code: string;
+  pricingSnapshot?: LossPricingSnapshot;
+  canEditPrice?: boolean;
+  isPriceMissing?: boolean;
 };
 
 type DailyBatchArrival = {
@@ -952,7 +957,7 @@ export function Dashboard() {
 }
 
 function AdminDashboard() {
-  const { state, activeSiteId, saveStateTransform } = useStore();
+  const { state, setState, activeSiteId, saveStateTransform } = useStore();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [financeRange, setFinanceRange] = useState<DashboardDateRange>(() => {
     const range = resolveDashboardDateRange({}, todayDateString());
@@ -981,6 +986,27 @@ function AdminDashboard() {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState("");
   const [summaryRetry, setSummaryRetry] = useState(0);
+  const lossScope = useRef("");
+  lossScope.current = `${financeRange.startDate}/${financeRange.endDate}/${dashboardSiteId}`;
+  const applySavedLossPrice = (update: LossPricingUpdate) => {
+    setSummary((current) => current ? { ...current, dailyLossData: (current.dailyLossData ?? []).map((point) => applyLossPricingUpdate(point, update)) } : current);
+    setSelectedLossPoint((current) => current ? applyLossPricingUpdate(current, update) : current);
+    // Other screens may already have a partial stock list loaded. Merge only
+    // the returned pricing fields; never save the entire store to the server.
+    setState((current) => ({ ...current, stock: current.stock.map((item) => item.id === update.id ? { ...item, ...update } : item) }));
+    toast.success("售价已修改，损耗预计价值已更新");
+  };
+  const refreshLossDetails = async () => {
+    const requestedScope = lossScope.current;
+    const params = new URLSearchParams({ ...financeRange, siteId: dashboardSiteId });
+    const response = await fetch(`/api/dashboard-summary?${params}`, { headers: authJsonHeaders(), cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok || !Array.isArray(result.summary?.dailyLossData)) throw new Error(result.error || "明细刷新失败，请重试");
+    if (requestedScope !== lossScope.current) return;
+    const nextSummary = result.summary as DashboardSummary;
+    setSummary(nextSummary);
+    setSelectedLossPoint((current) => current ? nextSummary.dailyLossData?.find((point) => point.date === current.date) ?? null : null);
+  };
   const sites = getSites(state);
   const configuredFishListFooterText = typeof state.systemSettings?.fishListFooterText === "string"
     ? state.systemSettings.fishListFooterText
@@ -2909,13 +2935,13 @@ function AdminDashboard() {
           if (!open) setSelectedLossPoint(null);
         }}
       >
-        <DialogContent aria-describedby={undefined} className="max-h-[85vh] max-w-3xl overflow-y-auto">
+        <DialogContent aria-describedby={undefined} className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
           {selectedLossPoint && (
             <>
               <DialogHeader>
                 <DialogTitle>{selectedLossPoint.date} 损耗与到货明细</DialogTitle>
               </DialogHeader>
-              <div className="grid gap-3 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <div className="rounded-lg border bg-red-50 px-3 py-2">
                   <div className="text-xs text-red-700">死鱼数量</div>
                   <div className="text-xl font-semibold text-red-700">{selectedLossPoint.lostCount} 条</div>
@@ -2957,17 +2983,18 @@ function AdminDashboard() {
               </section>
               <section className="space-y-2">
                 <h4 className="text-sm font-semibold">当天损耗记录</h4>
+                <p className="text-xs leading-5 text-muted-foreground">预计价值使用单鱼售价。修改后设为单独定价，同步更新损耗统计；不修改商品默认价、历史订单金额或提成。</p>
                 {(selectedLossPoint.lossDetails ?? []).length > 0 ? (
                   <div className="overflow-hidden rounded-lg border">
-                    <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr] gap-3 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground">
+                    <div className="hidden grid-cols-[1.2fr_0.8fr_0.9fr_1.1fr] gap-3 bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground md:grid">
                       <span>商品</span>
                       <span>损耗地点</span>
                       <span>批次</span>
                       <span className="text-right">预计价值</span>
                     </div>
                     {(selectedLossPoint.lossDetails ?? []).map((detail) => (
-                      <div key={`${detail.id}-${detail.stockItemId}`} className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr] gap-3 border-t px-3 py-2 text-sm">
-                        <div>
+                      <div key={`${detail.id}-${detail.stockItemId}`} className="grid grid-cols-2 gap-3 border-t px-3 py-3 text-sm first:border-t-0 md:grid-cols-[1.2fr_0.8fr_0.9fr_1.1fr]">
+                        <div className="col-span-2 min-w-0 md:col-span-1">
                           <div className="font-semibold">
                             {detail.productName}
                             {detail.code ? <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">编号 {detail.code}</span> : null}
@@ -2978,14 +3005,22 @@ function AdminDashboard() {
                           {detail.reason ? <div className="mt-0.5 text-xs text-red-700">原因：{detail.reason}</div> : null}
                         </div>
                         <div>
+                          <div className="mb-1 text-xs text-muted-foreground md:hidden">损耗地点</div>
                           <div className="font-medium">{detail.siteName || "未知场地"}</div>
                           <div className="mt-0.5 text-xs text-muted-foreground">{detail.tankName || "未知缸位"}</div>
                         </div>
                         <div className="text-muted-foreground">
+                          <div className="mb-1 text-xs md:hidden">批次</div>
                           <div>{detail.batchNo || "未关联批次"}</div>
                           <div className="text-xs">{[detail.supplier, detail.arrivalDate].filter(Boolean).join(" · ")}</div>
                         </div>
-                        <div className="text-right font-semibold">{formatMoney(detail.estimatedValue)}</div>
+                        <div className="col-span-2 min-w-0 border-t pt-2 md:col-span-1 md:border-t-0 md:pt-0">
+                          <div className="mb-1 text-xs text-muted-foreground md:hidden">预计价值</div>
+                          <LossPriceEditor stockItemId={detail.stockItemId} label={`${detail.productName}${detail.code ? `（${detail.code}）` : ""}`}
+                            value={detail.estimatedValue} pricingSnapshot={detail.pricingSnapshot} canEdit={detail.canEditPrice === true}
+                            isPriceMissing={detail.isPriceMissing}
+                            onSaved={applySavedLossPrice} onRefresh={refreshLossDetails} />
+                        </div>
                       </div>
                     ))}
                   </div>
