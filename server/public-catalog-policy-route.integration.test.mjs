@@ -247,7 +247,7 @@ let baseUrl;
 let uploadDir;
 let derivativeToolLog;
 let childOutput = "";
-const authSecret = "example-public-policy-route-integration-secret";
+const exampleAuthSecret = "example-public-policy-route-integration-secret";
 
 async function unusedPort() {
   const socket = createServer();
@@ -334,7 +334,7 @@ console.log(JSON.stringify({streams: [
       NODE_ENV: "test",
       HOST: "127.0.0.1",
       PORT: String(port),
-      AUTH_SESSION_SECRET: authSecret,
+      AUTH_SESSION_SECRET: exampleAuthSecret,
       UPLOAD_DIR: uploadDir,
       FFMPEG_PATH: ffmpegPath,
       FFPROBE_PATH: ffprobePath,
@@ -520,7 +520,7 @@ test("encoded path normalization cannot bypass signed video-derivative delivery"
 
 test("full playback has a private independent cache, authorizes before access, and supports video Range", async () => {
   const source = "/uploads/cached-playback.mp4";
-  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: exampleAuthSecret });
   const cacheId = createHash("sha256").update("local:cached-playback.mp4").digest("hex");
   const playbackPath = join(uploadDir, ".video-derived", "playbacks", `${cacheId}.mp4`);
   await mkdir(dirname(playbackPath), { recursive: true });
@@ -551,14 +551,14 @@ test("full playback has a private independent cache, authorizes before access, a
     assert.equal(response.status, 403);
     assert.equal(response.headers.get("cache-control"), "no-store");
   }
-  const expiredPath = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret, now: 1 });
+  const expiredPath = publicVideoDerivativeProxyPath(source, "playback", { secret: exampleAuthSecret, now: 1 });
   assert.equal((await fetch(`${baseUrl}${expiredPath}`, { method: "HEAD" })).status, 403);
   for (const privatePath of [
     `/uploads/.video-derived/playbacks/${cacheId}.mp4`,
     `/uploads/ignored/%2e%2e%2f.video-derived/playbacks/${cacheId}.mp4`,
   ]) assert.equal((await fetch(`${baseUrl}${privatePath}`)).status, 404);
 
-  const external = publicVideoDerivativeProxyPath("https://external.example/fish.mp4", "playback", { secret: authSecret });
+  const external = publicVideoDerivativeProxyPath("https://external.example/fish.mp4", "playback", { secret: exampleAuthSecret });
   assert.equal((await fetch(`${baseUrl}${external}`, { method: "HEAD" })).status, 400, "a signed kind cannot widen the source whitelist");
 });
 
@@ -567,7 +567,7 @@ test("lazy playback work is deduplicated, selects usable audio, keeps originals,
   const inputPath = join(uploadDir, "lazy-playback.mp4");
   const original = Buffer.from("unchanged-source-video-fixture");
   await writeFile(inputPath, original);
-  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: exampleAuthSecret });
   const responses = await Promise.all([
     fetch(`${baseUrl}${path}`, { method: "HEAD" }),
     fetch(`${baseUrl}${path}`, { headers: { Range: "bytes=0-11" } }),
@@ -581,7 +581,7 @@ test("lazy playback work is deduplicated, selects usable audio, keeps originals,
   assert.ok(!invocations[0].args.includes("-t"));
   assert.deepEqual(await readFile(inputPath), original);
 
-  const previewPath = publicVideoDerivativeProxyPath(source, "preview", { secret: authSecret });
+  const previewPath = publicVideoDerivativeProxyPath(source, "preview", { secret: exampleAuthSecret });
   const preview = await fetch(`${baseUrl}${previewPath}`, { method: "HEAD" });
   assert.equal(preview.status, 200);
   assert.equal(Number(preview.headers.get("content-length")), 128);
@@ -597,15 +597,15 @@ test("lazy playback work is deduplicated, selects usable audio, keeps originals,
 test("a short-preview failure does not poison playback and source-size limits apply before encoding", async () => {
   const source = "/uploads/preview-fails.mp4";
   await writeFile(join(uploadDir, "preview-fails.mp4"), "source-fixture");
-  const preview = publicVideoDerivativeProxyPath(source, "preview", { secret: authSecret });
-  const playback = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  const preview = publicVideoDerivativeProxyPath(source, "preview", { secret: exampleAuthSecret });
+  const playback = publicVideoDerivativeProxyPath(source, "playback", { secret: exampleAuthSecret });
   assert.equal((await fetch(`${baseUrl}${preview}`, { method: "HEAD" })).status, 502);
   assert.equal((await fetch(`${baseUrl}${playback}`, { method: "HEAD" })).status, 200);
   assert.equal((await fetch(`${baseUrl}${preview}`, { method: "HEAD" })).status, 503, "preview keeps its own failure backoff");
   const tooLargeSource = "/uploads/too-large-playback.mp4";
   await writeFile(join(uploadDir, "too-large-playback.mp4"), "");
   await truncate(join(uploadDir, "too-large-playback.mp4"), 301 * 1024 * 1024);
-  const tooLarge = publicVideoDerivativeProxyPath(tooLargeSource, "playback", { secret: authSecret });
+  const tooLarge = publicVideoDerivativeProxyPath(tooLargeSource, "playback", { secret: exampleAuthSecret });
   assert.equal((await fetch(`${baseUrl}${tooLarge}`, { method: "HEAD" })).status, 413);
   assert.ok(!(await readFile(derivativeToolLog, "utf8")).includes("too-large-playback"));
 });
