@@ -72,7 +72,10 @@ export function createPublicCosStreamHandler({
         // The pipeline deliberately stops reading COS while a slow viewer fills
         // the output buffers. That is downstream backpressure, not a stalled
         // upstream. The total deadline still bounds a viewer that never resumes.
-        if (res.writableNeedDrain || countBytes?.writableNeedDrain || countBytes?.readableLength > 0) {
+        // A final chunk can still be queued below the high-water mark, so
+        // writableNeedDrain alone misses pending writes (notably on Node 22).
+        if (res.writableLength > 0 || res.writableNeedDrain ||
+            countBytes?.writableLength > 0 || countBytes?.writableNeedDrain || countBytes?.readableLength > 0) {
           resetIdleTimeout();
           return;
         }

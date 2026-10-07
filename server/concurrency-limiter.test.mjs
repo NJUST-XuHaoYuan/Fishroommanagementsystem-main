@@ -85,10 +85,22 @@ test("a never-finishing active operation times out and cannot strand the limiter
   });
   const queued = limiter.acquire();
 
-  const releaseNext = await queued;
-  assert.equal(expirationReason, "timeout");
-  assert.deepEqual(limiter.status(), { active: 1, pending: 0, concurrency: 1, maxPending: 1 });
+  // The lease timer deliberately does not keep the server process alive. This
+  // isolated test has no HTTP listener, so use a referenced, bounded watchdog.
+  let deadline;
+  try {
+    const releaseNext = await Promise.race([
+      queued,
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error("The queued request did not acquire its expired lease")), 1000);
+      }),
+    ]);
+    assert.equal(expirationReason, "timeout");
+    assert.deepEqual(limiter.status(), { active: 1, pending: 0, concurrency: 1, maxPending: 1 });
 
-  releaseNext();
-  assert.equal(limiter.status().active, 0);
+    releaseNext();
+    assert.equal(limiter.status().active, 0);
+  } finally {
+    clearTimeout(deadline);
+  }
 });

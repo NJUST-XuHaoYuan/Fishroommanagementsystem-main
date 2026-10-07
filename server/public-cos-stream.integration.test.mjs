@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer, get } from "node:http";
 import { readFile } from "node:fs/promises";
+import { Writable } from "node:stream";
 import test from "node:test";
 import COS from "cos-nodejs-sdk-v5";
 import { createPublicCosStreamHandler } from "./public-cos-stream.mjs";
@@ -303,6 +304,50 @@ test("upstream inactivity is detected again after downstream backpressure clears
     clearInterval(readTimer);
     clearTimeout(resumeTimer);
     request?.destroy();
+  }
+});
+
+test("a pending tail below the writable high-water mark is not mistaken for upstream inactivity", { timeout: 4000 }, async () => {
+  const writeStarted = deferred();
+  const cancelled = deferred();
+  const failures = [];
+  const size = 32 * 1024;
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(size)); },
+    cancel() { cancelled.resolve(); },
+  });
+  const req = Object.assign(new EventEmitter(), { headers: {}, method: "GET", aborted: false });
+  const res = new Writable({
+    highWaterMark: 64 * 1024,
+    write(_chunk, _encoding, callback) { writeStarted.resolve(callback); },
+  });
+  res.writeHead = () => { res.headersSent = true; };
+  const handler = createPublicCosStreamHandler({
+    getSignedUrl: () => "https://controlled-origin.example/video.mp4",
+    resolveContentType: () => "video/mp4",
+    inferContentType: () => "video/mp4",
+    fetchImpl: async () => new Response(body, { headers: { "Content-Type": "video/mp4" } }),
+    headerTimeoutMs: 1000,
+    idleTimeoutMs: 60,
+    totalTimeoutMs: 2000,
+    onFailure: (event) => failures.push(event),
+  });
+  const completed = handler(req, res, "tail.mp4", "no-store");
+  try {
+    const finishWrite = await within(writeStarted.promise);
+    assert.equal(res.writableNeedDrain, false, "a sub-threshold tail does not set the drain flag");
+    assert.equal(res.writableLength, size, "the pending write still owns undelivered bytes");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(res.destroyed, false, "pending bytes survive multiple upstream idle windows");
+    assert.equal(failures.length, 0);
+    finishWrite();
+    await within(completed);
+    await within(cancelled.promise);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].reason, "timeout", "a real upstream stall is detected once the tail drains");
+  } finally {
+    res.destroy();
+    await completed;
   }
 });
 
