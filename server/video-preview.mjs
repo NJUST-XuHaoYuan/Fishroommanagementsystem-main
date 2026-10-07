@@ -10,6 +10,7 @@ export const VIDEO_DERIVATIVE_DIRECTORY = ".video-derived";
 export const VIDEO_DERIVATIVE_KINDS = Object.freeze({
   poster: "poster",
   preview: "preview",
+  playback: "playback",
 });
 
 const VIDEO_DERIVATIVE_TOKEN_DOMAIN = "fishroom-video-derivative-v1";
@@ -23,7 +24,7 @@ function boundedInteger(value, fallback, minimum, maximum) {
 
 export function normalizeVideoDerivativeKind(value) {
   const kind = String(value ?? "").trim().toLowerCase();
-  return kind === VIDEO_DERIVATIVE_KINDS.poster || kind === VIDEO_DERIVATIVE_KINDS.preview
+  return Object.values(VIDEO_DERIVATIVE_KINDS).includes(kind)
     ? kind
     : "";
 }
@@ -98,7 +99,31 @@ export function videoDerivativeRelativePath(cacheIdValue, kindValue) {
   if (!/^[a-f0-9]{64}$/.test(cacheId) || !kind) throw new Error("视频预览缓存标识无效");
   return kind === VIDEO_DERIVATIVE_KINDS.poster
     ? `${VIDEO_DERIVATIVE_DIRECTORY}/posters/${cacheId}.jpg`
+    : kind === VIDEO_DERIVATIVE_KINDS.playback
+      ? `${VIDEO_DERIVATIVE_DIRECTORY}/playbacks/${cacheId}.mp4`
     : `${VIDEO_DERIVATIVE_DIRECTORY}/previews/${cacheId}.mp4`;
+}
+
+export function videoPlaybackFfmpegArgs(inputPath, outputPath, options = {}) {
+  const threads = boundedInteger(options.threads, 1, 1, 2);
+  const audioIndex = options.audioStreamIndex;
+  const audioArgs = audioIndex === null
+    ? ["-an"]
+    : ["-map", Number.isInteger(audioIndex) && audioIndex >= 0 ? `0:${audioIndex}` : "0:a:0?",
+      "-c:a", "aac", "-b:a", "64k"];
+  return [
+    "-y", "-hide_banner", "-loglevel", "error",
+    "-filter_threads", String(threads),
+    "-i", String(inputPath),
+    "-map", "0:v:0",
+    ...audioArgs,
+    "-c:v", "libx264", "-threads:v", String(threads), "-preset", "veryfast",
+    "-b:v", "750k", "-maxrate", "900k", "-bufsize", "1800k",
+    "-vf", "scale='min(720,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps='min(30,source_fps)'",
+    "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "3.1",
+    "-movflags", "+faststart",
+    String(outputPath),
+  ];
 }
 
 export function videoDerivativeFfmpegArgs(

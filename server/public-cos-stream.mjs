@@ -40,6 +40,7 @@ export function createPublicCosStreamHandler({
   videoConcurrency = 4,
   imageMaxPending = 32,
   videoMaxPending = 16,
+  onFailure = () => {},
 }) {
   // Streaming retains bounded chunks instead of a full original video per slot.
   const imageLimiter = createConcurrencyLimiter({ concurrency: imageConcurrency, maxPending: imageMaxPending });
@@ -52,19 +53,31 @@ export function createPublicCosStreamHandler({
       return;
     }
     const controller = new AbortController();
+    const startedAt = Date.now();
     let reason = "";
     let release;
     let upstream;
     let source;
+    let countBytes;
     let idleTimer;
     const abort = (nextReason) => {
       if (controller.signal.aborted) return;
       reason = nextReason;
       controller.abort(new Error(nextReason));
     };
+    const onSourceError = () => abort("upstream-error");
     const resetIdleTimeout = () => {
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => abort("timeout"), idleTimeoutMs);
+      idleTimer = setTimeout(() => {
+        // The pipeline deliberately stops reading COS while a slow viewer fills
+        // the output buffers. That is downstream backpressure, not a stalled
+        // upstream. The total deadline still bounds a viewer that never resumes.
+        if (res.writableNeedDrain || countBytes?.writableNeedDrain || countBytes?.readableLength > 0) {
+          resetIdleTimeout();
+          return;
+        }
+        abort("timeout");
+      }, idleTimeoutMs);
       idleTimer.unref?.();
     };
     const onDisconnect = () => {
@@ -72,6 +85,8 @@ export function createPublicCosStreamHandler({
     };
     req.once("aborted", onDisconnect);
     res.once("close", onDisconnect);
+    // Start a full upstream-idle window once the downstream is writable again.
+    res.on("drain", resetIdleTimeout);
     // The header deadline also bounds queue/signing time; a busy queue must not
     // silently wait through every preceding video's full stream budget.
     const headerTimer = setTimeout(() => abort("timeout"), headerTimeoutMs);
@@ -139,7 +154,11 @@ export function createPublicCosStreamHandler({
         return;
       }
       source = Readable.fromWeb(upstream.body);
-      const countBytes = new Transform({
+      // Record a source failure before pipeline destroys the response and its
+      // close event looks like a viewer cancellation. An earlier real viewer
+      // cancellation or timeout keeps its original reason through abort().
+      source.once("error", onSourceError);
+      countBytes = new Transform({
         transform(chunk, _encoding, callback) {
           resetIdleTimeout();
           res._logicalResponseBytes += chunk.length;
@@ -150,6 +169,18 @@ export function createPublicCosStreamHandler({
       // concatenation, or SDK buffer is retained while the client watches.
       await pipeline(source, countBytes, res, { signal: controller.signal });
     } catch (error) {
+      if (reason !== "disconnected") {
+        // A response can be truncated after its 206 headers were sent. Record
+        // that failure separately; an access-log status alone looks successful.
+        try {
+          onFailure({
+            key, method: req.method, reason: reason || "upstream-error",
+            elapsedMs: Date.now() - startedAt,
+            transferredBytes: Number(res._logicalResponseBytes) || 0,
+            headersSent: res.headersSent,
+          });
+        } catch { /* Diagnostics must not change transport cleanup. */ }
+      }
       if (reason === "disconnected" || req.aborted || res.destroyed) return;
       if (res.headersSent) { res.destroy(); return; }
       sendError(req, res, reason === "timeout" ? 504 : error?.statusCode === 503 ? 503 : 502,
@@ -160,9 +191,11 @@ export function createPublicCosStreamHandler({
       clearTimeout(idleTimer);
       req.removeListener("aborted", onDisconnect);
       res.removeListener("close", onDisconnect);
+      res.removeListener("drain", resetIdleTimeout);
       // Cancels a rejected upstream response as well as any unfinished fetch.
       if (!controller.signal.aborted) controller.abort();
       if (source && !source.destroyed) source.destroy();
+      source?.removeListener("error", onSourceError);
       // Fetch has already been aborted; a body implementation whose cancel()
       // stalls must not retain a limiter slot after this request has ended.
       if (upstream?.body && !upstream.body.locked) void upstream.body.cancel().catch(() => undefined);

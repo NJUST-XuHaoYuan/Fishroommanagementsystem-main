@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import { publicVideoDerivativeProxyPath } from "./video-preview.mjs";
 
 const localServerPath = fileURLToPath(new URL("./local-server.mjs", import.meta.url));
 const pgLoaderPath = fileURLToPath(new URL("./test-support/pg-stub-loader.mjs", import.meta.url));
@@ -244,7 +245,9 @@ databaseFixture.state.stock.find((item) => item.id === "group-one").purchasePric
 let child;
 let baseUrl;
 let uploadDir;
+let derivativeToolLog;
 let childOutput = "";
+const authSecret = "example-public-policy-route-integration-secret";
 
 async function unusedPort() {
   const socket = createServer();
@@ -292,6 +295,33 @@ async function publicGet(path) {
 before(async () => {
   const port = await unusedPort();
   uploadDir = await mkdtemp(join(tmpdir(), "fishroom-public-policy-route-test-"));
+  derivativeToolLog = join(uploadDir, "derivative-tool.jsonl");
+  const ffmpegPath = join(uploadDir, "ffmpeg-test.mjs");
+  const ffprobePath = join(uploadDir, "ffprobe-test.mjs");
+  await writeFile(ffmpegPath, `#!/usr/bin/env node
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
+const args = process.argv.slice(2);
+const input = args[args.indexOf('-i') + 1];
+await readFile(input);
+await appendFile(${JSON.stringify(derivativeToolLog)}, JSON.stringify({ input, args }) + '\\n');
+await new Promise(resolve => setTimeout(resolve, 70));
+await readFile(input);
+if (input.includes('preview-fails') && args.includes('-t')) process.exit(1);
+for (const output of args.filter(value => value !== input && /(?:preview|poster|playback)\\.(?:mp4|jpg)$/.test(value))) {
+  const data = output.endsWith('poster.jpg')
+    ? Buffer.from([255,216,255,219,0,0,0,0,0,0,0,255,217])
+    : Buffer.alloc(output.endsWith('playback.mp4') ? 3 * 1024 * 1024 : 128);
+  if (output.endsWith('.mp4')) { data.writeUInt32BE(24); data.write('ftypisom', 4); }
+  await writeFile(output, data);
+}
+`, { mode: 0o700 });
+  await writeFile(ffprobePath, `#!/usr/bin/env node
+console.log(JSON.stringify({streams: [
+  {index:0,codec_type:'video',codec_name:'h264'},
+  {index:1,codec_type:'audio',codec_name:''},
+  {index:2,codec_type:'audio',codec_name:'aac'}
+]}));
+`, { mode: 0o700 });
   baseUrl = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [
     "--no-warnings",
@@ -304,8 +334,10 @@ before(async () => {
       NODE_ENV: "test",
       HOST: "127.0.0.1",
       PORT: String(port),
-      AUTH_SESSION_SECRET: "example-public-policy-route-integration-secret",
+      AUTH_SESSION_SECRET: authSecret,
       UPLOAD_DIR: uploadDir,
+      FFMPEG_PATH: ffmpegPath,
+      FFPROBE_PATH: ffprobePath,
       TRANSCODE_VIDEO_UPLOADS: "false",
       FISHROOM_TEST_DATABASE_FIXTURE_JSON: JSON.stringify(databaseFixture),
     },
@@ -414,6 +446,9 @@ test("a compact video-only latest record retains the fish's newest real photo fo
   assert.deepEqual(record.videos, ["/uploads/released-cancelled.mp4"]);
   assert.match(record.videoPosters[0], /^\/api\/public\/media\/video-derivative\?/);
   assert.match(record.videoPreviews[0], /^\/api\/public\/media\/video-derivative\?/);
+  assert.match(record.videoPlaybacks[0], /^\/api\/public\/media\/video-derivative\?/);
+  assert.equal(new URL(record.videoPlaybacks[0], baseUrl).searchParams.get("kind"), "playback");
+  assert.equal(record.videoPlaybacks.length, record.videos.length);
 });
 
 test("catalog publishes only the authorized fish note while protecting unrelated business information", async () => {
@@ -481,6 +516,98 @@ test("encoded path normalization cannot bypass signed video-derivative delivery"
   );
   assert.equal(response.status, 404);
   assert.equal((await response.json()).error, "Upload file not found");
+});
+
+test("full playback has a private independent cache, authorizes before access, and supports video Range", async () => {
+  const source = "/uploads/cached-playback.mp4";
+  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  const cacheId = createHash("sha256").update("local:cached-playback.mp4").digest("hex");
+  const playbackPath = join(uploadDir, ".video-derived", "playbacks", `${cacheId}.mp4`);
+  await mkdir(dirname(playbackPath), { recursive: true });
+  const playback = Buffer.alloc(3 * 1024 * 1024);
+  playback.writeUInt32BE(24);
+  playback.write("ftypisom", 4);
+  await writeFile(playbackPath, playback);
+
+  const head = await fetch(`${baseUrl}${path}`, { method: "HEAD" });
+  assert.equal(head.status, 200, "playback may exceed the 2 MB short-preview cap without requiring that cache or the source");
+  assert.equal(head.headers.get("content-type"), "video/mp4");
+  assert.equal(Number(head.headers.get("content-length")), playback.length);
+  assert.match(head.headers.get("cache-control"), /^public, max-age=\d+$/);
+  const partial = await fetch(`${baseUrl}${path}`, { headers: { Range: "bytes=4-7" } });
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers.get("accept-ranges"), "bytes");
+  assert.equal(partial.headers.get("content-range"), `bytes 4-7/${playback.length}`);
+  assert.equal(Buffer.from(await partial.arrayBuffer()).toString("ascii"), "ftyp");
+  const invalidRange = await fetch(`${baseUrl}${path}`, { headers: { Range: "bytes=0-1,4-5" } });
+  assert.equal(invalidRange.status, 416);
+
+  for (const change of [(url) => url.searchParams.set("kind", "preview"),
+    (url) => url.searchParams.set("url", "/uploads/other.mp4"),
+    (url) => url.searchParams.set("signature", "bad")]) {
+    const altered = new URL(path, baseUrl);
+    change(altered);
+    const response = await fetch(altered, { method: "HEAD" });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
+  const expiredPath = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret, now: 1 });
+  assert.equal((await fetch(`${baseUrl}${expiredPath}`, { method: "HEAD" })).status, 403);
+  for (const privatePath of [
+    `/uploads/.video-derived/playbacks/${cacheId}.mp4`,
+    `/uploads/ignored/%2e%2e%2f.video-derived/playbacks/${cacheId}.mp4`,
+  ]) assert.equal((await fetch(`${baseUrl}${privatePath}`)).status, 404);
+
+  const external = publicVideoDerivativeProxyPath("https://external.example/fish.mp4", "playback", { secret: authSecret });
+  assert.equal((await fetch(`${baseUrl}${external}`, { method: "HEAD" })).status, 400, "a signed kind cannot widen the source whitelist");
+});
+
+test("lazy playback work is deduplicated, selects usable audio, keeps originals, and never overwrites the short preview", async () => {
+  const source = "/uploads/lazy-playback.mp4";
+  const inputPath = join(uploadDir, "lazy-playback.mp4");
+  const original = Buffer.from("unchanged-source-video-fixture");
+  await writeFile(inputPath, original);
+  const path = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  const responses = await Promise.all([
+    fetch(`${baseUrl}${path}`, { method: "HEAD" }),
+    fetch(`${baseUrl}${path}`, { headers: { Range: "bytes=0-11" } }),
+  ]);
+  assert.deepEqual(responses.map((response) => response.status), [200, 206]);
+  await responses[1].arrayBuffer();
+  const invocations = (await readFile(derivativeToolLog, "utf8")).trim().split("\n").map(JSON.parse)
+    .filter((entry) => entry.input === inputPath);
+  assert.equal(invocations.length, 1, "simultaneous playback requests share one generation job");
+  assert.ok(invocations[0].args.includes("0:2"), "the probe skips an empty audio track and preserves the AAC track");
+  assert.ok(!invocations[0].args.includes("-t"));
+  assert.deepEqual(await readFile(inputPath), original);
+
+  const previewPath = publicVideoDerivativeProxyPath(source, "preview", { secret: authSecret });
+  const preview = await fetch(`${baseUrl}${previewPath}`, { method: "HEAD" });
+  assert.equal(preview.status, 200);
+  assert.equal(Number(preview.headers.get("content-length")), 128);
+  await rm(inputPath);
+  const cached = await fetch(`${baseUrl}${path}`, { method: "HEAD" });
+  assert.equal(cached.status, 200, "a ready playback cache requires no new download or transcode");
+  assert.equal(Number(cached.headers.get("content-length")), 3 * 1024 * 1024);
+  const allInvocations = (await readFile(derivativeToolLog, "utf8")).trim().split("\n").map(JSON.parse)
+    .filter((entry) => entry.input === inputPath);
+  assert.equal(allInvocations.length, 2, "only one playback and one independent short-preview generation ran");
+});
+
+test("a short-preview failure does not poison playback and source-size limits apply before encoding", async () => {
+  const source = "/uploads/preview-fails.mp4";
+  await writeFile(join(uploadDir, "preview-fails.mp4"), "source-fixture");
+  const preview = publicVideoDerivativeProxyPath(source, "preview", { secret: authSecret });
+  const playback = publicVideoDerivativeProxyPath(source, "playback", { secret: authSecret });
+  assert.equal((await fetch(`${baseUrl}${preview}`, { method: "HEAD" })).status, 502);
+  assert.equal((await fetch(`${baseUrl}${playback}`, { method: "HEAD" })).status, 200);
+  assert.equal((await fetch(`${baseUrl}${preview}`, { method: "HEAD" })).status, 503, "preview keeps its own failure backoff");
+  const tooLargeSource = "/uploads/too-large-playback.mp4";
+  await writeFile(join(uploadDir, "too-large-playback.mp4"), "");
+  await truncate(join(uploadDir, "too-large-playback.mp4"), 301 * 1024 * 1024);
+  const tooLarge = publicVideoDerivativeProxyPath(tooLargeSource, "playback", { secret: authSecret });
+  assert.equal((await fetch(`${baseUrl}${tooLarge}`, { method: "HEAD" })).status, 413);
+  assert.ok(!(await readFile(derivativeToolLog, "utf8")).includes("too-large-playback"));
 });
 
 test("a post-migration legacy false flag no longer hides a product, while archivedAt still does", async () => {

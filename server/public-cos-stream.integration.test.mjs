@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { createServer, get } from "node:http";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import COS from "cos-nodejs-sdk-v5";
@@ -98,12 +98,13 @@ test("two videos stream concurrently while the first viewer is still connected",
 
 test("disconnecting the viewer cancels the actual COS response and frees capacity", { timeout: 4000 }, async (t) => {
   const closed = deferred();
+  const failures = [];
   const f = await fixture(t, (req, res) => {
     res.writeHead(200, { "Content-Type": "video/mp4" });
     if (req.url.startsWith("/next")) { res.end("next"); return; }
     res.on("close", () => closed.resolve({ ended: res.writableEnded }));
     res.write("first");
-  }, { videoConcurrency: 1, videoMaxPending: 0 });
+  }, { videoConcurrency: 1, videoMaxPending: 0, onFailure: (event) => failures.push(event) });
   const controller = new AbortController();
   const response = await fetch(`${f.url}/held.mp4`, { signal: controller.signal });
   await response.body.getReader().read();
@@ -112,6 +113,7 @@ test("disconnecting the viewer cancels the actual COS response and frees capacit
   const next = await within(fetch(`${f.url}/next.mp4`));
   assert.equal(next.status, 200);
   assert.equal(await next.text(), "next");
+  assert.deepEqual(failures, [], "a viewer cancellation is not an upstream failure");
 });
 
 test("Range and HEAD preserve metadata, method-specific signing, and safe upstream errors", { timeout: 4000 }, async (t) => {
@@ -187,11 +189,13 @@ test("header timeout aborts a stalled upstream and returns 504", { timeout: 4000
 test("a healthy stream outlives the header deadline, but its total lifetime remains bounded", { timeout: 4000 }, async (t) => {
   const origin = deferred();
   const closed = deferred();
+  const failures = [];
+  const diagnosed = deferred();
   const f = await fixture(t, (_req, res) => {
     res.on("close", () => closed.resolve());
     res.writeHead(200, { "Content-Type": "video/mp4" }); res.write("first");
     origin.resolve(res);
-  }, { headerTimeoutMs: 60, totalTimeoutMs: 300 });
+  }, { headerTimeoutMs: 60, totalTimeoutMs: 300, onFailure: (event) => { failures.push(event); diagnosed.resolve(); } });
   const response = await fetch(`${f.url}/long.mp4`);
   const reader = response.body.getReader();
   await reader.read();
@@ -200,6 +204,9 @@ test("a healthy stream outlives the header deadline, but its total lifetime rema
   assert.equal(Buffer.from((await reader.read()).value).toString(), "later");
   await assert.rejects(reader.read(), /terminated|aborted/i);
   await within(closed.promise);
+  await within(diagnosed.promise);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].reason, "timeout", "aborting the source must preserve the initiating timeout reason");
 });
 
 test("continuing chunks reset the idle deadline throughout a slow active stream", { timeout: 4000 }, async (t) => {
@@ -216,6 +223,87 @@ test("continuing chunks reset the idle deadline throughout a slow active stream"
   const response = await fetch(`${f.url}/active.mp4`);
   assert.equal(response.status, 200);
   assert.equal(await response.text(), `first${"more".repeat(8)}last`);
+});
+
+test("a slow receiver keeps progressing under backpressure beyond the upstream idle deadline", { timeout: 4000 }, async (t) => {
+  const size = 8 * 1024 * 1024;
+  const f = await fixture(t, (_req, res) => {
+    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": String(size) });
+    res.end(Buffer.alloc(size));
+  }, { headerTimeoutMs: 1000, idleTimeoutMs: 150, totalTimeoutMs: 3000 });
+  let readTimer;
+  let resumeTimer;
+  let request;
+  let slowReads = 0;
+  try {
+    const bytes = await new Promise((resolve, reject) => {
+      request = get(`${f.url}/slow-client.mp4`, (res) => {
+        let received = 0;
+        res.on("error", reject);
+        res.on("end", () => resolve(received));
+        // Small periodic reads really fill the TCP/Node output buffers. Merely
+        // delaying chunks at the origin does not exercise downstream backpressure.
+        readTimer = setInterval(() => {
+          const chunk = res.read(8192);
+          if (chunk) { received += chunk.length; slowReads++; }
+        }, 20);
+        resumeTimer = setTimeout(() => {
+          clearInterval(readTimer);
+          res.on("data", (chunk) => { received += chunk.length; });
+          res.resume();
+        }, 450);
+      });
+      request.on("error", reject);
+    });
+    assert.ok(slowReads >= 10, "receiver kept reading for several idle windows");
+    assert.equal(bytes, size, "no false idle abort truncates the original video");
+  } finally {
+    clearInterval(readTimer);
+    clearTimeout(resumeTimer);
+    request?.destroy();
+  }
+});
+
+test("upstream inactivity is detected again after downstream backpressure clears", { timeout: 4000 }, async (t) => {
+  const size = 8 * 1024 * 1024;
+  const closed = deferred();
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(200, { "Content-Type": "video/mp4" });
+    if (req.url.startsWith("/next")) { res.end("next"); return; }
+    res.on("close", () => closed.resolve(res.writableEnded));
+    res.write(Buffer.alloc(size)); // Keep the origin open after its pending bytes.
+  }, { videoConcurrency: 1, videoMaxPending: 0, headerTimeoutMs: 1000, idleTimeoutMs: 150, totalTimeoutMs: 3000 });
+  let readTimer;
+  let resumeTimer;
+  let request;
+  let received = 0;
+  try {
+    await assert.rejects(new Promise((resolve, reject) => {
+      request = get(`${f.url}/slow-then-idle.mp4`, (res) => {
+        res.on("error", reject);
+        res.on("end", resolve);
+        readTimer = setInterval(() => {
+          const chunk = res.read(8192);
+          if (chunk) received += chunk.length;
+        }, 20);
+        resumeTimer = setTimeout(() => {
+          clearInterval(readTimer);
+          res.on("data", (chunk) => { received += chunk.length; });
+          res.resume();
+        }, 450);
+      });
+      request.on("error", reject);
+    }), /aborted|ECONNRESET/i);
+    assert.equal(received, size, "all pending bytes arrive before the real upstream stall is timed out");
+    assert.equal(await within(closed.promise), false);
+    const next = await fetch(`${f.url}/next.mp4`);
+    assert.equal(next.status, 200);
+    assert.equal(await next.text(), "next");
+  } finally {
+    clearInterval(readTimer);
+    clearTimeout(resumeTimer);
+    request?.destroy();
+  }
 });
 
 test("a stream with no further chunks is cancelled at the idle deadline and releases capacity", { timeout: 4000 }, async (t) => {
@@ -277,17 +365,49 @@ test("a rejected response whose body cancellation stalls cannot retain a stream 
 });
 
 test("a truncated upstream terminates the partial response and frees the slot", { timeout: 4000 }, async (t) => {
+  const failures = [];
   const f = await fixture(t, (req, res) => {
     res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": "10" });
     if (req.url.startsWith("/next")) { res.end("1234567890"); return; }
     res.write("first");
     setTimeout(() => res.destroy(), 30);
-  }, { videoConcurrency: 1, videoMaxPending: 0 });
+  }, { videoConcurrency: 1, videoMaxPending: 0, onFailure: (event) => { failures.push(event); } });
   const partial = await fetch(`${f.url}/broken.mp4`);
   await assert.rejects(partial.text(), /terminated|aborted/i);
   const next = await fetch(`${f.url}/next.mp4`);
   assert.equal(next.status, 200);
   assert.equal(await next.text(), "1234567890");
+  assert.equal(failures.length, 1, "a partial 200 response must still be diagnosable as a transport failure");
+  assert.equal(failures[0].headersSent, true);
+  assert.equal(failures[0].transferredBytes, 5);
+  assert.equal(failures[0].reason, "upstream-error");
+  assert.ok(!JSON.stringify(failures).includes("signature="));
+});
+
+test("a throwing diagnostic callback cannot retain capacity after a truncated partial response", { timeout: 4000 }, async (t) => {
+  const failures = [];
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(206, { "Content-Type": "video/mp4", "Content-Length": "10", "Content-Range": "bytes 0-9/20" });
+    if (req.url.startsWith("/next")) { res.end("1234567890"); return; }
+    res.write("first");
+    setTimeout(() => res.destroy(), 30);
+  }, {
+    videoConcurrency: 1,
+    videoMaxPending: 0,
+    onFailure(event) {
+      failures.push(event);
+      throw new Error("diagnostic sink failed");
+    },
+  });
+  const partial = await fetch(`${f.url}/broken.mp4`, { headers: { Range: "bytes=0-9" } });
+  assert.equal(partial.status, 206);
+  await assert.rejects(partial.text(), /terminated|aborted/i);
+  const next = await within(fetch(`${f.url}/next.mp4`, { headers: { Range: "bytes=0-9" } }));
+  assert.equal(next.status, 206);
+  assert.equal(await next.text(), "1234567890");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].reason, "upstream-error");
+  assert.equal(failures[0].transferredBytes, 5);
 });
 
 test("the installed COS SDK signs HEAD and GET separately over HTTPS through the actual URL helper", async () => {

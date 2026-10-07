@@ -7,6 +7,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
@@ -182,6 +183,7 @@ import {
   videoDerivativeCacheId,
   videoDerivativeFfmpegArgs,
   videoDerivativeRelativePath,
+  videoPlaybackFfmpegArgs,
 } from "./video-preview.mjs";
 import {
   PUBLIC_CATALOG_MAJOR_CATEGORIES,
@@ -335,6 +337,10 @@ const VIDEO_PREVIEW_FPS = Math.min(15, Math.max(12, Math.floor(numberFromEnv(pro
 const VIDEO_PREVIEW_BITRATE_KBPS = Math.min(600, Math.max(300, Math.floor(numberFromEnv(process.env.VIDEO_PREVIEW_BITRATE_KBPS, 450))));
 const MAX_VIDEO_PREVIEW_BYTES = 2 * 1024 * 1024;
 const MAX_VIDEO_POSTER_BYTES = 1024 * 1024;
+const VIDEO_PLAYBACK_TIMEOUT_MS = Math.min(
+  15 * 60 * 1000,
+  Math.max(30_000, Math.floor(numberFromEnv(process.env.VIDEO_PLAYBACK_TIMEOUT_MS, 5 * 60 * 1000)))
+);
 const VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_VIDEO_DERIVATIVE_FAILURES = 2_000;
 const COS_REQUEST_TIMEOUT_MS = Math.min(
@@ -370,6 +376,10 @@ const streamPublicCosObject = createPublicCosStreamHandler({
   resolveContentType: safePublicMediaContentType,
   inferContentType: (key) => mimeForExtension(extname(key)),
   headerTimeoutMs: COS_REQUEST_TIMEOUT_MS,
+  onFailure: ({ key, ...info }) => console.warn("[public-media-failure]", JSON.stringify({
+    ...info,
+    mediaId: createHash("sha256").update(key).digest("hex").slice(0, 16),
+  })),
 });
 const PUBLIC_PROJECTION_CACHE_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_BIO_CACHE_MAX_ENTRIES = 2_000;
@@ -377,6 +387,8 @@ const publicCatalogCache = new Map();
 const publicBioRecordsCache = new Map();
 const videoDerivativeJobs = new Map();
 const videoDerivativeFailures = new Map();
+const videoPlaybackJobs = new Map();
+const videoPlaybackFailures = new Map();
 const DEFAULT_SITE_ID = "nanjing";
 const ALL_SITE_ID = "all";
 const DEFAULT_SITES = [
@@ -1276,12 +1288,16 @@ function publicBioRecordPayload(record = {}, media = {}) {
   const photos = media.photos ?? publicMediaUrls(record?.photos, 6);
   const videos = media.videos ?? publicMediaUrls(record?.videos, 3);
   // Keep these arrays index-aligned with `videos`: clients can use a tiny
-  // preview/poster in list views while retaining the original for detail play.
+  // preview/poster in lists and full-length mobile playback in detail, while
+  // retaining every original video reference.
   const videoPosters = videos.map((video) =>
     publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.poster)
   );
   const videoPreviews = videos.map((video) =>
     publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.preview)
+  );
+  const videoPlaybacks = videos.map((video) =>
+    publicVideoDerivativeUrl(video, VIDEO_DERIVATIVE_KINDS.playback)
   );
   return {
     id: String(record?.id ?? ""),
@@ -1299,6 +1315,7 @@ function publicBioRecordPayload(record = {}, media = {}) {
     videos: videos.map(publicCatalogMediaUrl),
     videoPosters,
     videoPreviews,
+    videoPlaybacks,
   };
 }
 
@@ -6900,6 +6917,7 @@ function videoDerivativePaths(descriptor) {
     cacheId,
     posterPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.poster)),
     previewPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.preview)),
+    playbackPath: join(uploadDir, videoDerivativeRelativePath(cacheId, VIDEO_DERIVATIVE_KINDS.playback)),
   };
 }
 
@@ -6909,6 +6927,8 @@ async function videoDerivativeFileReady(filePath, kind) {
     const info = await stat(filePath);
     const maximum = kind === VIDEO_DERIVATIVE_KINDS.poster
       ? MAX_VIDEO_POSTER_BYTES
+      : kind === VIDEO_DERIVATIVE_KINDS.playback
+        ? MAX_VIDEO_UPLOAD_BYTES
       : MAX_VIDEO_PREVIEW_BYTES;
     if (!info.isFile() || info.size < 12 || info.size > maximum) return false;
     handle = await open(filePath, "r");
@@ -7175,17 +7195,131 @@ async function ensureVideoDerivatives(sourceValue, options = {}) {
   return await job;
 }
 
+async function generateVideoPlayback(descriptor, paths, options = {}) {
+  const derivativeRoot = join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY);
+  await mkdir(derivativeRoot, { recursive: true });
+  const tempDir = await mkdtemp(join(derivativeRoot, ".playback-job-"));
+  const tempPlaybackPath = join(tempDir, "playback.mp4");
+  let inputPath = String(options.sourcePath ?? "").trim();
+  try {
+    if (inputPath) {
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "local") {
+      inputPath = descriptor.localPath;
+      await assertVideoDerivativeSourceFile(inputPath);
+    } else if (descriptor.type === "cos") {
+      inputPath = join(tempDir, `source${extname(descriptor.cosKey) || ".mp4"}`);
+      await downloadCosVideoSourceToFile(descriptor.cosKey, inputPath);
+    } else {
+      const error = new Error("视频源地址无效");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    let audioStreamIndex;
+    try {
+      const selectedAudio = selectWechatAudioStream(await probeVideoFile(inputPath));
+      audioStreamIndex = selectedAudio ? selectedAudio.index : null;
+    } catch (error) {
+      // A failed probe can still be encoded with ffmpeg's optional first audio.
+      console.warn(`Video playback probe failed for cache ${paths.cacheId}: ${error.message}`);
+    }
+    try {
+      await execFileAsync(FFMPEG_PATH, videoPlaybackFfmpegArgs(inputPath, tempPlaybackPath, {
+        audioStreamIndex,
+        threads: VIDEO_TRANSCODE_THREADS,
+      }), {
+        timeout: VIDEO_PLAYBACK_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      });
+    } catch (cause) {
+      console.warn(`Video playback ffmpeg failed for cache ${paths.cacheId}: ${cause.message}`);
+      const error = new Error("视频播放副本生成失败");
+      error.statusCode = 502;
+      throw error;
+    }
+    if (!await videoDerivativeFileReady(tempPlaybackPath, VIDEO_DERIVATIVE_KINDS.playback)) {
+      const error = new Error("视频播放副本生成结果无效");
+      error.statusCode = 502;
+      throw error;
+    }
+    await mkdir(join(uploadDir, VIDEO_DERIVATIVE_DIRECTORY, "playbacks"), { recursive: true });
+    await rename(tempPlaybackPath, paths.playbackPath);
+    return paths;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function ensureVideoPlayback(sourceValue, options = {}) {
+  const descriptor = videoDerivativeSourceDescriptor(sourceValue);
+  if (!descriptor) {
+    const error = new Error("视频播放来源无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  const paths = videoDerivativePaths(descriptor);
+  if (await videoDerivativeFileReady(paths.playbackPath, VIDEO_DERIVATIVE_KINDS.playback)) return paths;
+
+  const recentFailure = videoPlaybackFailures.get(paths.cacheId);
+  if (recentFailure && recentFailure.retryAfter > Date.now()) {
+    const error = new Error("视频播放副本正在等待重试");
+    error.statusCode = 503;
+    throw error;
+  }
+  if (recentFailure) videoPlaybackFailures.delete(paths.cacheId);
+  const existingJob = videoPlaybackJobs.get(paths.cacheId);
+  if (existingJob) return await existingJob;
+
+  const job = (async () => {
+    const release = await videoPreviewLimiter.acquire();
+    try {
+      if (await videoDerivativeFileReady(paths.playbackPath, VIDEO_DERIVATIVE_KINDS.playback)) return paths;
+      const generated = await generateVideoPlayback(descriptor, paths, options);
+      videoPlaybackFailures.delete(paths.cacheId);
+      return generated;
+    } catch (error) {
+      videoPlaybackFailures.delete(paths.cacheId);
+      videoPlaybackFailures.set(paths.cacheId, {
+        retryAfter: Date.now() + VIDEO_DERIVATIVE_FAILURE_BACKOFF_MS,
+      });
+      while (videoPlaybackFailures.size > MAX_VIDEO_DERIVATIVE_FAILURES) {
+        const oldestKey = videoPlaybackFailures.keys().next().value;
+        if (oldestKey === undefined) break;
+        videoPlaybackFailures.delete(oldestKey);
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  })();
+  videoPlaybackJobs.set(paths.cacheId, job);
+  job.then(
+    () => videoPlaybackJobs.delete(paths.cacheId),
+    () => videoPlaybackJobs.delete(paths.cacheId),
+  );
+  return await job;
+}
+
 function scheduleVideoDerivativeGeneration(source, sourcePath, cleanupDir = "") {
   setImmediate(() => {
-    void ensureVideoDerivatives(source, { sourcePath })
-      .catch((error) => {
-        console.warn(`Video preview generation deferred: ${error.message}`);
-      })
-      .finally(() => {
-        if (cleanupDir) {
-          void rm(cleanupDir, { recursive: true, force: true }).catch(() => undefined);
+    void (async () => {
+      try {
+        // Keep the shared upload source until both independent jobs finish.
+        // A short-preview failure must not suppress full-length playback.
+        for (const generate of [ensureVideoDerivatives, ensureVideoPlayback]) {
+          try {
+            await generate(source, { sourcePath });
+          } catch (error) {
+            console.warn(`Video derivative generation deferred: ${error.message}`);
+          }
         }
-      });
+      } finally {
+        if (cleanupDir) {
+          await rm(cleanupDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
+    })();
   });
 }
 
@@ -7244,7 +7378,7 @@ async function sendVideoDerivativeFile(req, res, filePath, kind, cacheControl) {
     res.end();
     return;
   }
-  createReadStream(filePath, { start, end }).pipe(res);
+  await pipeline(createReadStream(filePath, { start, end }), res);
 }
 
 async function externalizeDataUrl(value) {
@@ -8413,15 +8547,23 @@ async function handleApi(req, res, url) {
         return;
       }
 
-      const paths = await ensureVideoDerivatives(source);
+      const paths = kind === VIDEO_DERIVATIVE_KINDS.playback
+        ? await ensureVideoPlayback(source)
+        : await ensureVideoDerivatives(source);
       if (req.aborted || res.destroyed) return;
       const filePath = kind === VIDEO_DERIVATIVE_KINDS.poster
         ? paths.posterPath
+        : kind === VIDEO_DERIVATIVE_KINDS.playback
+          ? paths.playbackPath
         : paths.previewPath;
-      const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt, { now });
+      const maxAge = publicMediaCacheMaxAgeSeconds(expiresAt);
       await sendVideoDerivativeFile(req, res, filePath, kind, `public, max-age=${maxAge}`);
     } catch (error) {
       if (req.aborted || res.destroyed) return;
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       const candidateStatus = Number(error?.statusCode ?? 0);
       const status = [400, 404, 413, 415, 503].includes(candidateStatus) ? candidateStatus : 502;
       sendJson(req, res, status, {
@@ -10905,6 +11047,9 @@ async function handleApi(req, res, url) {
       const previewUrl = isVideo && mediaUrl
         ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.preview)
         : "";
+      const playbackUrl = isVideo && mediaUrl
+        ? publicVideoDerivativeUrl(mediaUrl, VIDEO_DERIVATIVE_KINDS.playback)
+        : "";
       sendJson(req, res, 200, {
         ok: true,
         url: mediaUrl,
@@ -10914,15 +11059,16 @@ async function handleApi(req, res, url) {
         processingMode,
         storage: cosReady() ? "cos" : "local",
         ...(isVideo ? {
-          derivativeStatus: posterUrl && previewUrl ? "processing" : "unavailable",
+          derivativeStatus: posterUrl && previewUrl && playbackUrl ? "processing" : "unavailable",
           posterUrl,
           previewUrl,
+          playbackUrl,
         } : {}),
       }, { "Server-Timing": uploadTimingHeader });
       if (isVideo && mediaUrl && videoDerivativeSourcePath) {
         // The original upload is already complete. Transfer temporary-file
-        // cleanup to a detached, bounded preview task so response latency does
-        // not include poster/preview encoding.
+        // cleanup to detached, bounded derivative tasks so response latency
+        // does not include poster, preview, or playback encoding.
         const cleanupDir = videoTempDir;
         videoTempDir = "";
         scheduleVideoDerivativeGeneration(mediaUrl, videoDerivativeSourcePath, cleanupDir);
