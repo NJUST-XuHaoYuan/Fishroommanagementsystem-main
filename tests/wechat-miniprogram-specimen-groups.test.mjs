@@ -161,15 +161,17 @@ test("numbered or individually noted fish remain separate even when the full his
   assert.equal(catalog.groupSpecimens(catalog.buildViewModel(data).specimens).length, 3, "legacy APIs without notes cannot prove there is no individual note");
 });
 
-test("stock cards show blue identifiers and red notes but no tank position or filter buttons", async () => {
+test("stock cards show blue identifiers, red notes and location filtering, but no tank position or status filters", async () => {
   const template = await read("pages/specimens/index.wxml");
   const page = await read("pages/specimens/index.js");
   const styles = await read("app.wxss");
   assert.match(template, /class="specimen-number">编号/);
   assert.match(template, /wx:if="\{\{item.notes\}\}" class="specimen-note">备注：\{\{item.notes\}\}/);
   assert.ok(template.indexOf('class="specimen-number"') < template.indexOf('class="specimen-note"'));
-  assert.doesNotMatch(template, /item\.location|filter-row|onFilterTap|鱼码/);
+  assert.doesNotMatch(template, /item\.location|class="filter-row"|onFilterTap|鱼码/);
   assert.doesNotMatch(page, /filterOptions|activeFilter|onFilterTap/);
+  assert.match(template, /bindtap="onSiteTap"/);
+  assert.match(template, /class="specimen-site">\{\{[^}]*item.siteName[^}]*\}\}/);
   assert.match(page, /\}, "all"\)/);
   assert.match(template, /class="price-unit"> \/ \{\{item.unit\}\}/);
   assert.match(styles, /\.specimen-number\s*\{[^}]*color: #183d72/);

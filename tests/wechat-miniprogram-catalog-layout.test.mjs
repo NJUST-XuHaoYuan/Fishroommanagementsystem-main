@@ -13,7 +13,8 @@ test("catalog keeps real category counts, brand assets and accessible navigation
     assert.ok(template.includes(`{{${binding}}}`));
   }
   assert.match(template, /src="\/assets\/brand-logo.jpg"/);
-  assert.match(template, /src="\/assets\/brand-slogan.png"/);
+  assert.match(template, /src="\/assets\/brand-slogan-zh.jpg"/);
+  assert.match(template, /src="\/assets\/brand-slogan-en.jpg"/);
   assert.match(template, /aria-label="查看\{\{minor.label\}\}/);
   assert.match(template, /class="minor-link"\s+size="mini"/);
   assert.match(template, /bindtap="onMinorCategoryTap"/);
@@ -32,6 +33,29 @@ test("catalog uses unframed two-column rows with stable touch targets", () => {
   for (const tone of ["coral", "invertebrate", "consumable"]) {
     assert.ok(styles.includes(`.major-section.${tone}`));
   }
+});
+
+test("catalog and products share the new compact bilingual brand artwork", async () => {
+  const products = await readFile(new URL("../products/index.wxml", base), "utf8");
+  const globalStyles = await readFile(new URL("../../app.wxss", base), "utf8");
+  for (const page of [template, products]) {
+    assert.match(page, /class="nav-brand-logo"[^>]*mode="aspectFit"[^>]*aria-label="Marine Forest"/);
+    assert.match(page, /src="\/assets\/brand-slogan-zh.jpg"[^>]*aria-label="种一片海"/);
+    assert.match(page, /src="\/assets\/brand-slogan-en.jpg"[^>]*aria-label="Grow an Ocean"/);
+    assert.doesNotMatch(page, /brand-slogan\.png/);
+  }
+  assert.match(globalStyles, /\.nav-brand-logo\s*\{[^}]*width: 60px;[^}]*height: 60px;/);
+  assert.match(globalStyles, /\.nav-brand-slogan\s*\{[^}]*min-width: 0;[^}]*flex-direction: column;/);
+  assert.match(globalStyles, /\.nav-slogan-image-zh\s*\{[^}]*width: 88%;[^}]*height: 35\.2px;[^}]*top: -6\.6px;/);
+  assert.match(globalStyles, /\.nav-slogan-image-en\s*\{\s*height: 33\.33px; top: -9px;/);
+  let total = 0;
+  for (const name of ["brand-logo.jpg", "brand-slogan-zh.jpg", "brand-slogan-en.jpg"]) {
+    const asset = await readFile(new URL(`../../assets/${name}`, base));
+    assert.equal(asset.readUInt16BE(0), 0xffd8, `${name} must be a JPEG`);
+    assert.ok(asset.length < 200 * 1024, `${name} exceeds the image budget`);
+    total += asset.length;
+  }
+  assert.ok(total < 100 * 1024, "brand artwork should remain lightweight as a set");
 });
 
 test("category tap preserves the existing product route and encodes category keys", () => {

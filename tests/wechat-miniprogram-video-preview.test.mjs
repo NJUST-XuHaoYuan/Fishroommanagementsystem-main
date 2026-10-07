@@ -11,6 +11,9 @@ const previewSource = await readFile(
   new URL("../wechat-miniprogram/utils/card-video-preview.js", import.meta.url),
   "utf8"
 );
+const refreshSource = await readFile(
+  new URL("../wechat-miniprogram/utils/public-catalog-refresh.js", import.meta.url), "utf8"
+);
 const productsPageSource = await readFile(
   new URL("../wechat-miniprogram/pages/products/index.js", import.meta.url),
   "utf8"
@@ -198,7 +201,10 @@ test("card preview controller keeps one player, stops off-screen, and pauses on 
     toggleCardVideoPreview
   } = loadCommonJs(previewSource, {}, { wx });
   const page = {
-    data: { activePreviewId: "" },
+    data: { activePreviewId: "", specimens: [
+      { id: "one", previewVideo: "/one.mp4" },
+      { id: "two", previewVideo: "/two.mp4" }
+    ] },
     setData(update, callback) {
       Object.assign(this.data, update);
       if (callback) callback();
@@ -241,9 +247,150 @@ test("card preview controller keeps one player, stops off-screen, and pauses on 
     image: "/generated-poster.jpg",
     fallbackImage: "/real-photo.jpg"
   }];
-  handleCardImageError(page, { currentTarget: { dataset: { id: "one" } } }, "products");
+  handleCardImageError(page, { currentTarget: { dataset: { id: "one", src: "/generated-poster.jpg" } } }, "products");
   assert.equal(page.data.products[0].image, "/real-photo.jpg");
   assert.equal(page.data.products[0].fallbackImage, "");
+});
+
+function mediaPageHarness(kind = "specimens") {
+  const players = [];
+  const toasts = [];
+  const updates = [];
+  const wx = {
+    createVideoContext() {
+      const player = { played: 0, paused: 0, play() { this.played += 1; }, pause() { this.paused += 1; } };
+      players.push(player);
+      return player;
+    },
+    showToast(options) { toasts.push(options); },
+  };
+  const controller = loadCommonJs(previewSource, {}, { wx });
+  let page;
+  loadCommonJs(kind === "products" ? productsPageSource : specimensPageSource, {
+    "../../utils/api": {}, "../../utils/catalog": {},
+    "../../utils/navigation": { getNavigationMetrics: () => ({}) },
+    "../../utils/public-catalog-refresh": {
+      ...loadCommonJs(refreshSource),
+      startPublicCatalogRefresh(page) { page.__publicCatalogIsVisible = true; },
+      stopPublicCatalogRefresh(page) { page.__publicCatalogIsVisible = false; }
+    },
+    "../../utils/card-video-preview": controller,
+  }, { Page(value) { page = value; } });
+  page.data = JSON.parse(JSON.stringify(page.data));
+  page.data.loading = false;
+  page.data.specimens = [
+    { id: "one", previewVideo: "/one.mp4" },
+    { id: "two", previewVideo: "/two.mp4?signature=old" }
+  ];
+  page.setData = function (update, callback) {
+    Object.assign(this.data, update);
+    updates.push(update);
+    callback?.();
+  };
+  return { page, players, toasts, updates };
+}
+
+const mediaError = (id, src) => ({ currentTarget: { dataset: { id, src } } });
+const previewTap = (id, preview) => ({ currentTarget: { dataset: { id, preview } } });
+
+test("late image errors cannot replace refreshed photos or discard a successful fallback", () => {
+  for (const kind of ["products", "specimens"]) {
+    const { page, updates } = mediaPageHarness(kind);
+    page.data[kind] = [{ id: "same-card", image: "/photo.jpg?signature=fresh", fallbackImage: "/fallback.jpg" }];
+    const oldFailure = mediaError("same-card", "/photo.jpg?signature=expired");
+    page.onCardImageError(oldFailure);
+    page.onCardImageError(mediaError("other-card", "/photo.jpg?signature=fresh"));
+    page.onCardImageError(mediaError("same-card", ""));
+    assert.equal(updates.length, 0, "stale, unrelated and unidentified errors must not replace current media");
+    assert.equal(page.data[kind][0].image, "/photo.jpg?signature=fresh");
+    const currentFailure = mediaError("same-card", "/photo.jpg?signature=fresh");
+    page.onCardImageError(currentFailure);
+    assert.equal(page.data[kind][0].image, "/fallback.jpg");
+    assert.equal(updates.length, 1);
+    page.onCardImageError(currentFailure);
+    page.onCardImageError(oldFailure);
+    assert.equal(page.data[kind][0].image, "/fallback.jpg");
+    assert.equal(updates.length, 1, "late errors from the original image cannot erase the fallback");
+    page.onCardImageError(mediaError("same-card", "/fallback.jpg"));
+    assert.equal(page.data[kind][0].image, "");
+    assert.equal(page.data[kind][0].fallbackImage, "");
+    page.onCardImageError(mediaError("same-card", "/fallback.jpg"));
+    assert.equal(updates.length, 2, "an exhausted fallback must stop without retry loops");
+  }
+});
+
+test("late video errors neither stop another card nor a newer source for the same card", () => {
+  const { page, players, toasts } = mediaPageHarness();
+  page.onPreviewToggle(previewTap("one", "/one.mp4"));
+  page.onPreviewToggle(previewTap("two", "/two.mp4?signature=old"));
+  page.onPreviewError(mediaError("one", "/one.mp4"));
+  assert.equal(page.data.activePreviewId, "two");
+  assert.equal(players[1].paused, 0);
+  assert.equal(toasts.length, 0);
+  page.onHide();
+  page.onShow();
+  page.data.loading = false;
+  page.data.specimens[1].previewVideo = "/two.mp4?signature=fresh";
+  page.onPreviewToggle(previewTap("two", "/two.mp4?signature=fresh"));
+  page.onPreviewError(mediaError("two", "/two.mp4?signature=old"));
+  page.onPreviewError(mediaError("two", ""));
+  assert.equal(page.data.activePreviewId, "two");
+  assert.equal(players[2].paused, 0);
+  assert.equal(toasts.length, 0);
+  const currentFailure = mediaError("two", "/two.mp4?signature=fresh");
+  page.onPreviewError(currentFailure);
+  assert.equal(players[2].paused, 1);
+  assert.equal(page.data.activePreviewId, "");
+  assert.equal(toasts.length, 1);
+  page.onPreviewError(currentFailure);
+  assert.equal(toasts.length, 1, "duplicate old errors must not add toasts or restart playback");
+});
+
+test("late preview taps resolve the current card source and current errors still stop the player", () => {
+  const { page, players, toasts } = mediaPageHarness();
+  const oldTap = previewTap("two", "/two.mp4?signature=old");
+  page.data.specimens[1].previewVideo = "/two.mp4?signature=fresh";
+  page.onPreviewToggle(oldTap);
+  assert.equal(players.length, 1);
+  assert.equal(page.__cardVideoSource, page.data.specimens[1].previewVideo);
+  page.onPreviewError(mediaError("two", "/two.mp4?signature=fresh"));
+  assert.equal(page.data.activePreviewId, "");
+  assert.equal(players[0].paused, 1);
+  assert.equal(toasts.length, 1);
+  page.data.specimens = page.data.specimens.filter((item) => item.id !== "two");
+  page.onPreviewToggle(oldTap);
+  assert.equal(players.length, 1, "a removed card cannot be resurrected by its old tap event");
+});
+
+test("preview taps cannot start players while loading, refreshing, failed, hidden, or unloaded", () => {
+  const { page, players } = mediaPageHarness();
+  const event = previewTap("one", "/one.mp4");
+  for (const key of ["loading", "refreshing", "error"]) {
+    page.data[key] = key === "error" ? "network failed" : true;
+    page.onPreviewToggle(event);
+    assert.equal(players.length, 0, key);
+    page.data[key] = key === "error" ? "" : false;
+  }
+  page.onHide();
+  page.onPreviewToggle(event);
+  assert.equal(players.length, 0);
+  page.data.loading = false;
+  page.onUnload();
+  page.onPreviewToggle(event);
+  assert.equal(players.length, 0, "a late tap cannot create a player after teardown");
+});
+
+test("teardown invalidates a pending preview render and any late video failure", () => {
+  const { page, players, toasts } = mediaPageHarness();
+  let afterRender;
+  page.setData = function (update, callback) { Object.assign(this.data, update); afterRender = callback; };
+  page.onPreviewToggle(previewTap("one", "/one.mp4"));
+  assert.equal(typeof afterRender, "function");
+  page.onUnload();
+  afterRender();
+  page.onPreviewError(mediaError("one", "/one.mp4"));
+  assert.equal(players.length, 0, "a deferred render cannot start video after the page is unloaded");
+  assert.equal(toasts.length, 0);
 });
 
 test("specimen cards create muted previews only after an explicit tap", () => {
@@ -256,8 +403,10 @@ test("specimen cards create muted previews only after an explicit tap", () => {
     assert.match(template, /loop="\{\{true\}\}"/);
     assert.match(template, /controls="\{\{false\}\}"/);
     assert.match(template, /catchtap="onPreviewToggle"/);
+    assert.match(template, /<button\b[^>]*catchtap="onPreviewToggle"[^>]*disabled="\{\{refreshing\}\}"/);
     assert.match(template, /<video[\s\S]*?catchtap="on(?:Product|Specimen)Tap"/);
     assert.match(template, /<image[\s\S]*?binderror="onCardImageError"/);
+    assert.match(template, /<video\b[^>]*data-id="\{\{item.id\}\}"[^>]*data-src="\{\{item.previewVideo\}\}"[^>]*binderror="onPreviewError"/);
     assert.match(template, /aria-label="\{\{activePreviewId === item\.id \? '暂停' : '播放'\}\}/);
     assert.doesNotMatch(template, /src="\{\{item\.videos?/);
   }
@@ -266,11 +415,15 @@ test("specimen cards create muted previews only after an explicit tap", () => {
     assert.match(pageSource, /onHide\(\)[\s\S]*?stopCardVideoPreview\(this\)/);
     assert.match(pageSource, /onUnload\(\)[\s\S]*?stopCardVideoPreview\(this, \{ clearData: false \}\)/);
     assert.match(pageSource, /onPreviewToggle\(event\)[\s\S]*?toggleCardVideoPreview\(this, event\)/);
+    assert.match(pageSource, /onPreviewError\(event\)[\s\S]*?handleCardVideoError\(this, event\)/);
     assert.match(pageSource, /onCardImageError\(event\)[\s\S]*?handleCardImageError\(this, event, "(?:products|specimens)"\)/);
   }
 
   assert.match(previewSource, /createIntersectionObserver/);
   assert.match(previewSource, /intersectionRatio/);
+  for (const template of [productsTemplate, specimensTemplate]) {
+    assert.match(template, /<image\b[^>]*data-id="\{\{item.id\}\}"[^>]*data-src="\{\{item.image\}\}"[^>]*binderror="onCardImageError"/);
+  }
 });
 
 test("specimen preview buttons opt out of native full-width sizing", () => {

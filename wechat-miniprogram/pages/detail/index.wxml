@@ -25,6 +25,9 @@
         src="{{specimen.image}}"
         mode="aspectFit"
         data-src="{{specimen.image}}"
+        data-image-generation="{{imageGeneration}}"
+        binderror="onDetailImageError"
+        bindload="onDetailImageLoad"
         bindtap="onPreviewImage"
       />
       <view wx:else class="hero-image placeholder"></view>
@@ -40,6 +43,7 @@
         </view>
       </view>
       <view class="stock-quantity">{{members.length > 1 ? '同款可选' : '可选'}} {{members.length || 1}} {{specimen.unit}}</view>
+      <view class="detail-site">{{specimen.siteId ? '所在地 · ' + specimen.siteName : specimen.siteName}}</view>
       <view class="taxonomy">
         <text class="species-name">{{specimen.speciesName}}</text>
         <text class="scientific">{{specimen.subtitle}}</text>
@@ -82,6 +86,11 @@
         <view class="timeline-count">{{timeline.length}} 条</view>
       </view>
 
+      <view wx:if="{{imageErrorCount}}" class="timeline-video-error detail-image-error" role="alert">
+        <text>部分图片暂时无法加载。</text>
+        <button class="timeline-video-retry" size="mini" bindtap="onReloadDetailImages" disabled="{{refreshing}}">{{refreshing ? '正在更新…' : '重新加载图片'}}</button>
+      </view>
+
       <view wx:if="{{timeline.length}}" class="timeline">
         <view wx:for="{{timeline}}" wx:key="id" class="timeline-item">
           <view class="timeline-dot"></view>
@@ -106,21 +115,37 @@
                 mode="aspectFit"
                 lazy-load
                 data-src="{{item}}"
+                data-image-generation="{{imageGeneration}}"
+                binderror="onDetailImageError"
+                bindload="onDetailImageLoad"
                 bindtap="onPreviewImage"
               />
             </scroll-view>
-            <view wx:if="{{item.videos.length}}" class="video-list">
-              <video
-                wx:for="{{item.videos}}"
-                wx:key="*this"
-                class="timeline-video"
-                src="{{item}}"
-                controls
-                object-fit="contain"
-                show-center-play-btn
-                show-fullscreen-btn
-                enable-progress-gesture
-              />
+            <view wx:if="{{item.videoItems.length}}" class="video-list">
+              <view wx:for="{{item.videoItems}}" wx:for-item="video" wx:key="id" class="timeline-video-entry">
+                <button
+                  class="timeline-video-button {{videoOpeningId !== '' || refreshing ? 'is-opening' : ''}}"
+                  size="mini"
+                  hover-class="timeline-video-button-hover"
+                  data-record-id="{{item.id}}"
+                  data-video-index="{{video.index}}"
+                  bindtap="onPlayTimelineVideo"
+                  disabled="{{videoOpeningId !== '' || refreshing}}"
+                  aria-label="播放{{item.dateText}}的维护视频{{video.index + 1}}"
+                >
+                  <image wx:if="{{video.poster}}" class="timeline-video-poster" src="{{video.poster}}" mode="aspectFit" lazy-load aria-hidden="true"
+                    data-src="{{video.poster}}" data-image-generation="{{imageGeneration}}" binderror="onDetailImageError" bindload="onDetailImageLoad" />
+                  <view class="timeline-video-play" aria-hidden="true">
+                    <view class="timeline-video-play-icon"></view>
+                    <text>{{refreshing ? '正在更新…' : videoOpeningId === video.id ? '正在打开…' : '播放视频'}}</text>
+                  </view>
+                  <text class="timeline-video-hint" aria-hidden="true">点击全屏观看</text>
+                </button>
+                <view wx:if="{{videoErrorId === video.id}}" class="timeline-video-error" role="alert">
+                  <text>{{videoErrorText}}</text>
+                  <button class="timeline-video-retry" size="mini" bindtap="onReloadTimelineVideos" disabled="{{refreshing}}">{{refreshing ? '正在加载…' : '重新加载视频'}}</button>
+                </view>
+              </view>
             </view>
           </view>
         </view>

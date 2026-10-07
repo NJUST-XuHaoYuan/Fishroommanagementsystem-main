@@ -1,5 +1,13 @@
 const PUBLIC_CATALOG_REFRESH_MS = 60 * 1000;
 
+function publicMediaNeedsRefresh(src, now = Date.now(), minimumValidityMs = PUBLIC_CATALOG_REFRESH_MS) {
+  const value = String(src || "");
+  if (!/\/api\/public\/media\/(?:cos|video-derivative)\?/.test(value)) return false;
+  const match = value.match(/[?&]expires=(\d+)(?:&|$)/);
+  const expiresAt = match ? Number(match[1]) : 0;
+  return !Number.isSafeInteger(expiresAt) || expiresAt <= now + minimumValidityMs;
+}
+
 function stopPublicCatalogRefresh(page) {
   if (!page) return;
   if (page.__publicCatalogRefreshTimer !== null && page.__publicCatalogRefreshTimer !== undefined) {
@@ -40,6 +48,7 @@ function isCurrentPublicCatalogRequest(page, generation) {
 
 module.exports = {
   PUBLIC_CATALOG_REFRESH_MS,
+  publicMediaNeedsRefresh,
   beginPublicCatalogRequest,
   isCurrentPublicCatalogRequest,
   startPublicCatalogRefresh,

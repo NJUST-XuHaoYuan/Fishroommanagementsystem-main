@@ -34,10 +34,25 @@
     </view>
 
     <view class="list-toolbar">
-      <view class="list-heading">
-        <view class="section-title">可选库存</view>
-        <view class="section-count">{{filteredSpecimenCount}} {{unit}}</view>
+      <view class="site-filter-row">
+        <text class="site-filter-label">所在地</text>
+        <view class="site-options">
+          <button
+            wx:for="{{siteOptions}}" wx:key="id"
+            class="site-filter-button {{selectedSiteId === item.id ? 'is-selected' : ''}} {{!siteDataReady && item.id !== 'all' ? 'is-unavailable' : ''}}"
+            size="mini" hover-class="site-filter-hover"
+            data-site-id="{{item.id}}" bindtap="onSiteTap"
+            disabled="{{!siteDataReady && item.id !== 'all'}}"
+            aria-label="所在地{{item.label}}，{{siteDataReady || item.id === 'all' ? item.count + unit : '暂不可用'}}{{selectedSiteId === item.id ? '，已选中' : ''}}"
+            aria-pressed="{{selectedSiteId === item.id}}"
+          >
+            <text>{{item.label}}</text>
+            <text class="site-filter-count">{{siteDataReady || item.id === 'all' ? item.count : '—'}}</text>
+            <view wx:if="{{selectedSiteId === item.id}}" class="site-selected-line" aria-hidden="true"></view>
+          </button>
+        </view>
       </view>
+      <view wx:if="{{!siteDataReady}}" class="site-unavailable">暂无法按所在地筛选</view>
     </view>
 
     <view wx:if="{{specimens.length}}" class="specimen-list">
@@ -47,7 +62,7 @@
         class="specimen-card"
         hover-class="specimen-card-hover"
         role="button"
-        aria-label="查看{{item.productName}}，{{item.grouped ? '同款可选' : '单独展示'}}{{item.quantity}}{{item.unit}}，编号{{item.code || '未设置'}}"
+        aria-label="查看{{item.productName}}，{{item.siteId ? '所在地' + item.siteName : item.siteName}}，{{item.grouped ? '同款可选' : '单独展示'}}{{item.quantity}}{{item.unit}}，编号{{item.code || '未设置'}}"
         data-id="{{item.id}}"
         bindtap="onSpecimenTap"
       >
@@ -70,6 +85,7 @@
               object-fit="contain"
               aria-label="{{item.productName}}的视频预览"
               data-id="{{item.id}}"
+              data-src="{{item.previewVideo}}"
               catchtap="onSpecimenTap"
               binderror="onPreviewError"
             />
@@ -80,6 +96,7 @@
               mode="aspectFit"
               lazy-load
               data-id="{{item.id}}"
+              data-src="{{item.image}}"
               binderror="onCardImageError"
             />
             <view wx:else class="specimen-image placeholder"></view>
@@ -90,8 +107,8 @@
               hover-class="media-preview-toggle-hover"
               aria-label="{{activePreviewId === item.id ? '暂停' : '播放'}}{{item.productName}}的视频预览"
               data-id="{{item.id}}"
-              data-preview="{{item.previewVideo}}"
               catchtap="onPreviewToggle"
+              disabled="{{refreshing}}"
             >
               <view wx:if="{{activePreviewId === item.id}}" class="preview-pause-icon" aria-hidden="true">
                 <view></view>
@@ -105,6 +122,7 @@
           <view class="specimen-info">
             <view class="specimen-product">{{item.productName}}</view>
             <view class="specimen-spec">{{item.size}} · {{item.origin}}</view>
+            <view class="specimen-site">{{item.siteId ? '所在地 · ' + item.siteName : item.siteName}}</view>
             <view class="specimen-tags">
               <text wx:for="{{item.tags}}" wx:for-item="tag" wx:key="key" class="specimen-tag {{tag.tone}}">{{tag.label}}</text>
             </view>
@@ -130,7 +148,8 @@
     </view>
 
     <view wx:else class="state-panel compact">
-      <view class="empty-title">暂无可选库存</view>
+      <view class="empty-title">{{!siteDataReady && selectedSiteId !== 'all' ? '所在地信息暂不可用' : selectedSiteId === 'all' ? '暂无可选库存' : selectedSiteName + '暂无可选库存'}}</view>
+      <button wx:if="{{selectedSiteId !== 'all'}}" class="primary-button" bindtap="onClearSite">查看全部所在地</button>
     </view>
   </view>
 </view>

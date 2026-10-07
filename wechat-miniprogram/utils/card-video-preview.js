@@ -18,6 +18,7 @@ function pausePlayer(page) {
 function stopCardVideoPreview(page, options = {}) {
   disconnectObserver(page);
   pausePlayer(page);
+  page.__cardVideoSource = "";
   if (options.clearData === false || !page.data || !page.data.activePreviewId) return;
   page.setData({ activePreviewId: "" });
 }
@@ -34,9 +35,12 @@ function observeActiveVideo(page, itemId) {
 }
 
 function toggleCardVideoPreview(page, event) {
+  if (!page || !page.data || page.__publicCatalogIsVisible === false
+    || page.data.loading || page.data.refreshing || page.data.error) return;
   const dataset = event && event.currentTarget && event.currentTarget.dataset || {};
   const itemId = String(dataset.id || "").trim();
-  const preview = String(dataset.preview || "").trim();
+  const item = (page.data.specimens || []).find((entry) => String(entry.id || "") === itemId);
+  const preview = String(item && item.previewVideo || "").trim();
   if (!itemId || !preview) return;
 
   if (page.data && page.data.activePreviewId === itemId) {
@@ -46,8 +50,9 @@ function toggleCardVideoPreview(page, event) {
 
   disconnectObserver(page);
   pausePlayer(page);
+  page.__cardVideoSource = preview;
   page.setData({ activePreviewId: itemId }, () => {
-    if (!page.data || page.data.activePreviewId !== itemId) return;
+    if (!page.data || page.data.activePreviewId !== itemId || page.__cardVideoSource !== preview) return;
     if (typeof wx.createVideoContext === "function") {
       page.__cardVideoContext = wx.createVideoContext(CARD_VIDEO_PLAYER_ID, page);
       if (page.__cardVideoContext && typeof page.__cardVideoContext.play === "function") {
@@ -58,7 +63,11 @@ function toggleCardVideoPreview(page, event) {
   });
 }
 
-function handleCardVideoError(page) {
+function handleCardVideoError(page, event) {
+  const dataset = event && event.currentTarget && event.currentTarget.dataset || {};
+  const itemId = String(dataset.id || "").trim();
+  const src = String(dataset.src || "").trim();
+  if (!itemId || !src || !page.data || page.data.activePreviewId !== itemId || page.__cardVideoSource !== src) return;
   stopCardVideoPreview(page);
   wx.showToast({
     title: "视频预览暂不可用",
@@ -69,13 +78,14 @@ function handleCardVideoError(page) {
 function handleCardImageError(page, event, collectionKey) {
   const dataset = event && event.currentTarget && event.currentTarget.dataset || {};
   const itemId = String(dataset.id || "").trim();
+  const src = String(dataset.src || "").trim();
   const key = String(collectionKey || "").trim();
   const items = page && page.data && page.data[key];
-  if (!itemId || !key || !Array.isArray(items)) return;
+  if (!itemId || !src || !key || !Array.isArray(items)) return;
 
   let changed = false;
   const nextItems = items.map((item) => {
-    if (!item || String(item.id || "") !== itemId) return item;
+    if (!item || String(item.id || "") !== itemId || item.image !== src) return item;
     const fallbackImage = String(item.fallbackImage || "").trim();
     changed = true;
     return {

@@ -12,13 +12,45 @@
   position: sticky;
   top: 48px;
   z-index: 20;
-  padding: 14px 16px 12px;
+  padding: 2px 16px;
   border-bottom: 1px solid var(--line-soft);
-  background: var(--canvas);
+  background: var(--surface);
 }
-.list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.section-title { font-size: 17px; font-weight: 700; }
-.section-count { color: var(--muted); font-size: 12px; }
+.site-filter-row { display: flex; align-items: center; gap: 16px; }
+.site-filter-label { flex: 0 0 auto; color: var(--muted); font-size: 12px; line-height: 20px; }
+.site-options { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: 0 4px; }
+.specimens-page .site-filter-button {
+  position: relative;
+  display: flex;
+  flex: 1 1 68px;
+  min-width: 68px;
+  width: auto;
+  min-height: 48px;
+  margin: 0;
+  padding: 10px 4px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 22px;
+  transition: color 160ms ease-out, opacity 160ms ease-out;
+}
+.site-filter-button::after { border: 0; }
+.specimens-page .site-filter-button.is-selected { color: var(--brand-dark); font-weight: 700; }
+.site-filter-hover { opacity: 0.65; }
+.site-filter-count { color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.is-selected .site-filter-count { color: var(--brand-dark); }
+.site-selected-line { position: absolute; left: 50%; bottom: 2px; width: 18px; height: 2px; margin-left: -9px; border-radius: 1px; background: var(--brand); }
+.specimens-page .site-filter-button.is-unavailable { color: var(--muted); }
+.site-unavailable { padding-bottom: 8px; color: var(--muted); font-size: 12px; line-height: 18px; }
+.specimen-site { margin-top: 5px; color: var(--ink-soft); font-size: 12px; line-height: 18px; }
+@media (prefers-reduced-motion: reduce) {
+  .specimens-page .site-filter-button { transition: none; }
+}
 .specimen-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -62,7 +94,7 @@
 }
 .specimen-info { display: flex; min-width: 0; flex: 1; flex-direction: column; padding: 12px 10px; }
 .specimen-product { font-size: 16px; font-weight: 700; line-height: 22px; overflow-wrap: anywhere; }
-.specimen-spec { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.specimen-spec { margin-top: 4px; color: var(--ink-soft); font-size: 13px; font-weight: 650; line-height: 20px; overflow-wrap: anywhere; }
 .specimen-meta { margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
 .specimen-number { margin-top: 8px; }
 .specimen-note { margin-top: 4px; }

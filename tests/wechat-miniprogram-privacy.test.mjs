@@ -12,11 +12,27 @@ const pageSources = await Promise.all([
   "../wechat-miniprogram/pages/detail/index.js"
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
 
-test("production mini-program never imports or reuses a catalog fallback", () => {
+test("production mini-program never imports or reuses a catalog fallback", async () => {
   assert.doesNotMatch(apiSource, /require\(["']\.\/fallback-catalog["']\)/);
   assert.doesNotMatch(apiSource, /return\s+fallbackCatalog\b/);
   assert.doesNotMatch(apiSource, /lastCatalog/);
-  assert.doesNotMatch(apiSource, /catch\s*\(/);
+  for (const failedSite of ["all", "nanjing"]) {
+    const context = {
+      module: { exports: {} },
+      require: () => ({ apiBaseUrl: "https://fish.example", siteId: "all" }),
+      getApp: () => ({ globalData: { catalog: { stock: [{ id: "stale-hidden-fish" }] } } }),
+      wx: { request(options) {
+        const site = new URL(options.url).searchParams.get("siteId");
+        if (site === failedSite) options.fail({ errMsg: "offline" });
+        else options.success({ statusCode: 200, data: { catalog: {
+          stock: site === "all" ? [{ id: "current-fish" }] : []
+        } } });
+      } }
+    };
+    vm.runInNewContext(apiSource, context);
+    await assert.rejects(context.module.exports.fetchCatalog(), undefined,
+      `${failedSite}: a failed live request must reject instead of returning any cached or partial inventory`);
+  }
 });
 
 test("real inventory fallback data and its generator are absent from the package", async () => {

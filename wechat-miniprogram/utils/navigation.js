@@ -22,7 +22,7 @@ function getNavigationMetrics() {
   const menuTop = safeNumber(menuButton.top, statusBarHeight + 6);
   const menuHeight = safeNumber(menuButton.height, 32);
   const measuredHeight = Math.max(44, (menuTop - statusBarHeight) * 2 + menuHeight);
-  const navBarHeight = Math.max(52, measuredHeight);
+  const navBarHeight = Math.max(64, measuredHeight);
   const menuLeft = safeNumber(menuButton.left, windowWidth - 96);
   const menuRightPadding = Math.max(96, windowWidth - menuLeft + 10);
 

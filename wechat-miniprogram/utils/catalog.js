@@ -1,6 +1,7 @@
 const { getApiBaseUrl } = require("./api");
 
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const SITE_NAMES = { nanjing: "南京", jiangyin: "江阴" };
 const DEFAULT_MAJOR_CATEGORIES = [
   { key: "marineFish", label: "海水鱼", tone: "marine", unit: "条" },
   { key: "coral", label: "珊瑚", tone: "coral", unit: "件" },
@@ -116,7 +117,7 @@ function groupSpecimens(specimens) {
     const individuallyIdentified = Boolean(specimen.code || specimen.notes || !specimen.notesKnown);
     const key = JSON.stringify([
       (!individuallyIdentified && specimen.specimenGroupKey) || `single:${specimen.id}`,
-      specimen.productId, specimen.inDate, specimen.location,
+      specimen.productId, specimen.siteId, specimen.inDate, specimen.location,
       specimen.status, specimen.price, specimen.defaultPrice,
       specimen.image, specimen.previewVideo,
     ]);
@@ -237,6 +238,8 @@ function normalizeCatalog(value) {
     stock: asArray(catalog.stock).map((item) => ({
       id: text(item.id),
       productId: text(item.productId),
+      siteId: text(item.siteId),
+      siteName: SITE_NAMES[text(item.siteId)] || text(item.siteName) || "所在地待确认",
       code: text(item.code),
       notes: text(item.notes),
       notesKnown: typeof item.notes === "string",
@@ -372,6 +375,8 @@ function buildViewModel(catalog) {
         notesKnown: stock.notesKnown,
         selectionCode: buildPublicSelectionCode(stock.id),
         productId: product.id,
+        siteId: stock.siteId,
+        siteName: stock.siteName,
         speciesId: product.speciesId,
         speciesName: species.name || "未命名品种",
         scientificName: species.scientificName || "",
@@ -550,9 +555,11 @@ function filterSpecimens(viewModel, selection, filterKey) {
     : { speciesId: selection };
   const speciesId = text(criteria.speciesId);
   const productId = text(criteria.productId);
+  const siteId = text(criteria.siteId);
   return viewModel.specimens.filter((item) => {
     if (speciesId && item.speciesId !== speciesId) return false;
     if (productId && item.productId !== productId) return false;
+    if (siteId && siteId !== "all" && item.siteId !== siteId) return false;
     if (filterKey === "quarantined") return item.daysInStore >= 14;
     if (filterKey === "feeding") return item.status === "feeding";
     if (filterKey === "healthy") return item.status === "healthy";
@@ -579,12 +586,23 @@ function normalizeTimeline(records, specimen) {
       title: "入库",
       text: `${specimen.location} 建立库存记录`,
       photos: [],
-      videos: []
+      videos: [],
+      videoItems: []
     });
   }
   asArray(records).map((item, index) => {
+    const recordId = text(item.id) || `fallback-${text(item.stockItemId) || text(specimen && specimen.id)}-${index}`;
     const photos = asArray(item.photos).map(absoluteUrl).filter(Boolean);
-    const videos = asArray(item.videos).map(absoluteUrl).filter(Boolean);
+    const posters = asArray(item.videoPosters).map(absoluteUrl);
+    const playbacks = asArray(item.videoPlaybacks).map(absoluteUrl);
+    // Keep the original indexes until posters and videos have been paired.
+    const videoItems = asArray(item.videos).map((src, videoIndex) => ({
+      id: `${recordId}-video-${videoIndex}`,
+      index: videoIndex,
+      src: src ? playbacks[videoIndex] || absoluteUrl(src) : "",
+      poster: posters[videoIndex] || photos[0] || ""
+    })).filter((video) => video.src);
+    const videos = videoItems.map((video) => video.src);
     const photoCount = Math.max(number(item.photoCount), photos.length);
     const videoCount = Math.max(number(item.videoCount), videos.length);
     const mediaParts = [];
@@ -598,7 +616,7 @@ function normalizeTimeline(records, specimen) {
     ]);
     const isDailyLog = item.sourceType === "dailyLog";
     return {
-      id: text(item.id) || `fallback-${text(item.stockItemId) || text(specimen && specimen.id)}-${index}`,
+      id: recordId,
       date: text(item.date),
       dateText: formatDateTime(item.date),
       title: isDailyLog ? "缸组养护" : "观察/治疗记录",
@@ -608,6 +626,7 @@ function normalizeTimeline(records, specimen) {
       mediaUnavailable: photoCount > photos.length || videoCount > videos.length,
       photos,
       videos,
+      videoItems,
       operator: text(item.operator)
     };
   }).sort((a, b) => a.date.localeCompare(b.date)).forEach((item) => events.push(item));

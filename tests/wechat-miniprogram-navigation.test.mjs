@@ -11,6 +11,23 @@ function navigation(pages, wx) {
   return context.module.exports;
 }
 
+test("brand header reserves room for the larger logo and keeps the native capsule clear", () => {
+  for (const windowWidth of [320, 375, 430, 768]) {
+    const metrics = navigation([], {
+      getWindowInfo: () => ({ windowWidth, statusBarHeight: 20 }),
+      getMenuButtonBoundingClientRect: () => ({ top: 26, height: 32, left: windowWidth - 88 }),
+    }).getNavigationMetrics();
+    assert.equal(metrics.navBarHeight, 64);
+    assert.equal(metrics.navigationHeight, 84);
+    const brandWidth = 60 + 12 + 100;
+    const leftGutter = 32 * windowWidth / 750;
+    assert.ok(brandWidth + leftGutter + metrics.menuRightPadding <= windowWidth);
+  }
+  const fallback = navigation([], {}).getNavigationMetrics();
+  assert.equal(fallback.navBarHeight, 64);
+  assert.ok(Number.isFinite(fallback.menuRightPadding));
+});
+
 test("back uses the matching parent instance so scroll position and filters survive", () => {
   let delta;
   const parent = { route: "pages/products/index", options: { category: "%E9%9A%86%E5%A4%B4%E9%B1%BC%E7%A7%91" }, scrollTop: 560, keyword: "龙" };
