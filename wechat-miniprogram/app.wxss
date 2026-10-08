@@ -96,7 +96,7 @@ page {
   display: block;
   flex: 0 0 auto;
   color: var(--brand-dark);
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: 0;
   line-height: 24px;
@@ -136,7 +136,7 @@ page {
   }
 
   .nav-brand-purpose {
-    font-size: 15px;
+    font-size: 16px;
   }
 
   .nav-brand-divider {
