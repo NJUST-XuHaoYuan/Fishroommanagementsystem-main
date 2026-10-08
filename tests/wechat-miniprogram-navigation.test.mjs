@@ -19,9 +19,13 @@ test("brand header reserves room for the larger logo and keeps the native capsul
     }).getNavigationMetrics();
     assert.equal(metrics.navBarHeight, 64);
     assert.equal(metrics.navigationHeight, 84);
-    const brandWidth = 60 + 12 + 100;
+    const brandWidth = 60 + (windowWidth <= 350 ? 8 : 12) + 124;
     const leftGutter = 32 * windowWidth / 750;
     assert.ok(brandWidth + leftGutter + metrics.menuRightPadding <= windowWidth);
+    const noCapsule = navigation([], {
+      getWindowInfo: () => ({ windowWidth, statusBarHeight: 20 }),
+    }).getNavigationMetrics();
+    assert.ok(brandWidth + leftGutter + noCapsule.menuRightPadding <= windowWidth);
   }
   const fallback = navigation([], {}).getNavigationMetrics();
   assert.equal(fallback.navBarHeight, 64);

@@ -59,12 +59,12 @@ page {
   flex: 0 0 60px;
 }
 
-/* Keep the brand prominent and explain the purpose directly below it. */
+/* Brand first; purpose and original handwritten slogan share a quiet second line. */
 .nav-brand-copy {
   display: flex;
-  width: 100px;
+  width: 124px;
   min-width: 0;
-  flex: 0 1 100px;
+  flex: 0 0 124px;
   flex-direction: column;
   gap: 2px;
 }
@@ -79,14 +79,44 @@ page {
   white-space: nowrap;
 }
 
+.nav-brand-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 20px;
+}
+
 .nav-brand-purpose {
   display: block;
-  color: var(--ink-soft);
-  font-size: 14px;
+  flex: 0 0 48px;
+  color: var(--brand-dark);
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 2px;
+  letter-spacing: 0;
   line-height: 20px;
   white-space: nowrap;
+}
+
+.nav-brand-slogan {
+  position: relative;
+  overflow: hidden;
+  width: 68px;
+  height: 20px;
+  flex: 0 0 68px;
+}
+
+.nav-brand-slogan-image {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  display: block;
+  width: 68px;
+}
+
+@media (max-width: 350px) {
+  .nav-brand-lockup {
+    gap: 8px;
+  }
 }
 
 view,
