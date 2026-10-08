@@ -112,7 +112,7 @@ Page({
 
   onShareAppMessage() {
     return {
-      title: "海洋森林 · 海水生物鱼单",
+      title: "海洋森林 · 生物选购",
       path: "/pages/catalog/index"
     };
   }

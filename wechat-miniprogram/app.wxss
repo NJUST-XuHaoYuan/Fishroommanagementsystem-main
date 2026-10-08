@@ -59,7 +59,7 @@ page {
   flex: 0 0 60px;
 }
 
-/* Brand name leads; the original handwritten slogan is a supporting line. */
+/* Keep the brand prominent and explain the purpose directly below it. */
 .nav-brand-copy {
   display: flex;
   width: 100px;
@@ -79,21 +79,14 @@ page {
   white-space: nowrap;
 }
 
-/* Crop only the supplied artwork's white margins, preserving the lettering. */
-.nav-slogan-line {
-  position: relative;
-  overflow: hidden;
-  width: 82px;
-  height: 18px;
-  flex-shrink: 0;
-}
-
-.nav-slogan-image {
-  position: absolute;
+.nav-brand-purpose {
   display: block;
-  width: 72px;
-  height: 28.8px;
-  top: -5.4px;
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 view,

@@ -244,7 +244,7 @@ Page({
       ? `productId=${encodeURIComponent(this.data.productId)}`
       : `speciesId=${encodeURIComponent(this.data.speciesId || "")}`;
     return {
-      title: context ? `海洋森林 · ${context.name} · ${this.data.selectedSiteId === "all" ? "可选个体" : this.data.selectedSiteName + "库存"}` : "海洋森林 · 海水生物鱼单",
+      title: context ? `海洋森林 · ${context.name} · ${this.data.selectedSiteId === "all" ? "可选个体" : this.data.selectedSiteName + "库存"}` : "海洋森林 · 生物选购",
       path: `/pages/specimens/index?${query}${this.data.selectedSiteId === "all" ? "" : `&siteId=${encodeURIComponent(this.data.selectedSiteId)}`}`,
       imageUrl: context && context.image || undefined
     };

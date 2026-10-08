@@ -11,16 +11,14 @@
         <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFit" aria-label="海洋森林 Marine Forest" />
         <view class="nav-brand-copy">
           <text class="nav-brand-name">海洋森林</text>
-          <view class="nav-slogan-line">
-            <image class="nav-slogan-image" src="/assets/brand-slogan-zh.jpg" mode="aspectFit" aria-label="种一片海" />
-          </view>
+          <text class="nav-brand-purpose">生物选购</text>
         </view>
       </view>
     </view>
   </view>
 
   <view class="catalog-utilities">
-    <button class="utility-button" size="mini" open-type="contact" show-message-card="{{true}}" send-message-title="海洋森林 · 海水生物鱼单" send-message-path="/pages/catalog/index">
+    <button class="utility-button" size="mini" open-type="contact" show-message-card="{{true}}" send-message-title="海洋森林 · 生物选购" send-message-path="/pages/catalog/index">
       <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text>
     </button>
     <button class="utility-button" size="mini" bindtap="onAccountTap">

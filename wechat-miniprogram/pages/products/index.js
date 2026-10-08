@@ -168,7 +168,7 @@ Page({
     const categoryInfo = this.data.categoryInfo;
     const firstProduct = this.data.products[0];
     return {
-      title: categoryInfo ? `海洋森林 · ${categoryInfo.label} · 在售商品` : "海洋森林 · 海水生物鱼单",
+      title: categoryInfo ? `海洋森林 · ${categoryInfo.label} · 在售商品` : "海洋森林 · 生物选购",
       path: `/pages/products/index?category=${encodeURIComponent(this.data.categoryKey || "")}&majorKey=${encodeURIComponent(this.data.majorKey || "")}`,
       imageUrl: firstProduct && firstProduct.image || undefined
     };
