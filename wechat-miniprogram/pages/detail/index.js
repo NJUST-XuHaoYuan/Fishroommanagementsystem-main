@@ -296,7 +296,7 @@ Page({
   onShareAppMessage() {
     const specimen = this.data.specimen;
     return {
-      title: specimen ? `${specimen.productName} · 库存 ${this.data.members.length || 1} ${specimen.unit}` : "商品详情",
+      title: specimen ? `海洋森林 · ${specimen.productName} · 库存 ${this.data.members.length || 1} ${specimen.unit}` : "海洋森林 · 商品详情",
       path: `/pages/detail/index?stockItemId=${encodeURIComponent(this.data.stockItemId || "")}${this.data.groupMode ? "&group=1" : ""}`,
       imageUrl: specimen && specimen.image || undefined
     };

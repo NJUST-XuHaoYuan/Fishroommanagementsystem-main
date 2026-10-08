@@ -59,40 +59,42 @@ page {
   flex: 0 0 60px;
 }
 
-.nav-brand-slogan {
+/* Brand name leads; the original handwritten slogan is a supporting line. */
+.nav-brand-copy {
   display: flex;
   width: 100px;
-  height: 36px;
   min-width: 0;
   flex: 0 1 100px;
   flex-direction: column;
   gap: 2px;
 }
 
-/* The supplied artwork includes white margins; frame it without stretching the lettering. */
+.nav-brand-name {
+  display: block;
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: 2px;
+  line-height: 28px;
+  white-space: nowrap;
+}
+
+/* Crop only the supplied artwork's white margins, preserving the lettering. */
 .nav-slogan-line {
   position: relative;
   overflow: hidden;
-  width: 100%;
+  width: 82px;
+  height: 18px;
   flex-shrink: 0;
 }
-
-.nav-slogan-line-zh { height: 22px; }
-.nav-slogan-line-en { height: 12px; }
 
 .nav-slogan-image {
   position: absolute;
   display: block;
-  width: 100%;
-  max-width: 100px;
+  width: 72px;
+  height: 28.8px;
+  top: -5.4px;
 }
-
-.nav-slogan-image-zh {
-  width: 88%;
-  height: 35.2px;
-  top: -6.6px;
-}
-.nav-slogan-image-en { height: 33.33px; top: -9px; }
 
 view,
 text,

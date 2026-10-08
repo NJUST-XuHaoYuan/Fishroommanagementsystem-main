@@ -1,6 +1,7 @@
 .account-identity { padding: 32px 20px 28px; text-align: center; background: var(--surface); }
-.account-logo { display: block; width: 80px; height: 80px; margin: 0 auto 20px; }
-.account-heading { font-size: 19px; font-weight: 700; line-height: 28px; overflow-wrap: anywhere; }
+.account-logo { display: block; width: 80px; height: 80px; margin: 0 auto 12px; }
+.account-brand-name { color: var(--ink); font-size: 24px; font-weight: 650; letter-spacing: 2px; line-height: 32px; }
+.account-heading { margin-top: 16px; font-size: 19px; font-weight: 700; line-height: 28px; overflow-wrap: anywhere; }
 .account-subtitle { margin-top: 8px; font-size: 13px; color: var(--muted); }
 .account-status { margin-top: 8px; color: var(--brand-dark); font-size: 14px; }
 .login-form { max-width: 380px; margin: 24px auto 0; }

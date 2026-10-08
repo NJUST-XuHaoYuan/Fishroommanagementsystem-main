@@ -14,7 +14,7 @@ test("catalog keeps real category counts, brand assets and accessible navigation
   }
   assert.match(template, /src="\/assets\/brand-logo.jpg"/);
   assert.match(template, /src="\/assets\/brand-slogan-zh.jpg"/);
-  assert.match(template, /src="\/assets\/brand-slogan-en.jpg"/);
+  assert.match(template, /class="nav-brand-name">海洋森林<\/text>/);
   assert.match(template, /aria-label="查看\{\{minor.label\}\}/);
   assert.match(template, /class="minor-link"\s+size="mini"/);
   assert.match(template, /bindtap="onMinorCategoryTap"/);
@@ -35,19 +35,19 @@ test("catalog uses unframed two-column rows with stable touch targets", () => {
   }
 });
 
-test("catalog and products share the new compact bilingual brand artwork", async () => {
+test("catalog and products lead with the Chinese brand and retain the supporting slogan", async () => {
   const products = await readFile(new URL("../products/index.wxml", base), "utf8");
   const globalStyles = await readFile(new URL("../../app.wxss", base), "utf8");
   for (const page of [template, products]) {
-    assert.match(page, /class="nav-brand-logo"[^>]*mode="aspectFit"[^>]*aria-label="Marine Forest"/);
+    assert.match(page, /class="nav-brand-logo"[^>]*mode="aspectFit"[^>]*aria-label="海洋森林 Marine Forest"/);
+    assert.match(page, /class="nav-brand-name">海洋森林<\/text>/);
     assert.match(page, /src="\/assets\/brand-slogan-zh.jpg"[^>]*aria-label="种一片海"/);
-    assert.match(page, /src="\/assets\/brand-slogan-en.jpg"[^>]*aria-label="Grow an Ocean"/);
+    assert.ok(page.indexOf('class="nav-brand-name"') < page.indexOf('aria-label="种一片海"'));
     assert.doesNotMatch(page, /brand-slogan\.png/);
   }
   assert.match(globalStyles, /\.nav-brand-logo\s*\{[^}]*width: 60px;[^}]*height: 60px;/);
-  assert.match(globalStyles, /\.nav-brand-slogan\s*\{[^}]*min-width: 0;[^}]*flex-direction: column;/);
-  assert.match(globalStyles, /\.nav-slogan-image-zh\s*\{[^}]*width: 88%;[^}]*height: 35\.2px;[^}]*top: -6\.6px;/);
-  assert.match(globalStyles, /\.nav-slogan-image-en\s*\{\s*height: 33\.33px; top: -9px;/);
+  assert.match(globalStyles, /\.nav-brand-copy\s*\{[^}]*min-width: 0;[^}]*flex-direction: column;/);
+  assert.match(globalStyles, /\.nav-brand-name\s*\{[^}]*white-space: nowrap;/);
   let total = 0;
   for (const name of ["brand-logo.jpg", "brand-slogan-zh.jpg", "brand-slogan-en.jpg"]) {
     const asset = await readFile(new URL(`../../assets/${name}`, base));

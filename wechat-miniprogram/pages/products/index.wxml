@@ -8,13 +8,11 @@
       style="height: {{navBarHeight}}px; padding-right: {{menuRightPadding}}px;"
     >
       <view class="nav-brand-lockup">
-        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFit" aria-label="Marine Forest" />
-        <view class="nav-brand-slogan">
-          <view class="nav-slogan-line nav-slogan-line-zh">
-            <image class="nav-slogan-image nav-slogan-image-zh" src="/assets/brand-slogan-zh.jpg" mode="aspectFit" aria-label="种一片海" />
-          </view>
-          <view class="nav-slogan-line nav-slogan-line-en">
-            <image class="nav-slogan-image nav-slogan-image-en" src="/assets/brand-slogan-en.jpg" mode="aspectFit" aria-label="Grow an Ocean" />
+        <image class="nav-brand-logo" src="/assets/brand-logo.jpg" mode="aspectFit" aria-label="海洋森林 Marine Forest" />
+        <view class="nav-brand-copy">
+          <text class="nav-brand-name">海洋森林</text>
+          <view class="nav-slogan-line">
+            <image class="nav-slogan-image" src="/assets/brand-slogan-zh.jpg" mode="aspectFit" aria-label="种一片海" />
           </view>
         </view>
       </view>
