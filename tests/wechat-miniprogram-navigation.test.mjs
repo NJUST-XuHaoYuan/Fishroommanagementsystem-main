@@ -12,7 +12,7 @@ function navigation(pages, wx) {
 }
 
 test("brand header reserves room for the larger logo and keeps the native capsule clear", () => {
-  for (const windowWidth of [320, 350, 360, 370, 371, 375, 390, 430, 768]) {
+  for (const windowWidth of [320, 350, 360, 370, 375, 376, 390, 430, 768]) {
     const metrics = navigation([], {
       getWindowInfo: () => ({ windowWidth, statusBarHeight: 20 }),
       getMenuButtonBoundingClientRect: () => ({ top: 26, height: 32, left: windowWidth - 88 }),
@@ -20,9 +20,9 @@ test("brand header reserves room for the larger logo and keeps the native capsul
     assert.equal(metrics.navBarHeight, 64);
     assert.equal(metrics.navigationHeight, 84);
     // Both text rows share one fixed-width column next to the logo.
-    const brandWidth = windowWidth <= 370
-      ? 42 + 8 + 146
-      : 52 + 10 + 176;
+    const brandWidth = windowWidth <= 375
+      ? 42 + 8 + 150
+      : 52 + 10 + 188;
     const leftGutter = 32 * windowWidth / 750;
     assert.ok(brandWidth + leftGutter + metrics.menuRightPadding <= windowWidth);
     const noCapsule = navigation([], {

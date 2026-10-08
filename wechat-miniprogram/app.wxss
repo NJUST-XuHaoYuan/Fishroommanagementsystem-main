@@ -62,9 +62,9 @@ page {
 /* Keep the chosen two-line lockup inside the existing 64px navigation bar. */
 .nav-brand-copy {
   display: flex;
-  width: 176px;
+  width: 188px;
   min-width: 0;
-  flex: 0 0 176px;
+  flex: 0 0 188px;
   flex-direction: column;
 }
 
@@ -91,10 +91,10 @@ page {
   display: block;
   flex: 0 0 auto;
   color: var(--brand-dark);
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 600;
   letter-spacing: 0;
-  line-height: 24px;
+  line-height: 28px;
   white-space: nowrap;
 }
 
@@ -136,7 +136,7 @@ page {
   white-space: nowrap;
 }
 
-@media (max-width: 370px) {
+@media (max-width: 375px) {
   .nav-brand-lockup {
     gap: 8px;
   }
@@ -148,8 +148,8 @@ page {
   }
 
   .nav-brand-copy {
-    width: 146px;
-    flex-basis: 146px;
+    width: 150px;
+    flex-basis: 150px;
   }
 
   .nav-brand-name {
@@ -158,7 +158,7 @@ page {
   }
 
   .nav-brand-purpose {
-    font-size: 16px;
+    font-size: 18px;
   }
 
   .nav-brand-slogan {
