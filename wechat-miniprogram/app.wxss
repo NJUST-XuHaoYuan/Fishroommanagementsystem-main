@@ -62,14 +62,17 @@ page {
 /* Keep the chosen two-line lockup inside the existing 64px navigation bar. */
 .nav-brand-copy {
   display: flex;
+  width: 176px;
   min-width: 0;
-  flex: 0 0 auto;
+  flex: 0 0 176px;
   flex-direction: column;
 }
 
 .nav-brand-title-row {
   display: flex;
+  width: 100%;
   align-items: center;
+  justify-content: space-between;
   height: 28px;
   white-space: nowrap;
 }
@@ -84,14 +87,6 @@ page {
   white-space: nowrap;
 }
 
-.nav-brand-divider {
-  width: 1px;
-  height: 18px;
-  flex: 0 0 1px;
-  margin: 0 8px;
-  background: var(--line-strong);
-}
-
 .nav-brand-purpose {
   display: block;
   flex: 0 0 auto;
@@ -103,20 +98,42 @@ page {
   white-space: nowrap;
 }
 
+.nav-brand-slogan-row {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  white-space: nowrap;
+}
+
 .nav-brand-slogan {
   position: relative;
   overflow: hidden;
-  width: 88px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 68px;
+  height: 22px;
+  flex: 0 0 68px;
 }
 
 .nav-brand-slogan-image {
   position: absolute;
-  top: -6px;
-  left: 0;
+  top: -5px;
+  left: -5px;
   display: block;
-  width: 88px;
+  width: 76px;
+  filter: grayscale(1) contrast(2);
+}
+
+.nav-brand-slogan-en {
+  display: block;
+  flex: 0 0 auto;
+  color: var(--brand-dark);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 14px;
+  font-style: italic;
+  line-height: 22px;
+  white-space: nowrap;
 }
 
 @media (max-width: 370px) {
@@ -130,6 +147,11 @@ page {
     flex-basis: 42px;
   }
 
+  .nav-brand-copy {
+    width: 146px;
+    flex-basis: 146px;
+  }
+
   .nav-brand-name {
     font-size: 18px;
     letter-spacing: 0.5px;
@@ -139,9 +161,19 @@ page {
     font-size: 16px;
   }
 
-  .nav-brand-divider {
-    margin-right: 4px;
-    margin-left: 4px;
+  .nav-brand-slogan {
+    width: 56px;
+    flex-basis: 56px;
+  }
+
+  .nav-brand-slogan-image {
+    top: -2px;
+    left: -4px;
+    width: 62px;
+  }
+
+  .nav-brand-slogan-en {
+    font-size: 12px;
   }
 }
 

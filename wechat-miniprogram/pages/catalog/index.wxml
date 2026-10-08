@@ -12,11 +12,13 @@
         <view class="nav-brand-copy">
           <view class="nav-brand-title-row">
             <text class="nav-brand-name">海洋森林</text>
-            <view class="nav-brand-divider" aria-hidden="true"></view>
             <text class="nav-brand-purpose">生物选购</text>
           </view>
-          <view class="nav-brand-slogan">
-            <image class="nav-brand-slogan-image" src="/assets/brand-slogan-zh.jpg" mode="widthFix" aria-label="种一片海" />
+          <view class="nav-brand-slogan-row">
+            <view class="nav-brand-slogan">
+              <image class="nav-brand-slogan-image" src="/assets/brand-slogan-zh.jpg" mode="widthFix" aria-label="种一片海" />
+            </view>
+            <text class="nav-brand-slogan-en">Grow an Ocean</text>
           </view>
         </view>
       </view>

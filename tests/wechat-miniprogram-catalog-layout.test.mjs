@@ -42,6 +42,7 @@ test("catalog and products retain the brand, shopping purpose and original sloga
     assert.match(page, /class="nav-brand-logo"[^>]*mode="aspectFit"[^>]*aria-label="海洋森林 Marine Forest"/);
     assert.match(page, /class="nav-brand-name">海洋森林<\/text>/);
     assert.match(page, /class="nav-brand-purpose">生物选购<\/text>/);
+    assert.match(page, /class="nav-brand-slogan-en">Grow an Ocean<\/text>/);
     assert.match(page, /class="nav-brand-slogan-image"[^>]*src="\/assets\/brand-slogan-zh.jpg"[^>]*mode="widthFix"[^>]*aria-label="种一片海"/);
     assert.ok(page.indexOf('class="nav-brand-name"') < page.indexOf('class="nav-brand-purpose"'));
     assert.doesNotMatch(page, /brand-slogan\.png/);

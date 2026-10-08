@@ -19,10 +19,10 @@ test("brand header reserves room for the larger logo and keeps the native capsul
     }).getNavigationMetrics();
     assert.equal(metrics.navBarHeight, 64);
     assert.equal(metrics.navigationHeight, 84);
-    // Logo + gap + four brand glyphs/tracking + divider/margins + four purpose glyphs.
+    // Both text rows share one fixed-width column next to the logo.
     const brandWidth = windowWidth <= 370
-      ? 42 + 8 + 4 * (18 + 0.5) + 1 + 2 * 4 + 4 * 16
-      : 52 + 10 + 4 * (22 + 1) + 1 + 2 * 8 + 4 * 18;
+      ? 42 + 8 + 146
+      : 52 + 10 + 176;
     const leftGutter = 32 * windowWidth / 750;
     assert.ok(brandWidth + leftGutter + metrics.menuRightPadding <= windowWidth);
     const noCapsule = navigation([], {
