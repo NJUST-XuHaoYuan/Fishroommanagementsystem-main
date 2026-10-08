@@ -46,7 +46,7 @@ test("catalog and products retain the brand, shopping purpose and original sloga
     assert.ok(page.indexOf('class="nav-brand-name"') < page.indexOf('class="nav-brand-purpose"'));
     assert.doesNotMatch(page, /brand-slogan\.png/);
   }
-  assert.match(globalStyles, /\.nav-brand-logo\s*\{[^}]*width: 60px;[^}]*height: 60px;/);
+  assert.match(globalStyles, /\.nav-brand-logo\s*\{[^}]*width: 52px;[^}]*height: 52px;/);
   assert.match(globalStyles, /\.nav-brand-copy\s*\{[^}]*min-width: 0;[^}]*flex-direction: column;/);
   assert.match(globalStyles, /\.nav-brand-name\s*\{[^}]*white-space: nowrap;/);
   let total = 0;
