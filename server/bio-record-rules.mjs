@@ -1,5 +1,6 @@
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
 import { normalizeStockPricing } from "./stock-pricing.mjs";
+import { isStockInTransfer } from "./stock-transfer-rules.mjs";
 
 const BIO_RECORD_ID_MAX_LENGTH = 160;
 const BIO_RECORD_TEXT_MAX_LENGTH = 10_000;
@@ -9,6 +10,16 @@ const STOCK_CODE_MAX_LENGTH = 120;
 const STOCK_NOTES_MAX_LENGTH = 10_000;
 const STOCK_PRICE_MAX = 10_000_000;
 const STOCK_STATUSES = new Set(["healthy", "feeding", "sick"]);
+const SYSTEM_BIO_RECORD_SOURCE_TYPES = new Set([
+  "dailyLog",
+  "stockMove",
+  "stockTransferIssued",
+  "stockTransferReceived",
+]);
+
+export function isSystemBioRecord(record) {
+  return SYSTEM_BIO_RECORD_SOURCE_TYPES.has(String(record?.sourceType ?? "").trim());
+}
 
 export class BioRecordConflictError extends Error {
   constructor(message, { code = "BIO_RECORD_CONFLICT" } = {}) {
@@ -39,7 +50,7 @@ export function bioRecordRequiredActions(action, { includesRecord = false } = {}
 export function maintenanceRequiredPermissions(mode) {
   const normalizedMode = String(mode ?? "").trim();
   if (normalizedMode === "record") return [{ module: "daily", action: "create" }];
-  if (normalizedMode === "move" || normalizedMode === "status") {
+  if (["move", "transferIssue", "transferReceive", "status"].includes(normalizedMode)) {
     return [{ module: "daily", action: "update" }];
   }
   if (normalizedMode === "loss") {
@@ -248,6 +259,12 @@ export function planBioRecordSave({
   const stockItemId = normalizedId(stockItem?.id, "库存鱼编号");
   const currentRecords = Array.isArray(records) ? records : [];
 
+  if (["create", "saveDetails"].includes(normalizedAction) && isStockInTransfer(stockItem)) {
+    throw new BioRecordConflictError("移缸在途的鱼不能新增维护记录或修改鱼只档案", {
+      code: "STOCK_IN_TRANSFER",
+    });
+  }
+
   if (normalizedAction === "create") {
     const created = createRecord(record, { stockItem, operator, now });
     const { record: duplicate } = findUniqueBioRecord(currentRecords, created.id);
@@ -274,7 +291,11 @@ export function planBioRecordSave({
   if (normalizedAction === "updateTime") {
     const { targetId, record: current } = findUniqueBioRecord(currentRecords, recordId);
     if (!current || String(current?.stockItemId ?? "") !== stockItemId) throw new Error("观察/治疗记录不存在或已被删除");
-    if (current?.sourceType === "dailyLog") throw new Error("缸组养护记录不能在鱼详情中单独修改");
+    if (isSystemBioRecord(current)) {
+      throw new BioRecordConflictError("系统生成的养护或移缸记录不能在鱼详情中单独修改", {
+        code: "SYSTEM_BIO_RECORD_IMMUTABLE",
+      });
+    }
     assertExpectedRecord(current, expectedRecord);
     const date = normalizedDate(record?.date, stockItem, now);
     const updated = { ...current, date };
@@ -290,7 +311,11 @@ export function planBioRecordSave({
   if (normalizedAction === "delete") {
     const { targetId, record: current } = findUniqueBioRecord(currentRecords, recordId);
     if (!current || String(current?.stockItemId ?? "") !== stockItemId) throw new Error("观察/治疗记录不存在或已被删除");
-    if (current?.sourceType === "dailyLog") throw new Error("缸组养护记录不能在鱼详情中单独删除");
+    if (isSystemBioRecord(current)) {
+      throw new BioRecordConflictError("系统生成的养护或移缸记录不能在鱼详情中单独删除", {
+        code: "SYSTEM_BIO_RECORD_IMMUTABLE",
+      });
+    }
     assertExpectedRecord(current, expectedRecord);
     return {
       records: currentRecords.filter((item) => String(item?.id ?? "").trim() !== targetId),

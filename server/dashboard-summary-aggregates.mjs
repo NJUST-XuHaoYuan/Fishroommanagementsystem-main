@@ -6,6 +6,7 @@ import {
   unshippedRefundRecordedAt,
 } from "./dashboard-sales-metrics.mjs";
 import { lossPricingSnapshot } from "./stock-loss-price.mjs";
+import { isStockInTransfer } from "./stock-transfer-rules.mjs";
 
 function array(value) {
   return Array.isArray(value) ? value : [];
@@ -513,7 +514,7 @@ export function buildDashboardFocusOptions({ species = [], products = [], stock 
   const physicalCountBySpecies = new Map();
   for (const item of array(stock)) {
     const stockId = String(item?.id ?? "");
-    if (item?.lost || outStockIds.has(stockId)) continue;
+    if (item?.lost || isStockInTransfer(item) || outStockIds.has(stockId)) continue;
     const productId = String(item?.productId ?? "");
     const product = productById.get(productId);
     physicalCountByProduct.set(productId, (physicalCountByProduct.get(productId) ?? 0) + 1);
@@ -578,7 +579,7 @@ export function buildDashboardFocusDetail({
     targetStock.push(item);
     const stats = productStats.get(productId);
     if (item?.lost) stats.lost += 1;
-    if (item?.lost || outStockIds.has(String(item?.id ?? ""))) continue;
+    if (item?.lost || isStockInTransfer(item) || outStockIds.has(String(item?.id ?? ""))) continue;
     stats.inTank += 1;
     if (item?.sold) stats.soldInTank += 1;
     else if (item?.status === "sick") stats.sick += 1;

@@ -251,6 +251,17 @@ import {
   validateStockMutationRelationships,
 } from "./stock-mutation-relationships.mjs";
 import {
+  STOCK_TRANSFER_IN_TRANSIT,
+  STOCK_TRANSFER_RECEIVED,
+  assertStockIdsNotInTransfer,
+  isStockInTransfer,
+  stockTransferId,
+} from "./stock-transfer-rules.mjs";
+import {
+  sanitizeBioRecordTransferForVisibleSites,
+  sanitizeStockTransferForVisibleSites,
+} from "./stock-transfer-response-rules.mjs";
+import {
   PERSONNEL_SENSITIVE_FIELDS,
   decryptPersonnelSensitiveFields,
   decryptPersonnelProfileProposalFields,
@@ -818,6 +829,20 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
   });
 }
 
+function sanitizeTransferCollectionsForAuth(state = {}, account = {}, {
+  stock = [],
+  bioRecords = [],
+} = {}) {
+  const visibleSiteIds = visibleSiteIdsForAccount(account, state);
+  const options = { isAdmin: account?.accessRole === "admin" };
+  return {
+    stock: (Array.isArray(stock) ? stock : [])
+      .map((item) => sanitizeStockTransferForVisibleSites(item, visibleSiteIds, options)),
+    bioRecords: (Array.isArray(bioRecords) ? bioRecords : [])
+      .map((record) => sanitizeBioRecordTransferForVisibleSites(record, visibleSiteIds, options)),
+  };
+}
+
 function inventoryProjectionForResponse(state = {}, req = {}) {
   return siteVisibilityFilteredState(state, req?.auth?.account).inventoryProjection ?? {
     outStockIds: [],
@@ -1195,7 +1220,76 @@ function shippedOutStockIds(state = {}) {
 }
 
 function isPhysicallyInTank(item, shippedIds) {
-  return item && !item.lost && !shippedIds.has(normalizeShipmentInventoryId(item.id));
+  return item && !item.lost && !isStockInTransfer(item) && !shippedIds.has(normalizeShipmentInventoryId(item.id));
+}
+
+function sanitizedMaintenanceDeltaForAuth(state = {}, delta = {}, account = {}) {
+  const visible = siteVisibilityFilteredState(state, account);
+  const allowedIds = (items) => new Set((Array.isArray(items) ? items : [])
+    .map((item) => String(item?.id ?? "").trim())
+    .filter(Boolean));
+  const visibleStockIds = allowedIds(visible.stock);
+  const visibleBatchIds = allowedIds(visible.batches);
+  const visibleBioRecordIds = allowedIds(visible.bioRecords);
+  const visibleLossRecordIds = allowedIds(visible.lossRecords);
+  const filter = (items, ids) => (Array.isArray(items) ? items : [])
+    .filter((item) => ids.has(String(item?.id ?? "").trim()));
+  const visibleStockUpdates = filter(delta.stockUpdates, visibleStockIds);
+  const visibleBioRecordUpdates = filter(delta.bioRecordUpdates, visibleBioRecordIds);
+  const sanitizedTransfers = sanitizeTransferCollectionsForAuth(state, account, {
+    stock: visibleStockUpdates,
+    bioRecords: visibleBioRecordUpdates,
+  });
+  return {
+    stockUpdates: sanitizedTransfers.stock,
+    batchUpdates: filter(delta.batchUpdates, visibleBatchIds),
+    bioRecordUpdates: sanitizedTransfers.bioRecords,
+    lossRecordUpdates: filter(delta.lossRecordUpdates, visibleLossRecordIds),
+  };
+}
+
+function requireMaintenanceSiteIds(req, state = {}, siteIds = [], message = "不能操作未授权场地的库存鱼") {
+  for (const siteId of [...new Set((Array.isArray(siteIds) ? siteIds : [])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean))]) {
+    requireVisibleSiteForAuth(req, state, siteId, message);
+  }
+}
+
+function stockTransferPoolItems(state = {}) {
+  const products = new Map((Array.isArray(state.products) ? state.products : [])
+    .map((product) => [String(product?.id ?? "").trim(), product]));
+  const siteNames = new Map(getSitesFromState(state)
+    .map((site) => [String(site?.id ?? "").trim(), String(site?.name ?? "").trim()]));
+  return (Array.isArray(state.stock) ? state.stock : [])
+    .filter(isStockInTransfer)
+    .flatMap((item) => {
+      const transfer = item?.tankTransfer;
+      const transferId = stockTransferId(item);
+      const stockItemId = String(item?.id ?? "").trim();
+      if (!transferId || !stockItemId) return [];
+      const product = products.get(String(item?.productId ?? "").trim()) ?? {};
+      return [{
+        stockItemId,
+        transferId,
+        productId: String(item?.productId ?? "").trim(),
+        productName: String(product?.name ?? "商品已删除"),
+        size: String(product?.size ?? ""),
+        origin: String(product?.origin ?? ""),
+        imageUrl: String(product?.imageUrl ?? ""),
+        code: String(item?.code ?? ""),
+        status: String(item?.status ?? ""),
+        sold: Boolean(item?.sold),
+        fromSiteId: String(transfer?.fromSiteId ?? "").trim(),
+        fromSiteName: siteNames.get(String(transfer?.fromSiteId ?? "").trim()) ?? "",
+        fromSubTankId: String(transfer?.fromSubTankId ?? "").trim(),
+        fromTankName: String(transfer?.fromTankName ?? ""),
+        issuedAt: String(transfer?.issuedAt ?? ""),
+        issuedBy: String(transfer?.issuedBy ?? ""),
+        notes: String(transfer?.notes ?? ""),
+      }];
+    })
+    .sort((left, right) => right.issuedAt.localeCompare(left.issuedAt) || left.stockItemId.localeCompare(right.stockItemId));
 }
 
 function isPublicMediaUrl(value) {
@@ -2172,6 +2266,12 @@ function personnelSensitiveRevision(person = {}) {
 function sanitizeStateForResponse(data = {}, req) {
   if (!data || typeof data !== "object") return data;
   const next = { ...siteVisibilityFilteredState(normalizePickupShipmentsForState(data), req?.auth?.account) };
+  const sanitizedTransfers = sanitizeTransferCollectionsForAuth(next, req?.auth?.account, {
+    stock: next.stock,
+    bioRecords: next.bioRecords,
+  });
+  if (Array.isArray(next.stock)) next.stock = sanitizedTransfers.stock;
+  if (Array.isArray(next.bioRecords)) next.bioRecords = sanitizedTransfers.bioRecords;
   delete next.notifications;
   // The commission journal is private. Staff receive only their own monthly aggregate.
   delete next.commissionLedgerV1;
@@ -2288,7 +2388,7 @@ function hasModulePermission(account = {}, module, action = "update") {
 
 function requireModulePermissionForAuth(req, module, action = "update") {
   if (!hasModulePermission(req.auth?.account, module, action)) {
-    throw new Error("当前账户没有执行该操作的权限");
+    throw httpError(403, "当前账户没有执行该操作的权限", "PERMISSION_FORBIDDEN");
   }
 }
 
@@ -3906,6 +4006,15 @@ function activeStockCountForSubTanks(state, subTankIds) {
     .length;
 }
 
+function inTransitSourceReferenceCount(state, subTankIds) {
+  const idSet = new Set((Array.isArray(subTankIds) ? subTankIds : [subTankIds])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean));
+  return (Array.isArray(state.stock) ? state.stock : [])
+    .filter((item) => isStockInTransfer(item) && idSet.has(String(item?.tankTransfer?.fromSubTankId ?? "").trim()))
+    .length;
+}
+
 function normalizeTankGroup(group, existingSubTanks = []) {
   const normalized = {
     id: String(group?.id || uid("group")),
@@ -3932,6 +4041,26 @@ function normalizeSubTank(subTank) {
   if (subTank?.col !== undefined) normalized.col = Number(subTank.col);
   if (!normalized.name) throw new Error("Sub tank name is required");
   return normalized;
+}
+
+function validateTankGroupTopology(tankGroups = []) {
+  const groupIds = new Set();
+  const subTankIds = new Set();
+  for (const group of Array.isArray(tankGroups) ? tankGroups : []) {
+    const groupId = String(group?.id ?? "").trim();
+    if (!groupId || groupIds.has(groupId)) {
+      throw httpError(409, "缸组编号缺失或重复，请先修复缸组数据", "TANK_GROUP_ID_NOT_UNIQUE");
+    }
+    groupIds.add(groupId);
+    for (const subTank of Array.isArray(group?.subTanks) ? group.subTanks : []) {
+      const subTankId = String(subTank?.id ?? "").trim();
+      if (!subTankId || subTankIds.has(subTankId)) {
+        throw httpError(409, "子缸编号缺失或跨缸组重复，请先修复缸位数据", "SUB_TANK_ID_NOT_UNIQUE");
+      }
+      subTankIds.add(subTankId);
+    }
+  }
+  return true;
 }
 
 function pushOperationLog(operationLogs, operationLog) {
@@ -3966,6 +4095,12 @@ function normalizeStockItem(item) {
   return normalized;
 }
 
+function preserveServerOwnedTankTransfer(item = {}, existing = null) {
+  if (!existing || Object.prototype.hasOwnProperty.call(item, "tankTransfer")) return item;
+  if (!Object.prototype.hasOwnProperty.call(existing, "tankTransfer")) return item;
+  return { ...item, tankTransfer: existing.tankTransfer };
+}
+
 function applyStockMutationToState(state = {}, change = {}, operator = "system", options = {}) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
@@ -3978,15 +4113,20 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   const pricingProtectedIds = stockPricingProtectedIds({ ...state,
     stock: stock.map((item) => proposedPricingItems.get(String(item?.id ?? "").trim()) ?? item),
   });
-  let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map((item) => normalizeStockItem(normalizeStockPricing(
-    item,
-    pricingProductById.get(String(item?.productId ?? "").trim()),
-    {
-      existing: pricingExistingById.get(String(item?.id ?? "").trim()),
-      previousProduct: pricingProductById.get(String(pricingExistingById.get(String(item?.id ?? "").trim())?.productId ?? "").trim()),
-      protected: pricingProtectedIds.has(String(item?.id ?? "").trim()),
-    },
-  )));
+  let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map((item) => {
+    const stockId = String(item?.id ?? "").trim();
+    const existing = pricingExistingById.get(stockId);
+    const protectedItem = preserveServerOwnedTankTransfer(item, existing);
+    return normalizeStockItem(normalizeStockPricing(
+      protectedItem,
+      pricingProductById.get(String(item?.productId ?? "").trim()),
+      {
+        existing,
+        previousProduct: pricingProductById.get(String(existing?.productId ?? "").trim()),
+        protected: pricingProtectedIds.has(stockId),
+      },
+    ));
+  });
   const deleteIds = (Array.isArray(change?.deleteIds) ? change.deleteIds : [])
     .map((id) => String(id ?? "").trim());
   if (upsertItems.length === 0 && deleteIds.length === 0) throw new Error("No stock changes provided");
@@ -4441,12 +4581,31 @@ function stockApprovalPlan(state = {}, mutation = {}, req, adjustmentContext = n
   };
 }
 
-function findSubTank(state = {}, subTankId) {
+function findSubTankMatches(state = {}, subTankId) {
+  const targetId = String(subTankId ?? "").trim();
+  if (!targetId) return [];
+  const matches = [];
   for (const group of Array.isArray(state.tankGroups) ? state.tankGroups : []) {
-    const subTank = (Array.isArray(group.subTanks) ? group.subTanks : []).find((tank) => tank.id === subTankId);
-    if (subTank) return { group, subTank };
+    for (const subTank of Array.isArray(group.subTanks) ? group.subTanks : []) {
+      if (String(subTank?.id ?? "").trim() === targetId) matches.push({ group, subTank });
+    }
   }
-  return null;
+  return matches;
+}
+
+function findSubTank(state = {}, subTankId) {
+  return findSubTankMatches(state, subTankId)[0] ?? null;
+}
+
+function requireUniqueSubTank(state = {}, subTankId, label = "缸位") {
+  const matches = findSubTankMatches(state, subTankId);
+  if (matches.length === 1) return matches[0];
+  const error = new Error(matches.length === 0
+    ? `${label}不存在或已被删除`
+    : `${label}编号不唯一，请先修复缸位数据`);
+  error.statusCode = matches.length === 0 ? 400 : 409;
+  error.code = matches.length === 0 ? "SUB_TANK_NOT_FOUND" : "SUB_TANK_ID_NOT_UNIQUE";
+  throw error;
 }
 
 function subTankDisplayName(state = {}, subTankId) {
@@ -5397,7 +5556,10 @@ function requireOrderPermissionForAuth(req, action = "update") {
   }
 }
 
-function refreshLockedOrderMutationAuth(req, state = {}) {
+function refreshLockedMutationAuth(req, state = {}, {
+  code = "ACCOUNT_CHANGED",
+  message = "当前账号权限已变化，请重新登录后重试",
+} = {}) {
   const matches = (Array.isArray(state.personnel) ? state.personnel : []).filter((account) =>
     String(account?.username ?? "") === req.auth?.user?.username);
   const account = matches.length === 1 ? matches[0] : null;
@@ -5405,9 +5567,18 @@ function refreshLockedOrderMutationAuth(req, state = {}) {
       String(account.id ?? "") !== String(req.auth?.account?.id ?? "") ||
       sessionVersionForAccount(account) !== sessionVersionForAccount(req.auth?.account) ||
       (account.accessRole === "admin" ? "admin" : "staff") !== req.auth?.user?.role) {
-    throw httpError(403, "当前账号权限已变化，请重新登录后重试", "ORDER_ACCOUNT_CHANGED");
+    throw httpError(403, message, code);
   }
   req.auth = { ...req.auth, account };
+  return account;
+}
+
+function refreshLockedOrderMutationAuth(req, state = {}) {
+  return refreshLockedMutationAuth(req, state, { code: "ORDER_ACCOUNT_CHANGED" });
+}
+
+function refreshLockedMaintenanceMutationAuth(req, state = {}) {
+  return refreshLockedMutationAuth(req, state, { code: "MAINTENANCE_ACCOUNT_CHANGED" });
 }
 
 function commissionCurrentMonth(now = new Date()) {
@@ -11538,10 +11709,14 @@ async function handleApi(req, res, url) {
         return;
       }
       assertUniqueBioRecordIds(state.bioRecords);
+      const sanitizedTransfers = sanitizeTransferCollectionsForAuth(state, req.auth?.account, {
+        stock: [stockItem],
+        bioRecords: state.bioRecords,
+      });
       sendJson(req, res, 200, {
         ok: true,
-        bioRecords: state.bioRecords,
-        stockItem,
+        bioRecords: sanitizedTransfers.bioRecords,
+        stockItem: sanitizedTransfers.stock[0],
       });
     } catch (error) {
       sendJson(req, res, Number(error?.statusCode ?? 400), {
@@ -13024,6 +13199,7 @@ async function handleApi(req, res, url) {
       const blockedShipmentIds = shipmentActiveStockIds(state);
       const duplicatedShipmentIds = selectedItemIds.filter((id) => blockedShipmentIds.has(id));
       if (duplicatedShipmentIds.length > 0) throw new Error("所选商品已经出库或发货，请刷新后重试");
+      assertStockIdsNotInTransfer(state, selectedItemIds, "移缸在途的鱼不能出库，请先完成签收入缸");
       const shippedIds = shippedOutStockIds(state);
       for (const stockId of selectedItemIds) {
         const { stock: stockItem } = resolveOrderFulfillmentStock(state, stockId, {
@@ -13211,6 +13387,7 @@ async function handleApi(req, res, url) {
 
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
       const shipmentId = String(shipment.id ?? "");
+      assertStockIdsNotInTransfer(state, shipment.itemStockIds, "发货单包含移缸在途的鱼，不能确认发货");
       if (shipment.status !== "outbound") throw new Error("只有已出库的发货单可以确认发货");
 
       if (order.status === "completed") throw new Error("已完成订单不能再确认发货");
@@ -13306,6 +13483,7 @@ async function handleApi(req, res, url) {
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
       const shipmentId = String(shipment.id ?? "");
+      assertStockIdsNotInTransfer(state, shipment.itemStockIds, "发货单包含移缸在途的鱼，不能确认签收");
       if (order.status === "completed") throw new Error("已完成订单不能再确认签收");
       if (order.status === "cancelled") throw new Error("已取消订单不能再确认签收");
       if (shipment.status === "delivered") {
@@ -13831,6 +14009,8 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedMutationAuth(req, state, { code: "STOCK_APPROVAL_ACCOUNT_CHANGED" });
+      requireAdminForAuth(req);
       const requests = currentApprovalRequests(state);
       const approvalRequest = requests.find((request) => String(request?.id ?? "") === requestId);
       if (!approvalRequest) throw new Error("审批记录不存在，请刷新后重试");
@@ -14057,6 +14237,42 @@ async function handleApi(req, res, url) {
     }
     return;
   }
+		  if (url.pathname === "/api/stock/transfers" && req.method === "GET") {
+		    try {
+			      // This toolbar polls. Project only the four collections required for
+			      // current-account authorization and the redacted transfer pool; never
+			      // materialize orders, customers, audit logs, or bio-record media.
+			      const { rows } = await pool.query(
+			        `SELECT data -> 'sites' AS sites,
+			                data -> 'personnel' AS personnel,
+			                data -> 'products' AS products,
+			                data -> 'stock' AS stock
+			         FROM app_state
+			         WHERE id = $1`,
+			        [stateId]
+			      );
+			      const state = {
+			        sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
+			        personnel: Array.isArray(rows[0]?.personnel) ? rows[0].personnel : [],
+			        products: Array.isArray(rows[0]?.products) ? rows[0].products : [],
+			        stock: Array.isArray(rows[0]?.stock) ? rows[0].stock : [],
+			      };
+		      refreshLockedMaintenanceMutationAuth(req, state);
+		      requireModulePermissionForAuth(req, "daily", "update");
+		      sendJson(req, res, 200, {
+		        ok: true,
+		        items: stockTransferPoolItems(state),
+		      }, { "Cache-Control": "no-store, private" });
+		    } catch (error) {
+		      sendJson(req, res, Number(error?.statusCode ?? 400), {
+		        ok: false,
+		        ...(error?.code ? { code: error.code } : {}),
+		        error: error.message || "读取移缸在途列表失败",
+		      }, { "Cache-Control": "no-store, private" });
+		    }
+		    return;
+		  }
+
 			  if (url.pathname === "/api/stock/save" && req.method === "POST") {
 			    try {
 			      const rawChange = JSON.parse(await readBody(req) || "{}");
@@ -14396,9 +14612,9 @@ async function handleApi(req, res, url) {
 		        mode,
 	        itemIds = [],
 	        expectedItems = [],
+	        items: transferItems = [],
 	        targetSubTankId,
 	        targetStatus,
-	        moveDate,
 	        moveNotes = "",
 	        recordDate,
 	        recordText = "",
@@ -14415,6 +14631,10 @@ async function handleApi(req, res, url) {
 	        const responseBody = await withMaintenanceTransaction(client, async () => {
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
+		        refreshLockedMaintenanceMutationAuth(req, state);
+		        for (const permission of maintenanceRequiredPermissions(mode)) {
+		          requireModulePermissionForAuth(req, permission.module, permission.action);
+		        }
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
 	        const bioRecords = Array.isArray(state.bioRecords) ? state.bioRecords : [];
 	        const lossRecords = Array.isArray(state.lossRecords) ? state.lossRecords : [];
@@ -14442,11 +14662,20 @@ async function handleApi(req, res, url) {
 		          error.code = mode === "record" ? "MAINTENANCE_ITEM_NOT_FOUND" : "MAINTENANCE_STALE";
 		          throw error;
 		        }
-		        requireVisibleStockItems(requestedItems);
+		        let receiveTarget = null;
+		        if (mode === "transferReceive") {
+		          receiveTarget = requireUniqueSubTank(state, targetSubTankId, "目标子缸");
+		          requireMaintenanceSiteIds(
+		            req,
+		            state,
+		            [normalizeSiteId(receiveTarget.group?.siteId)],
+		            "不能签收到未授权场地的缸位"
+		          );
+		        }
 
-		        // The row lock serializes concurrent double-clicks. Idempotency is
-		        // checked before CAS because an exact retry necessarily observes the
-		        // state already changed by its first committed attempt.
+		        // The row lock serializes concurrent double-clicks. The current
+		        // account, module permission and site scope are all revalidated before
+		        // an idempotent ledger replay, so revocation takes effect immediately.
 		        const priorMutation = findMaintenanceMutationLog({
 		          operationLogs,
 		          operator,
@@ -14454,14 +14683,24 @@ async function handleApi(req, res, url) {
 		          digest: preparedMutation.digest,
 		        });
 		        if (priorMutation) {
+		          const replaySiteIds = Array.isArray(priorMutation.operationLog?.maintenanceSiteIds)
+		            ? priorMutation.operationLog.maintenanceSiteIds
+		            : [];
+		          if (replaySiteIds.length > 0) {
+		            requireMaintenanceSiteIds(req, state, replaySiteIds);
+		          } else if (mode !== "transferReceive") {
+		            requireVisibleStockItems(requestedItems);
+		          }
 		          const priorDelta = resolveMaintenanceDeltaByIds(state, priorMutation.deltaIds);
 		          return {
 		            ok: true,
 		            idempotent: true,
-		            ...priorDelta,
+		            ...sanitizedMaintenanceDeltaForAuth(state, priorDelta, req.auth?.account),
 		            operationLog: priorMutation.operationLog,
 		          };
 		        }
+
+		        if (mode !== "transferReceive") requireVisibleStockItems(requestedItems);
 
 		        assertMaintenanceExpectedItems({
 		          mode,
@@ -14488,7 +14727,7 @@ async function handleApi(req, res, url) {
 		          requireVisibleStockItems(targetItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
-	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能添加维护记录");
+	          if (invalidItem) throw new Error("已损耗、已发货或移缸在途的鱼不能添加维护记录");
 	          const date = normalizeLocalDateTime(recordDate);
 	          if (!date) throw new Error("请选择记录时间");
 	          if (date > nowDatetimeInChina()) throw new Error("记录时间不能晚于当前时间");
@@ -14521,59 +14760,159 @@ async function handleApi(req, res, url) {
 	            action: "添加记录",
 	            detail: `批量添加观察/治疗记录 ${targetItems.length} 条（${date}）`,
 	          };
-	        } else if (mode === "move") {
-	          const targetId = String(targetSubTankId ?? "");
-		          const targetTank = findSubTank(state, targetId);
-		          if (!targetTank) throw new Error("目标子缸不存在或已被删除");
-		          const targetSiteId = normalizeSiteId(targetTank.group?.siteId);
-		          if (!canAccessSite(targetSiteId)) {
-		            const error = new Error("不能移入未授权场地的缸位");
-		            error.statusCode = 403;
-		            throw error;
-		          }
-	          const targetName = subTankDisplayName(state, targetId);
-	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
-	          const idSet = new Set(requestedIds);
-	          if (idSet.size === 0) throw new Error("请选择要移缸的鱼");
+	        } else if (mode === "transferIssue") {
+	          const movingItems = requestedItems;
 	          const shippedIds = shippedOutStockIds(state);
-		          const movingItems = stock.filter((item) => idSet.has(item.id));
-		          if (movingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
-		          requireVisibleStockItems(movingItems);
 	          const invalidItem = movingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
-	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能移缸");
-	          if (movingItems.every((item) => item.subTankId === targetId)) throw new Error("目标子缸与当前子缸相同");
-	          const notes = String(moveNotes ?? "").trim();
-	          const date = String(moveDate || todayInChina()).trim();
-	          const moveRecords = movingItems.map((item) => ({
-	            id: uid("bio"),
-	            siteId: targetSiteId,
-	            stockItemId: item.id,
-	            date,
-		            text: `移缸：${subTankDisplayName(state, item.subTankId)} → ${targetName}${notes ? `。备注：${notes}` : ""}`,
-		            photos: [],
-		            videos: [],
-		            sourceType: "stockMove",
-		            fromSiteId: stockSiteId(item),
-		            fromSubTankId: item.subTankId,
-		            fromTankName: subTankDisplayName(state, item.subTankId),
-		            toSiteId: targetSiteId,
-		            toSubTankId: targetId,
-		            toTankName: targetName,
-		            operator,
+	          if (invalidItem) throw httpError(409, "已损耗、已发货或移缸在途的鱼不能再次签发", "STOCK_TRANSFER_ISSUE_INVALID");
+	          const sourceByStockId = new Map(movingItems.map((item) => {
+	            const source = requireUniqueSubTank(state, item?.subTankId, "库存鱼当前缸位");
+	            const fromSiteId = normalizeSiteId(source.group?.siteId);
+	            if (normalizeSiteId(item?.siteId) !== fromSiteId) {
+	              throw httpError(409, "库存鱼的场地与当前缸位不一致，请先修复库存位置", "STOCK_LOCATION_INVALID");
+	            }
+	            return [String(item.id), {
+	              fromSiteId,
+	              fromSubTankId: String(item.subTankId),
+	              fromTankName: `${source.group.name} / ${source.subTank.name}`,
+	            }];
 	          }));
-	          nextStock = stock.map((item) =>
-	            idSet.has(item.id) ? { ...item, siteId: targetSiteId, subTankId: targetId } : item
-	          );
-		          nextBioRecords = [...bioRecords, ...moveRecords];
-		          stockUpdates = nextStock.filter((item) => idSet.has(String(item.id)));
-		          bioRecordUpdates = moveRecords;
+	          const sourceSiteIds = [...new Set([...sourceByStockId.values()].map((source) => source.fromSiteId))];
+	          requireMaintenanceSiteIds(req, state, sourceSiteIds);
+	          const notes = String(moveNotes ?? "").trim();
+	          const issuedAt = new Date().toISOString();
+	          const transfers = new Map(movingItems.map((item) => {
+	            const source = sourceByStockId.get(String(item.id));
+	            return [String(item.id), {
+	              id: uid("transfer"),
+	              status: STOCK_TRANSFER_IN_TRANSIT,
+	              issuedAt,
+	              issuedBy: operator,
+	              ...source,
+	              notes,
+	            }];
+	          }));
+	          nextStock = stock.map((item) => {
+	            const transfer = transfers.get(String(item?.id ?? ""));
+	            return transfer ? { ...item, tankTransfer: transfer } : item;
+	          });
+	          const issueRecords = movingItems.map((item) => {
+	            const transfer = transfers.get(String(item.id));
+	            return {
+	              id: uid("bio"),
+	              siteId: transfer.fromSiteId,
+	              stockItemId: item.id,
+	              date: nowDatetimeInChina(),
+	              text: `移缸签发：${transfer.fromTankName} → 移缸在途${notes ? `。备注：${notes}` : ""}`,
+	              photos: [],
+	              videos: [],
+	              sourceType: "stockTransferIssued",
+	              transferId: transfer.id,
+	              fromSiteId: transfer.fromSiteId,
+	              fromSubTankId: transfer.fromSubTankId,
+	              fromTankName: transfer.fromTankName,
+	              issuedAt,
+	              issuedBy: operator,
+	              notes,
+	              operator,
+	            };
+	          });
+	          nextBioRecords = [...bioRecords, ...issueRecords];
+	          stockUpdates = nextStock.filter((item) => transfers.has(String(item?.id ?? "")));
+	          bioRecordUpdates = issueRecords;
 	          operationLog = {
 	            id: uid("log"),
-	            time: new Date().toISOString(),
+	            time: issuedAt,
 	            operator,
 	            module: "日常管理",
-	            action: "修改记录",
-	            detail: `移缸 ${movingItems.length} 条至「${targetName}」`,
+	            action: "移缸签发",
+	            detail: `签发移缸在途鱼 ${movingItems.length} 条`,
+	            maintenanceSiteIds: sourceSiteIds,
+	          };
+	        } else if (mode === "transferReceive") {
+	          const targetId = String(targetSubTankId ?? "");
+	          const targetTank = receiveTarget ?? requireUniqueSubTank(state, targetId, "目标子缸");
+	          const targetSiteId = normalizeSiteId(targetTank.group?.siteId);
+	          const targetName = `${targetTank.group.name} / ${targetTank.subTank.name}`;
+	          requireMaintenanceSiteIds(req, state, [targetSiteId], "不能签收到未授权场地的缸位");
+	          const receiveByStockId = new Map((Array.isArray(transferItems) ? transferItems : [])
+	            .map((item) => [String(item?.stockItemId ?? ""), String(item?.transferId ?? "")]));
+	          const activeTransferIdCounts = new Map();
+	          for (const stockItem of stock.filter(isStockInTransfer)) {
+	            const activeTransferId = stockTransferId(stockItem);
+	            if (activeTransferId) activeTransferIdCounts.set(activeTransferId, (activeTransferIdCounts.get(activeTransferId) ?? 0) + 1);
+	          }
+	          const shippedIds = shippedOutStockIds(state);
+	          for (const item of requestedItems) {
+	            const expectedTransferId = receiveByStockId.get(String(item.id));
+	            const transfer = item?.tankTransfer;
+	            if (!isStockInTransfer(item) || !expectedTransferId || stockTransferId(item) !== expectedTransferId) {
+	              throw httpError(409, "在途鱼已被签收、重新签发或状态已变化，请刷新后重试", "STOCK_TRANSFER_STALE");
+	            }
+	            if (activeTransferIdCounts.get(expectedTransferId) !== 1) {
+	              throw httpError(409, "移缸签发 ID 不唯一，不能安全签收", "STOCK_TRANSFER_ID_NOT_UNIQUE");
+	            }
+	            if (!String(transfer?.issuedAt ?? "").trim() || !String(transfer?.fromSiteId ?? "").trim() ||
+	                !String(transfer?.fromSubTankId ?? "").trim() || !String(transfer?.fromTankName ?? "").trim()) {
+	              throw httpError(409, "移缸在途快照不完整，请联系管理员修复", "STOCK_TRANSFER_STATE_INVALID");
+	            }
+	            if (item?.lost || shippedIds.has(normalizeShipmentInventoryId(item.id))) {
+	              throw httpError(409, "已损耗或已出库的鱼不能签收入缸", "STOCK_TRANSFER_RECEIVE_INVALID");
+	            }
+	          }
+	          const receivedAt = new Date().toISOString();
+	          const receivedTransfers = new Map(requestedItems.map((item) => [String(item.id), {
+	            ...item.tankTransfer,
+	            status: STOCK_TRANSFER_RECEIVED,
+	            receivedAt,
+	            receivedBy: operator,
+	            toSiteId: targetSiteId,
+	            toSubTankId: targetId,
+	            toTankName: targetName,
+	          }]));
+	          nextStock = stock.map((item) => {
+	            const transfer = receivedTransfers.get(String(item?.id ?? ""));
+	            return transfer
+	              ? { ...item, siteId: targetSiteId, subTankId: targetId, tankTransfer: transfer }
+	              : item;
+	          });
+	          const receiveRecords = requestedItems.map((item) => {
+	            const transfer = receivedTransfers.get(String(item.id));
+	            return {
+	              id: uid("bio"),
+	              siteId: targetSiteId,
+	              stockItemId: item.id,
+	              date: nowDatetimeInChina(),
+	              text: `移缸签收：${transfer.fromTankName} → ${targetName}${transfer.notes ? `。签发备注：${transfer.notes}` : ""}`,
+	              photos: [],
+	              videos: [],
+	              sourceType: "stockTransferReceived",
+	              transferId: transfer.id,
+	              fromSiteId: transfer.fromSiteId,
+	              fromSubTankId: transfer.fromSubTankId,
+	              fromTankName: transfer.fromTankName,
+	              toSiteId: targetSiteId,
+	              toSubTankId: targetId,
+	              toTankName: targetName,
+	              issuedAt: transfer.issuedAt,
+	              issuedBy: transfer.issuedBy,
+	              receivedAt,
+	              receivedBy: operator,
+	              notes: String(transfer.notes ?? ""),
+	              operator,
+	            };
+	          });
+	          nextBioRecords = [...bioRecords, ...receiveRecords];
+	          stockUpdates = nextStock.filter((item) => receivedTransfers.has(String(item?.id ?? "")));
+	          bioRecordUpdates = receiveRecords;
+	          operationLog = {
+	            id: uid("log"),
+	            time: receivedAt,
+	            operator,
+	            module: "日常管理",
+	            action: "移缸签收",
+	            detail: `签收入缸 ${requestedItems.length} 条至「${targetName}」`,
+	            maintenanceSiteIds: [targetSiteId],
 	          };
 	        } else if (mode === "status") {
 	          const requestedIds = Array.isArray(itemIds) ? itemIds.map((id) => String(id)) : [];
@@ -14584,7 +14923,7 @@ async function handleApi(req, res, url) {
 		          requireVisibleStockItems(targetItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = targetItems.find((item) => !isPhysicallyInTank(item, shippedIds));
-	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能设置状态");
+	          if (invalidItem) throw new Error("已损耗、已发货或移缸在途的鱼不能设置状态");
 	          const nextStatus = String(targetStatus ?? "").trim();
 	          const statusLabels = { healthy: "正常", feeding: "开口", sick: "疾病" };
 	          if (!Object.prototype.hasOwnProperty.call(statusLabels, nextStatus)) throw new Error("请选择目标状态");
@@ -14626,7 +14965,7 @@ async function handleApi(req, res, url) {
 		          requireVisibleStockItems(losingItems);
 	          const shippedIds = shippedOutStockIds(state);
 	          const invalidItem = losingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
-	          if (invalidItem) throw new Error("已损耗或已发货的鱼不能重复损耗");
+	          if (invalidItem) throw new Error("已损耗、已发货或移缸在途的鱼不能登记损耗");
 	          const date = String(lossDate ?? "").trim();
 	          if (!date) throw new Error("请选择损耗日期");
 	          const invalidDateItem = losingItems.find((item) => item.inDate && date < item.inDate);
@@ -14716,13 +15055,24 @@ async function handleApi(req, res, url) {
 		           WHERE id = $1`,
 		          updateValues
 		        );
-		        return {
-		          ok: true,
-		          idempotent: false,
+		        const committedState = {
+		          ...state,
+		          stock: nextStock,
+		          batches: nextBatches,
+		          bioRecords: nextBioRecords,
+		          lossRecords: nextLossRecords,
+		          operationLogs: nextOperationLogs,
+		        };
+		        const sanitizedDelta = sanitizedMaintenanceDeltaForAuth(committedState, {
 		          stockUpdates,
 		          batchUpdates,
 		          bioRecordUpdates,
 		          lossRecordUpdates,
+		        }, req.auth?.account);
+		        return {
+		          ok: true,
+		          idempotent: false,
+		          ...sanitizedDelta,
 		          operationLog,
 		        };
 	        });
@@ -14758,16 +15108,31 @@ async function handleApi(req, res, url) {
 	        const state = rows[0]?.data ?? {};
 	        const tankGroups = Array.isArray(state.tankGroups) ? state.tankGroups : [];
 	        const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+		        refreshLockedMutationAuth(req, state, { code: "TANK_GROUP_ACCOUNT_CHANGED" });
+		        validateTankGroupTopology(tankGroups);
 	        if (rawMode === "deleteGroup" || rawMode === "deleteSubTank") {
 	          requireModulePermissionForAuth(req, "tankGroups", "delete");
+		          const targetGroupId = String(rawChange.groupId ?? "");
+		          const targetGroup = tankGroups.find((item) => String(item?.id ?? "") === targetGroupId);
+		          if (!targetGroup) throw new Error("缸组不存在或已被删除");
+		          requireVisibleSiteForAuth(req, state, normalizeSiteId(targetGroup.siteId), "不能操作未授权场地的缸组");
 	        } else if (rawMode === "upsertGroup") {
 	          const rawGroup = rawChange.group && typeof rawChange.group === "object" ? rawChange.group : {};
-	          const groupExists = rawGroup.id && tankGroups.some((item) => String(item?.id ?? "") === String(rawGroup.id));
+		          const existingGroup = rawGroup.id
+		            ? tankGroups.find((item) => String(item?.id ?? "") === String(rawGroup.id))
+		            : null;
+		          const groupExists = Boolean(existingGroup);
 	          requireModulePermissionForAuth(req, "tankGroups", groupExists ? "update" : "create");
+		          const requestedSiteId = normalizeSiteId(rawGroup.siteId ?? existingGroup?.siteId);
+		          if (existingGroup && requestedSiteId !== normalizeSiteId(existingGroup.siteId)) {
+		            throw httpError(409, "已有缸组不能通过普通保存迁移场地", "TANK_GROUP_SITE_CHANGE_FORBIDDEN");
+		          }
+		          requireVisibleSiteForAuth(req, state, requestedSiteId, "不能在未授权场地保存缸组");
 	        } else if (rawMode === "upsertSubTank") {
 	          const targetGroupId = String(rawChange.groupId ?? "");
 	          const targetGroup = tankGroups.find((item) => String(item?.id ?? "") === targetGroupId);
 	          if (!targetGroup) throw new Error("缸组不存在或已被删除");
+		          requireVisibleSiteForAuth(req, state, normalizeSiteId(targetGroup.siteId), "不能操作未授权场地的缸组");
 	          const rawSubTank = rawChange.subTank && typeof rawChange.subTank === "object" ? rawChange.subTank : {};
 	          const subTankExists = rawSubTank.id && (Array.isArray(targetGroup.subTanks) ? targetGroup.subTanks : [])
 	            .some((item) => String(item?.id ?? "") === String(rawSubTank.id));
@@ -14825,6 +15190,10 @@ async function handleApi(req, res, url) {
 	          const subTankIds = Array.isArray(target.subTanks) ? target.subTanks.map((item) => item.id) : [];
 	          const activeCount = activeStockCountForSubTanks(state, subTankIds);
 	          if (activeCount > 0) throw new Error(`该缸组还有 ${activeCount} 条在缸库存，不能删除`);
+	          const inTransitReferences = inTransitSourceReferenceCount(state, subTankIds);
+	          if (inTransitReferences > 0) {
+	            throw httpError(409, `该缸组仍是 ${inTransitReferences} 条移缸在途鱼的签发来源，完成签收后再删除`, "TANK_IN_TRANSIT_SOURCE_REFERENCED");
+	          }
 	          nextTankGroups = tankGroups.filter((item) => item.id !== targetId);
 	          operationLog = {
 	            id: uid("log"),
@@ -14874,6 +15243,10 @@ async function handleApi(req, res, url) {
 	          if (!targetSubTank) throw new Error("子缸不存在或已被删除");
 	          const activeCount = activeStockCountForSubTank(state, targetSubTankId);
 	          if (activeCount > 0) throw new Error(`该子缸还有 ${activeCount} 条在缸库存，不能删除`);
+	          const inTransitReferences = inTransitSourceReferenceCount(state, targetSubTankId);
+	          if (inTransitReferences > 0) {
+	            throw httpError(409, `该子缸仍是 ${inTransitReferences} 条移缸在途鱼的签发来源，完成签收后再删除`, "TANK_IN_TRANSIT_SOURCE_REFERENCED");
+	          }
 	          const nextSubTanks = currentSubTanks.filter((item) => item.id !== targetSubTankId);
 	          nextTankGroups = tankGroups.map((item, index) =>
 	            index === groupIndex ? { ...targetGroup, subTanks: nextSubTanks } : item
@@ -14889,6 +15262,7 @@ async function handleApi(req, res, url) {
 	        } else {
 	          throw new Error("Unsupported tank group save mode");
 	        }
+		        validateTankGroupTopology(nextTankGroups);
 
 	        const nextState = {
 	          ...state,
@@ -14911,8 +15285,11 @@ async function handleApi(req, res, url) {
 	      } finally {
 	        client.release();
 	      }
-	    } catch (error) {
-	      sendJson(req, res, 400, { error: `Failed to save tank groups: ${error.message}` });
+		    } catch (error) {
+		      sendJson(req, res, Number(error?.statusCode ?? 400), {
+		        error: `Failed to save tank groups: ${error.message}`,
+		        ...(error?.code ? { code: error.code } : {}),
+		      });
 	    }
 	    return;
 	  }
@@ -15030,6 +15407,7 @@ async function handleApi(req, res, url) {
                      (NOT $3::boolean
                        AND btrim(COALESCE(stock_row.item ->> 'subTankId', '')) = ANY($5::text[])
                        AND lower(COALESCE(stock_row.item ->> 'lost', 'false')) <> 'true'
+                       AND COALESCE(stock_row.item -> 'tankTransfer' ->> 'status', '') <> 'in_transit'
                        AND NOT EXISTS (
                          SELECT 1 FROM outbound_stock_ids outbound
                          WHERE outbound.stock_id = btrim(COALESCE(stock_row.item ->> 'id', ''))

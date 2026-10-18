@@ -150,9 +150,9 @@ export function parseBatchDetailQuery(params, { history = false, orderDetail = f
   const search = text(params.get("search"));
   if (search.length > 100) fail("搜索内容最多 100 个字符");
   const status = text(params.get("status")) || "all";
-  if (!["all", "inStock", "sold", "lost", "removed", "restricted"].includes(status)) fail("库存状态筛选无效");
+  if (!["all", "inStock", "inTransit", "sold", "lost", "removed", "restricted"].includes(status)) fail("库存状态筛选无效");
   const tankKey = text(params.get("tankKey"));
-  if (tankKey.length > 600 || (tankKey && !["restricted", "removed", "unknown"].includes(tankKey) && !/^tank:[^:]+:[^:]+$/.test(tankKey))) fail("缸位筛选无效");
+  if (tankKey.length > 600 || (tankKey && !["restricted", "removed", "inTransit", "unknown"].includes(tankKey) && !/^tank:[^:]+:[^:]+$/.test(tankKey))) fail("缸位筛选无效");
   return { batchId, siteId, stockItemId, orderId, page, pageSize, search, status, tankKey };
 }
 
@@ -315,7 +315,8 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
   const product = context.products.get(id(item.productId)) ?? {};
   const species = context.species.get(id(product.speciesId)) ?? {};
   const { key, current, currentVisible, bio, losses, entry, entryLocation, entryVisible, sales } = evidence;
-  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost ? "lost" : context.unavailableStockIds.has(key) ? "sold" : "inStock";
+  const inTransit = item?.tankTransfer?.status === "in_transit";
+  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost ? "lost" : inTransit ? "inTransit" : context.unavailableStockIds.has(key) ? "sold" : "inStock";
   const warnings = [];
   if (!entry || !entryVisible || !entryLocation.tankName) warnings.push("未留存可核实的初始入库缸位；当前缸位不代表初始缸位");
   if (!currentVisible) warnings.push("该鱼当前信息及部分历史不在账户可见范围内，已隐藏");
@@ -324,15 +325,15 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
   if (item._removed) warnings.push("原库存记录已删除，仅展示留存快照及可核实关联");
   if (!id(item.productId) || !context.products.has(id(item.productId))) warnings.push("商品档案已缺失，无法补全未保存的商品信息");
   const latestLoss = [...losses].sort((a, b) => compareHistoryDate(b.date, a.date))[0];
-  const tankKey = !currentVisible ? "restricted" : item._removed ? "removed" : !current.subTankId ? "unknown"
+  const tankKey = !currentVisible ? "restricted" : item._removed ? "removed" : inTransit ? "inTransit" : !current.subTankId ? "unknown"
     : `tank:${encodeURIComponent(current.siteId)}:${encodeURIComponent(current.subTankId)}`;
   return {
     stockItemId: key, code: text(item.code), productName: text(product.name) || text(item.productName) || "商品档案缺失",
     speciesName: text(species.name) || text(item.speciesName), size: text(product.size) || text(item.size), origin: text(product.origin) || text(item.origin),
-    status, statusLabel: { inStock: "在库", sold: "已售", lost: "已损耗", removed: "记录已删除", restricted: "记录受限" }[status],
+    status, statusLabel: { inStock: "在库", inTransit: "移缸在途", sold: "已售", lost: "已损耗", removed: "记录已删除", restricted: "记录受限" }[status],
     inDate: text(entry?.inDate) || text(item.inDate), initialTankName: entryVisible ? entryLocation.tankName : "",
-    currentTankName: currentVisible && !item._removed ? current.tankName : "", currentSiteName: currentVisible && !item._removed ? current.siteName : "",
-    currentSubTankId: currentVisible && !item._removed ? current.subTankId : "", tankKey,
+    currentTankName: currentVisible && !item._removed && !inTransit ? current.tankName : "", currentSiteName: currentVisible && !item._removed && !inTransit ? current.siteName : "",
+    currentSubTankId: currentVisible && !item._removed && !inTransit ? current.subTankId : "", tankKey,
     sales, lossDate: date(latestLoss?.date) || (currentVisible && !(context.lossByStock.get(key) ?? []).length ? date(item.lossDate) : ""), recordCount: bio.length, bioRecordCount: bio.length, warnings,
   };
 }
@@ -341,7 +342,7 @@ export function buildPurchaseBatchDetail(state, options) {
   const context = contextFor(state, options);
   const valuation = buildBatchStockValuations({ ...state, batches: [context.batch], visibleSiteIds: options.visibleSiteIds }).metrics[0];
   const rows = [...context.candidateById.values()].map((item) => rowForFish(context, item));
-  const summary = { total: rows.length, inStock: 0, sold: 0, lost: 0, removed: 0, restricted: 0 };
+  const summary = { total: rows.length, inStock: 0, inTransit: 0, sold: 0, lost: 0, removed: 0, restricted: 0 };
   rows.forEach((row) => { summary[row.status] += 1; });
   const query = text(options.search).toLocaleLowerCase();
   const filtered = rows.filter((row) => (!options.status || options.status === "all" || row.status === options.status)
@@ -354,8 +355,8 @@ export function buildPurchaseBatchDetail(state, options) {
     if (!tankGroups.has(row.tankKey)) tankGroups.set(row.tankKey, {
       key: row.tankKey,
       siteName: row.tankKey.startsWith("tank:") ? row.currentSiteName : "",
-      tankName: row.tankKey.startsWith("tank:") ? row.currentTankName : ({ restricted: "记录受限", removed: "记录已删除", unknown: "缸位未记录" })[row.tankKey],
-      total: 0, inStock: 0, sold: 0, lost: 0, removed: 0, restricted: 0,
+      tankName: row.tankKey.startsWith("tank:") ? row.currentTankName : ({ restricted: "记录受限", removed: "记录已删除", inTransit: "移缸在途", unknown: "缸位未记录" })[row.tankKey],
+      total: 0, inStock: 0, inTransit: 0, sold: 0, lost: 0, removed: 0, restricted: 0,
     });
     const group = tankGroups.get(row.tankKey);
     group.total += 1;
@@ -453,7 +454,7 @@ export function buildPurchaseBatchFishHistory(state, options) {
   add({ id: `stock-in:${fish.stockItemId}`, type: "stockIn", date: fish.inDate, title: "入库", text: fish.initialTankName ? `初始入库：${fish.initialTankName}` : "未留存可核实的初始缸位", siteName: evidence.entryVisible ? evidence.entryLocation.siteName : "", tankName: fish.initialTankName, operator: evidence.entryVisible ? text(evidence.entry?.operator) : "" });
   for (const record of evidence.bio) {
     const recordLocation = context.locations.historical(record);
-    const isMove = record.sourceType === "stockMove" || /^移缸[：:]/.test(text(record.text));
+    const isMove = ["stockMove", "stockTransferIssued", "stockTransferReceived"].includes(record.sourceType) || /^移缸(?:签发|签收)?[：:]/.test(text(record.text));
     const fromSiteId = text(record.fromSiteId);
     const toSiteId = text(record.toSiteId) || recordLocation.siteId;
     const canShowMoveText = options.isAdmin || (fromSiteId && context.visible.has(fromSiteId) && context.visible.has(toSiteId));

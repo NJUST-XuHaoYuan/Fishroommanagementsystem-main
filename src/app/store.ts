@@ -176,6 +176,44 @@ export type PurchaseBatch = {
 export type StockStatus = "healthy" | "sick" | "feeding";
 export type StockPriceMode = "product" | "manual" | "legacy";
 
+/** Latest transfer snapshot; the full issue/receipt history lives in bioRecords. */
+export type StockTankTransfer = {
+  id: string;
+  status: "in_transit" | "received";
+  issuedAt: string;
+  issuedBy: string;
+  fromSiteId: string;
+  fromSubTankId: string;
+  fromTankName: string;
+  notes: string;
+  receivedAt?: string;
+  receivedBy?: string;
+  toSiteId?: string;
+  toSubTankId?: string;
+  toTankName?: string;
+};
+
+/** Safe cross-site projection, not a StockItem or an order/customer record. */
+export type StockTransferListItem = {
+  stockItemId: string;
+  transferId: string;
+  productId: string;
+  productName: string;
+  size: string;
+  origin: string;
+  imageUrl: string;
+  code: string;
+  status: StockStatus;
+  sold: boolean;
+  fromSiteId: string;
+  fromSiteName: string;
+  fromSubTankId: string;
+  fromTankName: string;
+  issuedAt: string;
+  issuedBy: string;
+  notes: string;
+};
+
 export type StockItem = {
   id: string;
   siteId?: string;
@@ -183,6 +221,7 @@ export type StockItem = {
   batchId: string;
   subTankId: string;
   status: StockStatus;
+  tankTransfer?: StockTankTransfer;
   /** 是否已售（由销售模块写入，与健康状态独立） */
   sold?: boolean;
   /** 是否已损耗。损耗后保留记录，但不再显示为在缸库存。 */
@@ -263,9 +302,22 @@ export type MaintenanceSaveResult = {
 export type MaintenanceStockExpectedSnapshot = Pick<
   StockItem,
   "id" | "subTankId" | "status"
-> & { lost: boolean };
+> & { lost: boolean; tankTransferId?: string };
 
 export type MaintenanceSaveChange =
+  | {
+      mode: "transferIssue";
+      clientMutationId: string;
+      itemIds: string[];
+      expectedItems: MaintenanceStockExpectedSnapshot[];
+      moveNotes?: string;
+    }
+  | {
+      mode: "transferReceive";
+      clientMutationId: string;
+      items: { stockItemId: string; transferId: string }[];
+      targetSubTankId: string;
+    }
   | {
       mode: "record";
       clientMutationId: string;
@@ -274,15 +326,6 @@ export type MaintenanceSaveChange =
       recordText?: string;
       recordPhotos: string[];
       recordVideos: string[];
-    }
-  | {
-      mode: "move";
-      clientMutationId: string;
-      itemIds: string[];
-      expectedItems: MaintenanceStockExpectedSnapshot[];
-      targetSubTankId: string;
-      moveDate?: string;
-      moveNotes?: string;
     }
   | {
       mode: "status";

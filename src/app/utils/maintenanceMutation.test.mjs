@@ -115,5 +115,11 @@ test("stock CAS snapshots contain only the guarded maintenance fields", () => {
     subTankId: "tank-a",
     status: "healthy",
     lost: false,
+    tankTransferId: "",
   });
+});
+
+test("dispatch snapshots retain previous transfer identity to prevent away-and-back stale writes", () => {
+  const snapshot = maintenanceStockExpectedSnapshot({ id: "fish", subTankId: "source", status: "healthy", tankTransfer: { id: "previous-transfer", status: "received" } });
+  assert.equal(snapshot.tankTransferId, "previous-transfer");
 });

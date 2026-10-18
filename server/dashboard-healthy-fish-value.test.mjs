@@ -35,6 +35,15 @@ test("sick, sold-in-tank, lost and invalid-status rows are excluded", () => {
   ]), { value: 100, count: 1, unpricedCount: 0 });
 });
 
+test("active transfers leave physical healthy stock while received transfers count normally", () => {
+  assert.deepEqual(metrics([
+    { id: "active", productId: "product-fish", status: "healthy", basePrice: 100,
+      tankTransfer: { id: "transfer-active", status: "in_transit" } },
+    { id: "received", productId: "product-fish", status: "healthy", basePrice: 200,
+      tankTransfer: { id: "transfer-received", status: "received" } },
+  ]), { value: 200, count: 1, unpricedCount: 0 });
+});
+
 test("trusted cross-site inventory projection excludes fulfilled fish", () => {
   assert.deepEqual(metrics([
     { id: " nj-fish-fulfilled ", siteId: "nanjing", productId: "product-fish", status: "healthy", basePrice: 880 },

@@ -23,6 +23,10 @@ test("daily-log save locks projected keys and incrementally preserves fish timel
   assert.match(block, /matching_logs/);
   assert.match(block, /existing_bio_records/);
   assert.match(block, /outbound_stock_ids/);
+  assert.match(block, /tankTransfer'\s*->>\s*'status'[\s\S]{0,100}<>\s*'in_transit'/,
+    "new daily-log sync must not attach active in-transit fish from their retained source subTankId");
+  assert.match(block, /\$3::boolean[\s\S]{0,180}id[^]*?ANY\(\$4::text\[\]\)/,
+    "editing an existing log must preserve its original synchronized fish set, including later transfers");
   assert.match(block, /jsonb_set\([\s\S]*?'\{logs\}'[\s\S]*?'\{bioRecords\}'[\s\S]*?'\{operationLogs\}'/);
   assert.match(block, /changedLog/);
   assert.match(block, /deletedLogId/);

@@ -1,3 +1,5 @@
+import { isStockInTransfer } from "./stock-transfer-rules.mjs";
+
 const HEALTHY_STOCK_STATUSES = new Set(["healthy", "feeding"]);
 const MAX_SAFE_CENTS = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -87,7 +89,7 @@ export function healthyFishInventoryMetrics({
     const stockId = normalizedId(item?.id);
     if (!stockId || seenStockIds.has(stockId)) continue;
     seenStockIds.add(stockId);
-    if (item?.lost || item?.sold || projectedOutIds.has(stockId)) continue;
+    if (item?.lost || item?.sold || isStockInTransfer(item) || projectedOutIds.has(stockId)) continue;
     if (!HEALTHY_STOCK_STATUSES.has(String(item?.status ?? ""))) continue;
 
     const product = productById.get(normalizedId(item?.productId));

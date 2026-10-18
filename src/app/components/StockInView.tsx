@@ -29,6 +29,7 @@ import { orderSourceLabel } from "../utils/orderSources";
 import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
 import { buildSpeciesStockGroups } from "../utils/speciesStockGroups";
 import { SpeciesStockProductRow } from "./SpeciesStockProductRow";
+import { StockTransferPoolButton } from "./StockTransferDialog";
 
 type StockViewMode = "tank" | "species";
 type StockInViewProps = {
@@ -775,6 +776,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
           <p className="text-sm text-muted-foreground">按缸位或品种查看和管理在缸库存</p>
         </div>
 	        <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
+	          <StockTransferPoolButton refreshKey={state.stock} />
 	          {(permission.canCreate || permission.canDelete) && <InventoryAdjustmentDialog />}
 	          <ToggleGroup
             type="single"
@@ -1282,7 +1284,13 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                 />
               </div>
 
-              {!fromSubTank && (
+              {editing.id && (
+                <div className="text-sm leading-6">
+                  <span className="text-muted-foreground">当前缸位：</span>{tankMetaById.get(editing.subTankId)?.label ?? "未知缸位"}
+                  <p className="text-xs text-muted-foreground">更换缸位请到日常管理先签发，再在目标缸签收；此处仅修改入库资料。</p>
+                </div>
+              )}
+              {!editing.id && !fromSubTank && (
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="grid gap-2">
                     <Label><span className="text-red-500">*</span> 缸组</Label>

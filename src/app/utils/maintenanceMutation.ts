@@ -63,13 +63,14 @@ function canonicalValue(value: unknown): unknown {
 }
 
 export function maintenanceStockExpectedSnapshot(
-  item: Pick<StockItem, "id" | "subTankId" | "status" | "lost">
+  item: Pick<StockItem, "id" | "subTankId" | "status" | "lost" | "tankTransfer">
 ): MaintenanceStockExpectedSnapshot {
   return {
     id: String(item.id),
     subTankId: String(item.subTankId ?? ""),
     status: item.status,
     lost: item.lost === true,
+    tankTransferId: item.tankTransfer?.id ?? "",
   };
 }
 

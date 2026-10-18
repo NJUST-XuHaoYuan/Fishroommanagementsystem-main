@@ -1,4 +1,5 @@
 import type { OrderItem, Shipment, StockItem, TankGroup } from "../store";
+import { isStockInTransfer } from "./inventory.ts";
 
 export type StockLocationSnapshot = { siteId: string; subTankId: string };
 export type ExpectedStockLocations = Record<string, StockLocationSnapshot>;
@@ -15,10 +16,14 @@ export function orderOutboundItems(items: OrderItem[], shipments: Shipment[], ac
     inventoryActiveItems,
     unshippedItems,
     lostUnshippedItems: unshippedItems.filter((item) => findStock(item.stockItemId)?.lost),
+    transferUnshippedItems: unshippedItems.filter((item) => {
+      const stock = findStock(item.stockItemId);
+      return Boolean(stock && isStockInTransfer(stock));
+    }),
     unavailableUnshippedItems: unshippedItems.filter((item) => !findStock(item.stockItemId)),
     shippableUnshippedItems: unshippedItems.filter((item) => {
       const stock = findStock(item.stockItemId);
-      return Boolean(stock) && !stock?.lost;
+      return Boolean(stock) && !stock?.lost && !isStockInTransfer(stock!);
     }),
   };
 }

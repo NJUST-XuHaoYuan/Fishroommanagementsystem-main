@@ -9,6 +9,12 @@ let writeLock = Promise.resolve();
 // without inventing a debug HTTP route in the application.
 if (persistWrites && typeof process.send === "function") process.on("message", (message) => {
   if (message?.type === "fishroom-test-state-read") process.send({ type: "fishroom-test-state", requestId: message.requestId, state, revision });
+  // Simulate account changes in another session without exposing a production debug API.
+  if (message?.type === "fishroom-test-personnel-patch") {
+    state.personnel = (state.personnel ?? []).map((person) => person.id === message.personnelId ? { ...person, ...message.patch } : person);
+    revision = String(Number(revision) + 1);
+    process.send({ type: "fishroom-test-personnel-patched", requestId: message.requestId });
+  }
 });
 const settlements = Array.isArray(fixture.platformSettlements)
   ? fixture.platformSettlements

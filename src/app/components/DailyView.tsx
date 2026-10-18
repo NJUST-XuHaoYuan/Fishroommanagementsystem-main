@@ -23,7 +23,7 @@ import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory"
 import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { authJsonHeaders } from "../utils/authSession";
-import { normalizeSiteId, siteName } from "../utils/sites";
+import { siteName } from "../utils/sites";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, buildStockPriceDetailsPatch, isStockSpecialPrice, stockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
@@ -31,6 +31,7 @@ import { StockPriceField } from "./StockPriceField";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import { StockTransferDialog, StockTransferPoolButton, notifyStockTransfersChanged, stockTransferRecordLabel, type StockTransferTarget } from "./StockTransferDialog";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
@@ -74,7 +75,7 @@ type DailyViewProps = {
   onOpenOrder?: (orderId: string) => void;
 };
 
-export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder }: DailyViewProps = {}) {
+export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewProps = {}) {
   const { state, setState, saveBioRecordChange, saveDailyLog, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
   const lossPermission = usePermission("lossRecords");
@@ -137,10 +138,9 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveItemIds, setMoveItemIds] = useState<string[]>([]);
-  const [targetGroupId, setTargetGroupId] = useState("");
-  const [targetSubTankId, setTargetSubTankId] = useState("");
   const [moveNotes, setMoveNotes] = useState("");
   const [moveSaving, setMoveSaving] = useState(false);
+  const [receiveTarget, setReceiveTarget] = useState<StockTransferTarget | undefined>();
 
   // Batch observation/treatment state
   const [batchRecordOpen, setBatchRecordOpen] = useState(false);
@@ -325,11 +325,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     }
     return null;
   };
-  const siteIdForStockItem = (item?: StockItem | null) => {
-    if (!item) return "";
-    const tankSiteId = tankContextBySubId(item.subTankId)?.group.siteId;
-    return normalizeSiteId(tankSiteId ?? item.siteId);
-  };
 
   // 是否有任何过滤条件激活
   const term = normalizeSearchText(q);
@@ -469,8 +464,6 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
   const movingItems = moveItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
-  const moveTargetGroups = allTankGroups?.length ? allTankGroups : state.tankGroups;
-  const targetSubTanks = moveTargetGroups.find((g) => g.id === targetGroupId)?.subTanks ?? [];
   const batchRecordItems = batchRecordItemIds
     .map((id) => stockItem(id))
     .filter(Boolean) as StockItem[];
@@ -521,26 +514,12 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 
   const openMoveDialog = (ids: string[]) => {
     if (!permission.requirePermission("update")) return;
-    const validIds = ids.filter((id) => {
+    const validIds = Array.from(new Set(ids)).filter((id) => {
       const item = stockItem(id);
       return item && isPhysicallyInTank(item, shippedOutStockIds);
     });
     if (validIds.length === 0) return toast.error("请选择要移缸的鱼");
-    const first = stockItem(validIds[0]);
-    const currentGroupId = first
-      ? state.tankGroups.find((g) => g.subTanks.some((t) => t.id === first.subTankId))?.id
-      : "";
-    const sourceSiteId = siteIdForStockItem(first);
-    const sameSiteGroups = moveTargetGroups.filter((group) => normalizeSiteId(group.siteId) === sourceSiteId);
-    const defaultGroup =
-      sameSiteGroups.find((g) => g.id !== currentGroupId) ??
-      sameSiteGroups[0] ??
-      moveTargetGroups.find((g) => g.id !== currentGroupId) ??
-      moveTargetGroups[0];
-    if (!defaultGroup) return toast.error("没有可选择的目标缸组");
     setMoveItemIds(validIds);
-    setTargetGroupId(defaultGroup?.id ?? "");
-    setTargetSubTankId("");
     setMoveNotes("");
     maintenanceTicketRef.current = null;
     setBioOpen(false);
@@ -551,20 +530,12 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
     if (!permission.requirePermission("update")) return;
     if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
     if (moveItemIds.length === 0) return toast.error("请选择要移缸的鱼");
-    if (!targetSubTankId) return toast.error("请选择目标子缸");
-    if (movingItems.length > 0 && movingItems.every((item) => item.subTankId === targetSubTankId))
-      return toast.error("目标子缸与当前子缸相同");
-    const targetGroup = moveTargetGroups.find((group) =>
-      group.subTanks.some((tank) => tank.id === targetSubTankId)
-    );
-    if (!targetGroup) return toast.error("目标子缸不存在或已被删除");
-    if (!confirmWrite("移缸", `将移动 ${moveItemIds.length} 条鱼到目标子缸。`)) return;
+    if (movingItems.length !== moveItemIds.length || movingItems.some((item) => !isPhysicallyInTank(item, shippedOutStockIds)))
+      return toast.error("所选鱼的库存状态已变化，请关闭弹窗并刷新后重新选择");
     const change = {
-      mode: "move" as const,
+      mode: "transferIssue" as const,
       itemIds: movingItems.map((item) => item.id),
       expectedItems: movingItems.map(maintenanceStockExpectedSnapshot),
-      targetSubTankId,
-      moveDate: today,
       moveNotes: moveNotes.trim(),
     };
     const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
@@ -578,12 +549,13 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
       finishMaintenanceRequest(maintenanceRequestInFlightRef);
       setMoveSaving(false);
     }
-    if (!saveResult.ok) return toast.error(saveResult.error || "移缸保存失败，请刷新后重试");
+    if (!saveResult.ok) return toast.error(saveResult.error || "签发失败，请刷新后重试");
     maintenanceTicketRef.current = null;
     setMoveOpen(false);
     setSelectedIds(new Set());
     setSelectMode(false);
-    toast.success(`已移缸 ${moveItemIds.length} 条`);
+    notifyStockTransfersChanged();
+    toast.success(`已签发 ${moveItemIds.length} 条，等待目标缸签收`);
   };
 
   const openBatchStatusDialog = (ids: string[]) => {
@@ -1371,7 +1343,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                       disabled={selectedItems.length === 0}
                       onClick={() => openMoveDialog(Array.from(selectedIds))}
                     >
-                      移到子缸
+                      签发移缸
                     </Button>
                   )}
                   {canRegisterLoss && (
@@ -1388,6 +1360,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                   )}
                 </>
               )}
+              <StockTransferPoolButton className="min-h-10" />
               <div className="relative min-w-0 flex-1 basis-full sm:min-w-[13rem] sm:basis-auto sm:flex-none">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                 <Input
@@ -1531,6 +1504,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                               </span>
                             )}
                           </div>
+                          <div className="ml-2 flex items-center gap-2">
+                          {permission.canUpdate && <Button type="button" size="sm" variant="ghost" className="min-h-10 px-2 text-xs text-sky-700" onClick={() => setReceiveTarget({ subTankId: t.id, tankName: `${siteName(state, g.siteId)} / ${g.name} / ${t.name}` })}>签收入缸</Button>}
                           {selectMode && canBatchSelect && total > 0 && (
                             <button
                               type="button"
@@ -1540,6 +1515,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                               {allSelected ? "取消" : "全选"}
                             </button>
                           )}
+                          </div>
                         </div>
 
                         {/* 商品分组列表 */}
@@ -1875,7 +1851,8 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                         <div className="flex flex-wrap items-center gap-2">
                           {ev.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
                           {ev.type === "record" && ev.sourceType === "dailyLog" && <ClipboardList className="size-3.5 text-blue-600" />}
-                          {ev.type === "record" && ev.sourceType !== "dailyLog" && <Camera className="size-3.5 text-emerald-600" />}
+                          {ev.type === "record" && stockTransferRecordLabel(ev.sourceType) && <ArrowRightLeft className="size-3.5 text-emerald-600" />}
+                          {ev.type === "record" && ev.sourceType !== "dailyLog" && !stockTransferRecordLabel(ev.sourceType) && <Camera className="size-3.5 text-emerald-600" />}
                           {ev.type === "sold" && <ShoppingBag className="size-3.5 text-yellow-600" />}
                           {ev.type === "shipment" && <Truck className="size-3.5 text-violet-600" />}
                           <span className={`text-xs ${
@@ -1893,7 +1870,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                                   ? "物流"
                                   : ev.sourceType === "dailyLog"
                                     ? "缸组养护"
-                                    : "观察/治疗记录"}
+                                    : stockTransferRecordLabel(ev.sourceType) || "观察/治疗记录"}
                           </span>
                         </div>
                         <span className="text-xs tabular-nums text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
@@ -1943,6 +1920,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                       {ev.type === "record" && (
                         <>
                           {ev.text && <p className="text-foreground">{ev.text}</p>}
+                          {stockTransferRecordLabel(ev.sourceType) && <p className="mt-1 text-xs text-muted-foreground">系统留存记录，不可修改或删除{ev.operator ? `；操作员：${ev.operator}` : ""}</p>}
                           {ev.sourceType === "dailyLog" && (
                             <p className="mt-1 text-xs text-blue-700">
                               来自养护日志
@@ -2016,7 +1994,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
                               ))}
                             </div>
                           )}
-                          {ev.sourceType !== "dailyLog" && (permission.canUpdate || permission.canDelete) && (
+                          {ev.sourceType !== "dailyLog" && !stockTransferRecordLabel(ev.sourceType) && (permission.canUpdate || permission.canDelete) && (
                             editingRecordId === ev.id ? (
                               <div className="mt-3 grid gap-3 border-t pt-3">
                                 <div className="grid gap-1.5">
@@ -2202,7 +2180,7 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 		              {permission.canUpdate && bioItem && (
 		                <Button variant="outline" disabled={recordMediaUploading || recordActionSaving} onClick={() => openMoveDialog([bioItem.id])}>
 		                  <ArrowRightLeft className="size-4 mr-1" />
-		                  移缸
+		                  签发移缸
 		                </Button>
 		              )}
 		              {canRegisterLoss && bioItem && (
@@ -2463,14 +2441,15 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	      </Dialog>
 
 	      {/* ── 移缸 Dialog ── */}
-	      <Dialog open={moveOpen} onOpenChange={setMoveOpen}>
+	      <StockTransferDialog open={!!receiveTarget} onOpenChange={(open) => { if (!open) setReceiveTarget(undefined); }} target={receiveTarget} />
+	      <Dialog open={moveOpen} onOpenChange={(open) => { if (!moveSaving) setMoveOpen(open); }}>
 	        <DialogContent aria-describedby={undefined} className="max-w-lg">
 	          <DialogHeader>
-	            <DialogTitle>移缸</DialogTitle>
+	            <DialogTitle>签发移缸</DialogTitle>
 	          </DialogHeader>
 	          <div className="grid gap-4 py-2">
 	            <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-	              <div className="font-medium mb-2">本次移动 {movingItems.length} 条</div>
+	              <div className="font-medium mb-2">本次签发 {movingItems.length} 条</div>
 	              <div className="flex flex-col gap-1 text-xs text-muted-foreground max-h-28 overflow-y-auto">
 	                {movingItems.map((item) => {
 	                  const p = product(item.productId);
@@ -2483,57 +2462,22 @@ export function DailyView({ allTankGroups, allOrders, allShipments, onOpenOrder 
 	                })}
 	              </div>
 	            </div>
-	            <div className="grid gap-3 sm:grid-cols-2">
-	              <div className="grid gap-2">
-	                <Label>目标缸组<span className="text-red-500 ml-0.5">*</span></Label>
-	                <Select
-	                  value={targetGroupId}
-	                  onValueChange={(value) => {
-	                    setTargetGroupId(value);
-	                    setTargetSubTankId("");
-	                  }}
-	                >
-	                  <SelectTrigger><SelectValue placeholder="选择缸组" /></SelectTrigger>
-	                  <SelectContent>
-                    {moveTargetGroups.map((group) => (
-	                      <SelectItem key={group.id} value={group.id}>
-	                        {siteName(state, group.siteId)} / {group.name}
-	                      </SelectItem>
-	                    ))}
-	                  </SelectContent>
-	                </Select>
-	              </div>
-	              <div className="grid gap-2">
-	                <Label>目标子缸<span className="text-red-500 ml-0.5">*</span></Label>
-	                <Select
-	                  value={targetSubTankId}
-	                  onValueChange={setTargetSubTankId}
-	                  disabled={!targetGroupId || targetSubTanks.length === 0}
-	                >
-	                  <SelectTrigger>
-	                    <SelectValue placeholder={targetGroupId ? "选择子缸" : "先选缸组"} />
-	                  </SelectTrigger>
-	                  <SelectContent>
-	                    {targetSubTanks.map((tank) => (
-	                      <SelectItem key={tank.id} value={tank.id}>{tank.name}</SelectItem>
-	                    ))}
-	                  </SelectContent>
-	                </Select>
-	              </div>
-	            </div>
+                <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示、新订单选鱼及实际出库。接收人员在目标缸选择这些鱼后签收入缸；误签发可签回原缸。</p>
 	            <div className="grid gap-2">
 	              <Label>移缸备注</Label>
 	              <Textarea
 	                rows={2}
 	                value={moveNotes}
+	                disabled={moveSaving}
 	                onChange={(e) => setMoveNotes(e.target.value)}
 	                placeholder="选填，如隔离、配对、调整密度等"
 	              />
+	              <p className="text-xs text-muted-foreground">备注会显示在全场地在途列表，请勿填写客户、订单或金额等敏感信息。</p>
 	            </div>
 	          </div>
 	          <DialogFooter>
             <Button variant="outline" onClick={() => setMoveOpen(false)} disabled={moveSaving}>取消</Button>
-            <Button onClick={submitMove} disabled={moveSaving}>{moveSaving ? "保存中…" : "确认移缸"}</Button>
+            <Button onClick={submitMove} disabled={moveSaving}>{moveSaving ? "签发中…" : "确认签发"}</Button>
 	          </DialogFooter>
 	        </DialogContent>
 	      </Dialog>

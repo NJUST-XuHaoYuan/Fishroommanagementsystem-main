@@ -8,6 +8,18 @@ import {
   isVisibleInStockInventory,
 } from "./inventory.ts";
 
+test("transfer is excluded from physical stock without becoming a sale or loss", () => {
+  for (const sold of [false, true]) {
+    const fish = { id: "moving", sold, lost: false, status: "sick", tankTransfer: { id: "transfer", status: "in_transit" } };
+    const out = getInventoryOutStockIds({ stock: [fish] });
+    assert.equal(out.has(fish.id), false);
+    assert.equal(isPhysicallyInTank(fish, out), false);
+    assert.equal(isVisibleInStockInventory(fish, out), false);
+    assert.equal(isPhysicallyInTank({ ...fish, tankTransfer: { ...fish.tankTransfer, status: "received" } }, out), true);
+    assert.equal(fish.status, "sick");
+  }
+});
+
 test("safe server projection hides cross-site fulfilled stock without shipment details", () => {
   const hiddenIds = getInventoryOutStockIds({
     shipments: [],

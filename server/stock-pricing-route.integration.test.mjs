@@ -351,10 +351,14 @@ test("cross-site maintenance movement preserves manual prices and follows produc
   const s = await setup(t); ok(await s.upsert(200));
   const before = await s.state(); const itemIds = ["follower", "manual-different", "legacy-different"];
   const result = await s.request("/api/maintenance/save", { token: s.tokens.admin, body: {
-    mode: "move", clientMutationId: "pricing-cross-site-move", itemIds,
-    expectedItems: itemIds.map((id) => { const item = byId(before, id); return { id, subTankId: item.subTankId, status: item.status, lost: item.lost }; }),
-    targetSubTankId: "tank-j", moveDate: "2026-09-10", moveNotes: "价格来源回归测试",
+    mode: "transferIssue", clientMutationId: "pricing-cross-site-move", itemIds,
+    expectedItems: itemIds.map((id) => { const item = byId(before, id); return { id, subTankId: item.subTankId, status: item.status, lost: item.lost, tankTransferId: "" }; }),
+    moveNotes: "价格来源回归测试",
   } }); ok(result);
+  ok(await s.request("/api/maintenance/save", { token: s.tokens.admin, body: {
+    mode: "transferReceive", clientMutationId: "pricing-cross-site-receive", targetSubTankId: "tank-j",
+    items: result.body.stockUpdates.map((item) => ({ stockItemId: item.id, transferId: item.tankTransfer.id })),
+  } }));
   let state = await s.state();
   for (const id of itemIds) { assert.equal(byId(state, id).siteId, "jiangyin"); assert.equal(byId(state, id).batchId, "batch-n"); }
   assertPricing(state, "follower", 200, "product"); assertPricing(state, "manual-different", 150, "manual"); assertPricing(state, "legacy-different", 200, "product");

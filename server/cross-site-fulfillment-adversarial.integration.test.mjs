@@ -73,9 +73,13 @@ test("a move after opening fulfillment rejects stale location snapshots and hidd
   const original = (await s.readPersistedState()).stock.find((item) => item.id === "moved-fish");
   const staleLocations = locations([original]);
   const moved = await s.request("/api/maintenance/save", { token: s.tokens.admin, body: {
-    mode: "move", clientMutationId: "cross-site-after-open", itemIds: [original.id], expectedItems: [maintenanceExpectedStockSnapshot(original)],
-    targetSubTankId: "tank-j", moveDate: "2026-09-28", moveNotes: "弹窗打开后调拨",
+    mode: "transferIssue", clientMutationId: "cross-site-after-open", itemIds: [original.id], expectedItems: [{ ...maintenanceExpectedStockSnapshot(original), tankTransferId: "" }],
+    moveNotes: "弹窗打开后调拨",
   } }); ok(moved);
+  const received = await s.request("/api/maintenance/save", { token: s.tokens.admin, body: {
+    mode: "transferReceive", clientMutationId: "cross-site-after-open-receive", targetSubTankId: "tank-j",
+    items: [{ stockItemId: original.id, transferId: moved.body.stockUpdates[0].tankTransfer.id }],
+  } }); ok(received);
   const before = await s.readPersistedState();
   const stale = await s.outbound({ expectedStockLocations: staleLocations });
   assert.equal(stale.response.status, 409, JSON.stringify(stale.body));

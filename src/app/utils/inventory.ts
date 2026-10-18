@@ -47,7 +47,12 @@ export function getInventoryOutStockIds(state: {
 }
 
 export function isPhysicallyInTank(item: StockItem, shippedOutStockIds: Set<string>): boolean {
-  return !item.lost && !shippedOutStockIds.has(inventoryId(item.id));
+  return !item.lost && !isStockInTransfer(item) && !shippedOutStockIds.has(inventoryId(item.id));
+}
+
+/** Movement is independent of health and order ownership. It is not a sale/outbound. */
+export function isStockInTransfer(item: Pick<StockItem, "tankTransfer">): boolean {
+  return item.tankTransfer?.status === "in_transit";
 }
 
 export function getInventoryHiddenStockIds(
@@ -59,5 +64,5 @@ export function getInventoryHiddenStockIds(
 }
 
 export function isVisibleInStockInventory(item: StockItem, hiddenStockIds: Set<string>): boolean {
-  return !item.lost && !hiddenStockIds.has(inventoryId(item.id));
+  return isPhysicallyInTank(item, hiddenStockIds);
 }

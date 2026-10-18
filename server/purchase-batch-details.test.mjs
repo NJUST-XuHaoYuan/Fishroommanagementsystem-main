@@ -67,6 +67,64 @@ test("hidden entry site also hides its operator and does not leak through search
   assert.equal(buildPurchaseBatchDetail(state, { ...staff, search: "PRIVATE_ENTRY_TANK" }).total, 0);
 });
 
+test("active transfers have their own physical status even when already sold", () => {
+  const state = fresh();
+  const item = state.stock.find((stock) => stock.id === "fish-in");
+  item.sold = true;
+  item.tankTransfer = {
+    id: "transfer-active",
+    status: "in_transit",
+    issuedAt: "2026-08-20T01:00:00Z",
+    issuedBy: "staff-a",
+    fromSiteId: "nanjing",
+    fromSubTankId: "tank-n2",
+    fromTankName: "南京鱼缸 / N2",
+    notes: "",
+  };
+  const detail = buildPurchaseBatchDetail(state, admin);
+  const row = detail.items.find((fish) => fish.stockItemId === "fish-in");
+  assert.equal(row.status, "inTransit");
+  assert.equal(row.statusLabel, "移缸在途");
+  assert.equal(row.currentTankName, "");
+  assert.equal(row.currentSubTankId, "");
+  assert.equal(row.tankKey, "inTransit");
+  assert.equal(detail.summary.inTransit, 1);
+  assert.equal(detail.tanks.find((tank) => tank.key === "inTransit").tankName, "移缸在途");
+  assert.equal(parseBatchDetailQuery(new URLSearchParams("batchId=batch-nj&siteId=nanjing&status=inTransit")).status, "inTransit");
+  assert.equal(parseBatchDetailQuery(new URLSearchParams("batchId=batch-nj&siteId=nanjing&tankKey=inTransit")).tankKey, "inTransit");
+});
+
+test("transfer history requires both endpoint sites before showing route text", () => {
+  const state = fresh();
+  state.bioRecords.push({
+    id: "transfer-received-private-source",
+    siteId: "nanjing",
+    stockItemId: "fish-in",
+    date: "2026-08-20T10:00:00+08:00",
+    sourceType: "stockTransferReceived",
+    text: "移缸签收：PRIVATE_JY_TANK / J1 → 南京鱼缸 / N2",
+    transferId: "transfer-private-source",
+    fromSiteId: "jiangyin",
+    fromSubTankId: "tank-j1",
+    fromTankName: "PRIVATE_JY_TANK / J1",
+    toSiteId: "nanjing",
+    toSubTankId: "tank-n2",
+    toTankName: "南京鱼缸 / N2",
+    photos: [],
+    videos: [],
+    operator: "staff-a",
+  });
+  const staffEvent = buildPurchaseBatchFishHistory(state, { ...staff, stockItemId: "fish-in" }).events
+    .find((event) => event.id === "bio:transfer-received-private-source");
+  assert.equal(staffEvent.type, "move");
+  assert.equal(staffEvent.title, "移缸");
+  assert.match(staffEvent.text, /历史位置已隐藏/);
+  assert.doesNotMatch(JSON.stringify(staffEvent), /PRIVATE_JY_TANK/);
+  const adminEvent = buildPurchaseBatchFishHistory(state, { ...admin, stockItemId: "fish-in" }).events
+    .find((event) => event.id === "bio:transfer-received-private-source");
+  assert.match(adminEvent.text, /PRIVATE_JY_TANK/);
+});
+
 test("ambiguous or missing fish item prices remain unknown rather than using current price or same-product orders", () => {
   const state = fresh();
   const order = state.orders.find((item) => item.id === "ORDER-SALE");

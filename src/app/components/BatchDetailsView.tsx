@@ -8,7 +8,8 @@ import { BatchOrderDialog } from "./BatchOrderDialog";
 import { BatchStockValuationSection } from "./BatchStockValuationSection";
 import type { BatchStockValuation } from "../utils/batchStockValuation";
 
-type FishStatus = "all" | "inStock" | "sold" | "lost" | "removed" | "restricted";
+type FishStatus = "all" | "inStock" | "inTransit" | "sold" | "lost" | "removed" | "restricted";
+type BatchFishSummary = { total: number; inStock: number; inTransit?: number; sold: number; lost: number; removed: number; restricted?: number };
 type FishSummary = {
   stockItemId: string;
   code?: string;
@@ -30,7 +31,7 @@ type FishSummary = {
 type BatchDetailResponse = {
   ok: boolean;
   batch: { id: string; batchNo: string; supplier: string; arrivalDate: string; siteName: string };
-  summary: { total: number; inStock: number; sold: number; lost: number; removed: number; restricted?: number };
+  summary: BatchFishSummary;
   valuation?: BatchStockValuation;
   items: FishSummary[];
   tanks: BatchTank[];
@@ -44,6 +45,7 @@ type BatchTank = {
   tankName: string;
   total: number;
   inStock: number;
+  inTransit?: number;
   sold: number;
   lost: number;
   removed: number;
@@ -153,7 +155,7 @@ function FishHistory({ batchId, siteId, stockItemId, onOpenOrder }: {
   </div>;
 }
 
-function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSummary; batchId: string; siteId: string; onOpenOrder?: OpenOrder }) {
+export function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSummary; batchId: string; siteId: string; onOpenOrder?: OpenOrder }) {
   const [expanded, setExpanded] = useState(false);
   const tone = fish.status === "lost" ? "border-red-200 bg-red-50 text-red-800"
     : fish.status === "sold" ? "border-amber-200 bg-amber-50 text-amber-900"
@@ -170,8 +172,8 @@ function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSummary; ba
       <dl className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-sm lg:grid-cols-4">
         <div><dt className="text-xs text-muted-foreground">入库时间</dt><dd className="mt-1 tabular-nums">{batchRecordDate(fish.inDate)}</dd></div>
         <div><dt className="text-xs text-muted-foreground">初始入缸</dt><dd className="mt-1 break-words">{fish.initialTankName || "未记录"}</dd></div>
-        <div><dt className="text-xs text-muted-foreground">{fish.status === "inStock" ? "当前缸位" : "档案缸位"}</dt>
-          <dd className="mt-1 break-words">{[fish.currentSiteName, fish.currentTankName].filter(Boolean).join(" · ") || (fish.status === "restricted" ? "无权查看" : "未记录")}</dd></div>
+        <div><dt className="text-xs text-muted-foreground">{fish.status === "inTransit" ? "当前位置" : fish.status === "inStock" ? "当前缸位" : "档案缸位"}</dt>
+          <dd className="mt-1 break-words">{fish.status === "inTransit" ? "移缸在途，尚未签收入缸" : [fish.currentSiteName, fish.currentTankName].filter(Boolean).join(" · ") || (fish.status === "restricted" ? "无权查看" : "未记录")}</dd></div>
         <div><dt className="text-xs text-muted-foreground">{fish.status === "lost" ? "死亡 / 损耗时间" : "关联订单"}</dt>
           <dd className="mt-1 tabular-nums">{fish.status === "lost" ? batchRecordDate(fish.lossDate) : fish.sales.length ? `${fish.sales.length} 条` : fish.status === "restricted" ? "无可查看的关联" : "暂无关联"}</dd></div>
       </dl>
@@ -195,6 +197,25 @@ function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSummary; ba
     </div>
     {expanded && <div id={`fish-history-${fish.stockItemId}`}><FishHistory batchId={batchId} siteId={siteId} stockItemId={fish.stockItemId} onOpenOrder={onOpenOrder} /></div>}
   </article>;
+}
+
+export function batchFishStatusFilters(summary?: BatchFishSummary): { value: FishStatus; label: string; count?: number }[] {
+  return [
+    { value: "all", label: "全部", count: summary?.total },
+    { value: "inStock", label: "在库", count: summary?.inStock },
+    { value: "inTransit", label: "移缸在途", count: summary?.inTransit },
+    { value: "sold", label: "已售", count: summary?.sold },
+    { value: "lost", label: "损耗", count: summary?.lost },
+    { value: "removed", label: "已移除", count: summary?.removed },
+    ...(summary?.restricted ? [{ value: "restricted" as const, label: "记录受限", count: summary.restricted }] : []),
+  ];
+}
+
+export function BatchTankCounts({ tank }: { tank: BatchTank }) {
+  return <span className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+    {!!tank.inStock && <span className="text-teal-800">在库 {tank.inStock}</span>}{!!tank.inTransit && <span>移缸在途 {tank.inTransit}</span>}{!!tank.sold && <span>已售 {tank.sold}</span>}
+    {!!tank.lost && <span className="text-red-800">损耗 {tank.lost}</span>}{!!tank.removed && <span>已移除 {tank.removed}</span>}{!!tank.restricted && <span>受限 {tank.restricted}</span>}
+  </span>;
 }
 
 export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIdentity }: {
@@ -235,14 +256,7 @@ export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIden
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [query, queryKey, scope]);
-  const filters: { value: FishStatus; label: string; count?: number }[] = [
-    { value: "all", label: "全部", count: summary?.total },
-    { value: "inStock", label: "在库", count: summary?.inStock },
-    { value: "sold", label: "已售", count: summary?.sold },
-    { value: "lost", label: "损耗", count: summary?.lost },
-    { value: "removed", label: "已移除", count: summary?.removed },
-    ...(summary?.restricted ? [{ value: "restricted" as const, label: "记录受限", count: summary.restricted }] : []),
-  ];
+  const filters = batchFishStatusFilters(summary);
   return <section className="flex flex-col gap-5 pb-20">
     <div>
       <Button variant="ghost" size="sm" className="mb-3 -ml-2" onClick={onBack}><ArrowLeft className="size-4" aria-hidden="true" />返回采购批次</Button>
@@ -281,19 +295,16 @@ export function BatchDetailsView({ batchId, siteId, onBack, batchInfo, batchIden
     {error && <LoadError error={error} onRetry={() => setRetry(value => value + 1)} />}
     {(loading || (!error && !data)) && <div role="status" className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden="true" />正在加载批次明细…</div>}
     {!loading && !error && data && <>
-      {viewMode === "tanks" && <p className="text-xs leading-relaxed text-muted-foreground">按档案当前缸位分组；已售、损耗鱼显示最后留存缸位，不代表出库或死亡发生地。具体地点请展开历史记录核对。</p>}
+      {viewMode === "tanks" && <p className="text-xs leading-relaxed text-muted-foreground">按档案当前缸位分组；移缸在途单独列出，不占原缸位。已售、损耗鱼显示最后留存缸位，不代表出库或死亡发生地。具体地点请展开历史记录核对。</p>}
       {tankOverview ? <>
         <p role="status" className="text-xs text-muted-foreground">{tanks.length} 个缸位分组 · {data.total} 条鱼{search && ` · “${search}”`} · 点击缸位查看鱼只</p>
         {tanks.length ? <div className="batch-tank-grid grid gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="批次缸位分布">
           {tanks.map(tank => <button key={tank.key} type="button" onClick={() => { setTankKey(tank.key); setPage(1); }}
-            aria-label={`查看缸位 ${[tank.siteName, tank.tankName].filter(Boolean).join(" ")}，${tank.total} 条鱼`}
+            aria-label={`${tank.key === "inTransit" ? "查看移缸在途" : `查看缸位 ${[tank.siteName, tank.tankName].filter(Boolean).join(" ")}`}，${tank.total} 条鱼`}
             className="min-w-0 rounded-lg border bg-card p-4 text-left transition-colors hover:border-teal-600 hover:bg-teal-50/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700">
-            <span className="flex items-start justify-between gap-3"><span className="min-w-0"><span className="block text-xs text-muted-foreground">{tank.siteName || "其他记录"}</span>
+            <span className="flex items-start justify-between gap-3"><span className="min-w-0"><span className="block text-xs text-muted-foreground">{tank.key === "inTransit" ? "待签收入缸" : tank.siteName || "其他记录"}</span>
               <span className="mt-1 block break-words text-base font-semibold">{tank.tankName || "缸位未记录"}</span></span><span className="shrink-0 text-sm tabular-nums">{tank.total} 条</span></span>
-            <span className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              {!!tank.inStock && <span className="text-teal-800">在库 {tank.inStock}</span>}{!!tank.sold && <span>已售 {tank.sold}</span>}
-              {!!tank.lost && <span className="text-red-800">损耗 {tank.lost}</span>}{!!tank.removed && <span>已移除 {tank.removed}</span>}{!!tank.restricted && <span>受限 {tank.restricted}</span>}
-            </span>
+            <BatchTankCounts tank={tank} />
           </button>)}
         </div> : <div className="rounded-lg border border-dashed px-5 py-10 text-center text-sm text-muted-foreground">没有符合条件的缸位记录，可以清除搜索或切换状态。</div>}
       </> : <>

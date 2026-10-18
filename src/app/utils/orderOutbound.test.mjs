@@ -9,6 +9,16 @@ const groups = [
 ];
 const sites = [{ id: "nanjing", name: "南京" }, { id: "jiangyin", name: "江阴" }];
 
+test("retained order fish in transfer cannot be fulfilled until received", () => {
+  const item = { stockItemId: "fish", price: 188 };
+  const stock = { id: "fish", sold: true, tankTransfer: { id: "transfer", status: "in_transit" } };
+  const result = orderOutboundItems([item], [], [stock]);
+  assert.deepEqual(result.inventoryActiveItems, [item]);
+  assert.deepEqual(result.transferUnshippedItems, [item]);
+  assert.deepEqual(result.shippableUnshippedItems, []);
+  assert.deepEqual(orderOutboundItems([item], [], [{ ...stock, tankTransfer: { ...stock.tankTransfer, status: "received" } }]).shippableUnshippedItems, [item]);
+});
+
 test("both cross-site directions retain sold order fish as outbound candidates without changing order origin", () => {
   for (const [origin, currentSite, subTankId] of [["nanjing", "jiangyin", "tank-jy"], ["jiangyin", "nanjing", "tank-nj"]]) {
     const order = { siteId: origin, items: [{ stockItemId: "fish", productId: "product", price: 400 }] };

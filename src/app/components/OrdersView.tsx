@@ -63,6 +63,7 @@ import {
   nowDatetimeLocal,
 } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import { notifyStockTransfersChanged, stockTransferRecordLabel } from "./StockTransferDialog";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
 import { bioRecordFromDraft, hasBioRecordDraftContent } from "../utils/bioRecordDraft";
 import {
@@ -2546,6 +2547,10 @@ function ReportDamageDialog({
         return toast.error("请选择补发库存鱼");
       if (new Set(replacements.map((item) => item.replacementStockItemId)).size !== replacements.length)
         return toast.error("同一条库存鱼不能重复补发");
+      if (replacements.some(({ replacementStockItemId }) => {
+        const stock = getStockItem(replacementStockItemId);
+        return !stock || stock.sold || !isPhysicallyInTank(stock, shippedOutStockIds);
+      })) return toast.error("所选补发鱼已售、移缸在途或库存状态有变化，请重新选择");
       result = {
         resolution: "reship",
         notes: reshipNotes.trim() || "物流报损，安排补发",
@@ -3032,7 +3037,7 @@ function StockItemDetailDialog({
     .filter((r) => r.stockItemId === stockItemId)
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  const tankName = currentTankName;
+  const tankName = s.tankTransfer?.status === "in_transit" ? "移缸在途，待签收入缸" : currentTankName;
 
   const statusLabel: Record<string, string> = { healthy: "正常", sick: "病弱", feeding: "开口", sold: "已售", lost: "已损耗" };
   const statusColor: Record<string, string> = {
@@ -3102,7 +3107,7 @@ function StockItemDetailDialog({
                 <div className="flex flex-col gap-2">
                   {bioRecs.map((r) => (
                     <div key={r.id} className="rounded-lg border p-3 text-sm">
-                      <div className="text-xs text-muted-foreground mb-1">{formatBioRecordTime(r.date)}</div>
+                      <div className="text-xs text-muted-foreground mb-1">{stockTransferRecordLabel(r.sourceType)} {formatBioRecordTime(r.date)}</div>
                       <p>{r.text}</p>
                       {r.photos.length > 0 && (
                         <div className="flex gap-2 mt-2 flex-wrap">
@@ -3169,8 +3174,6 @@ function StockPickerBioDialog({
   const [bioSaving, setBioSaving] = useState(false);
   const [downloadingMediaKey, setDownloadingMediaKey] = useState("");
   const newRecordIdRef = useRef(uid());
-  const [targetGroupId, setTargetGroupId] = useState("");
-  const [targetSubTankId, setTargetSubTankId] = useState("");
   const [moveNotes, setMoveNotes] = useState("");
   const [moveSaving, setMoveSaving] = useState(false);
   const [lossDate, setLossDate] = useState(today);
@@ -3257,14 +3260,7 @@ function StockPickerBioDialog({
     }
     return "—";
   };
-  const groupIdBySubTank = (subTankId?: string) => {
-    if (!subTankId) return "";
-    return state.tankGroups.find((group) =>
-      group.subTanks.some((tank) => tank.id === subTankId)
-    )?.id ?? "";
-  };
   const tankName = subTankName(item?.subTankId);
-  const targetSubTanks = state.tankGroups.find((group) => group.id === targetGroupId)?.subTanks ?? [];
   const shippedOutStockIds = getInventoryOutStockIds(state);
 
   const timeline = item
@@ -3420,10 +3416,6 @@ function StockPickerBioDialog({
     if (!permission.requirePermission("update")) return;
     if (recordMediaUploading) return toast.info("请等待照片或视频上传完成");
     if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("该鱼已不在当前库存中，不能移缸");
-    const currentGroupId = groupIdBySubTank(item.subTankId);
-    const defaultGroup = state.tankGroups.find((group) => group.id !== currentGroupId) ?? state.tankGroups[0];
-    setTargetGroupId(defaultGroup?.id ?? "");
-    setTargetSubTankId("");
     setMoveNotes("");
     maintenanceTicketRef.current = null;
     setActionMode("move");
@@ -3433,15 +3425,11 @@ function StockPickerBioDialog({
     if (!item) return;
     if (!permission.requirePermission("update")) return;
     if (isMaintenanceRequestInFlight(maintenanceRequestInFlightRef)) return;
-    if (!targetSubTankId) return toast.error("请选择目标子缸");
-    if (item.subTankId === targetSubTankId) return toast.error("目标子缸与当前子缸相同");
-    if (!confirmWrite("移缸", `将移动「${product?.name ?? item.productId}」到目标子缸。`)) return;
+    if (!isPhysicallyInTank(item, shippedOutStockIds)) return toast.error("库存状态已变化，请刷新后重新选择");
     const change = {
-      mode: "move" as const,
+      mode: "transferIssue" as const,
       itemIds: [item.id],
       expectedItems: [maintenanceStockExpectedSnapshot(item)],
-      targetSubTankId,
-      moveDate: today,
       moveNotes: moveNotes.trim(),
     };
     const ticket = maintenanceMutationTicket(maintenanceTicketRef.current, change, createMaintenanceClientMutationId);
@@ -3455,9 +3443,10 @@ function StockPickerBioDialog({
       finishMaintenanceRequest(maintenanceRequestInFlightRef);
       setMoveSaving(false);
     }
-    if (!saveResult.ok) return toast.error(saveResult.error || "移缸保存失败，请刷新后重试");
+    if (!saveResult.ok) return toast.error(saveResult.error || "签发失败，请刷新后重试");
     maintenanceTicketRef.current = null;
-    toast.success("已移缸");
+    notifyStockTransfersChanged();
+    toast.success("已签发，等待目标缸签收");
     onOpenChange(false);
   };
 
@@ -3627,14 +3616,14 @@ function StockPickerBioDialog({
                       <div className="mb-1 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           {event.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
-                          {event.type === "record" && <Camera className="size-3.5 text-emerald-600" />}
+                          {event.type === "record" && (stockTransferRecordLabel(event.sourceType) ? <ArrowRightLeft className="size-3.5 text-emerald-600" /> : <Camera className="size-3.5 text-emerald-600" />)}
                           {event.type === "sold" && <ShoppingCart className="size-3.5 text-yellow-600" />}
                           <span className="text-xs">
-                            {event.type === "stock_in" ? "入库" : event.type === "sold" ? "销售" : "观察记录"}
+                            {event.type === "stock_in" ? "入库" : event.type === "sold" ? "销售" : stockTransferRecordLabel(event.sourceType) || "观察记录"}
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {event.type === "record" && event.sourceType !== "dailyLog" && editingRecordId === event.id ? (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && !stockTransferRecordLabel(event.sourceType) && editingRecordId === event.id ? (
                             <div className="flex items-center gap-1">
                               <PreciseDateTimeInput
                                 min={minDatetimeForDate(item.inDate)}
@@ -3649,7 +3638,7 @@ function StockPickerBioDialog({
                           ) : (
                             <span className="text-xs text-muted-foreground">{formatBioRecordTime(event.date)}</span>
                           )}
-                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canUpdate && editingRecordId !== event.id && (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && !stockTransferRecordLabel(event.sourceType) && permission.canUpdate && editingRecordId !== event.id && (
                             <button
                               type="button"
                               onClick={() => startEditBioRecordTime(event.id, event.date)}
@@ -3659,7 +3648,7 @@ function StockPickerBioDialog({
                               改时间
                             </button>
                           )}
-                          {event.type === "record" && event.sourceType !== "dailyLog" && permission.canDelete && (
+                          {event.type === "record" && event.sourceType !== "dailyLog" && !stockTransferRecordLabel(event.sourceType) && permission.canDelete && (
                             <button type="button" disabled={bioSaving} onClick={() => deleteBioRecord(event.id)} className="text-xs text-red-400 hover:text-red-600 disabled:opacity-50" title="删除记录">
                               <X className="size-3" />
                             </button>
@@ -3671,6 +3660,7 @@ function StockPickerBioDialog({
                       {event.type === "record" && (
                         <>
                           {event.text && <p className="text-foreground">{event.text}</p>}
+                          {stockTransferRecordLabel(event.sourceType) && <p className="mt-1 text-xs text-muted-foreground">系统留存记录，不可修改或删除</p>}
                           {event.photos.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.photos.map((src, photoIndex) => (
@@ -3818,7 +3808,7 @@ function StockPickerBioDialog({
             {permission.canUpdate && item && (
               <Button variant="outline" disabled={recordMediaUploading || bioSaving} onClick={openMoveDialog}>
                 <ArrowRightLeft className="mr-1 size-4" />
-                移缸
+                签发移缸
               </Button>
             )}
             {canRegisterLoss && item && (
@@ -3842,10 +3832,10 @@ function StockPickerBioDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-    <Dialog open={open && actionMode === "move"} onOpenChange={(nextOpen) => !nextOpen && setActionMode("detail")}>
+    <Dialog open={open && actionMode === "move"} onOpenChange={(nextOpen) => !nextOpen && !moveSaving && setActionMode("detail")}>
       <DialogContent aria-describedby={undefined} className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>移缸</DialogTitle>
+          <DialogTitle>签发移缸</DialogTitle>
         </DialogHeader>
         {item && (
           <div className="grid gap-4 py-2">
@@ -3853,56 +3843,23 @@ function StockPickerBioDialog({
               <div className="font-medium">{product?.name ?? item.productId}</div>
               <div className="mt-1 text-xs text-muted-foreground">当前缸位：{subTankName(item.subTankId)}</div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-2">
-                <Label>目标缸组<span className="ml-0.5 text-red-500">*</span></Label>
-                <Select
-                  value={targetGroupId}
-                  onValueChange={(value) => {
-                    setTargetGroupId(value);
-                    setTargetSubTankId("");
-                  }}
-                >
-                  <SelectTrigger><SelectValue placeholder="选择缸组" /></SelectTrigger>
-                  <SelectContent>
-                    {state.tankGroups.map((group) => (
-                      <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-2">
-                <Label>目标子缸<span className="ml-0.5 text-red-500">*</span></Label>
-                <Select
-                  value={targetSubTankId}
-                  onValueChange={setTargetSubTankId}
-                  disabled={!targetGroupId || targetSubTanks.length === 0}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder={targetGroupId ? "选择子缸" : "先选缸组"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {targetSubTanks.map((tank) => (
-                      <SelectItem key={tank.id} value={tank.id}>{tank.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+            <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示、新订单选鱼及实际出库。接收人员在目标缸选择后签收入缸；误签发可签回原缸。</p>
             <div className="grid gap-2">
               <Label>移缸备注</Label>
               <Textarea
                 rows={2}
                 value={moveNotes}
+                disabled={moveSaving}
                 onChange={(event) => setMoveNotes(event.target.value)}
                 placeholder="选填，如隔离、配对、调整密度等"
               />
+              <p className="text-xs text-muted-foreground">备注会显示在全场地在途列表，请勿填写客户、订单或金额等敏感信息。</p>
             </div>
           </div>
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => setActionMode("detail")} disabled={moveSaving}>取消</Button>
-          <Button onClick={submitMove} disabled={moveSaving}>{moveSaving ? "保存中…" : "确认移缸"}</Button>
+          <Button onClick={submitMove} disabled={moveSaving}>{moveSaving ? "签发中…" : "确认签发"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -4064,7 +4021,7 @@ function ItemsWithShipments({
           </div>
         </td>
         <td className="px-4 py-2.5 text-sm text-muted-foreground">
-          {inventoryRemoved ? "已从库存移除" : s ? subTankName(s.subTankId) : "—"}
+          {inventoryRemoved ? "已从库存移除" : s?.tankTransfer?.status === "in_transit" ? "移缸在途，待签收" : s ? subTankName(s.subTankId) : "—"}
         </td>
         <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
         <td className="px-4 py-2.5 text-sm text-right">
@@ -4687,7 +4644,7 @@ function OrderDetailDialog({
     : 0;
   const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
   const { shippedItemIds, inventoryActiveItems, unshippedItems, lostUnshippedItems,
-    unavailableUnshippedItems, shippableUnshippedItems } = orderOutboundItems(order?.items ?? [], orderShipments, accessibleStock);
+    transferUnshippedItems, unavailableUnshippedItems, shippableUnshippedItems } = orderOutboundItems(order?.items ?? [], orderShipments, accessibleStock);
   const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || s.status === "damaged"
@@ -4907,6 +4864,9 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return false;
     const lostSelected = data.selectedItemIds.filter((id) => getAccessibleStockItem(id)?.lost);
     if (lostSelected.length > 0) { toast.error("已损耗商品不能出库，请先从订单中删除"); return false; }
+    if (data.selectedItemIds.some((id) => getAccessibleStockItem(id)?.tankTransfer?.status === "in_transit")) {
+      toast.error("所选鱼移缸在途，请先签收入缸再出库"); return false;
+    }
     const confirmDetail = data.shipMethod === "pickup"
       ? `将确认 ${data.selectedItemIds.length} 条商品上门自取并直接签收。`
       : `将出库 ${data.selectedItemIds.length} 条商品，后续需上传打包凭证再确认发货。`;
@@ -5273,7 +5233,7 @@ function OrderDetailDialog({
                                   </div>
                                 </div>
                               </td>
-                              <td className="px-4 py-2 text-sm text-muted-foreground">{s ? subTankName(s.subTankId) : "—"}</td>
+                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途，待签收" : s ? subTankName(s.subTankId) : "—"}</td>
                               <td className="px-4 py-2 text-sm text-right">
                                 <Input type="number" min={0} value={item.price}
                                   onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
@@ -5469,7 +5429,8 @@ function OrderDetailDialog({
 	                        {lostUnshippedItems.length} 件已损耗，不能出库，请在商品行点击退
 	                      </p>
 	                    )}
-                    {shippableUnshippedItems.length === 0 && lostUnshippedItems.length > 0 && (
+                    {transferUnshippedItems.length > 0 && <p className="max-w-72 text-right text-xs text-amber-700">{transferUnshippedItems.length} 件移缸在途，请先签收，再出库或自提</p>}
+                    {shippableUnshippedItems.length === 0 && (lostUnshippedItems.length > 0 || transferUnshippedItems.length > 0) && (
                       <p className="text-xs text-muted-foreground">无可出库商品</p>
                     )}
                     {unavailableUnshippedItems.length > 0 && (
@@ -5822,6 +5783,7 @@ function StockPickerDialog({
     !s.sold && !excludeIds.has(s.id) && isPhysicallyInTank(s, shippedOutStockIds);
   const unavailableReason = (s: StockItem) => {
     if (excludeIds.has(s.id)) return "已在当前订单或已选列表中";
+    if (s.tankTransfer?.status === "in_transit") return "移缸在途，签收入缸后才可选鱼";
     if (s.sold) return "已被订单占用";
     if (!isPhysicallyInTank(s, shippedOutStockIds)) return "已不在缸内或已出库";
     return "不可添加";
@@ -5980,9 +5942,9 @@ function StockPickerDialog({
   const clearAll = () => setPicked(new Set());
 
   const confirm = () => {
-    const missingIds = Array.from(picked).filter((stockItemId) => !state.stock.some((x) => x.id === stockItemId));
-    if (missingIds.length > 0) {
-      toast.error("已选商品数据已变化，请重新选择商品");
+    const unavailableIds = Array.from(picked).filter((stockItemId) => !state.stock.some((stock) => stock.id === stockItemId && isAvail(stock)));
+    if (unavailableIds.length > 0) {
+      toast.error("已选商品已售、移缸在途或库存状态有变化，请重新选择商品");
       return;
     }
     const items = Array.from(picked).map((stockItemId) => {

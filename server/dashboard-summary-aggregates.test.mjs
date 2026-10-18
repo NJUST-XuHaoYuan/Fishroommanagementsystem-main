@@ -145,6 +145,8 @@ test("focus summary returns compact options and detail without raw collections",
   const stock = [
     { id: "f1", productId: "p1", inDate: "2026-08-01", sold: false, lost: false, status: "healthy" },
     { id: "f2", productId: "p1", inDate: "2026-08-01", sold: true, lost: false, status: "healthy" },
+    { id: "f3", productId: "p1", inDate: "2026-08-01", sold: false, lost: false, status: "healthy",
+      tankTransfer: { id: "transfer-active", status: "in_transit" } },
   ];
   const options = buildDashboardFocusOptions({ species, products, stock, outStockIds: new Set() });
   assert.equal(options.species[0].inTankCount, 2);

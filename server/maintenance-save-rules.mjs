@@ -7,7 +7,7 @@ const TEXT_MAX_LENGTH = 10_000;
 const MEDIA_MAX_ITEMS = 30;
 const MEDIA_URL_MAX_LENGTH = 2_048;
 const STOCK_STATUSES = new Set(["healthy", "feeding", "sick"]);
-const EXPECTED_ITEM_MODES = new Set(["move", "status", "loss"]);
+const EXPECTED_ITEM_MODES = new Set(["transferIssue", "status", "loss"]);
 const DELTA_ID_KEYS = [
   "stockUpdateIds",
   "batchUpdateIds",
@@ -87,13 +87,17 @@ function normalizeRecordDate(value) {
   return date;
 }
 
-function expectedStockSnapshot(item) {
-  return {
+function expectedStockSnapshot(item, { includeTankTransferId = false } = {}) {
+  const snapshot = {
     id: String(item?.id ?? "").trim(),
     subTankId: String(item?.subTankId ?? "").trim(),
     status: String(item?.status ?? "").trim(),
     lost: Boolean(item?.lost),
   };
+  if (includeTankTransferId) {
+    snapshot.tankTransferId = String(item?.tankTransferId ?? item?.tankTransfer?.id ?? "").trim();
+  }
+  return snapshot;
 }
 
 export function normalizeMaintenanceClientMutationId(value) {
@@ -111,7 +115,10 @@ export function normalizeMaintenanceClientMutationId(value) {
   return id;
 }
 
-export function normalizeMaintenanceExpectedItems(expectedItems, itemIds, { required = true } = {}) {
+export function normalizeMaintenanceExpectedItems(expectedItems, itemIds, {
+  required = true,
+  includeTankTransferId = false,
+} = {}) {
   const normalizedIds = normalizeIdList(itemIds);
   if (!Array.isArray(expectedItems)) {
     if (!required && expectedItems == null) return [];
@@ -136,12 +143,16 @@ export function normalizeMaintenanceExpectedItems(expectedItems, itemIds, { requ
         code: "INVALID_MAINTENANCE_EXPECTED_ITEMS",
       });
     }
-    return {
+    const normalizedItem = {
       id: normalizeRequiredId(item.id, "库存鱼 ID"),
       subTankId: String(item.subTankId ?? "").trim(),
       status: String(item.status ?? "").trim(),
       lost: item.lost,
     };
+    if (includeTankTransferId) {
+      normalizedItem.tankTransferId = String(item.tankTransferId ?? "").trim();
+    }
+    return normalizedItem;
   });
 
   const expectedIds = normalized.map((item) => item.id);
@@ -160,18 +171,54 @@ export function normalizeMaintenanceExpectedItems(expectedItems, itemIds, { requ
 }
 
 export function maintenanceExpectedStockSnapshot(item) {
-  const snapshot = expectedStockSnapshot(item);
+  const snapshot = expectedStockSnapshot(item, { includeTankTransferId: true });
   snapshot.id = normalizeRequiredId(snapshot.id, "库存鱼 ID");
   return snapshot;
+}
+
+function normalizeTransferReceiveItems(value) {
+  if (!Array.isArray(value) || value.length === 0) fail("请选择要签收入缸的在途鱼");
+  const items = value.map((item) => {
+    if (!isPlainObject(item)) fail("签收入缸明细格式不正确");
+    return {
+      stockItemId: normalizeRequiredId(item.stockItemId, "库存鱼 ID"),
+      transferId: normalizeRequiredId(item.transferId, "移缸签发 ID"),
+    };
+  });
+  const stockIds = items.map((item) => item.stockItemId);
+  const transferIds = items.map((item) => item.transferId);
+  if (new Set(stockIds).size !== stockIds.length) {
+    fail("签收入缸明细不能包含重复库存鱼", { code: "MAINTENANCE_DUPLICATE_ITEM_ID" });
+  }
+  if (new Set(transferIds).size !== transferIds.length) {
+    fail("同一移缸签发记录不能重复签收", { code: "MAINTENANCE_DUPLICATE_TRANSFER_ID" });
+  }
+  return items.sort((left, right) => left.stockItemId.localeCompare(right.stockItemId));
 }
 
 export function normalizeMaintenanceSavePayload(change = {}) {
   if (!isPlainObject(change)) fail("维护保存请求格式不正确");
   const mode = String(change.mode ?? "").trim();
-  if (!new Set(["record", "move", "status", "loss"]).has(mode)) {
+  if (mode === "move") {
+    fail("移缸流程已升级，请刷新页面后重新操作", {
+      statusCode: 409,
+      code: "CLIENT_REFRESH_REQUIRED",
+    });
+  }
+  if (!new Set(["record", "transferIssue", "transferReceive", "status", "loss"]).has(mode)) {
     fail("Unsupported maintenance save mode", { code: "UNSUPPORTED_MAINTENANCE_MODE" });
   }
   const clientMutationId = normalizeMaintenanceClientMutationId(change.clientMutationId);
+  if (mode === "transferReceive") {
+    const items = normalizeTransferReceiveItems(change.items);
+    return {
+      mode,
+      clientMutationId,
+      itemIds: items.map((item) => item.stockItemId),
+      items,
+      targetSubTankId: normalizeRequiredId(change.targetSubTankId, "目标子缸 ID"),
+    };
+  }
   const rawItemIds = mode === "loss" && (!Array.isArray(change.itemIds) || change.itemIds.length === 0)
     ? [change.stockItemId].filter((id) => String(id ?? "").trim())
     : change.itemIds;
@@ -195,15 +242,15 @@ export function normalizeMaintenanceSavePayload(change = {}) {
     };
   }
 
-  const expectedItems = normalizeMaintenanceExpectedItems(change.expectedItems, itemIds);
-  if (mode === "move") {
+  const expectedItems = normalizeMaintenanceExpectedItems(change.expectedItems, itemIds, {
+    includeTankTransferId: mode === "transferIssue",
+  });
+  if (mode === "transferIssue") {
     return {
       mode,
       clientMutationId,
       itemIds,
       expectedItems,
-      targetSubTankId: normalizeRequiredId(change.targetSubTankId, "目标子缸 ID"),
-      moveDate: normalizeDateOnly(change.moveDate, "移缸日期", { optional: true }),
       moveNotes: normalizeText(change.moveNotes, "移缸备注"),
     };
   }
@@ -248,7 +295,8 @@ export function assertMaintenanceExpectedItems({ mode, itemIds, expectedItems, c
   const normalizedMode = String(mode ?? "").trim();
   if (!EXPECTED_ITEM_MODES.has(normalizedMode)) return [];
   const normalizedIds = normalizeIdList(itemIds);
-  const expected = normalizeMaintenanceExpectedItems(expectedItems, normalizedIds);
+  const includeTankTransferId = normalizedMode === "transferIssue";
+  const expected = normalizeMaintenanceExpectedItems(expectedItems, normalizedIds, { includeTankTransferId });
   if (!Array.isArray(currentItems)) {
     fail("当前库存鱼数据格式不正确", {
       statusCode: 409,
@@ -271,7 +319,7 @@ export function assertMaintenanceExpectedItems({ mode, itemIds, expectedItems, c
     });
   }
   const currentById = new Map(relevantCurrentItems.map((item) => {
-    const snapshot = expectedStockSnapshot(item);
+    const snapshot = expectedStockSnapshot(item, { includeTankTransferId });
     return [snapshot.id, snapshot];
   }));
   const stale = expected.some((snapshot) => stable(currentById.get(snapshot.id)) !== stable(snapshot));

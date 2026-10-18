@@ -21,14 +21,12 @@ const stocks = [
 ];
 const expectedItems = stocks.map(maintenanceExpectedStockSnapshot);
 
-function moveChange(overrides = {}) {
+function issueChange(overrides = {}) {
   return {
-    mode: "move",
+    mode: "transferIssue",
     clientMutationId: "maintenance-client-001",
     itemIds: ["stock-2", "stock-1"],
     expectedItems,
-    targetSubTankId: "tank-c",
-    moveDate: "2026-08-19",
     moveNotes: "  同批移缸  ",
     ...overrides,
   };
@@ -48,7 +46,7 @@ test("validates stable client mutation ids with recognizable 400 errors", () => 
   );
 });
 
-test("normalizes all four maintenance payload modes", () => {
+test("normalizes maintenance payload modes including transfer issue and receive", () => {
   assert.deepEqual(normalizeMaintenanceSavePayload({
     mode: "record",
     clientMutationId: "record-1",
@@ -67,9 +65,27 @@ test("normalizes all four maintenance payload modes", () => {
     recordVideos: ["/v.mp4"],
   });
 
-  const moved = normalizeMaintenanceSavePayload(moveChange());
-  assert.equal(moved.moveNotes, "同批移缸");
-  assert.deepEqual(moved.expectedItems.map((item) => item.id), ["stock-1", "stock-2"]);
+  const issued = normalizeMaintenanceSavePayload(issueChange());
+  assert.equal(issued.moveNotes, "同批移缸");
+  assert.deepEqual(issued.expectedItems.map((item) => item.id), ["stock-1", "stock-2"]);
+  assert.deepEqual(normalizeMaintenanceSavePayload({
+    mode: "transferReceive",
+    clientMutationId: "receive-1",
+    items: [
+      { stockItemId: "stock-2", transferId: "transfer-2" },
+      { stockItemId: "stock-1", transferId: "transfer-1" },
+    ],
+    targetSubTankId: "tank-c",
+  }), {
+    mode: "transferReceive",
+    clientMutationId: "receive-1",
+    itemIds: ["stock-1", "stock-2"],
+    items: [
+      { stockItemId: "stock-1", transferId: "transfer-1" },
+      { stockItemId: "stock-2", transferId: "transfer-2" },
+    ],
+    targetSubTankId: "tank-c",
+  });
 
   assert.equal(normalizeMaintenanceSavePayload({
     mode: "status",
@@ -90,9 +106,42 @@ test("normalizes all four maintenance payload modes", () => {
   }).lossProof, ["/proof-b.jpg", "/proof-a.jpg"]);
 });
 
+test("legacy direct move requires a refreshed client", () => {
+  assert.throws(() => normalizeMaintenanceSavePayload({
+    mode: "move",
+    clientMutationId: "legacy-move",
+    itemIds: ["stock-1"],
+    expectedItems: [expectedItems.find((item) => item.id === "stock-1")],
+    targetSubTankId: "tank-c",
+  }), (error) => error instanceof MaintenanceSaveError &&
+    error.statusCode === 409 && error.code === "CLIENT_REFRESH_REQUIRED");
+});
+
+test("transfer receive requires unique stock and transfer identities", () => {
+  const payload = {
+    mode: "transferReceive",
+    clientMutationId: "receive-duplicates",
+    targetSubTankId: "tank-c",
+  };
+  assert.throws(() => normalizeMaintenanceSavePayload({
+    ...payload,
+    items: [
+      { stockItemId: "stock-1", transferId: "transfer-1" },
+      { stockItemId: "stock-1", transferId: "transfer-2" },
+    ],
+  }), (error) => error.code === "MAINTENANCE_DUPLICATE_ITEM_ID");
+  assert.throws(() => normalizeMaintenanceSavePayload({
+    ...payload,
+    items: [
+      { stockItemId: "stock-1", transferId: "transfer-1" },
+      { stockItemId: "stock-2", transferId: "transfer-1" },
+    ],
+  }), (error) => error.code === "MAINTENANCE_DUPLICATE_TRANSFER_ID");
+});
+
 test("produces a stable sha256 digest independent of set-like array order", () => {
-  const first = moveChange();
-  const second = moveChange({
+  const first = issueChange();
+  const second = issueChange({
     itemIds: [...first.itemIds].reverse(),
     expectedItems: [...first.expectedItems].reverse(),
   });
@@ -121,20 +170,20 @@ test("produces a stable sha256 digest independent of set-like array order", () =
   assert.notEqual(maintenanceMutationDigest({ ...record, recordPhotos: ["/three.jpg"] }), maintenanceMutationDigest(record));
 });
 
-test("requires one unique expected snapshot for every move/status/loss item", () => {
-  assert.throws(() => normalizeMaintenanceSavePayload(moveChange({ expectedItems: undefined })), (error) =>
+test("requires one unique expected snapshot for every transfer issue/status/loss item", () => {
+  assert.throws(() => normalizeMaintenanceSavePayload(issueChange({ expectedItems: undefined })), (error) =>
     error instanceof MaintenanceSaveError &&
     error.statusCode === 400 &&
     error.code === "MAINTENANCE_EXPECTED_ITEMS_REQUIRED"
   );
-  assert.throws(() => normalizeMaintenanceSavePayload(moveChange({
+  assert.throws(() => normalizeMaintenanceSavePayload(issueChange({
     expectedItems: [expectedItems[0], expectedItems[0]],
   })), (error) =>
     error instanceof MaintenanceSaveError &&
     error.statusCode === 400 &&
     error.code === "MAINTENANCE_DUPLICATE_EXPECTED_ITEM"
   );
-  assert.throws(() => normalizeMaintenanceSavePayload(moveChange({
+  assert.throws(() => normalizeMaintenanceSavePayload(issueChange({
     expectedItems: [expectedItems[0]],
   })), (error) =>
     error instanceof MaintenanceSaveError &&
@@ -145,7 +194,7 @@ test("requires one unique expected snapshot for every move/status/loss item", ()
 
 test("CAS accepts an exact snapshot and rejects stale or invalid stock state with 409", () => {
   assert.deepEqual(assertMaintenanceExpectedItems({
-    mode: "move",
+    mode: "transferIssue",
     itemIds: ["stock-2", "stock-1"],
     expectedItems,
     currentItems: stocks,
@@ -168,7 +217,7 @@ test("CAS accepts an exact snapshot and rejects stale or invalid stock state wit
     error instanceof MaintenanceSaveError && error.statusCode === 409 && error.code === "MAINTENANCE_STALE"
   );
   assert.throws(() => assertMaintenanceExpectedItems({
-    mode: "move",
+    mode: "transferIssue",
     itemIds: ["stock-1", "stock-2"],
     expectedItems,
     currentItems: [stocks[0], stocks[1], { ...stocks[1] }],
@@ -177,8 +226,21 @@ test("CAS accepts an exact snapshot and rejects stale or invalid stock state wit
   );
 });
 
+test("transfer issue CAS detects an ABA move cycle even when tank, status and loss return to the old values", () => {
+  assert.throws(() => assertMaintenanceExpectedItems({
+    mode: "transferIssue",
+    itemIds: ["stock-1"],
+    expectedItems: [expectedItems.find((item) => item.id === "stock-1")],
+    currentItems: [{
+      ...stocks.find((item) => item.id === "stock-1"),
+      tankTransfer: { id: "completed-cycle", status: "received" },
+    }],
+  }), (error) => error instanceof MaintenanceSaveError &&
+    error.statusCode === 409 && error.code === "MAINTENANCE_STALE");
+});
+
 test("double click and response-loss retry return committed metadata without duplicating the log", () => {
-  const prepared = prepareMaintenanceMutation(moveChange());
+  const prepared = prepareMaintenanceMutation(issueChange());
   const delta = {
     stockUpdates: stocks,
     batchUpdates: [{ id: "batch-2", count: 3 }],
@@ -221,13 +283,13 @@ test("double click and response-loss retry return committed metadata without dup
 });
 
 test("same operator and mutation id with different content conflicts, while another operator is independent", () => {
-  const first = prepareMaintenanceMutation(moveChange());
+  const first = prepareMaintenanceMutation(issueChange());
   const committedLog = withMaintenanceMutationMetadata({ id: "log-1", operator: "staff-a" }, {
     clientMutationId: first.clientMutationId,
     digest: first.digest,
     delta: {},
   });
-  const changedDigest = maintenanceMutationDigest(moveChange({ moveNotes: "另一项操作" }));
+  const changedDigest = maintenanceMutationDigest(issueChange({ moveNotes: "另一项操作" }));
   assert.throws(() => findMaintenanceMutationLog({
     operationLogs: [committedLog],
     operator: "staff-a",
@@ -247,7 +309,7 @@ test("same operator and mutation id with different content conflicts, while anot
 });
 
 test("idempotency is based on committed transaction state and resolves compact delta ids", () => {
-  const prepared = prepareMaintenanceMutation(moveChange());
+  const prepared = prepareMaintenanceMutation(issueChange());
   const stagedLog = withMaintenanceMutationMetadata({ id: "log-tx", operator: "staff-a" }, {
     clientMutationId: prepared.clientMutationId,
     digest: prepared.digest,

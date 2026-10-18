@@ -66,5 +66,14 @@ export async function startMutableRouteServer(fixture, { port: requestedPort = 0
     };
     child.on("message", receive); child.send({ type: "fishroom-test-state-read", requestId });
   });
-  return { child, baseUrl, uploadDir, stop, request, login, readPersistedState, get output() { return output; } };
+  const patchTestPersonnel = (personnelId, patch) => new Promise((resolve, reject) => {
+    const requestId = ++readId;
+    const timer = setTimeout(() => { child.off("message", receive); reject(new Error("Test personnel patch timed out")); }, 2_000);
+    const receive = (message) => {
+      if (message?.type !== "fishroom-test-personnel-patched" || message.requestId !== requestId) return;
+      clearTimeout(timer); child.off("message", receive); resolve();
+    };
+    child.on("message", receive); child.send({ type: "fishroom-test-personnel-patch", requestId, personnelId, patch });
+  });
+  return { child, baseUrl, uploadDir, stop, request, login, readPersistedState, patchTestPersonnel, get output() { return output; } };
 }

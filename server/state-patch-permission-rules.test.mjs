@@ -15,10 +15,11 @@ import {
   validateStatePatchValueShape,
 } from "./state-patch-permission-rules.mjs";
 
-test("requires bio records, personnel and stock to use dedicated APIs", () => {
+test("requires bio records, personnel, stock and tank topology to use dedicated APIs", () => {
   assert.throws(() => assertGenericStatePatchKeyAllowed("bioRecords"), /生物记录必须通过专用接口/);
   assert.throws(() => assertGenericStatePatchKeyAllowed("personnel"), /人员账号和权限必须通过专用接口/);
   assert.throws(() => assertGenericStatePatchKeyAllowed("stock"), /库存记录必须通过库存或日常维护专用接口/);
+  assert.throws(() => assertGenericStatePatchKeyAllowed("tankGroups"), /缸组.*缸位.*专用接口/);
   assert.equal(assertGenericStatePatchKeyAllowed("orders"), "orders");
 });
 

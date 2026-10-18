@@ -106,7 +106,54 @@ test("ordinary stock save cannot move an existing item between sites", () => {
       batchId: "batch-b",
       subTankId: "tank-b",
     }],
-  }), (error) => error?.code === "STOCK_SITE_CHANGE_FORBIDDEN");
+  }), (error) => error?.code === "STOCK_LOCATION_CHANGE_FORBIDDEN");
+});
+
+test("ordinary stock save cannot move an existing item between tanks on the same site", () => {
+  const state = {
+    ...baseState,
+    tankGroups: [{
+      ...baseState.tankGroups[0],
+      subTanks: [{ id: "tank-a" }, { id: "tank-a-2" }],
+    }],
+  };
+  assert.throws(() => validateStockMutationRelationships(state, {
+    upsert: [{ ...baseState.stock[0], subTankId: "tank-a-2" }],
+  }), (error) => error?.code === "STOCK_LOCATION_CHANGE_FORBIDDEN");
+});
+
+test("ordinary stock mutations cannot forge, edit or delete transfer state", () => {
+  assert.throws(() => validateStockMutationRelationships(baseState, {
+    upsert: [{
+      ...baseState.stock[0],
+      id: "stock-new",
+      tankTransfer: { id: "forged", status: "in_transit" },
+    }],
+  }), (error) => error?.code === "STOCK_TRANSFER_FORGED");
+
+  const received = {
+    ...baseState.stock[0],
+    tankTransfer: { id: "transfer-complete", status: "received", fromSiteId: "nanjing" },
+  };
+  const receivedState = { ...baseState, stock: [received] };
+  assert.equal(validateStockMutationRelationships(receivedState, {
+    upsert: [{ ...received, notes: "ordinary edit preserves transfer history" }],
+  }), true);
+  assert.throws(() => validateStockMutationRelationships(receivedState, {
+    upsert: [{ ...received, tankTransfer: { ...received.tankTransfer, id: "forged-change" } }],
+  }), (error) => error?.code === "STOCK_TRANSFER_FORGED");
+
+  const active = {
+    ...baseState.stock[0],
+    tankTransfer: { id: "transfer-active", status: "in_transit", fromSiteId: "nanjing" },
+  };
+  const activeState = { ...baseState, stock: [active] };
+  assert.throws(() => validateStockMutationRelationships(activeState, {
+    upsert: [{ ...active, notes: "bypass" }],
+  }), (error) => error?.code === "STOCK_IN_TRANSFER");
+  assert.throws(() => validateStockMutationRelationships(activeState, {
+    deleteIds: [active.id],
+  }), (error) => error?.code === "STOCK_IN_TRANSFER");
 });
 
 test("a moved fish may keep its procurement batch but new stock may not cross sites", () => {
@@ -278,6 +325,12 @@ test("stock detail and approval decisions share the canonical review-completenes
   const decisionEnd = localServerSource.indexOf('if (url.pathname === "/api/stock/save"', decisionStart);
   assert.ok(decisionStart >= 0 && decisionEnd > decisionStart);
   const decisionRoute = localServerSource.slice(decisionStart, decisionEnd);
+  const lockIndex = decisionRoute.indexOf('SELECT data FROM app_state WHERE id = $1 FOR UPDATE');
+  const refreshIndex = decisionRoute.indexOf('refreshLockedMutationAuth(req, state, { code: "STOCK_APPROVAL_ACCOUNT_CHANGED" })');
+  const targetIndex = decisionRoute.indexOf("const approvalRequest = requests.find");
+  assert.ok(lockIndex >= 0 && refreshIndex > lockIndex && targetIndex > refreshIndex,
+    "administrator status must be rebound from the locked state before selecting or executing an approval");
+  assert.match(decisionRoute.slice(refreshIndex, targetIndex), /requireAdminForAuth\(req\)/);
   const reviewIndex = decisionRoute.indexOf("stockApprovalReviewDetails(approvalRequest, state)");
   const expectationIndex = decisionRoute.indexOf("assertStockMutationExpectation(state, payload)");
   assert.ok(reviewIndex >= 0 && expectationIndex > reviewIndex);

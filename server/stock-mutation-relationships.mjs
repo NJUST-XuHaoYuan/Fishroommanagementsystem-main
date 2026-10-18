@@ -1,3 +1,8 @@
+import {
+  isStockInTransfer,
+  stockTransferConcurrencySnapshot,
+} from "./stock-transfer-rules.mjs";
+
 function id(value) {
   return String(value ?? "").trim();
 }
@@ -61,6 +66,7 @@ export function stockConcurrencySnapshot(item = {}) {
     commissionRate: Number(item?.commissionRate ?? 0),
     code: id(item?.code),
     notes: optionalString(item?.notes).trim(),
+    tankTransfer: stockTransferConcurrencySnapshot(item),
   };
 }
 
@@ -143,8 +149,17 @@ export function validateStockMutationRelationships(
     const nextBatchSiteId = id(matchesById(state.batches, item?.batchId)[0]?.siteId);
     if (previousSiteId) requireVisible(previousSiteId);
     requireVisible(nextSiteId);
-    if (previousSiteId && previousSiteId !== nextSiteId) {
-      throw relationshipError("库存不能通过普通保存跨场地移动，请使用专用移缸流程", 409, "STOCK_SITE_CHANGE_FORBIDDEN");
+    if (!previous && stockTransferConcurrencySnapshot(item)) {
+      throw relationshipError("移缸状态只能由签发和签收流程生成", 409, "STOCK_TRANSFER_FORGED");
+    }
+    if (previous && isStockInTransfer(previous)) {
+      throw relationshipError("移缸在途的鱼不能通过普通库存保存修改", 409, "STOCK_IN_TRANSFER");
+    }
+    if (previous && stableJson(stockTransferConcurrencySnapshot(previous)) !== stableJson(stockTransferConcurrencySnapshot(item))) {
+      throw relationshipError("移缸状态不能通过普通库存保存修改", 409, "STOCK_TRANSFER_FORGED");
+    }
+    if (previous && (previousSiteId !== nextSiteId || id(previous?.subTankId) !== id(item?.subTankId))) {
+      throw relationshipError("库存不能通过普通保存修改场地或缸位，请使用移缸签发和签收流程", 409, "STOCK_LOCATION_CHANGE_FORBIDDEN");
     }
     const batchChanged = previous && id(previous?.batchId) !== id(item?.batchId);
     // A batch records the procurement site. Fish moved later through the
@@ -159,6 +174,9 @@ export function validateStockMutationRelationships(
   for (const stockId of deleteIds) {
     const previous = stockById.get(stockId);
     if (!previous) throw relationshipError("部分库存记录已不存在，请刷新后重试");
+    if (isStockInTransfer(previous)) {
+      throw relationshipError("移缸在途的鱼不能删除", 409, "STOCK_IN_TRANSFER");
+    }
     requireVisible(authoritativeStockMutationSiteId(state, previous));
   }
   return true;

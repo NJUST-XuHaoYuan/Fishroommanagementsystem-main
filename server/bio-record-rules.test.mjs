@@ -7,6 +7,7 @@ import {
   bioRecordExpectedSnapshot,
   canAccessBioStockSite,
   findUniqueBioStockItem,
+  isSystemBioRecord,
   maintenanceRequiredPermissions,
   planBioRecordSave,
 } from "./bio-record-rules.mjs";
@@ -64,12 +65,66 @@ test("maps every write action to its server-side daily permission", () => {
 test("maps batch maintenance modes to all permissions they mutate", () => {
   assert.deepEqual(maintenanceRequiredPermissions("record"), [{ module: "daily", action: "create" }]);
   assert.deepEqual(maintenanceRequiredPermissions("move"), [{ module: "daily", action: "update" }]);
+  assert.deepEqual(maintenanceRequiredPermissions("transferIssue"), [{ module: "daily", action: "update" }]);
+  assert.deepEqual(maintenanceRequiredPermissions("transferReceive"), [{ module: "daily", action: "update" }]);
   assert.deepEqual(maintenanceRequiredPermissions("status"), [{ module: "daily", action: "update" }]);
   assert.deepEqual(maintenanceRequiredPermissions("loss"), [
     { module: "daily", action: "delete" },
     { module: "lossRecords", action: "create" },
   ]);
   assert.throws(() => maintenanceRequiredPermissions("unknown"), /Unsupported maintenance save mode/);
+});
+
+test("system generated maintenance and transfer records are immutable in fish details", () => {
+  for (const sourceType of ["dailyLog", "stockMove", "stockTransferIssued", "stockTransferReceived"]) {
+    const current = {
+      ...inputRecord,
+      id: `system-${sourceType}`,
+      siteId: "nanjing",
+      stockItemId: stockItem.id,
+      date: "2026-08-19T09:30:00",
+      sourceType,
+      operator: "system",
+    };
+    assert.equal(isSystemBioRecord(current), true);
+    for (const action of ["updateTime", "delete"]) {
+      assert.throws(() => planBioRecordSave({
+        action,
+        stockItem,
+        records: [current],
+        recordId: current.id,
+        expectedRecord: bioRecordExpectedSnapshot(current),
+        ...(action === "updateTime" ? { record: { date: "2026-08-19T09:45" } } : {}),
+        operator: "staff-a",
+        now: "2026-08-19T10:00:00",
+      }), (error) => error instanceof BioRecordConflictError &&
+        error.statusCode === 409 && error.code === "SYSTEM_BIO_RECORD_IMMUTABLE");
+    }
+  }
+});
+
+test("active transfers freeze manual records and stock details", () => {
+  const inTransitStock = {
+    ...stockItem,
+    tankTransfer: { id: "transfer-1", status: "in_transit" },
+  };
+  assert.throws(() => planBioRecordSave({
+    action: "create",
+    stockItem: inTransitStock,
+    records: [],
+    record: inputRecord,
+    operator: "staff-a",
+    now: "2026-08-19T10:00:00",
+  }), (error) => error instanceof BioRecordConflictError && error.code === "STOCK_IN_TRANSFER");
+  assert.throws(() => planBioRecordSave({
+    action: "saveDetails",
+    stockItem: inTransitStock,
+    records: [],
+    details: { status: "feeding" },
+    expectedDetails: { status: "healthy" },
+    operator: "staff-a",
+    now: "2026-08-19T10:00:00",
+  }), (error) => error instanceof BioRecordConflictError && error.code === "STOCK_IN_TRANSFER");
 });
 
 test("creates one server-owned manual record and accepts an exact retry idempotently", () => {
