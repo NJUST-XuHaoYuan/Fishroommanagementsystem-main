@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { configuredShippingCarriers, useStore, Order, Shipment, ShipmentDamageReplacement, Store } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -29,12 +29,13 @@ import {
 } from "../utils/orderFees";
 import {
   actualShippingFeePayload,
-  canUseActualShippingFeeApi,
+  canEditShipmentActualShippingFee,
   MAX_ACTUAL_SHIPPING_FEE,
   normalizedPositiveShippingFee,
   roundShippingFee,
 } from "../utils/shipmentFee";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
+import { usePermission } from "../utils/permissions";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -204,6 +205,9 @@ function EditShipmentDialog({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [actualFeeError, setActualFeeError] = useState("");
+  const [savingFee, setSavingFee] = useState(false);
+  const [actualFeeSaved, setActualFeeSaved] = useState(false);
+  const saveLock = useRef(false);
   const today = todayDateString();
 
   // populate when dialog opens
@@ -217,6 +221,8 @@ function EditShipmentDialog({
       setSaving(false);
       setSaveError("");
       setActualFeeError("");
+      setSavingFee(false);
+      setActualFeeSaved(false);
     }
   }, [open, shipment?.id]); // eslint-disable-line
 
@@ -224,57 +230,64 @@ function EditShipmentDialog({
 
   const isExpress = (shipment.shipMethod ?? "express") === "express";
   const shippingFeeMode = orderShippingFeeMode(order);
-  const actualFeeApiEnabled = canUseActualShippingFeeApi(shipment, shippingFeeMode);
+  const actualFeeApiEnabled = canEditShipmentActualShippingFee(shipment, shippingFeeMode, order?.status);
+  const canEditLogistics = shipment.status === "shipped" && !!order && !["completed", "cancelled"].includes(order.status);
   const configuredCarriers = configuredShippingCarriers(state.systemSettings);
   const carrierOptions = carrier && !configuredCarriers.some((item) => item.name === carrier)
     ? [{ id: "legacy-carrier", name: carrier, enabled: false }, ...configuredCarriers]
     : configuredCarriers;
 
-  const handleSave = async () => {
-    if (saving) return;
+  const handleSave = async (feeOnly = false) => {
+    if (saveLock.current) return;
+    if (!order || ["completed", "cancelled"].includes(order.status)) {
+      setSaveError("已完成或已取消订单不能修改发货信息");
+      return;
+    }
+    if (feeOnly && !actualFeeApiEnabled) return;
+    if (!feeOnly && !canEditLogistics) return;
     setSaveError("");
     setActualFeeError("");
-    if (isExpress && !carrier.trim()) {
+    setActualFeeSaved(false);
+    if (!feeOnly && isExpress && !carrier.trim()) {
       setSaveError("请选择快递公司");
       return toast.error("请选择快递公司");
     }
     const normalizedActualFee = normalizedPositiveShippingFee(actualFee);
-    if (actualFeeApiEnabled) {
-      const zeroPendingFeeAllowed = shippingFeeMode === "prepaid" && actualFee === 0;
-      if (!zeroPendingFeeAllowed && normalizedActualFee === null) {
+    if (feeOnly) {
+      if (normalizedActualFee === null) {
         const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
         setActualFeeError(message);
         return toast.error(message);
       }
       setActualFee(normalizedActualFee ?? 0);
     }
-    if (!shipDate) {
+    if (!feeOnly && !shipDate) {
       setSaveError("请填写发货日期");
       return toast.error("请填写发货日期");
     }
-    if (minShipDate && shipDate < minShipDate) {
+    if (!feeOnly && minShipDate && shipDate < minShipDate) {
       setSaveError("发货日期不能早于下单日期");
       return toast.error("发货日期不能早于下单日期");
     }
-    if (shipDate > today) {
+    if (!feeOnly && shipDate > today) {
       setSaveError("发货日期不能晚于今天");
       return toast.error("发货日期不能晚于今天");
     }
 
+    saveLock.current = true;
     setSaving(true);
+    setSavingFee(feeOnly);
     try {
-      const updated: Partial<Shipment> = {
+      const updated: Partial<Shipment> = feeOnly ? { actualShippingFee: normalizedActualFee! } : {
         carrier,
         trackingNo,
         shipDate,
         notes,
       };
-      if (actualFeeApiEnabled) {
-        updated.actualShippingFee = normalizedActualFee ?? 0;
-      }
       const result = await onSave(updated);
       if (result.ok) {
-        onOpenChange(false);
+        if (feeOnly) setActualFeeSaved(true);
+        else onOpenChange(false);
         return;
       }
       if (result.cancelled) return;
@@ -289,17 +302,19 @@ function EditShipmentDialog({
       setSaveError(message);
       toast.error(message);
     } finally {
+      saveLock.current = false;
       setSaving(false);
+      setSavingFee(false);
     }
   };
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!saving) onOpenChange(nextOpen); }}>
-      <DialogContent aria-describedby={undefined} className="max-w-sm">
+      <DialogContent aria-describedby={undefined} aria-busy={saving} className="max-w-sm max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Pencil className="size-4 text-sky-600" />
-            编辑发货信息
+            {canEditLogistics ? "编辑发货信息" : "补录 / 修正运费"}
           </DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-4 py-1">
@@ -310,12 +325,13 @@ function EditShipmentDialog({
               : <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700"><MapPin className="size-3" /> 上门自取</span>}
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3">
             <div className="grid gap-1.5">
               <Label className="text-sm">发货日期<span className="text-red-500 ml-0.5">*</span></Label>
               <Input
                 type="date"
                 value={shipDate}
+                disabled={saving || !canEditLogistics}
                 min={minShipDate}
                 max={today}
                 onChange={(e) => {
@@ -335,26 +351,33 @@ function EditShipmentDialog({
             {actualFeeApiEnabled && (
               <div className="grid gap-1.5">
                 <Label htmlFor="edit-shipment-actual-fee" className="text-sm">
-                  实际运费（¥）
-                  {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
+                  {shippingFeeModeLabel(shippingFeeMode)}实际运费（¥）
                 </Label>
                 <Input
                   id="edit-shipment-actual-fee"
-                  type="number" min={0} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
+                  type="number" inputMode="decimal" min={0.01} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
+                  className="min-h-11"
+                  disabled={saving}
                   value={actualFee || ""}
-                  placeholder={shippingFeeMode === "prepaid" ? "发货后补录" : "0"}
+                  placeholder="费用确定后填写"
                   aria-invalid={Boolean(actualFeeError)}
                   aria-describedby={actualFeeError ? "edit-shipment-actual-fee-error" : undefined}
                   onChange={(e) => {
                     setActualFee(Number(e.target.value));
+                    setActualFeeSaved(false);
                     if (actualFeeError) setActualFeeError("");
                   }}
                 />
+                <Button type="button" variant="outline" className="min-h-11" disabled={saving} onClick={() => handleSave(true)}>
+                  {savingFee ? "保存运费中…" : "单独保存实际运费"}
+                </Button>
                 {actualFeeError && (
                   <p id="edit-shipment-actual-fee-error" role="alert" className="text-xs text-red-600">
                     {actualFeeError}
                   </p>
                 )}
+                {actualFeeSaved && <p role="status" className="text-xs text-emerald-700">实际运费已保存</p>}
+                <p className="text-xs text-muted-foreground">与物流信息独立保存，不影响发货、签收；完成订单前必须补齐。</p>
               </div>
             )}
           </div>
@@ -363,7 +386,7 @@ function EditShipmentDialog({
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
                 <Label className="text-sm">快递公司<span className="text-red-500 ml-0.5">*</span></Label>
-                <Select value={carrier} onValueChange={setCarrier}>
+                <Select value={carrier} onValueChange={setCarrier} disabled={saving || !canEditLogistics}>
                   <SelectTrigger>
                     <SelectValue placeholder="请选择快递公司" />
                   </SelectTrigger>
@@ -378,19 +401,19 @@ function EditShipmentDialog({
               </div>
               <div className="grid gap-1.5">
                 <Label className="text-sm">运单号</Label>
-                <Input value={trackingNo} onChange={(e) => setTrackingNo(e.target.value)} placeholder="选填" />
+                <Input value={trackingNo} disabled={saving || !canEditLogistics} onChange={(e) => setTrackingNo(e.target.value)} placeholder="选填" />
               </div>
             </div>
           )}
-          {isExpress && shippingFeeMode === "prepaid" && actualFee <= 0 && (
+          {actualFeeApiEnabled && Number(shipment.actualShippingFee ?? 0) <= 0 && (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-              该发货单仍为待补运费；可先保存其他物流信息，但确认签收前必须补录实际运费。
+              该发货单仍为待补运费；可先保存其他物流信息、发货和签收，完成订单前需补齐实际运费。
             </div>
           )}
 
           <div className="grid gap-1.5">
             <Label className="text-sm">备注</Label>
-            <Textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填…" />
+            <Textarea rows={2} value={notes} disabled={saving || !canEditLogistics} onChange={(e) => setNotes(e.target.value)} placeholder="选填…" />
           </div>
           {saveError && (
             <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
@@ -400,7 +423,7 @@ function EditShipmentDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? "保存中..." : "保存"}</Button>
+          {canEditLogistics && <Button className="min-h-11" onClick={() => handleSave()} disabled={saving}>{saving && !savingFee ? "保存中..." : "保存物流信息"}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -411,6 +434,7 @@ function EditShipmentDialog({
 
 export function ShipmentsView() {
   const { state, setState, saveStateTransform, saveShipmentOutbound } = useStore();
+  const permission = usePermission("orders");
 
   const [shipOrder, setShipOrder] = useState<Order | null>(null);
   const [deliverShipment, setDeliverShipment] = useState<Shipment | null>(null);
@@ -506,29 +530,18 @@ export function ShipmentsView() {
       shipMethod: data.shipMethod,
       carrier: data.carrier,
       shipDate: data.shipDate,
-      actualShippingFee: data.shipMethod === "pickup" ? 0 : data.actualShippingFee,
+      actualShippingFee: 0,
       notes: data.notes,
     });
     if (!ok) { toast.error("保存失败，请重试"); return false; }
 
-    const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
-    const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
     const shippingFeeMode = orderShippingFeeMode(order);
     if (data.shipMethod === "pickup") {
       toast.success(`订单 ${order.orderNo} 已确认上门自取签收`);
     } else if (shippingFeeMode === "collect") {
       toast.success(`订单 ${order.orderNo} 已出库 — 运费到付，不计订单应收`);
-    } else if (shippingFeeMode === "prepaid" && actualShippingFee <= 0) {
-      toast.success(`订单 ${order.orderNo} 已出库 — 实际运费待补录，确认签收前必须填写`);
-    } else if (shippingFeeMode === "free") {
-      toast.success(`订单 ${order.orderNo} 已出库 — 实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
-    } else if (Math.abs(feeDiff) > 0.005) {
-      if (feeDiff > 0)
-        toast.success(`订单 ${order.orderNo} 已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
-      else
-        toast.success(`订单 ${order.orderNo} 已出库 — 实际运费少 ¥${Math.abs(feeDiff).toFixed(2)}，已计入应收账款`);
     } else {
-      toast.success(`订单 ${order.orderNo} 已出库，请到订单详情上传打包凭证并确认发货`);
+      toast.success(`订单 ${order.orderNo} 已出库 — 实际运费待补录，不影响发货、签收，完成订单前请补齐`);
     }
 
     setShipOrder(null);
@@ -537,12 +550,8 @@ export function ShipmentsView() {
 
   const doMarkDelivered = async (sh: Shipment) => {
     const order = getOrder(sh.orderId);
-    if (order && shipmentHasPendingActualShippingFee(order, sh)) {
-      toast.error("寄付订单确认签收前必须先补录实际运费");
-      setDeliverShipment(null);
-      setEditShipment(sh);
-      return;
-    }
+    if (!permission.requirePermission("update")) return;
+    if (!order || ["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能修改签收状态");
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     try {
       const result = await postShipmentApi("shipments/deliver", { shipmentId: sh.id });
@@ -557,24 +566,27 @@ export function ShipmentsView() {
   const doEditShipment = async (sh: Shipment, patch: Partial<Shipment>): Promise<EditShipmentSaveResult> => {
     const { actualShippingFee: requestedActualShippingFee, ...nonFeePatch } = patch;
     const order = getOrder(sh.orderId);
-    const feeCanBeEdited = canUseActualShippingFeeApi(sh, orderShippingFeeMode(order));
+    if (!permission.canUpdate || !order || ["completed", "cancelled"].includes(order.status)) {
+      return { ok: false, error: "当前账号或订单状态不允许修改发货信息", errorField: "form" };
+    }
+    const feeCanBeEdited = canEditShipmentActualShippingFee(sh, orderShippingFeeMode(order), order.status);
     const currentActualShippingFee = roundShippingFee(sh.actualShippingFee ?? 0) ?? 0;
     const hasRequestedFee = requestedActualShippingFee !== undefined;
     const normalizedRequestedFee = hasRequestedFee
       ? normalizedPositiveShippingFee(requestedActualShippingFee)
       : null;
-    const zeroPendingFeeAllowed = orderShippingFeeMode(order) === "prepaid"
-      && Number(requestedActualShippingFee) === 0
-      && currentActualShippingFee === 0;
     const roundedRequestedFee = hasRequestedFee
-      ? (zeroPendingFeeAllowed ? 0 : normalizedRequestedFee)
+      ? normalizedRequestedFee
       : currentActualShippingFee;
     const hasNonFeeChanges = Object.entries(nonFeePatch).some(
       ([key, value]) => sh[key as keyof Shipment] !== value
     );
+    if (hasNonFeeChanges && sh.status !== "shipped") {
+      return { ok: false, error: "当前状态仅可补录或修正实际运费", errorField: "form" };
+    }
     const feeChanged = feeCanBeEdited && roundedRequestedFee !== null && roundedRequestedFee !== currentActualShippingFee;
 
-    if (feeCanBeEdited && hasRequestedFee && normalizedRequestedFee === null && !zeroPendingFeeAllowed) {
+    if (feeCanBeEdited && hasRequestedFee && normalizedRequestedFee === null) {
       const error = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
       toast.error(error);
       return { ok: false, error, errorField: "actualShippingFee" };
@@ -959,11 +971,12 @@ export function ShipmentsView() {
                                 凭证 {packingProofs.length}
                               </Button>
                             )}
-                            {sh.status === "shipped" && (
+                            {permission.canUpdate && order && !["completed", "cancelled"].includes(order.status)
+                              && (sh.status === "shipped" || canEditShipmentActualShippingFee(sh, mode, order.status)) && (
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="text-sky-600 hover:text-sky-700 hover:bg-sky-50 whitespace-nowrap"
+                                className="min-h-11 text-sky-600 hover:text-sky-700 hover:bg-sky-50 whitespace-nowrap"
                                 onClick={() => setEditShipment(sh)}
                               >
                                 <Pencil className="size-3.5 mr-1" /> 编辑

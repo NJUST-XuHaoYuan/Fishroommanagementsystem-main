@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   actualShippingFeePayload,
   canApplyActualShippingFeeResponse,
+  canEditShipmentActualShippingFee,
   canUseActualShippingFeeApi,
   MAX_ACTUAL_SHIPPING_FEE,
   normalizedPositiveShippingFee,
@@ -41,6 +42,22 @@ test("only enables the dedicated fee API for prepaid or free express shipments",
   assert.equal(canUseActualShippingFeeApi({ shipMethod: "express" }, "free"), true);
   assert.equal(canUseActualShippingFeeApi({ shipMethod: "express" }, "collect"), false);
   assert.equal(canUseActualShippingFeeApi({ shipMethod: "pickup" }, "prepaid"), false);
+});
+
+test("fee editing remains reachable after delivery or damage but closed orders stay immutable", () => {
+  for (const mode of ["prepaid", "free"]) {
+    for (const status of ["outbound", "shipped", "delivered", "damaged"]) {
+      const shipment = { shipMethod: "express", status };
+      assert.equal(canEditShipmentActualShippingFee(shipment, mode, "confirmed"), true);
+      assert.equal(canEditShipmentActualShippingFee(shipment, mode, "damaged"), true);
+      assert.equal(canEditShipmentActualShippingFee(shipment, mode, "completed"), false);
+      assert.equal(canEditShipmentActualShippingFee(shipment, mode, "cancelled"), false);
+      assert.equal(canEditShipmentActualShippingFee(shipment, mode, undefined), false);
+    }
+    assert.equal(canEditShipmentActualShippingFee({ status: "preparing" }, mode, "confirmed"), false);
+    assert.equal(canEditShipmentActualShippingFee({ shipMethod: "pickup", status: "delivered" }, mode, "confirmed"), false);
+  }
+  assert.equal(canEditShipmentActualShippingFee({ status: "shipped" }, "collect", "confirmed"), false);
 });
 
 test("discards stale fee responses and responses for a removed shipment", () => {

@@ -24,18 +24,20 @@ test("legacy non-pickup sources default to express shipping", () => {
   assert.equal(requiredShipMethodForOrderSource(""), "express");
 });
 
-test("prepaid shipping can leave the actual fee blank at outbound while free shipping cannot", () => {
+test("prepaid and free shipping can both leave the actual fee pending at outbound", () => {
   assert.equal(actualShippingFeeRequiredAtOutbound("prepaid"), false);
-  assert.equal(actualShippingFeeRequiredAtOutbound("free"), true);
+  assert.equal(actualShippingFeeRequiredAtOutbound("free"), false);
   assert.equal(actualShippingFeeRequiredAtOutbound("collect"), false);
 });
 
-test("an active prepaid shipment remains pending until a positive actual fee is recorded", () => {
-  assert.equal(shipmentHasPendingActualShippingFee("prepaid", {
-    status: "outbound",
-    shipMethod: "express",
-    actualShippingFee: 0,
-  }), true);
+test("active prepaid and free express shipments remain pending until a positive actual fee is recorded", () => {
+  for (const mode of ["prepaid", "free"]) {
+    assert.equal(shipmentHasPendingActualShippingFee(mode, {
+      status: "outbound",
+      shipMethod: "express",
+      actualShippingFee: 0,
+    }), true);
+  }
   assert.equal(shipmentHasPendingActualShippingFee("prepaid", {
     status: "shipped",
     shipMethod: "express",
@@ -49,6 +51,11 @@ test("an active prepaid shipment remains pending until a positive actual fee is 
   assert.equal(shipmentHasPendingActualShippingFee("prepaid", {
     status: "delivered",
     shipMethod: "pickup",
+    actualShippingFee: 0,
+  }), false);
+  assert.equal(shipmentHasPendingActualShippingFee("collect", {
+    status: "delivered",
+    shipMethod: "express",
     actualShippingFee: 0,
   }), false);
 });

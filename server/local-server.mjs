@@ -61,7 +61,6 @@ import {
 } from "./order-refund-rules.mjs";
 import {
   requiredShipMethodForOrderSource,
-  shipmentHasPendingActualShippingFee,
   shipmentsHavePendingActualShippingFee,
 } from "./shipment-rules.mjs";
 import {
@@ -6044,11 +6043,6 @@ function applyAutomaticOrderTransitions(state = {}) {
     if (status === "shipped") {
       const shippedDate = datePart(shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt);
       if (isDateOnOrBefore(shippedDate, shippedThreshold)) {
-        const order = orders.find((item) => String(item?.id ?? "") === String(shipment?.orderId ?? ""));
-        const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
-        if (order && shipmentHasPendingActualShippingFee(mode, shipment)) {
-          return shipment;
-        }
         autoDeliveredCount += 1;
         return {
           ...shipment,
@@ -6394,16 +6388,6 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
       if (resolvedCarrier !== nextCarrier) throw new Error("快递公司必须从后台启用项中选择");
     }
     validateShipmentPatchTransition(currentShipment, nextShipment);
-    const relatedShippingFeeMode = relatedOrder
-      ? normalizeShippingFeeMode(relatedOrder.shippingFeeMode, relatedOrder.source)
-      : "collect";
-    if (
-      String(nextShipment.status ?? "") === "delivered" &&
-      relatedOrder &&
-      shipmentHasPendingActualShippingFee(relatedShippingFeeMode, nextShipment)
-    ) {
-      throw new Error(`${relatedShippingFeeMode === "free" ? "包邮" : "寄付"}订单确认签收前必须补录实际运费`);
-    }
     if (
       String(currentShipment.status ?? "") === "outbound" &&
       ["shipped", "delivered"].includes(String(nextShipment.status ?? "")) &&
@@ -13496,10 +13480,6 @@ async function handleApi(req, res, url) {
           shipments: visibleState.shipments,
         });
         return;
-      }
-      const shippingFeeMode = normalizeShippingFeeMode(order.shippingFeeMode, order.source);
-      if (shipmentHasPendingActualShippingFee(shippingFeeMode, shipment)) {
-        throw new Error(`${shippingFeeMode === "free" ? "包邮" : "寄付"}订单确认签收前必须补录实际运费`);
       }
       const nextShipment = {
         ...shipment,

@@ -221,13 +221,13 @@ test("requires finite positive money within the limit and at most two decimals",
   );
 });
 
-test("initial outbound enforces the shared cap and precision without changing prepaid/free rules", () => {
+test("initial outbound accepts a pending zero for prepaid and free while enforcing cap and precision", () => {
   assert.equal(normalizeOutboundActualShippingFee(0, "prepaid"), 0);
+  assert.equal(normalizeOutboundActualShippingFee(0, "free"), 0);
   assert.equal(normalizeOutboundActualShippingFee(12.34, "free"), 12.34);
   assert.equal(normalizeOutboundActualShippingFee(MAX_ACTUAL_SHIPPING_FEE, "prepaid"), MAX_ACTUAL_SHIPPING_FEE);
 
   for (const [value, mode] of [
-    [0, "free"],
     [12.345, "prepaid"],
     [MAX_ACTUAL_SHIPPING_FEE + 0.01, "free"],
   ]) {

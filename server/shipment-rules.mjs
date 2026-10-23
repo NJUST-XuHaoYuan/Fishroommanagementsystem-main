@@ -6,7 +6,12 @@ export function requiredShipMethodForOrderSource(source = "") {
 }
 
 export function actualShippingFeeRequiredAtOutbound(mode = "") {
-  return String(mode ?? "").trim() === "free";
+  // The carrier normally confirms the real amount after pickup. Both prepaid
+  // and free-shipping orders may therefore leave outbound with a pending fee.
+  // Keep this helper for callers and older tests, but no fee mode is finalized
+  // at the physical outbound step.
+  void mode;
+  return false;
 }
 
 export function shipmentHasPendingActualShippingFee(mode = "", shipment = {}) {

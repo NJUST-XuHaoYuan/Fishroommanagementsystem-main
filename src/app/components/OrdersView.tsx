@@ -89,6 +89,7 @@ import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialo
 import {
   actualShippingFeePayload,
   canApplyActualShippingFeeResponse,
+  canEditShipmentActualShippingFee,
   MAX_ACTUAL_SHIPPING_FEE,
   normalizedPositiveShippingFee,
 } from "../utils/shipmentFee";
@@ -1115,7 +1116,7 @@ async function exportPendingTrackingShipmentsWord(orders: Order[], state: Store)
   toast.success(`已导出 Word 打印版：${rows.length} 条已出库待发货商品`);
 }
 
-function exportOrdersExcel(orders: Order[], state: Store) {
+export function exportOrdersExcel(orders: Order[], state: Store) {
   if (orders.length === 0) {
     toast.error("请先选择要导出的订单");
     return;
@@ -1239,7 +1240,7 @@ function exportOrdersExcel(orders: Order[], state: Store) {
       shipment.trackingNo || "—",
       SHIPMENT_STATUS_LABEL[shipment.status],
       shipment.damageResolution === "refund" ? "退款" : shipment.damageResolution === "reship" ? "补发" : "",
-      money(shipment.actualShippingFee ?? 0),
+      shipmentHasPendingActualShippingFee(order, shipment) ? "待补运费" : money(shipment.actualShippingFee ?? 0),
       (shipment.itemStockIds ?? []).length,
       joinedShipmentProducts(order, shipment),
       shipment.notes || "",
@@ -2117,6 +2118,52 @@ function ReturnItemDialog({
 
 // ─── Shipment Status Actions ─────────────────────────────────────────────────
 
+export function ShipmentActualShippingFeeFields({
+  mode, pending, value, error, saving, disabled, saved, onChange, onSave,
+}: {
+  mode: ShippingFeeMode;
+  pending: boolean;
+  value: number;
+  error: string;
+  saving: boolean;
+  disabled: boolean;
+  saved: boolean;
+  onChange: (value: number) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className={`grid gap-2 rounded-lg border p-3 ${pending ? "border-amber-200 bg-amber-50/70" : "bg-muted/20"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label htmlFor="shipment-actual-shipping-fee">{shippingFeeModeLabel(mode)}实际运费（¥）</Label>
+        {pending && <Badge variant="outline" className="border-amber-300 bg-white text-amber-700">待补运费</Badge>}
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Input
+          id="shipment-actual-shipping-fee"
+          className="min-h-11 min-w-0"
+          type="number" inputMode="decimal" min={0.01} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
+          value={value || ""}
+          placeholder="费用确定后填写"
+          disabled={disabled}
+          aria-invalid={Boolean(error)}
+          aria-describedby={`shipment-actual-shipping-fee-hint${error ? " shipment-actual-shipping-fee-error" : ""}`}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+        <Button type="button" variant="outline" className="min-h-11 shrink-0" onClick={onSave} disabled={disabled}>
+          {saving && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+          {saving ? "保存运费中…" : pending ? "保存实际运费" : "更新实际运费"}
+        </Button>
+      </div>
+      {error && <p id="shipment-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">{error}</p>}
+      {saved && <p role="status" className="text-xs text-emerald-700">实际运费已保存</p>}
+      <p id="shipment-actual-shipping-fee-hint" className="text-xs leading-relaxed text-muted-foreground">
+        费用确定后单独保存，与打包凭证、发货和签收互不影响；完成订单前必须补齐。
+        {mode === "free" ? "包邮运费计入包邮折扣，不增加客户应收。" : "寄付运费会按实际金额调整订单应收。"}
+      </p>
+    </div>
+  );
+}
+
 function ShipmentActionDialog({
   shipment, order, open, saving = false, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
   onSaveActualShippingFee,
@@ -2136,6 +2183,8 @@ function ShipmentActionDialog({
   const [actualShippingFee, setActualShippingFee] = useState(0);
   const [savingShippingFee, setSavingShippingFee] = useState(false);
   const [actualShippingFeeError, setActualShippingFeeError] = useState("");
+  const [actualShippingFeeSaved, setActualShippingFeeSaved] = useState(false);
+  const shippingFeeSaveLock = useRef(false);
 
   useEffect(() => {
     if (open && shipment) {
@@ -2143,6 +2192,7 @@ function ShipmentActionDialog({
       setActualShippingFee(Number(shipment.actualShippingFee ?? 0));
       setSavingShippingFee(false);
       setActualShippingFeeError("");
+      setActualShippingFeeSaved(false);
     }
   }, [open, shipment?.id]);
 
@@ -2151,9 +2201,11 @@ function ShipmentActionDialog({
   const shippingFeeMode = orderShippingFeeMode(order);
   const shippingFeePending = !!order && shipmentHasPendingActualShippingFee(order, shipment);
   const actionLocked = saving || savingShippingFee;
+  const editableOrder = !!order && !["completed", "cancelled"].includes(order.status);
 
   const saveActualShippingFee = async () => {
-    if (savingShippingFee || saving) return false;
+    if (shippingFeeSaveLock.current || saving || !editableOrder) return false;
+    setActualShippingFeeSaved(false);
     const normalizedFee = normalizedPositiveShippingFee(actualShippingFee);
     if (normalizedFee === null) {
       const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
@@ -2163,14 +2215,20 @@ function ShipmentActionDialog({
     }
     setActualShippingFee(normalizedFee);
     setActualShippingFeeError("");
+    shippingFeeSaveLock.current = true;
     setSavingShippingFee(true);
     try {
       const ok = await onSaveActualShippingFee(shipment, normalizedFee);
-      if (ok) setActualShippingFeeError("");
+      if (ok) {
+        setActualShippingFeeError("");
+        setActualShippingFeeSaved(true);
+      }
       return ok;
     } catch (error) {
       const message = error instanceof OrderApiError && error.status === 401
         ? "登录状态已失效，请重新登录后再保存"
+        : error instanceof OrderApiError && error.status === 409
+        ? "运费或发货记录已被其他人修改，请关闭窗口并刷新后核对再保存"
         : error instanceof Error && error.message
         ? error.message
         : "运费保存失败，请重试";
@@ -2178,9 +2236,20 @@ function ShipmentActionDialog({
       toast.error(message);
       return false;
     } finally {
+      shippingFeeSaveLock.current = false;
       setSavingShippingFee(false);
     }
   };
+
+  const actualShippingFeeFields = canEditShipmentActualShippingFee(shipment, shippingFeeMode, order?.status) ? (
+    <ShipmentActualShippingFeeFields
+      mode={shippingFeeMode} pending={shippingFeePending} value={actualShippingFee}
+      error={actualShippingFeeError} saving={savingShippingFee} disabled={actionLocked}
+      saved={actualShippingFeeSaved}
+      onChange={(value) => { setActualShippingFee(value); setActualShippingFeeError(""); setActualShippingFeeSaved(false); }}
+      onSave={saveActualShippingFee}
+    />
+  ) : null;
 
   if (shipment.status === "outbound") {
     const confirmShipment = () => {
@@ -2198,7 +2267,7 @@ function ShipmentActionDialog({
           aria-busy={actionLocked}
           onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
           onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
-          className={`max-w-2xl ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+          className={`max-w-2xl max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
         >
           <DialogHeader>
             <DialogTitle>出库发货确认</DialogTitle>
@@ -2220,6 +2289,8 @@ function ShipmentActionDialog({
               </p>
             </div>
 
+            {actualShippingFeeFields}
+
             <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
               已出库的鱼已经不在缸内显示；如果出库点错，可以在真正发货前取消出库。
             </div>
@@ -2230,12 +2301,12 @@ function ShipmentActionDialog({
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
               onClick={() => onCancelShipment(shipment)}
-              disabled={actionLocked}
+              disabled={actionLocked || !editableOrder}
             >
               <RotateCcw className="size-4 mr-1" />
               取消出库
             </Button>
-            <Button onClick={confirmShipment} disabled={actionLocked}>
+            <Button className="min-h-11" onClick={confirmShipment} disabled={actionLocked || !editableOrder}>
               <Truck className="size-4 mr-1" />
               {saving ? "保存中..." : "确认发货"}
             </Button>
@@ -2252,10 +2323,10 @@ function ShipmentActionDialog({
         aria-busy={actionLocked}
         onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
         onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
-        className={`max-w-sm ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+        className={`max-w-sm max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
       >
         <DialogHeader>
-          <DialogTitle>处理运输状态</DialogTitle>
+          <DialogTitle>{shipment.status === "shipped" ? "处理运输状态" : "补录 / 修正运费"}</DialogTitle>
         </DialogHeader>
         <div className="rounded-lg border bg-muted/30 p-3 text-sm flex flex-col gap-1">
           <div><span className="text-muted-foreground">订单：</span>{order?.orderNo ?? "—"}</div>
@@ -2267,48 +2338,13 @@ function ShipmentActionDialog({
           <div><span className="text-muted-foreground">发货操作时间：</span>{formatShipmentCreatedAt(shipment.shippedAt || shipment.createdAt)}</div>
           <div><span className="text-muted-foreground">发货日期：</span>{shipment.shipDate}</div>
         </div>
-        {shipment.shipMethod !== "pickup" && shippingFeeMode === "prepaid" && (
-          <div className={`grid gap-2 rounded-lg border p-3 ${shippingFeePending ? "border-amber-200 bg-amber-50/70" : "bg-muted/20"}`}>
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="shipment-actual-shipping-fee">寄付实际运费（¥）</Label>
-              {shippingFeePending && <Badge variant="outline" className="border-amber-300 bg-white text-amber-700">待补运费</Badge>}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                id="shipment-actual-shipping-fee"
-                type="number"
-                min={0}
-                max={MAX_ACTUAL_SHIPPING_FEE}
-                step={0.01}
-                value={actualShippingFee || ""}
-                placeholder="发货后补录"
-                disabled={actionLocked}
-                aria-invalid={Boolean(actualShippingFeeError)}
-                aria-describedby={actualShippingFeeError ? "shipment-actual-shipping-fee-error" : undefined}
-                onChange={(event) => {
-                  setActualShippingFee(Number(event.target.value));
-                  if (actualShippingFeeError) setActualShippingFeeError("");
-                }}
-              />
-              <Button type="button" variant="outline" onClick={saveActualShippingFee} disabled={actionLocked}>
-                {savingShippingFee ? "保存中..." : shippingFeePending ? "补录运费" : "更新运费"}
-              </Button>
-            </div>
-            {actualShippingFeeError && (
-              <p id="shipment-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">
-                {actualShippingFeeError}
-              </p>
-            )}
-            <p className="text-xs text-muted-foreground">寄付可以先发货，实际运费必须在确认收货和完成订单前补录。</p>
-          </div>
-        )}
-        <div className="grid grid-cols-3 gap-3">
+        {actualShippingFeeFields}
+        {shipment.status === "shipped" && editableOrder && <div className="grid grid-cols-3 gap-3">
           <Button
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
-            disabled={actionLocked || shippingFeePending}
-            title={shippingFeePending ? "请先补录实际运费" : undefined}
+            disabled={actionLocked}
           >
             <CheckCircle className="size-4" />
             确认收货
@@ -2331,7 +2367,7 @@ function ShipmentActionDialog({
             <RotateCcw className="size-4" />
             取消发货
           </Button>
-        </div>
+        </div>}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>取消</Button>
         </DialogFooter>
@@ -4101,12 +4137,22 @@ function ItemsWithShipments({
               </span>
               <ShipmentStatusBadge
                 shipment={sh}
-                onClick={(sh.status === "outbound" || (sh.status === "shipped" && sh.shipMethod !== "pickup"))
+                onClick={onShipmentAction && (sh.status === "outbound" || (sh.status === "shipped" && sh.shipMethod !== "pickup"))
                   ? () => onShipmentAction?.(sh)
                   : undefined}
               />
               {shipmentHasPendingActualShippingFee(order, sh) && (
                 <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">待补运费</Badge>
+              )}
+              {onShipmentAction && canEditShipmentActualShippingFee(sh, orderShippingFeeMode(order), order.status) && (
+                <Button
+                  type="button" size="sm" variant="outline"
+                  className="min-h-11 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white"
+                  onClick={() => onShipmentAction(sh)}
+                >
+                  <CircleDollarSign className="size-3.5" aria-hidden="true" />
+                  {shipmentHasPendingActualShippingFee(order, sh) ? "补录运费" : "修改运费"}
+                </Button>
               )}
               {packingProofs.length > 0 && (
                 <Button
@@ -4732,7 +4778,7 @@ function OrderDetailDialog({
     if (!allShipmentsResolved)
       return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
     if (pendingActualShippingFee)
-      return toast.error(`尚有 ${pendingActualShippingFeeCount} 笔寄付实际运费未补录，不能完成订单`);
+      return toast.error(`尚有 ${pendingActualShippingFeeCount} 笔实际运费未补录，不能完成订单`);
     if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
     try {
       const result = await postOrderApi("orders/complete", { orderId: order.id });
@@ -4747,10 +4793,7 @@ function OrderDetailDialog({
   const markShipmentDelivered = async (shipment: Shipment) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
-    if (shipmentHasPendingActualShippingFee(order, shipment)) {
-      toast.error("寄付订单确认收货前必须先补录实际运费");
-      return;
-    }
+    if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能修改签收状态");
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     shipmentFeeRequestSequence.current += 1;
     try {
@@ -4766,6 +4809,9 @@ function OrderDetailDialog({
   const saveShipmentActualShippingFee = async (shipment: Shipment, actualShippingFee: number) => {
     if (!order) throw new Error("订单不存在或已关闭，请刷新后重试");
     if (!permission.canUpdate) throw new Error("当前账号没有修改订单的权限");
+    if (!canEditShipmentActualShippingFee(shipment, orderShippingFeeMode(order), order.status)) {
+      throw new Error("当前订单或发货状态不允许修改实际运费");
+    }
     const payload = actualShippingFeePayload(shipment, actualShippingFee);
     if (!payload) throw new Error("实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数");
     if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${payload.actualShippingFee.toFixed(2)}。`)) return false;
@@ -4787,7 +4833,7 @@ function OrderDetailDialog({
       shouldApply: () => requestSequence === shipmentFeeRequestSequence.current,
     });
     setShipmentAction((current) => current?.id === shipment.id ? result.shipment : current);
-    toast.success("实际运费已补录");
+    toast.success("实际运费已保存");
     return true;
   };
 
@@ -4795,7 +4841,7 @@ function OrderDetailDialog({
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (shipmentConfirmSaving) return;
-    if (order.status === "completed") return toast.error("已完成订单不能再确认发货");
+    if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能再确认发货");
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
@@ -4821,7 +4867,7 @@ function OrderDetailDialog({
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (shipmentConfirmSaving) return;
-    if (order.status === "completed") return toast.error("已完成订单不能取消发货");
+    if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
     if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。")) return;
     shipmentFeeRequestSequence.current += 1;
@@ -4877,7 +4923,7 @@ function OrderDetailDialog({
         shipDate: data.shipDate,
         shipMethod: data.shipMethod,
         carrier: data.carrier,
-        actualShippingFee: data.shipMethod === "pickup" ? 0 : data.actualShippingFee,
+        actualShippingFee: 0,
         notes: data.notes,
         selectedItemIds: data.selectedItemIds,
         expectedStockLocations: data.expectedStockLocations,
@@ -4890,24 +4936,13 @@ function OrderDetailDialog({
       return false;
     }
     setShipDialogOpen(false);
-    const actualShippingFee = data.shipMethod === "pickup" ? 0 : data.actualShippingFee;
-    const feeDiff = actualShippingFee - (order.shippingFee ?? 0);
     const shippingFeeMode = orderShippingFeeMode(order);
     if (data.shipMethod === "pickup") {
       toast.success("已确认上门自取签收");
     } else if (shippingFeeMode === "collect") {
       toast.success("已出库，运费到付，不计订单应收");
-    } else if (shippingFeeMode === "prepaid" && actualShippingFee <= 0) {
-      toast.success("已出库，实际运费待补录；确认收货前必须填写");
-    } else if (shippingFeeMode === "free") {
-      toast.success(`已出库，实际运费 ¥${actualShippingFee.toFixed(2)} 已计入包邮折扣`);
-    } else if (Math.abs(feeDiff) > 0.005) {
-      if (feeDiff > 0)
-        toast.success(`已出库 — 实际运费多 ¥${feeDiff.toFixed(2)}，已计入应收账款`);
-      else
-        toast.success(`已出库 — 实际运费少 ¥${Math.abs(feeDiff).toFixed(2)}，已计入应收账款`);
     } else {
-      toast.success("已出库，请上传打包凭证后确认发货");
+      toast.success("已出库，实际运费待补录；不影响发货、签收，完成订单前请补齐");
     }
     return true;
   };
@@ -5284,7 +5319,7 @@ function OrderDetailDialog({
                     getProduct={getProduct}
                     getStockItem={getAccessibleStockItem}
                     subTankName={subTankName}
-                    onShipmentAction={setShipmentAction}
+                    onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? setShipmentAction : undefined}
                     onReturnItem={openReturnItem}
                     canReturnItem={canReturnOrderItem}
                   />
@@ -5324,7 +5359,7 @@ function OrderDetailDialog({
                       <Label className="text-xs">预计运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
                         onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
-                      <p className="text-xs text-muted-foreground">寄付可发货后补录；确认收货和完成订单前必须填写</p>
+                      <p className="text-xs text-muted-foreground">这里只填写预估金额。实际运费在出库后独立补录；不影响签收，完成订单前需补齐。</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
@@ -5465,7 +5500,7 @@ function OrderDetailDialog({
                       <p className="text-xs text-purple-500">尚有发货未签收或报损未完成处理</p>
                     )}
                     {allItemsShipped && allShipmentsResolved && pendingActualShippingFee && (
-                      <p className="text-xs text-amber-600">尚有 {pendingActualShippingFeeCount} 笔寄付实际运费未补录</p>
+                      <p className="text-xs text-amber-600">尚有 {pendingActualShippingFeeCount} 笔实际运费未补录</p>
                     )}
                     <Button
                       size="sm"

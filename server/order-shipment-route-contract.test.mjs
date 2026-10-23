@@ -73,7 +73,9 @@ test("order and shipment success payloads always build site-filtered collections
 
   assert.doesNotMatch(routeBlock("/api/orders/credit-sale/confirm"), /compactResponse|responseMode/);
 
-  const rawCollectionInSuccessPayload = /sendJson\(req, res, 200,[\s\S]{0,1000}?\b(?:orders: (?:orders|nextOrders|approved\.nextOrders|nextState\.orders)|shipments: (?:shipments|nextShipments)|stock: nextStock)\b/;
+  // Stay inside the response object. A fixed character window can cross the
+  // closing `});` and mistake a later persistence object for response data.
+  const rawCollectionInSuccessPayload = /sendJson\(req, res, 200,\s*\{(?:(?!\n\s*\}\);)[\s\S])*?\b(?:orders: (?:orders|nextOrders|approved\.nextOrders|nextState\.orders)|shipments: (?:shipments|nextShipments)|stock: nextStock)\b/;
   for (const path of [
     "/api/orders/credit-sale/request",
     "/api/orders/credit-sale/confirm",

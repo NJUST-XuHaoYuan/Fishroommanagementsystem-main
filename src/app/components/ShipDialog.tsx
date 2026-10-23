@@ -11,7 +11,6 @@ import {
 import { toast } from "sonner";
 import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
 import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
-import { MAX_ACTUAL_SHIPPING_FEE, normalizedPositiveShippingFee } from "../utils/shipmentFee";
 import { selectExpectedStockLocations, type ExpectedStockLocations, type StockLocationSnapshot } from "../utils/orderOutbound";
 
 function todayDateString(): string {
@@ -69,11 +68,9 @@ export function ShipDialog({
   const [shipDate, setShipDate] = useState(todayStr);
   const [carrier, setCarrier] = useState("");
   const [trackingNo, setTrackingNo] = useState("");
-  const [actualShippingFee, setActualShippingFee] = useState(0);
   const [notes, setNotes] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
-  const [actualShippingFeeError, setActualShippingFeeError] = useState("");
   const [locationSnapshots, setLocationSnapshots] = useState<ExpectedStockLocations>({});
   const shipMethod: "express" | "pickup" = pickupOnly ? "pickup" : "express";
   const shippingFeeMode = orderShippingFeeMode(order);
@@ -91,9 +88,6 @@ export function ShipDialog({
       setShipDate(todayStr);
       setCarrier("");
       setTrackingNo("");
-      setActualShippingFee(
-        pickupOnly || orderShippingFeeMode(order) !== "free" ? 0 : order.shippingFee ?? 0
-      );
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));
       setLocationSnapshots(Object.fromEntries(unshippedItems.flatMap((item) => {
@@ -101,15 +95,10 @@ export function ShipDialog({
         return location ? [[item.stockItemId, { ...location }]] : [];
       })));
       setSaving(false);
-      setActualShippingFeeError("");
     }
   }, [open, order?.id, pickupOnly]); // eslint-disable-line
 
   if (!order) return null;
-
-  const orderShippingFee = order.shippingFee ?? 0;
-  const normalizedActualShippingFee = normalizedPositiveShippingFee(actualShippingFee);
-  const feeDiff = (normalizedActualShippingFee ?? actualShippingFee) - orderShippingFee;
 
   const toggleItem = (id: string) => {
     setSelectedIds((prev) => {
@@ -125,22 +114,10 @@ export function ShipDialog({
 
   const confirm = async () => {
     if (saving) return;
-    setActualShippingFeeError("");
     if (!shipDate) return toast.error("请填写出库日期");
     if (shipDate < order.date) return toast.error("出库日期不能早于下单日期");
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
     if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
-    let submittedActualShippingFee = actualShippingFee;
-    if (shipMethod === "express" && shippingFeeMode !== "collect") {
-      const zeroPendingFeeAllowed = shippingFeeMode === "prepaid" && actualShippingFee === 0;
-      if (!zeroPendingFeeAllowed && normalizedActualShippingFee === null) {
-        const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
-        setActualShippingFeeError(message);
-        return toast.error(message);
-      }
-      submittedActualShippingFee = normalizedActualShippingFee ?? 0;
-      setActualShippingFee(submittedActualShippingFee);
-    }
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
     const expectedStockLocations = getStockLocation
       ? selectExpectedStockLocations([...selectedIds], locationSnapshots)
@@ -153,7 +130,8 @@ export function ShipDialog({
         shipMethod,
         carrier,
         trackingNo,
-        actualShippingFee: submittedActualShippingFee,
+        // Actual charges are recorded separately after the carrier provides them.
+        actualShippingFee: 0,
         notes,
         selectedItemIds: [...selectedIds],
         ...(expectedStockLocations ? { expectedStockLocations } : {}),
@@ -266,8 +244,8 @@ export function ShipDialog({
             </div>
           )}
 
-          {/* Date + actual fee */}
-          <div className={shipMethod === "express" ? "grid grid-cols-2 gap-3" : "grid gap-3"}>
+          {/* Outbound date: carrier charges are not known at this stage. */}
+          <div className="grid gap-3">
             <div className="grid gap-1.5">
               <Label className="text-sm">{pickupOnly ? "自提日期" : "出库日期"}<span className="text-red-500 ml-0.5">*</span></Label>
               <Input
@@ -289,64 +267,19 @@ export function ShipDialog({
                 }}
               />
             </div>
-            {shipMethod === "express" && shippingFeeMode !== "collect" && (
-              <div className="grid gap-1.5">
-                <Label htmlFor="ship-actual-shipping-fee" className="text-sm">
-                  实际运费（¥）
-                  {shippingFeeMode === "free" && <span className="text-red-500 ml-0.5">*</span>}
-                </Label>
-                <Input
-                  id="ship-actual-shipping-fee"
-                  type="number" min={0} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
-                  value={actualShippingFee || ""}
-                  placeholder={shippingFeeMode === "prepaid" ? "可发货后补录" : "0"}
-                  aria-invalid={Boolean(actualShippingFeeError)}
-                  aria-describedby={actualShippingFeeError ? "ship-actual-shipping-fee-error" : undefined}
-                  onChange={(e) => {
-                    setActualShippingFee(Number(e.target.value));
-                    if (actualShippingFeeError) setActualShippingFeeError("");
-                  }}
-                />
-                {actualShippingFeeError && (
-                  <p id="ship-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">
-                    {actualShippingFeeError}
-                  </p>
-                )}
-              </div>
-            )}
           </div>
 
-          {/* Fee diff hint */}
+          {/* Fee recording happens independently from outbound and delivery. */}
           {shipMethod === "express" && shippingFeeMode === "collect" && (
             <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
               <Info className="size-4 mt-0.5 shrink-0" />
               到付运费由客户向承运方支付，不填写金额，也不计入订单应收。
             </div>
           )}
-          {shipMethod === "express" && shippingFeeMode === "free" && (
-            <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
-              <Info className="size-4 mt-0.5 shrink-0" />
-              实际运费会计入包邮折扣，订单应收不会增加。
-            </div>
-          )}
-          {shipMethod === "express" && shippingFeeMode === "prepaid" && actualShippingFee <= 0 && (
+          {shipMethod === "express" && shippingFeeMode !== "collect" && (
             <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
-              <Info className="size-4 mt-0.5 shrink-0" />
-              寄付可以先出库和发货，实际运费必须在确认收货和完成订单前补录。
-            </div>
-          )}
-          {shipMethod === "express" && shippingFeeMode === "prepaid" && normalizedActualShippingFee !== null && Math.abs(feeDiff) > 0.005 && (
-            <div className={`flex items-start gap-2 rounded-lg px-3 py-2.5 text-sm ${
-              feeDiff > 0
-                ? "bg-amber-50 text-amber-800 border border-amber-200"
-                : "bg-sky-50 text-sky-800 border border-sky-200"
-            }`}>
-              <Info className="size-4 mt-0.5 shrink-0" />
-              <div>
-                {feeDiff > 0
-                  ? <>实际运费比订单运费多 <strong>¥{feeDiff.toFixed(2)}</strong>，出库后将调整订单应收。</>
-                  : <>实际运费比订单运费少 <strong>¥{Math.abs(feeDiff).toFixed(2)}</strong>，出库后将调整订单应收。</>}
-              </div>
+              <Info className="size-4 mt-0.5 shrink-0" aria-hidden="true" />
+              出库无需填写实际运费。费用确定后，可在上传打包凭证时或发货后独立补录；不影响签收，完成订单前需补齐。
             </div>
           )}
 

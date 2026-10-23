@@ -22,6 +22,17 @@ export function canUseActualShippingFeeApi(
   return String(shipment.shipMethod ?? "express") === "express" && ["prepaid", "free"].includes(shippingFeeMode);
 }
 
+export function canEditShipmentActualShippingFee(
+  shipment: { shipMethod?: string; status?: string },
+  shippingFeeMode: string,
+  orderStatus?: string
+): boolean {
+  return Boolean(orderStatus)
+    && !["completed", "cancelled"].includes(orderStatus ?? "")
+    && ["outbound", "shipped", "delivered", "damaged"].includes(shipment.status ?? "")
+    && canUseActualShippingFeeApi(shipment, shippingFeeMode);
+}
+
 export function canApplyActualShippingFeeResponse(
   shipments: Array<{ id: string }>,
   shipmentId: string,

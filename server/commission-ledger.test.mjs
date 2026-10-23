@@ -128,6 +128,46 @@ test("actual shipment fee supersedes estimated shipping without counting damage 
   assert.equal(result.byOrder.get("o1").commissionBase, 400);
 });
 
+test("pending prepaid actual fees keep the estimated shipping allocation, including split shipments", () => {
+  for (const shipments of [
+    [{ orderId: "o1", status: "outbound", shipMethod: "express", actualShippingFee: 0 }],
+    [
+      { orderId: "o1", status: "shipped", shipMethod: "express", actualShippingFee: 25 },
+      { orderId: "o1", status: "outbound", shipMethod: "express", actualShippingFee: 0 },
+    ],
+  ]) {
+    const state = fixture({ shippingFee: 100, payments: [paid("partial", 550)] });
+    state.shipments = shipments;
+    const result = reconcile(state);
+    assert.equal(result.byOrder.get("o1").commissionBase, 500);
+    assert.deepEqual(Object.values(result.ledger.receiptSnapshots)[0].caps, [100000, 10000, 0]);
+  }
+});
+
+test("fully recorded prepaid split shipments replace the estimate with their actual total", () => {
+  const state = fixture({ shippingFee: 100, payments: [paid("partial", 550)] });
+  state.shipments = [
+    { orderId: "o1", status: "shipped", shipMethod: "express", actualShippingFee: 20 },
+    { orderId: "o1", status: "delivered", shipMethod: "express", actualShippingFee: 30 },
+  ];
+  const result = reconcile(state);
+  assert.deepEqual(Object.values(result.ledger.receiptSnapshots)[0].caps, [100000, 5000, 0]);
+});
+
+test("collect, free and pickup shipments never make freight commissionable", () => {
+  for (const { shippingFeeMode, source, shipment } of [
+    { shippingFeeMode: "collect", source: "私域线上", shipment: { status: "outbound", shipMethod: "express", actualShippingFee: 0 } },
+    { shippingFeeMode: "free", source: "私域线上", shipment: { status: "outbound", shipMethod: "express", actualShippingFee: 0 } },
+    { shippingFeeMode: "prepaid", source: "私域线上", shipment: { status: "delivered", shipMethod: "pickup", actualShippingFee: 0 } },
+  ]) {
+    const state = fixture({ shippingFeeMode, source, shippingFee: 100, payments: [paid("partial", 500)] });
+    state.shipments = [{ orderId: "o1", ...shipment }];
+    const result = reconcile(state);
+    assert.equal(result.byOrder.get("o1").commissionBase, 500);
+    assert.deepEqual(Object.values(result.ledger.receiptSnapshots)[0].caps, [100000, 0, 0]);
+  }
+});
+
 test("initial reconstruction recognizes Oct regular and Nov approval delta without rewriting Oct", () => {
   const state = approve(fixture());
   const result = reconcile(state);

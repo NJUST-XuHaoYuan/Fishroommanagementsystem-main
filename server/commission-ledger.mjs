@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeExternalOrderNo, normalizeShippingFeeMode } from "./finance-utils.mjs";
 import { commissionOrderCreatedAtMs, isCommissionEligibleOrder, resolveNewCustomerOrderOwner, NEW_CUSTOMER_COMMISSION_POLICY_EFFECTIVE_DATE } from "./new-customer-approval.mjs";
+import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
 
 export const COMMISSION_POLICY_EFFECTIVE_DATE = NEW_CUSTOMER_COMMISSION_POLICY_EFFECTIVE_DATE;
 const START = Date.parse(`${COMMISSION_POLICY_EFFECTIVE_DATE}T00:00:00+08:00`);
@@ -69,7 +70,11 @@ function feeCaps(state, order, diagnostics) {
   if (shipments.some((item) => !missing(item.actualShippingFee) && (cents(item.actualShippingFee) == null || cents(item.actualShippingFee) < 0))) {
     diagnose(diagnostics, order, "INVALID_ORDER_SHIPPING_MONEY"); return null;
   }
-  const actualKnown = shipments.length > 0 && shipments.every((item) => item.actualShippingFee != null && item.actualShippingFee !== "" && cents(item.actualShippingFee) != null);
+  // Zero is the persisted sentinel for a carrier fee that has not been
+  // confirmed yet. Reuse the fulfillment rule so commission allocation and
+  // customer receivables keep the same estimated-fee basis while any split
+  // shipment is pending. Pickup and collect/free modes remain non-billable.
+  const actualKnown = shipments.length > 0 && !shipmentsHavePendingActualShippingFee(mode, shipments);
   const shipping = mode === "prepaid" ? actualKnown ? shipments.reduce((sum, item) => sum + nonnegative(item.actualShippingFee), 0) : nonnegative(order.shippingFee) : 0;
   // Damage refunds are cash events below, not a second reduction of merchandise receivable.
   const caps = [goods, shipping, nonnegative(order.packagingFee)];
