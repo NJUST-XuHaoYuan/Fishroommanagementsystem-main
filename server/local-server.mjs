@@ -256,6 +256,8 @@ import {
   isStockInTransfer,
   stockTransferId,
 } from "./stock-transfer-rules.mjs";
+import { planStockTransferDispatch, applyStockTransferDispatch, restoreCancelledTransferDispatch } from "./stock-transfer-dispatch.mjs";
+import { recentStockTransferItems } from "./stock-transfer-history.mjs";
 import {
   sanitizeBioRecordTransferForVisibleSites,
   sanitizeStockTransferForVisibleSites,
@@ -805,7 +807,7 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
     batches: (Array.isArray(state.batches) ? state.batches : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds)
     ),
-    stock,
+    stock: stock.map((item) => sanitizeStockTransferForVisibleSites(item, visibleSiteIds)),
     logs: (Array.isArray(state.logs) ? state.logs : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || subTankIds.has(String(item?.subTankId ?? ""))
     ),
@@ -820,7 +822,7 @@ function siteVisibilityFilteredState(state = {}, account = {}) {
     ),
     bioRecords: (Array.isArray(state.bioRecords) ? state.bioRecords : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || stockIds.has(String(item?.stockItemId ?? ""))
-    ),
+    ).map((record) => sanitizeBioRecordTransferForVisibleSites(record, visibleSiteIds)),
     orders,
     shipments: (Array.isArray(state.shipments) ? state.shipments : []).filter((item) =>
       matchesAnyVisibleSite(item, visibleSiteIds) || orderIds.has(String(item?.orderId ?? ""))
@@ -5833,7 +5835,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
       // A sold fish may have moved after the order was placed. Retaining that
       // exact existing line must not require changing the order's ownership.
       // Adding another fish still goes through normalizeOrderItemInput above.
-      resolveOrderFulfillmentStock(state, stockId, { visibleSiteIds });
+      resolveOrderFulfillmentStock(state, stockId, { visibleSiteIds, allowDispatched: true });
     }
     const productId = String(stockItem?.productId ?? existingItem?.productId ?? item?.productId ?? "").trim();
     const product = findProductById(state, productId);
@@ -6400,6 +6402,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
 
   for (const [shipmentId, currentShipment] of currentShipmentsById.entries()) {
     if (nextShipmentsById.has(shipmentId)) continue;
+    if (currentShipment.transferDispatch) throw httpError(409, "在途直接出库必须通过取消出库专用入口撤销，以恢复移缸在途状态");
     requireOrderPermissionForAuth(req, "update");
     if (!["outbound", "shipped"].includes(String(currentShipment.status ?? ""))) {
       throw new Error("只能取消已出库或运输中的发货单");
@@ -13089,6 +13092,9 @@ async function handleApi(req, res, url) {
       const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
       const orderId = String(order.id ?? "");
       if (Array.isArray(order.payments) && order.payments.length > 0) throw new Error("该订单已有收款记录，不能删除");
+      if ((state.shipments ?? []).some((shipment) => String(shipment.orderId) === orderId && shipment.transferDispatch)) {
+        throw httpError(409, "订单包含在途直接出库记录，请先取消出库；已签收的发货记录不能删除");
+      }
 
       const nextOrders = orders.filter((item) => String(item?.id ?? "") !== orderId);
       const nextShipments = (Array.isArray(state.shipments) ? state.shipments : [])
@@ -13147,6 +13153,36 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/transfer-items" && req.method === "GET") {
+    try {
+      const orderId = String(url.searchParams.get("orderId") ?? "").trim();
+      if (!orderId) throw httpError(400, "缺少订单信息");
+      // Only the selected order and shipment inventory identities are read.
+      // No customer or finance collections are needed for this safe projection.
+      const { rows } = await pool.query(`SELECT data -> 'personnel' AS personnel,
+        data -> 'sites' AS sites, data -> 'stock' AS stock, data -> 'products' AS products,
+        COALESCE((SELECT jsonb_agg(order_item) FROM jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS order_item
+          WHERE order_item ->> 'id' = $2), '[]'::jsonb) AS transfer_orders,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('status', shipment_item -> 'status', 'itemStockIds', shipment_item -> 'itemStockIds'))
+          FROM jsonb_array_elements(COALESCE(data -> 'shipments', '[]'::jsonb)) AS shipment_item), '[]'::jsonb) AS transfer_shipments
+        FROM app_state WHERE id = $1`, [stateId, orderId]);
+      const row = rows[0] ?? {};
+      const state = { ...row, orders: row.transfer_orders ?? [], shipments: row.transfer_shipments ?? [] };
+      refreshLockedOrderMutationAuth(req, state);
+      requireOrderPermissionForAuth(req, "update");
+      const { order } = resolveAuthorizedLockedOrderTarget(req, state, orderId);
+      const allowed = new Set((order.items ?? []).filter(orderItemKeepsInventory).map((item) => String(item.stockItemId)));
+      const blocked = shipmentActiveStockIds(state);
+      const eligibleStock = (state.stock ?? []).filter((item) => allowed.has(String(item.id)) && !item.lost && !blocked.has(String(item.id)));
+      sendJson(req, res, 200, { ok: true, items: ["completed", "cancelled"].includes(order.status) ? [] :
+        stockTransferPoolItems({ ...state, stock: eligibleStock }) }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error?.statusCode || 400, { ok: false, ...(error?.code ? { code: error.code } : {}), error: error.message },
+        { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/shipments/outbound" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -13183,9 +13219,16 @@ async function handleApi(req, res, url) {
       const blockedShipmentIds = shipmentActiveStockIds(state);
       const duplicatedShipmentIds = selectedItemIds.filter((id) => blockedShipmentIds.has(id));
       if (duplicatedShipmentIds.length > 0) throw new Error("所选商品已经出库或发货，请刷新后重试");
-      assertStockIdsNotInTransfer(state, selectedItemIds, "移缸在途的鱼不能出库，请先完成签收入缸");
+      const transferDispatchPlan = planStockTransferDispatch(state, selectedItemIds, body.transferDispatch, {
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
+      });
+      const transferDispatchIds = new Set((transferDispatchPlan?.items ?? []).map((item) => String(item.id)));
       const shippedIds = shippedOutStockIds(state);
       for (const stockId of selectedItemIds) {
+        if (transferDispatchIds.has(stockId)) {
+          if (shippedIds.has(stockId)) throw httpError(409, "所选在途鱼已出库，请刷新后重试");
+          continue;
+        }
         const { stock: stockItem } = resolveOrderFulfillmentStock(state, stockId, {
           visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
           expectedLocation: expectedOrderFulfillmentLocation(body, stockId),
@@ -13227,6 +13270,10 @@ async function handleApi(req, res, url) {
         shipMethod,
         actualShippingFee,
         itemStockIds: selectedItemIds,
+        ...(transferDispatchPlan ? { transferDispatch: {
+          siteId: transferDispatchPlan.siteId,
+          items: transferDispatchPlan.items.map((item) => ({ stockItemId: String(item.id), transferId: stockTransferId(item) })),
+        } } : {}),
         ...(isPickup ? { shippedAt: createdAt, deliveredAt: createdAt } : {}),
       };
       assertActiveShipmentInventoryAssignment(shipment, {
@@ -13258,6 +13305,9 @@ async function handleApi(req, res, url) {
         paymentGate,
         operator
       );
+      const transferChanges = applyStockTransferDispatch(state, transferDispatchPlan, {
+        shipmentId, orderId, operator, now: new Date().toISOString(), date: createdAt, createId: () => uid("bio"),
+      });
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
@@ -13266,12 +13316,13 @@ async function handleApi(req, res, url) {
         action: "修改记录",
         detail: isPickup
           ? `订单「${order.orderNo}」上门自取签收 ${selectedItemIds.length} 条商品`
-          : `订单「${order.orderNo}」出库 ${selectedItemIds.length} 条商品`,
+          : `订单「${order.orderNo}」出库 ${selectedItemIds.length} 条商品${transferDispatchPlan ? `，其中在途直接出库 ${transferDispatchPlan.items.length} 条，实际发货场地「${transferDispatchPlan.siteName}」（未入缸）` : ""}`,
       };
       const nextState = {
         ...state,
         orders: nextOrders,
         shipments: nextShipments,
+        ...transferChanges,
         notifications: nextNotifications,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
@@ -13283,6 +13334,7 @@ async function handleApi(req, res, url) {
         shipment,
         orders: visibleNextState.orders,
         shipments: visibleNextState.shipments,
+        stock: visibleNextState.stock,
         inventoryProjection: visibleNextState.inventoryProjection,
         operationLog,
       });
@@ -13709,6 +13761,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
@@ -13720,6 +13773,11 @@ async function handleApi(req, res, url) {
 
       if (order.status === "completed") throw new Error("已完成订单不能取消发货");
 
+      const transferRestoration = restoreCancelledTransferDispatch(state, shipment, {
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), operator,
+        now: new Date().toISOString(), date: nowDatetimeInChina(), createId: () => uid("bio"),
+      });
+
       const nextShipments = shipments.filter((item) => String(item?.id ?? "") !== shipmentId);
       const remainingActiveShipments = nextShipments.filter((item) =>
         String(item?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(item)
@@ -13729,20 +13787,21 @@ async function handleApi(req, res, url) {
         if (item.status === "completed" || item.status === "cancelled" || item.status === "damaged") return item;
         return { ...item, status: remainingActiveShipments.length > 0 ? "shipped" : "pending" };
       });
-      const nextStock = setStockSoldForOrders({ ...state, shipments: nextShipments }, nextOrders, state);
+      const nextStock = setStockSoldForOrders({ ...state, stock: transferRestoration.stock, shipments: nextShipments }, nextOrders, state);
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `订单「${order.orderNo}」取消出库/发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品`,
+        detail: `订单「${order.orderNo}」取消出库/发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品${shipment.transferDispatch ? "，直接出库的鱼已恢复移缸在途（未入缸）" : ""}`,
       };
       const nextState = {
         ...state,
         orders: nextOrders,
         shipments: nextShipments,
         stock: nextStock,
+        bioRecords: transferRestoration.bioRecords,
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
@@ -14219,6 +14278,7 @@ async function handleApi(req, res, url) {
   }
 		  if (url.pathname === "/api/stock/transfers" && req.method === "GET") {
 		    try {
+		      const recent = url.searchParams.get("view") === "recent";
 			      // This toolbar polls. Project only the four collections required for
 			      // current-account authorization and the redacted transfer pool; never
 			      // materialize orders, customers, audit logs, or bio-record media.
@@ -14227,21 +14287,28 @@ async function handleApi(req, res, url) {
 			                data -> 'personnel' AS personnel,
 			                data -> 'products' AS products,
 			                data -> 'stock' AS stock
+			                ${recent ? `, COALESCE((
+                      SELECT jsonb_agg(transfer_record - 'photos' - 'videos' - 'text')
+                      FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS transfer_record
+                      WHERE transfer_record ->> 'sourceType' IN ('stockTransferReceived', 'stockTransferDispatched', 'stockTransferDispatchCancelled')
+                        AND COALESCE(transfer_record ->> 'cancelledAt', transfer_record ->> 'dispatchedAt', transfer_record ->> 'receivedAt', '') >= $2
+                    ), '[]'::jsonb) AS transfer_records` : ""}
 			         FROM app_state
 			         WHERE id = $1`,
-			        [stateId]
+			        recent ? [stateId, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()] : [stateId]
 			      );
 			      const state = {
 			        sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
 			        personnel: Array.isArray(rows[0]?.personnel) ? rows[0].personnel : [],
 			        products: Array.isArray(rows[0]?.products) ? rows[0].products : [],
 			        stock: Array.isArray(rows[0]?.stock) ? rows[0].stock : [],
+			        ...(recent ? { transferRecords: Array.isArray(rows[0]?.transfer_records) ? rows[0].transfer_records : [] } : {}),
 			      };
 		      refreshLockedMaintenanceMutationAuth(req, state);
 		      requireModulePermissionForAuth(req, "daily", "update");
 		      sendJson(req, res, 200, {
 		        ok: true,
-		        items: stockTransferPoolItems(state),
+		        items: recent ? recentStockTransferItems(state, { visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state) }) : stockTransferPoolItems(state),
 		      }, { "Cache-Control": "no-store, private" });
 		    } catch (error) {
 		      sendJson(req, res, Number(error?.statusCode ?? 400), {

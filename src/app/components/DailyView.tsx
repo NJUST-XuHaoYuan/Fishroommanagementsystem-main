@@ -2462,7 +2462,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
 	                })}
 	              </div>
 	            </div>
-                <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示、新订单选鱼及实际出库。接收人员在目标缸选择这些鱼后签收入缸；误签发可签回原缸。</p>
+                <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示和新订单选鱼。接收人员在目标缸选择这些鱼后签收入缸；已关联订单的鱼也可在订单中直接出库，需确认实际发货场地。误签发可签回原缸。</p>
 	            <div className="grid gap-2">
 	              <Label>移缸备注</Label>
 	              <Textarea

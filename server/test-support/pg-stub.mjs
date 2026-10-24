@@ -133,6 +133,16 @@ function appStateRow(sql, values = []) {
   const publicBioRow = publicBioProjectionRow(sql, values);
   if (publicBioRow) return publicBioRow;
   const row = {};
+  if (/\bAS transfer_orders\b/.test(sql)) {
+    row.transfer_orders = (state.orders ?? []).filter((item) => item.id === values[1]);
+    row.transfer_shipments = (state.shipments ?? []).map(({ status, itemStockIds }) => ({ status, itemStockIds }));
+  }
+  if (/\bAS transfer_records\b/.test(sql)) {
+    row.transfer_records = (state.bioRecords ?? [])
+      .filter((record) => ["stockTransferReceived", "stockTransferDispatched", "stockTransferDispatchCancelled"].includes(record.sourceType))
+      .filter((record) => String(record.cancelledAt ?? record.dispatchedAt ?? record.receivedAt ?? "") >= String(values[1] ?? ""))
+      .map(({ photos, videos, text, ...record }) => record);
+  }
   if (/\bstock_target\.stock_item_count\b/.test(sql) || /\btarget_stock\s+AS\s+MATERIALIZED\b/.test(sql)) {
     const list = (value) => Array.isArray(value) ? value : [];
     const stockId = String(values[1] ?? "");

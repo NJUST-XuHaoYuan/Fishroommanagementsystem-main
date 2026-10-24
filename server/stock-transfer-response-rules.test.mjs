@@ -63,3 +63,16 @@ test("cross-site and unstructured transfer records redact route text and fields"
   const legacy = sanitizeBioRecordTransferForVisibleSites({ id: "legacy", text: "移缸：A → B" }, ["nanjing"]);
   assert.match(legacy.text, /历史位置已隐藏/);
 });
+test("destination-only stock and timeline views cannot disclose foreign order or shipment references", () => {
+  const item = { id: "fish", siteId: "jiangyin", subTankId: "", tankTransfer: {
+    id: "transfer", status: "dispatched", fromSiteId: "nanjing", dispatchSiteId: "jiangyin", orderId: "foreign-order", shipmentId: "foreign-shipment",
+  } };
+  const projected = sanitizeStockTransferForVisibleSites(item, ["jiangyin"]);
+  assert.equal(projected.tankTransfer.status, "dispatched");
+  assert.equal(projected.tankTransfer.orderId, undefined); assert.equal(projected.tankTransfer.shipmentId, undefined);
+  const record = { sourceType: "stockTransferDispatched", fromSiteId: "nanjing", dispatchSiteId: "jiangyin", orderId: "foreign-order", shipmentId: "foreign-shipment", text: "来源南京" };
+  for (const sites of [["jiangyin"], ["nanjing", "jiangyin"]]) {
+    const safe = sanitizeBioRecordTransferForVisibleSites(record, sites);
+    assert.equal(safe.orderId, undefined); assert.equal(safe.shipmentId, undefined);
+  }
+});

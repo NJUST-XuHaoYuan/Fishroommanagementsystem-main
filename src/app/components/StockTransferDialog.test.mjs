@@ -27,6 +27,55 @@ test("global transfer search combines source-site filtering with fish and source
   assert.equal(rows.length, 2);
 });
 
+test("completed history search includes destination, operator and completion status without changing source filters", () => {
+  const received = fish({ transferStatus: "received", completedAt: "2026-10-24T03:00:00Z", completedBy: "接收员工", toSiteName: "江阴", toTankName: "B / B1" });
+  const dispatched = fish({ transferId: "transfer-2", transferStatus: "dispatched", completedAt: "2026-10-24T04:00:00Z", completedBy: "出库员工", dispatchSiteName: "南京" });
+  const rows = [received, dispatched];
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "江阴", "nanjing"), [received]);
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "B1", ""), [received]);
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "出库员工", ""), [dispatched]);
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "已出库", ""), [dispatched]);
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "已签收", ""), [received]);
+  assert.deepEqual(transfer.filterStockTransferHistory(rows, "江阴", "jiangyin"), []);
+  assert.equal(rows.length, 2);
+});
+
+test("history keys distinguish a fish's repeated transfers and separate completions", () => {
+  const original = fish({ transferStatus: "dispatched", completedAt: "2026-10-24T03:00:00Z" });
+  const variations = [original, { ...original, transferId: "transfer-2" }, { ...original, completedAt: "2026-10-24T04:00:00Z" }, { ...original, transferStatus: "received" }];
+  assert.equal(new Set(variations.map(transfer.transferHistoryKey)).size, 4);
+});
+
+test("completed rows show receipt destination or actual dispatch site and remain read-only", () => {
+  const received = fish({ transferStatus: "received", completedAt: "2026-10-24T03:00:00Z", completedBy: "接收员工", toSiteName: "江阴", toTankName: "B / B1" });
+  const dispatched = fish({ transferId: "transfer-2", transferStatus: "dispatched", completedAt: "2026-10-24T04:00:00Z", completedBy: "出库员工", dispatchSiteName: "南京", customerName: "保密客户", orderNo: "保密订单", basePrice: 987654, batchId: "保密批次" });
+  const html = renderToStaticMarkup(createElement(transfer.StockTransferHistoryRows, { items: [received, dispatched] }));
+  for (const value of ["来源：", "签发：", "签发人", "已签收", "接收员工", "江阴 / B / B1", "已出库", "出库员工", "实际发货场地：南京", "在途直接出库"]) assert.ok(html.includes(value), value);
+  assert.doesNotMatch(html, /保密客户|保密订单|987654|保密批次|href=|type="checkbox"|<button/);
+  assert.match(html, /min-w-0/);
+  assert.match(html, /break-words/);
+});
+
+test("recent history is lazy, isolated from the active counter and request results are aborted on view changes", async () => {
+  assert.equal(transfer.stockTransferListPath(), "/api/stock/transfers");
+  assert.equal(transfer.stockTransferListPath("active"), "/api/stock/transfers");
+  assert.equal(transfer.stockTransferListPath("recent"), "/api/stock/transfers?view=recent");
+  const source = await readFile(new URL("./StockTransferDialog.tsx", import.meta.url), "utf8");
+  assert.match(source, /open && permission\.canUpdate && isRecent, undefined, "recent"/);
+  assert.match(source, /if \(!active\) return/);
+  assert.match(source, /if \(!controller\.signal\.aborted\) setItems\(data\.items\)/);
+  assert.match(source, /return \(\) => controller\.abort\(\)/);
+  const counter = source.slice(source.indexOf("export function StockTransferPoolButton"));
+  assert.match(counter, /useStockTransferPool\(permission\.canUpdate, refreshKey\)/);
+  assert.doesNotMatch(counter, /view=recent|useStockTransferList/);
+  assert.match(source, /<TabsTrigger value="active"[^>]+>待签收<\/TabsTrigger>/);
+  assert.match(source, /<TabsTrigger value="recent"[^>]+>最近完成<\/TabsTrigger>/);
+  assert.match(source, /data-\[state=active\]:bg-primary/);
+  assert.match(source, /查看最近完成/);
+  assert.match(source, /最近 30 天/);
+  assert.match(source, /最多 200 条/);
+});
+
 test("partial receipt is versioned by transfer id and cannot silently receive a re-issued fish", () => {
   const oldFish = fish(), nextFish = fish({ transferId: "transfer-new" }), other = fish({ stockItemId: "fish-2", transferId: "transfer-2" });
   const selected = new Set([transfer.transferSelectionKey(oldFish), transfer.transferSelectionKey(other)]);
@@ -70,6 +119,8 @@ test("transfer audit records are distinctly labeled and are read-only in both bi
   assert.equal(transfer.stockTransferRecordLabel("stockMove"), "移缸记录");
   assert.equal(transfer.stockTransferRecordLabel("stockTransferIssued"), "移缸签发");
   assert.equal(transfer.stockTransferRecordLabel("stockTransferReceived"), "移缸签收");
+  assert.equal(transfer.stockTransferRecordLabel("stockTransferDispatched"), "在途直接出库");
+  assert.equal(transfer.stockTransferRecordLabel("stockTransferDispatchCancelled"), "撤销在途出库（恢复在途）");
   assert.equal(transfer.stockTransferRecordLabel("manual"), "");
   assert.equal(transfer.stockTransferRecordLabel(undefined), "");
   const daily = await readFile(new URL("./DailyView.tsx", import.meta.url), "utf8");
@@ -108,6 +159,8 @@ test("both old move forms issue without target tank and stale order picks are re
   assert.match(orders, /stock\.id === stockItemId && isAvail\(stock\)/);
   assert.match(orders, /return !stock \|\| stock\.sold \|\| !isPhysicallyInTank\(stock, shippedOutStockIds\)/);
   assert.match(orders, /transferUnshippedItems\.length/);
+  assert.doesNotMatch(daily, /暂停鱼单展示、新订单选鱼及实际出库/);
+  assert.match(daily, /已关联订单的鱼也可在订单中直接出库/);
 });
 
 test("receipt failures retain selection, conflict requires refresh, and requests carry idempotency keys", async () => {

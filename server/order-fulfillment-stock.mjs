@@ -3,7 +3,7 @@ const failure = (statusCode, code, message) => Object.assign(new Error(message),
 
 // Order/shipment site is the financial owner; physical fulfillment follows the
 // unique current tank. Resolve from locked state, never a request-supplied site.
-export function resolveOrderFulfillmentStock(state = {}, stockId, { visibleSiteIds, expectedLocation } = {}) {
+export function resolveOrderFulfillmentStock(state = {}, stockId, { visibleSiteIds, expectedLocation, allowDispatched = false } = {}) {
   const requestedId = id(stockId);
   const matches = (Array.isArray(state.stock) ? state.stock : []).filter((item) => id(item?.id) === requestedId);
   if (matches.length !== 1) {
@@ -11,6 +11,22 @@ export function resolveOrderFulfillmentStock(state = {}, stockId, { visibleSiteI
       matches.length > 1 ? "库存鱼 ID 不唯一，不能安全出库或编辑订单" : "所选库存不存在，请刷新后重试");
   }
   const stock = matches[0];
+  // Existing order lines remain editable after a direct in-transit dispatch.
+  // This exception is never enabled by outbound or new-order selection.
+  if (allowDispatched && stock.tankTransfer?.status === "dispatched") {
+    const transfer = stock.tankTransfer;
+    const siteId = id(transfer.dispatchSiteId);
+    const matchingShipments = (Array.isArray(state.shipments) ? state.shipments : []).filter((shipment) =>
+      id(shipment.id) === id(transfer.shipmentId) && id(shipment.orderId) === id(transfer.orderId) &&
+      (shipment.itemStockIds ?? []).map(id).includes(requestedId));
+    if (!siteId || id(stock.siteId) !== siteId || matchingShipments.length !== 1) {
+      throw failure(409, "STOCK_TRANSFER_STATE_INVALID", "在途直接出库记录不一致，请联系管理员核对");
+    }
+    if (visibleSiteIds && !visibleSiteIds.map(id).includes(siteId)) {
+      throw failure(403, "STOCK_SITE_FORBIDDEN", "无权操作该订单鱼实际发货场地");
+    }
+    return { stock, siteId, subTankId: "" };
+  }
   const subTankId = id(stock.subTankId);
   const tanks = (Array.isArray(state.tankGroups) ? state.tankGroups : []).flatMap((group) =>
     (Array.isArray(group?.subTanks) ? group.subTanks : [])

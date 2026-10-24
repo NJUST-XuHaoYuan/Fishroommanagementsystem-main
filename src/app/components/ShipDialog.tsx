@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { configuredShippingCarriers, Order, OrderItem, useStore } from "../store";
+import { configuredShippingCarriers, Order, OrderItem, type StockTankTransfer, useStore } from "../store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Checkbox } from "./ui/checkbox";
 import { Textarea } from "./ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import {
@@ -11,7 +12,8 @@ import {
 import { toast } from "sonner";
 import { PackageCheck, Truck, MapPin, Info, CheckSquare, Square } from "lucide-react";
 import { orderShippingFeeMode, shippingFeeModeLabel } from "../utils/orderFees";
-import { selectExpectedStockLocations, type ExpectedStockLocations, type StockLocationSnapshot } from "../utils/orderOutbound";
+import { outboundTransferConfirmationKey, outboundTransferSnapshotsMatch, selectExpectedStockLocations, type ExpectedStockLocations, type OutboundTransferDispatch, type OutboundTransferSnapshots, type StockLocationSnapshot } from "../utils/orderOutbound";
+import { visibleSitesForUser } from "../utils/sites";
 
 function todayDateString(): string {
   const now = new Date();
@@ -28,6 +30,7 @@ export type ShipFormData = {
   notes: string;
   selectedItemIds: string[]; // stockItemIds included in this shipment
   expectedStockLocations?: ExpectedStockLocations;
+  transferDispatch?: OutboundTransferDispatch;
 };
 
 type ItemMeta = {
@@ -36,6 +39,7 @@ type ItemMeta = {
   price: number;
   productName: string;
   tankName: string;
+  inTransfer: boolean;
 };
 
 export function ShipDialog({
@@ -47,6 +51,7 @@ export function ShipDialog({
   getProductName,
   getTankName,
   getStockLocation,
+  getStockTransfer,
   orderSiteName,
   pickupOnly = false,
 }: {
@@ -58,6 +63,7 @@ export function ShipDialog({
   getProductName: (productId: string) => string;
   getTankName: (stockItemId: string) => string;
   getStockLocation?: (stockItemId: string) => StockLocationSnapshot | undefined;
+  getStockTransfer?: (stockItemId: string) => StockTankTransfer | undefined;
   orderSiteName?: string;
   pickupOnly?: boolean;
 }) {
@@ -72,6 +78,10 @@ export function ShipDialog({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [locationSnapshots, setLocationSnapshots] = useState<ExpectedStockLocations>({});
+  const [transferSnapshots, setTransferSnapshots] = useState<OutboundTransferSnapshots>({});
+  const [dispatchSiteId, setDispatchSiteId] = useState("");
+  const [confirmedTransferKey, setConfirmedTransferKey] = useState("");
+  const dispatchSites = state.user ? visibleSitesForUser(state.user, state) : [];
   const shipMethod: "express" | "pickup" = pickupOnly ? "pickup" : "express";
   const shippingFeeMode = orderShippingFeeMode(order);
 
@@ -81,6 +91,7 @@ export function ShipDialog({
     price: i.price,
     productName: getProductName(i.productId),
     tankName: getTankName(i.stockItemId),
+    inTransfer: getStockTransfer?.(i.stockItemId)?.status === "in_transit",
   }));
 
   useEffect(() => {
@@ -94,13 +105,25 @@ export function ShipDialog({
         const location = getStockLocation?.(item.stockItemId);
         return location ? [[item.stockItemId, { ...location }]] : [];
       })));
+      setTransferSnapshots(Object.fromEntries(unshippedItems.map((item) => {
+        const transfer = getStockTransfer?.(item.stockItemId);
+        return [item.stockItemId, transfer?.status === "in_transit" ? transfer.id : ""];
+      })));
+      setDispatchSiteId("");
+      setConfirmedTransferKey("");
       setSaving(false);
     }
   }, [open, order?.id, pickupOnly]); // eslint-disable-line
 
   if (!order) return null;
 
+  const selectedTransferItems = [...selectedIds].filter((id) => transferSnapshots[id])
+    .map((stockItemId) => ({ stockItemId, transferId: transferSnapshots[stockItemId] }));
+  const transferConfirmationKey = outboundTransferConfirmationKey([...selectedIds], transferSnapshots, dispatchSiteId);
+  const transferConfirmed = confirmedTransferKey === transferConfirmationKey;
+
   const toggleItem = (id: string) => {
+    setConfirmedTransferKey("");
     setSelectedIds((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -108,6 +131,7 @@ export function ShipDialog({
     });
   };
   const toggleAll = () => {
+    setConfirmedTransferKey("");
     if (selectedIds.size === itemMetas.length) setSelectedIds(new Set());
     else setSelectedIds(new Set(itemMetas.map((i) => i.stockItemId)));
   };
@@ -119,8 +143,20 @@ export function ShipDialog({
     if (shipDate > todayStr) return toast.error("出库日期不能晚于今天");
     if (shipMethod === "express" && !carrier.trim()) return toast.error("请选择快递公司");
     if (selectedIds.size === 0) return toast.error("请至少选择一件商品进行出库");
+    const currentTransfers = Object.fromEntries(itemMetas.map((item) => {
+      const transfer = getStockTransfer?.(item.stockItemId);
+      return [item.stockItemId, transfer?.status === "in_transit" ? transfer.id : ""];
+    }));
+    if (!outboundTransferSnapshotsMatch([...selectedIds], transferSnapshots, currentTransfers)) {
+      return toast.error("所选鱼的移缸或出库状态已变化，请关闭窗口并重新选择");
+    }
+    if (selectedTransferItems.length > 0) {
+      if (!dispatchSites.some((site) => site.id === dispatchSiteId)) return toast.error("请选择有权限的实际发货场地");
+      if (!transferConfirmed) return toast.error("请明确确认在途直接出库");
+    }
+    const normalSelectedIds = [...selectedIds].filter((id) => !transferSnapshots[id]);
     const expectedStockLocations = getStockLocation
-      ? selectExpectedStockLocations([...selectedIds], locationSnapshots)
+      ? selectExpectedStockLocations(normalSelectedIds, locationSnapshots)
       : undefined;
     if (expectedStockLocations === null) return toast.error("库存位置暂不可用，请关闭出库窗口并刷新后重试");
     setSaving(true);
@@ -135,6 +171,7 @@ export function ShipDialog({
         notes,
         selectedItemIds: [...selectedIds],
         ...(expectedStockLocations ? { expectedStockLocations } : {}),
+        ...(selectedTransferItems.length > 0 ? { transferDispatch: { siteId: dispatchSiteId, items: selectedTransferItems } } : {}),
       });
       if (ok !== false) onOpenChange(false);
     } finally {
@@ -159,7 +196,7 @@ export function ShipDialog({
 
           {orderSiteName && (
             <p className="text-xs leading-relaxed text-muted-foreground">
-              按商品当前场地与缸位{pickupOnly ? "自提" : "出库"}；订单仍归属{orderSiteName}，金额不变。位置变更后需重新确认。
+              普通鱼按当前场地与缸位{pickupOnly ? "自提" : "出库"}；在途鱼需另选实际发货场地。订单仍归属{orderSiteName}，金额不变。
             </p>
           )}
 
@@ -172,7 +209,8 @@ export function ShipDialog({
               <button
                 type="button"
                 onClick={toggleAll}
-                className="text-xs text-sky-600 hover:text-sky-700 font-medium flex items-center gap-1"
+                disabled={saving}
+                className="min-h-11 text-xs text-sky-600 hover:text-sky-700 font-medium flex items-center gap-1 disabled:opacity-50"
               >
                 {selectedIds.size === itemMetas.length
                   ? <><CheckSquare className="size-3.5" /> 取消全选</>
@@ -189,6 +227,8 @@ export function ShipDialog({
                   <button
                     key={item.stockItemId}
                     type="button"
+                    aria-pressed={checked}
+                    disabled={saving}
                     onClick={() => toggleItem(item.stockItemId)}
                     className={`w-full min-h-16 flex items-center gap-3 px-3 py-3 text-left border-b transition-colors ${checked ? "bg-sky-50" : "hover:bg-muted/30"}`}
                   >
@@ -198,6 +238,7 @@ export function ShipDialog({
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{item.productName}</div>
                       <div className="text-xs text-muted-foreground">{item.tankName}</div>
+                      {item.inTransfer && <div className="text-xs font-medium text-amber-700">移缸在途 · 需确认直接出库</div>}
                     </div>
                     <div className="text-sm text-right shrink-0">¥{item.price.toFixed(2)}</div>
                   </button>
@@ -208,6 +249,29 @@ export function ShipDialog({
               )}
             </div>
           </div>
+
+          {selectedTransferItems.length > 0 && (
+            <section className="grid gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-3" aria-labelledby="transfer-dispatch-title">
+              <h3 id="transfer-dispatch-title" className="text-sm font-medium text-amber-900">在途直接出库 · {selectedTransferItems.length} 条</h3>
+              <p className="text-xs leading-relaxed text-amber-900">
+                仅用于本订单已关联的鱼。本次操作会结束移缸在途，不登记签收入缸，保留原签发场地和缸位记录。
+              </p>
+              <div className="grid gap-1.5">
+                <Label htmlFor="transfer-dispatch-site">实际发货场地<span className="ml-0.5 text-red-600">*</span></Label>
+                <Select value={dispatchSiteId} onValueChange={(id) => { setDispatchSiteId(id); setConfirmedTransferKey(""); }} disabled={saving}>
+                  <SelectTrigger id="transfer-dispatch-site" className="min-h-11 bg-background"><SelectValue placeholder="请选择鱼当前实际发货的场地" /></SelectTrigger>
+                  <SelectContent>{dispatchSites.map((site) => <SelectItem key={site.id} value={site.id}>{site.name}</SelectItem>)}</SelectContent>
+                </Select>
+                {dispatchSites.length === 0 && <p role="alert" className="text-xs text-red-700">当前账号没有可操作的发货场地，请联系管理员。</p>}
+              </div>
+              <Label htmlFor="confirm-transfer-dispatch" className="flex min-h-11 cursor-pointer items-start gap-2 py-2 text-sm leading-relaxed text-amber-950">
+                <Checkbox id="confirm-transfer-dispatch" className="mt-1 shrink-0" disabled={saving || !dispatchSiteId}
+                  checked={transferConfirmed}
+                  onCheckedChange={(checked) => setConfirmedTransferKey(checked === true ? transferConfirmationKey : "")} />
+                <span>确认这 {selectedTransferItems.length} 条鱼在所选场地直接出库，无需再签收入缸。</span>
+              </Label>
+            </section>
+          )}
 
           {/* Shipping method */}
           <div className="grid gap-2">
@@ -291,8 +355,8 @@ export function ShipDialog({
         </div>
 
         <DialogFooter className="border-t pt-3 shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
-          <Button onClick={confirm} disabled={saving}>
+          <Button className="min-h-11" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
+          <Button className="min-h-11" onClick={confirm} disabled={saving || (selectedTransferItems.length > 0 && (!transferConfirmed || !dispatchSites.some((site) => site.id === dispatchSiteId)))}>
             <PackageCheck className="size-4 mr-1" />
             {saving ? "保存中..." : pickupOnly ? "确认自提" : "确认出库"}
           </Button>

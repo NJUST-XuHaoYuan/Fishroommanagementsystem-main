@@ -1,7 +1,7 @@
 import { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
   useStore, BioRecord, Order, OrderItem, OrderStatus, Shipment, ShipmentDamageReplacement, Product, StockItem,
-  Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, Store, TankGroup, uid,
+  Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, StockTankTransfer, StockTransferListItem, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
   configuredOrderPackagingFee, ShippingFeeMode,
@@ -44,6 +44,7 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
+import { visibleSitesForUser } from "../utils/sites";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
 import {
@@ -329,6 +330,7 @@ function applyOrderApiResult(
       operationLogs: mergeOperationLog(current, result.operationLog),
     };
   });
+  if (Array.isArray(result.stock)) notifyStockTransfersChanged();
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2293,6 +2295,7 @@ function ShipmentActionDialog({
 
             <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
               已出库的鱼已经不在缸内显示；如果出库点错，可以在真正发货前取消出库。
+              {shipment.transferDispatch && " 在途直接出库的鱼取消后恢复移缸在途，不会自动回到原缸。"}
             </div>
           </div>
           <DialogFooter className="gap-2">
@@ -3073,7 +3076,8 @@ function StockItemDetailDialog({
     .filter((r) => r.stockItemId === stockItemId)
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  const tankName = s.tankTransfer?.status === "in_transit" ? "移缸在途，待签收入缸" : currentTankName;
+  const tankName = s.tankTransfer?.status === "in_transit" ? "移缸在途" : s.tankTransfer?.status === "dispatched"
+    ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : currentTankName;
 
   const statusLabel: Record<string, string> = { healthy: "正常", sick: "病弱", feeding: "开口", sold: "已售", lost: "已损耗" };
   const statusColor: Record<string, string> = {
@@ -3879,7 +3883,7 @@ function StockPickerBioDialog({
               <div className="font-medium">{product?.name ?? item.productId}</div>
               <div className="mt-1 text-xs text-muted-foreground">当前缸位：{subTankName(item.subTankId)}</div>
             </div>
-            <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示、新订单选鱼及实际出库。接收人员在目标缸选择后签收入缸；误签发可签回原缸。</p>
+            <p className="text-sm text-muted-foreground">签发后从原缸移出并进入在途，暂停鱼单展示和新订单选鱼。接收人员在目标缸签收入缸；已有订单关联的鱼可按实际发货场地直接出库，误签发可签回原缸。</p>
             <div className="grid gap-2">
               <Label>移缸备注</Label>
               <Textarea
@@ -4057,7 +4061,8 @@ function ItemsWithShipments({
           </div>
         </td>
         <td className="px-4 py-2.5 text-sm text-muted-foreground">
-          {inventoryRemoved ? "已从库存移除" : s?.tankTransfer?.status === "in_transit" ? "移缸在途，待签收" : s ? subTankName(s.subTankId) : "—"}
+          {inventoryRemoved ? "已从库存移除" : s?.tankTransfer?.status === "in_transit" ? "移缸在途" : s?.tankTransfer?.status === "dispatched"
+            ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : s ? subTankName(s.subTankId) : "—"}
         </td>
         <td className="px-4 py-2.5 text-sm text-right">¥{item.price.toFixed(2)}</td>
         <td className="px-4 py-2.5 text-sm text-right">
@@ -4306,6 +4311,52 @@ function OrderDetailDialog({
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
+  const [orderTransferSnapshot, setOrderTransferSnapshot] = useState<{ orderId: string; viewerKey: string; items: StockTransferListItem[] } | null>(null);
+  const [orderTransfersLoading, setOrderTransfersLoading] = useState(false);
+  const [orderTransfersError, setOrderTransfersError] = useState("");
+  const [orderTransfersRevision, setOrderTransfersRevision] = useState(0);
+  const orderTransferViewerKey = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const orderTransferItems = orderTransferSnapshot?.orderId === order?.id && orderTransferSnapshot?.viewerKey === orderTransferViewerKey
+    ? orderTransferSnapshot.items : [];
+  const getOrderStockTransfer = (stockItemId: string): StockTankTransfer | undefined => {
+    const stock = getAccessibleStockItem(stockItemId);
+    if (stock) return stock.tankTransfer;
+    const transfer = orderTransferItems.find((item) => item.stockItemId === stockItemId);
+    return transfer ? {
+      id: transfer.transferId, status: "in_transit", issuedAt: transfer.issuedAt, issuedBy: transfer.issuedBy,
+      fromSiteId: transfer.fromSiteId, fromSubTankId: transfer.fromSubTankId, fromTankName: transfer.fromTankName, notes: transfer.notes,
+    } : undefined;
+  };
+  useEffect(() => {
+    if (!open || !order?.id || !permission.canUpdate) return;
+    const controller = new AbortController();
+    setOrderTransfersLoading(true);
+    setOrderTransfersError("");
+    const requestedOrderId = order.id;
+    void fetch(`/api/orders/transfer-items?orderId=${encodeURIComponent(requestedOrderId)}`, {
+      headers: authJsonHeaders(), signal: controller.signal, cache: "no-store",
+    }).then(async (response) => {
+      const data = await response.json();
+      if (!response.ok || data.ok !== true || !Array.isArray(data.items)) throw new Error(data.error || "订单在途鱼加载失败");
+      if (!controller.signal.aborted) setOrderTransferSnapshot({ orderId: requestedOrderId, viewerKey: orderTransferViewerKey, items: data.items });
+    }).catch((error) => {
+      if (!controller.signal.aborted) {
+        setOrderTransferSnapshot(null);
+        setOrderTransfersError(error instanceof Error ? error.message : "订单在途鱼加载失败");
+      }
+    }).finally(() => { if (!controller.signal.aborted) setOrderTransfersLoading(false); });
+    return () => controller.abort();
+  }, [open, order?.id, orderTransferViewerKey, permission.canUpdate, orderTransfersRevision]);
+  useEffect(() => {
+    if (!open) return;
+    const refresh = () => setOrderTransfersRevision((value) => value + 1);
+    window.addEventListener("fishroom-stock-transfers-changed", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener("fishroom-stock-transfers-changed", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [open]);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
   const shipmentFeeRequestSequence = useRef(0);
@@ -4690,7 +4741,7 @@ function OrderDetailDialog({
     : 0;
   const hasActuallyShipped = orderShipments.some(shipmentHasActuallyShipped);
   const { shippedItemIds, inventoryActiveItems, unshippedItems, lostUnshippedItems,
-    transferUnshippedItems, unavailableUnshippedItems, shippableUnshippedItems } = orderOutboundItems(order?.items ?? [], orderShipments, accessibleStock);
+    transferUnshippedItems, unavailableUnshippedItems, shippableUnshippedItems } = orderOutboundItems(order?.items ?? [], orderShipments, accessibleStock, orderTransferItems);
   const allItemsShipped = inventoryActiveItems.length > 0 && unshippedItems.length === 0;
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || s.status === "damaged"
@@ -4869,14 +4920,15 @@ function OrderDetailDialog({
     if (shipmentConfirmSaving) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
-    if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。")) return;
+    if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。" +
+      (shipment.transferDispatch ? "其中在途直接出库的鱼会恢复移缸在途，不会自动回到原缸。" : ""))) return;
     shipmentFeeRequestSequence.current += 1;
     setShipmentConfirmSaving(true);
     try {
       const result = await postOrderApi("shipments/cancel", { shipmentId: shipment.id });
       applyOrderApiResult(setState, result);
       setShipmentAction(null);
-      toast.success("已取消出库/发货，商品已回到待发货状态");
+      toast.success(shipment.transferDispatch ? "已取消出库/发货，在途直接出库的鱼已恢复移缸在途" : "已取消出库/发货，商品已回到待发货状态");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");
     } finally {
@@ -4910,12 +4962,24 @@ function OrderDetailDialog({
     if (!permission.requirePermission("update")) return false;
     const lostSelected = data.selectedItemIds.filter((id) => getAccessibleStockItem(id)?.lost);
     if (lostSelected.length > 0) { toast.error("已损耗商品不能出库，请先从订单中删除"); return false; }
-    if (data.selectedItemIds.some((id) => getAccessibleStockItem(id)?.tankTransfer?.status === "in_transit")) {
-      toast.error("所选鱼移缸在途，请先签收入缸再出库"); return false;
+    const selectedTransfers = data.selectedItemIds.flatMap((stockItemId) => {
+      const transfer = getOrderStockTransfer(stockItemId);
+      return transfer?.status === "in_transit" ? [{ stockItemId, transferId: transfer.id }] : [];
+    });
+    const transferDispatch = data.transferDispatch;
+    if (selectedTransfers.length > 0 || transferDispatch) {
+      if (!transferDispatch || selectedTransfers.length !== transferDispatch.items.length ||
+        !selectedTransfers.every((item) => transferDispatch.items.some((entry) => entry.stockItemId === item.stockItemId && entry.transferId === item.transferId)) ||
+        !state.user || !visibleSitesForUser(state.user, state).some((site) => site.id === transferDispatch.siteId)) {
+        toast.error("在途状态或发货场地权限已变化，请重新打开出库窗口确认"); return false;
+      }
     }
-    const confirmDetail = data.shipMethod === "pickup"
+    const standardConfirmDetail = data.shipMethod === "pickup"
       ? `将确认 ${data.selectedItemIds.length} 条商品上门自取并直接签收。`
       : `将出库 ${data.selectedItemIds.length} 条商品，后续需上传打包凭证再确认发货。`;
+    const dispatchSiteName = state.sites.find((site) => site.id === transferDispatch?.siteId)?.name ?? transferDispatch?.siteId;
+    const confirmDetail = standardConfirmDetail + (transferDispatch
+      ? `其中 ${transferDispatch.items.length} 条移缸在途鱼将从${dispatchSiteName}直接出库，结束在途，不登记签收入缸。` : "");
     if (!confirmWrite(data.shipMethod === "pickup" ? "确认自提" : "出库", confirmDetail)) return false;
     try {
       const result = await postOrderApi("shipments/outbound", {
@@ -4927,6 +4991,7 @@ function OrderDetailDialog({
         notes: data.notes,
         selectedItemIds: data.selectedItemIds,
         expectedStockLocations: data.expectedStockLocations,
+        ...(transferDispatch ? { transferDispatch } : {}),
         operator: state.user?.username ?? "system",
       });
       applyOrderApiResult(setState, result);
@@ -5268,7 +5333,8 @@ function OrderDetailDialog({
                                   </div>
                                 </div>
                               </td>
-                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途，待签收" : s ? subTankName(s.subTankId) : "—"}</td>
+                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途" : s?.tankTransfer?.status === "dispatched"
+                                ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : s ? subTankName(s.subTankId) : "—"}</td>
                               <td className="px-4 py-2 text-sm text-right">
                                 <Input type="number" min={0} value={item.price}
                                   onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
@@ -5459,12 +5525,17 @@ function OrderDetailDialog({
                 )}
 	                {permission.canUpdate && unshippedItems.length > 0 && order.status !== "cancelled" && order.status !== "completed" && (
                   <div className="flex flex-col items-end gap-1">
+	                    {orderTransfersLoading && <p role="status" className="text-xs text-muted-foreground">正在核对本订单的在途鱼…</p>}
+                    {orderTransfersError && <div role="alert" className="max-w-72 text-right text-xs text-amber-700">
+                      <p>{orderTransfersError}，普通在缸鱼仍可出库。</p>
+                      <Button type="button" variant="link" size="sm" className="min-h-11" onClick={() => setOrderTransfersRevision((value) => value + 1)}>重新加载在途鱼</Button>
+                    </div>}
 	                    {lostUnshippedItems.length > 0 && (
 	                      <p className="text-xs text-red-600">
 	                        {lostUnshippedItems.length} 件已损耗，不能出库，请在商品行点击退
 	                      </p>
 	                    )}
-                    {transferUnshippedItems.length > 0 && <p className="max-w-72 text-right text-xs text-amber-700">{transferUnshippedItems.length} 件移缸在途，请先签收，再出库或自提</p>}
+                    {transferUnshippedItems.length > 0 && <p className="max-w-72 text-right text-xs text-amber-700">{transferUnshippedItems.length} 件移缸在途，可在出库窗口选择实际发货场地并确认直接出库</p>}
                     {shippableUnshippedItems.length === 0 && (lostUnshippedItems.length > 0 || transferUnshippedItems.length > 0) && (
                       <p className="text-xs text-muted-foreground">无可出库商品</p>
                     )}
@@ -5592,9 +5663,15 @@ function OrderDetailDialog({
         getProductName={(pid) => getProduct(pid)?.name ?? "—"}
         getTankName={(sid) => {
           const s = getAccessibleStockItem(sid);
+          const transfer = getOrderStockTransfer(sid);
+          if (transfer?.status === "in_transit") {
+            const sourceSite = state.sites.find((site) => site.id === transfer.fromSiteId)?.name ?? transfer.fromSiteId;
+            return `来源：${sourceSite} / ${transfer.fromTankName || "原缸位未记录"}`;
+          }
           return s ? subTankName(s.subTankId) : "—";
         }}
         getStockLocation={(sid) => stockLocationSnapshot(getAccessibleStockItem(sid), accessibleTankGroups)}
+        getStockTransfer={getOrderStockTransfer}
         orderSiteName={state.sites.find((site) => site.id === (order.siteId || "nanjing"))?.name ?? order.siteId ?? "南京"}
         pickupOnly={isPickupOrderSource(order.source)}
       />

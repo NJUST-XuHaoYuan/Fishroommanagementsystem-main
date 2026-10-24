@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRightLeft, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
-import { useStore, type StockTransferListItem } from "../store";
+import { useStore, type StockTransferHistoryItem, type StockTransferListItem } from "../store";
 import { authHeaders } from "../utils/authSession";
 import { usePermission } from "../utils/permissions";
 import { createMaintenanceClientMutationId, maintenanceMutationTicket, type MaintenanceMutationTicket } from "../utils/maintenanceMutation";
@@ -10,16 +10,20 @@ import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 
 export type StockTransferTarget = { subTankId: string; tankName: string };
 const TRANSFERS_CHANGED = "fishroom-stock-transfers-changed";
 const PAGE_SIZE = 50;
+type StockTransferView = "active" | "recent";
 
 export function stockTransferRecordLabel(sourceType?: string): string {
   if (sourceType === "stockMove") return "移缸记录";
   if (sourceType === "stockTransferIssued") return "移缸签发";
   if (sourceType === "stockTransferReceived") return "移缸签收";
+  if (sourceType === "stockTransferDispatched") return "在途直接出库";
+  if (sourceType === "stockTransferDispatchCancelled") return "撤销在途出库（恢复在途）";
   return "";
 }
 
@@ -32,11 +36,23 @@ export function transferSelectionKey(item: Pick<StockTransferListItem, "stockIte
   return JSON.stringify([item.stockItemId, item.transferId]);
 }
 
-export function filterStockTransfers(items: StockTransferListItem[], search: string, fromSiteId: string) {
+export function transferHistoryKey(item: StockTransferHistoryItem) {
+  return JSON.stringify([item.stockItemId, item.transferId, item.transferStatus, item.completedAt]);
+}
+
+export function filterStockTransfers<T extends StockTransferListItem>(items: T[], search: string, fromSiteId: string) {
   const term = search.trim().toLocaleLowerCase();
   return items.filter((item) => (!fromSiteId || item.fromSiteId === fromSiteId) && (!term ||
     [item.productName, item.size, item.origin, item.code, item.fromSiteName, item.fromTankName, item.issuedBy, item.notes]
       .join(" ").toLocaleLowerCase().includes(term)));
+}
+
+export function filterStockTransferHistory(items: StockTransferHistoryItem[], search: string, fromSiteId: string) {
+  const term = search.trim().toLocaleLowerCase();
+  return items.filter((item) => (!fromSiteId || item.fromSiteId === fromSiteId) && (!term ||
+    [item.productName, item.size, item.origin, item.code, item.fromSiteName, item.fromTankName, item.issuedBy,
+      item.notes, item.completedBy, item.toSiteName, item.toTankName, item.dispatchSiteName,
+      item.transferStatus === "dispatched" ? "已出库" : "已签收"].join(" ").toLocaleLowerCase().includes(term)));
 }
 
 /** A re-issued fish is a different transfer and must be explicitly selected again. */
@@ -61,9 +77,13 @@ export function stockTransferReceipt(targetSubTankId: string, selected: Set<stri
   };
 }
 
-function useStockTransferPool(active: boolean, refreshKey?: unknown) {
+export function stockTransferListPath(view: StockTransferView = "active") {
+  return view === "recent" ? "/api/stock/transfers?view=recent" : "/api/stock/transfers";
+}
+
+function useStockTransferList<T extends StockTransferListItem>(active: boolean, refreshKey?: unknown, view: StockTransferView = "active") {
   const { state } = useStore();
-  const [items, setItems] = useState<StockTransferListItem[]>([]);
+  const [items, setItems] = useState<T[]>([]);
   const [loading, setLoading] = useState(active);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -76,20 +96,22 @@ function useStockTransferPool(active: boolean, refreshKey?: unknown) {
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    void fetch("/api/stock/transfers", { headers: authHeaders(), signal: controller.signal, cache: "no-store" })
+    setItems([]);
+    const failureMessage = view === "recent" ? "最近完成记录加载失败，请重试" : "在途列表加载失败，请重试";
+    void fetch(stockTransferListPath(view), { headers: authHeaders(), signal: controller.signal, cache: "no-store" })
       .then(async (response) => {
         const data = await response.json();
         if (!response.ok || data.ok !== true || !Array.isArray(data.items)) {
-          throw new Error(data.error || "在途列表加载失败，请重试");
+          throw new Error(data.error || failureMessage);
         }
         if (!controller.signal.aborted) setItems(data.items);
       })
       .catch((reason) => {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "在途列表加载失败，请重试");
+        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : failureMessage);
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [active, revision, refreshKey, state.user?.username]);
+  }, [active, revision, refreshKey, state.user?.username, view]);
   useEffect(() => {
     if (!active) return;
     window.addEventListener(TRANSFERS_CHANGED, refresh);
@@ -102,9 +124,27 @@ function useStockTransferPool(active: boolean, refreshKey?: unknown) {
   return { items, loading, error, refresh };
 }
 
+function useStockTransferPool(active: boolean, refreshKey?: unknown) {
+  return useStockTransferList<StockTransferListItem>(active, refreshKey);
+}
+
 function issuedTime(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+}
+
+function StockTransferFishDescription({ item }: { item: StockTransferListItem }) {
+  return <>
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-sm font-medium">{item.productName || item.productId}</span>
+      <Badge variant="outline">{item.status === "sick" ? "疾病" : item.status === "feeding" ? "开口" : "正常"}</Badge>
+      {item.sold && <Badge variant="outline">已售</Badge>}
+    </div>
+    <p className="text-xs text-muted-foreground">{[item.size, item.origin, item.code ? `编号 ${item.code}` : "未编号"].filter(Boolean).join(" · ")}</p>
+    <p className="text-sm">来源：{item.fromSiteName || "未知场地"} / {item.fromTankName || "未知缸位"}</p>
+    <p className="text-xs text-muted-foreground">签发：{issuedTime(item.issuedAt)} · {item.issuedBy || "—"}</p>
+    {item.notes && <p className="whitespace-pre-wrap text-xs text-muted-foreground">备注：{item.notes}</p>}
+  </>;
 }
 
 export function StockTransferRows({ items, selectable = false, selected = new Set<string>(), disabled = false, onToggle }: {
@@ -118,25 +158,35 @@ export function StockTransferRows({ items, selectable = false, selected = new Se
     {items.map((item) => {
       const key = transferSelectionKey(item);
       return <li key={key} className="flex min-w-0 gap-3 p-3">
-        {selectable && <label className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-start justify-center pt-2">
+        {selectable && <label className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-start justify-center pt-2">
           <input type="checkbox" className="size-4 accent-slate-800" checked={selected.has(key)} disabled={disabled}
             aria-label={`选择 ${item.productName}${item.code ? `，编号 ${item.code}` : ""}，${item.fromSiteName} ${item.fromTankName}`}
             onChange={() => onToggle?.(key)} />
         </label>}
         <ImageWithFallback src={item.imageUrl} alt="" className="mt-1 size-12 shrink-0 rounded-md border object-cover" />
         <div className="min-w-0 flex-1 space-y-1 break-words">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">{item.productName || item.productId}</span>
-            <Badge variant="outline">{item.status === "sick" ? "疾病" : item.status === "feeding" ? "开口" : "正常"}</Badge>
-            {item.sold && <Badge variant="outline">已售</Badge>}
-          </div>
-          <p className="text-xs text-muted-foreground">{[item.size, item.origin, item.code ? `编号 ${item.code}` : "未编号"].filter(Boolean).join(" · ")}</p>
-          <p className="text-sm">来源：{item.fromSiteName} / {item.fromTankName}</p>
-          <p className="text-xs text-muted-foreground">签发：{issuedTime(item.issuedAt)} · {item.issuedBy || "—"}</p>
-          {item.notes && <p className="whitespace-pre-wrap text-xs text-muted-foreground">备注：{item.notes}</p>}
+          <StockTransferFishDescription item={item} />
         </div>
       </li>;
     })}
+  </ul>;
+}
+
+export function StockTransferHistoryRows({ items }: { items: StockTransferHistoryItem[] }) {
+  return <ul className="divide-y rounded-lg border" aria-label="移缸最近完成记录">
+    {items.map((item) => <li key={transferHistoryKey(item)} className="flex min-w-0 gap-3 p-3">
+      <ImageWithFallback src={item.imageUrl} alt="" className="mt-1 size-12 shrink-0 rounded-md border object-cover" />
+      <div className="min-w-0 flex-1 space-y-1 break-words">
+        <StockTransferFishDescription item={item} />
+        <div className="flex flex-wrap items-center gap-2 pt-2">
+          <Badge variant="secondary">{item.transferStatus === "dispatched" ? "已出库" : "已签收"}</Badge>
+          <span className="text-xs text-muted-foreground">{issuedTime(item.completedAt)} · {item.completedBy || "—"}</span>
+        </div>
+        <p className="text-sm">{item.transferStatus === "dispatched"
+          ? `实际发货场地：${item.dispatchSiteName || "未知场地"}（在途直接出库）`
+          : `签收入缸：${[item.toSiteName, item.toTankName].filter(Boolean).join(" / ") || "未知缸位"}`}</p>
+      </div>
+    </li>)}
   </ul>;
 }
 
@@ -148,7 +198,11 @@ export function StockTransferDialog({ open, onOpenChange, target, onReceived }: 
 }) {
   const { state, saveMaintenanceAction } = useStore();
   const permission = usePermission("daily");
-  const pool = useStockTransferPool(open && permission.canUpdate);
+  const [view, setView] = useState<StockTransferView>("active");
+  const isRecent = !target && view === "recent";
+  const pool = useStockTransferPool(open && permission.canUpdate && !isRecent);
+  const history = useStockTransferList<StockTransferHistoryItem>(open && permission.canUpdate && isRecent, undefined, "recent");
+  const currentList = isRecent ? history : pool;
   const [search, setSearch] = useState("");
   const [fromSiteId, setFromSiteId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -160,8 +214,8 @@ export function StockTransferDialog({ open, onOpenChange, target, onReceived }: 
   const ticketRef = useRef<MaintenanceMutationTicket | null>(null);
   const targetAvailable = !!target && state.tankGroups.some((group) => group.subTanks.some((tank) => tank.id === target.subTankId));
   const canReceive = !!target && permission.canUpdate && targetAvailable;
-  const sources = useMemo(() => [...new Map(pool.items.map((item) => [item.fromSiteId, item.fromSiteName])).entries()], [pool.items]);
-  const filtered = useMemo(() => filterStockTransfers(pool.items, search, fromSiteId), [pool.items, search, fromSiteId]);
+  const sources = useMemo(() => [...new Map(currentList.items.map((item) => [item.fromSiteId, item.fromSiteName])).entries()], [currentList.items]);
+  const filtered = useMemo(() => isRecent ? filterStockTransferHistory(history.items, search, fromSiteId) : filterStockTransfers(pool.items, search, fromSiteId), [isRecent, history.items, pool.items, search, fromSiteId]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const pageItems = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
@@ -170,7 +224,7 @@ export function StockTransferDialog({ open, onOpenChange, target, onReceived }: 
   const allPageSelected = pageItems.length > 0 && pageItems.every((item) => selected.has(transferSelectionKey(item)));
   useEffect(() => {
     if (!open) return;
-    setSearch(""); setFromSiteId(""); setPage(0); setSelected(new Set()); setSaveError(""); setConflict(false);
+    setView("active"); setSearch(""); setFromSiteId(""); setPage(0); setSelected(new Set()); setSaveError(""); setConflict(false);
     ticketRef.current = null;
   }, [open, target?.subTankId]);
   useEffect(() => {
@@ -202,41 +256,59 @@ export function StockTransferDialog({ open, onOpenChange, target, onReceived }: 
       setSaveError(reason instanceof Error ? reason.message : "签收失败，请重试；已选鱼仍保留。");
     } finally { requestLock.current = false; setSaving(false); }
   };
-  const refresh = () => { if (requestLock.current) return; setConflict(false); setSaveError(""); pool.refresh(); };
+  const refresh = () => { if (requestLock.current) return; setConflict(false); setSaveError(""); currentList.refresh(); };
+  const changeView = (next: string) => {
+    if (requestLock.current) return;
+    setView(next === "recent" ? "recent" : "active");
+    setSearch(""); setFromSiteId(""); setPage(0); setSelected(new Set()); setSaveError(""); setConflict(false);
+  };
   if (!permission.canUpdate) return null;
+  const listContent = <div className="space-y-3" aria-busy={currentList.loading}>
+    {isRecent && <p className="text-sm text-muted-foreground">查看你有场地权限的最近 30 天签收、在途直接出库记录，最多 200 条，按完成时间倒序。已完成记录仅供查看，不能再次签收。</p>}
+    <div className="flex flex-wrap gap-2">
+      <div className="relative min-w-0 flex-1 basis-48"><Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input className="h-11 pl-9" aria-label={isRecent ? "搜索移缸完成记录" : "搜索在途鱼"} placeholder={isRecent ? "商品 / 编号 / 来源或去向" : "商品 / 编号 / 来源缸 / 备注"} value={search} disabled={saving} onChange={(event) => { setSearch(event.target.value); setPage(0); }} /></div>
+      <Select value={fromSiteId || "all"} disabled={saving} onValueChange={(value) => { setFromSiteId(value === "all" ? "" : value); setPage(0); }}>
+        <SelectTrigger className="h-11 w-full sm:w-40" aria-label="筛选来源场地"><SelectValue /></SelectTrigger>
+        <SelectContent><SelectItem value="all">全部来源场地</SelectItem>{sources.map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}</SelectContent>
+      </Select>
+      <Button className="min-h-11" variant="outline" onClick={refresh} disabled={saving || currentList.loading}><RefreshCw className="mr-1 size-4" />刷新</Button>
+    </div>
+    {saveError && <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{saveError}</div>}
+    {currentList.loading ? <div role="status" className="space-y-3 py-4"><p className="text-center text-sm text-muted-foreground">{isRecent ? "正在加载最近完成记录…" : "正在加载在途列表…"}</p><div aria-hidden="true" className="h-24 rounded-md bg-muted" /><div aria-hidden="true" className="h-24 rounded-md bg-muted" /></div> : currentList.error ?
+      <div role="alert" className="py-6 text-center text-sm"><p>{currentList.error}</p><Button className="mt-2 min-h-11" variant="outline" onClick={refresh}>重试</Button></div> : <>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="text-muted-foreground">符合筛选 {filtered.length} / {isRecent ? "已加载" : "全部"} {currentList.items.length} 条</span>
+          {canReceive && <><span>已选 {selectedItems.length} 条{hiddenSelectedCount > 0 ? `（筛选外 ${hiddenSelectedCount} 条）` : ""}</span>
+            <Button size="sm" variant="ghost" className="min-h-11" disabled={saving || !pageItems.length} onClick={() => setSelected((current) => toggleTransferPageSelection(current, pageItems))}>{allPageSelected ? "取消本页" : "全选本页"}</Button>
+            {selected.size > 0 && <Button size="sm" variant="ghost" className="min-h-11" disabled={saving} onClick={() => setSelected(new Set())}>清空选择</Button>}</>}
+        </div>
+        {filtered.length ? isRecent ? <StockTransferHistoryRows items={pageItems as StockTransferHistoryItem[]} /> : <StockTransferRows items={pageItems} selectable={canReceive} selected={selected} disabled={saving} onToggle={toggle} /> :
+          <div className="space-y-2 py-8 text-center text-sm text-muted-foreground">
+            <p>{currentList.items.length ? "没有符合条件的记录，可修改搜索或来源筛选。" : isRecent ? "最近 30 天暂无你有权限查看的移缸完成记录。" : "暂无移缸在途的鱼。签发移缸后会出现在这里。"}</p>
+            {!isRecent && !target && !pool.items.length && <><p>鱼签收或直接出库后会移出待签收列表，可查看最近完成记录确认去向。</p><Button className="min-h-11" variant="outline" onClick={() => changeView("recent")}>查看最近完成</Button></>}
+          </div>}
+        {pageCount > 1 && <div className="flex items-center justify-center gap-3 text-sm"><Button className="min-h-11" variant="outline" disabled={saving || currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><span>{currentPage + 1} / {pageCount}</span><Button className="min-h-11" variant="outline" disabled={saving || currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>}
+      </>}
+  </div>;
   return <Dialog open={open} onOpenChange={(next) => { if (!requestLock.current) onOpenChange(next); }}>
     <DialogContent aria-describedby="stock-transfer-description" className="flex max-h-[90dvh] max-w-3xl flex-col overflow-hidden p-4 sm:p-6">
       <DialogHeader className="shrink-0 pr-6"><DialogTitle>{target ? "签收入缸" : "移缸在途"}</DialogTitle></DialogHeader>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto">
         <div id="stock-transfer-description" className="space-y-1 text-sm">
           {target ? <><p className="break-words font-medium">目标缸：{target.tankName}</p><p className="text-muted-foreground">勾选已到达的鱼，确认后放入此缸。可分批签收，也可签回原缸。</p></> :
-            <p className="text-muted-foreground">全场地在途鱼。请到目标子缸点击「签收入缸」；在途期间不展示在鱼单、不能新售或实际出库。</p>}
+            <p className="text-muted-foreground">待签收可查看全场地在途鱼。到达后，请在目标子缸点击「签收入缸」。在途鱼不展示在鱼单、不能用于新订单；已关联订单可直接出库。</p>}
         </div>
         {!permission.canUpdate || (target && !canReceive) ? <p role="alert" className="text-sm text-destructive">无签收权限或目标缸不可用，请返回已授权场地的目标缸。</p> : null}
-        <div className="flex flex-wrap gap-2">
-          <div className="relative min-w-0 flex-1 basis-48"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input className="h-10 pl-9" aria-label="搜索在途鱼" placeholder="商品 / 编号 / 来源缸 / 备注" value={search} disabled={saving} onChange={(event) => { setSearch(event.target.value); setPage(0); }} /></div>
-          <Select value={fromSiteId || "all"} disabled={saving} onValueChange={(value) => { setFromSiteId(value === "all" ? "" : value); setPage(0); }}>
-            <SelectTrigger className="h-10 w-full sm:w-40" aria-label="筛选来源场地"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="all">全部来源场地</SelectItem>{sources.map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}</SelectContent>
-          </Select>
-          <Button className="min-h-10" variant="outline" onClick={refresh} disabled={saving || pool.loading}><RefreshCw className="mr-1 size-4" />刷新</Button>
-        </div>
-        {saveError && <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{saveError}</div>}
-        {pool.loading ? <p role="status" className="py-8 text-center text-sm text-muted-foreground">正在加载在途列表…</p> : pool.error ?
-          <div role="alert" className="py-6 text-center text-sm"><p>{pool.error}</p><Button className="mt-2" variant="outline" onClick={refresh}>重试</Button></div> : <>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-            <span className="text-muted-foreground">符合筛选 {filtered.length} / 全部 {pool.items.length} 条</span>
-            {canReceive && <><span>已选 {selectedItems.length} 条{hiddenSelectedCount > 0 ? `（筛选外 ${hiddenSelectedCount} 条）` : ""}</span>
-              <Button size="sm" variant="ghost" className="min-h-10" disabled={saving || !pageItems.length} onClick={() => setSelected((current) => toggleTransferPageSelection(current, pageItems))}>{allPageSelected ? "取消本页" : "全选本页"}</Button>
-              {selected.size > 0 && <Button size="sm" variant="ghost" className="min-h-10" disabled={saving} onClick={() => setSelected(new Set())}>清空选择</Button>}</>}
-          </div>
-          {filtered.length ? <StockTransferRows items={pageItems} selectable={canReceive} selected={selected} disabled={saving} onToggle={toggle} /> :
-            <p className="py-8 text-center text-sm text-muted-foreground">{pool.items.length ? "没有符合条件的在途鱼，可修改搜索或来源筛选。" : "暂无移缸在途的鱼。签发移缸后会出现在这里。"}</p>}
-          {pageCount > 1 && <div className="flex items-center justify-center gap-3 text-sm"><Button variant="outline" disabled={saving || currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><span>{currentPage + 1} / {pageCount}</span><Button variant="outline" disabled={saving || currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>}
-        </>}
+        {target ? listContent : <Tabs value={view} onValueChange={changeView} className="min-w-0 gap-3">
+          <TabsList aria-label="移缸记录范围" className="grid h-auto w-full grid-cols-2 rounded-lg bg-muted p-1">
+            <TabsTrigger value="active" className="min-h-11 rounded-md data-[state=active]:border-primary data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">待签收</TabsTrigger>
+            <TabsTrigger value="recent" className="min-h-11 rounded-md data-[state=active]:border-primary data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">最近完成</TabsTrigger>
+          </TabsList>
+          <TabsContent value={view} className="min-w-0">{listContent}</TabsContent>
+        </Tabs>}
       </div>
-      <DialogFooter className="shrink-0 border-t pt-3"><Button variant="outline" disabled={saving} onClick={() => onOpenChange(false)}>关闭</Button>
-        {canReceive && <Button onClick={receive} disabled={saving || pool.loading || !!pool.error || conflict || !selectedItems.length}>{saving ? "签收中…" : `确认签收 ${selectedItems.length} 条`}</Button>}
+      <DialogFooter className="shrink-0 border-t pt-3"><Button className="min-h-11" variant="outline" disabled={saving} onClick={() => onOpenChange(false)}>关闭</Button>
+        {canReceive && <Button className="min-h-11" onClick={receive} disabled={saving || pool.loading || !!pool.error || conflict || !selectedItems.length}>{saving ? "签收中…" : `确认签收 ${selectedItems.length} 条`}</Button>}
       </DialogFooter>
     </DialogContent>
   </Dialog>;

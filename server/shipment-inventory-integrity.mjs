@@ -87,6 +87,7 @@ export function inventoryProjectionForStock(
 }
 
 function sameImmutableValue(field, left, right) {
+  if (field === "transferDispatch") return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
   if (field === "itemStockIds") {
     return JSON.stringify(Array.isArray(left) ? left : []) === JSON.stringify(Array.isArray(right) ? right : []);
   }
@@ -99,6 +100,7 @@ const IMMUTABLE_SHIPMENT_FIELDS = Object.freeze([
   "shipMethod",
   "itemStockIds",
   "createdAt",
+  "transferDispatch",
 ]);
 
 export function assertShipmentInventoryIdentityUnchanged(

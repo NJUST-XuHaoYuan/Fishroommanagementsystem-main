@@ -454,9 +454,9 @@ export function buildPurchaseBatchFishHistory(state, options) {
   add({ id: `stock-in:${fish.stockItemId}`, type: "stockIn", date: fish.inDate, title: "入库", text: fish.initialTankName ? `初始入库：${fish.initialTankName}` : "未留存可核实的初始缸位", siteName: evidence.entryVisible ? evidence.entryLocation.siteName : "", tankName: fish.initialTankName, operator: evidence.entryVisible ? text(evidence.entry?.operator) : "" });
   for (const record of evidence.bio) {
     const recordLocation = context.locations.historical(record);
-    const isMove = ["stockMove", "stockTransferIssued", "stockTransferReceived"].includes(record.sourceType) || /^移缸(?:签发|签收)?[：:]/.test(text(record.text));
+    const isMove = ["stockMove", "stockTransferIssued", "stockTransferReceived", "stockTransferDispatched", "stockTransferDispatchCancelled"].includes(record.sourceType) || /^移缸(?:签发|签收)?[：:]/.test(text(record.text));
     const fromSiteId = text(record.fromSiteId);
-    const toSiteId = text(record.toSiteId) || recordLocation.siteId;
+    const toSiteId = text(record.toSiteId || record.dispatchSiteId) || recordLocation.siteId;
     const canShowMoveText = options.isAdmin || (fromSiteId && context.visible.has(fromSiteId) && context.visible.has(toSiteId));
     const recordText = isMove && !canShowMoveText ? "移缸记录；未授权或未结构化保存的历史位置已隐藏" : text(record.text);
     add({ id: `bio:${record.id}`, type: isMove ? "move" : "maintenance", date: date(record.date), title: isMove ? "移缸" : record.sourceType === "dailyLog" ? "缸组养护" : "观察 / 治疗记录", text: recordText, ...recordLocation, operator: text(record.operator), photos: safeMedia(record.photos), videos: safeMedia(record.videos) });

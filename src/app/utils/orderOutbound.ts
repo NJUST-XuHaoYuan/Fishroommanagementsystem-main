@@ -1,16 +1,33 @@
-import type { OrderItem, Shipment, StockItem, TankGroup } from "../store";
+import type { OrderItem, Shipment, StockItem, StockTransferListItem, TankGroup } from "../store";
 import { isStockInTransfer } from "./inventory.ts";
 
 export type StockLocationSnapshot = { siteId: string; subTankId: string };
 export type ExpectedStockLocations = Record<string, StockLocationSnapshot>;
+export type OutboundTransferSnapshots = Record<string, string>;
+export type OutboundTransferDispatch = {
+  siteId: string;
+  items: { stockItemId: string; transferId: string }[];
+};
+
+/** Confirmation covers the exact selection, issuing transfer IDs, and actual dispatch site. */
+export function outboundTransferConfirmationKey(selectedItemIds: string[], snapshots: OutboundTransferSnapshots, siteId: string): string {
+  return JSON.stringify([siteId, [...selectedItemIds].sort().map((id) => [id, snapshots[id] ?? ""])]);
+}
+
+/** Never silently reuse an approval after receipt, re-issue, or a newly issued move. */
+export function outboundTransferSnapshotsMatch(selectedItemIds: string[], snapshots: OutboundTransferSnapshots, current: OutboundTransferSnapshots): boolean {
+  return selectedItemIds.every((id) => Object.hasOwn(snapshots, id) && Object.hasOwn(current, id) && snapshots[id] === current[id]);
+}
 
 /** Sold fish remain eligible for their own order after an authorized cross-site move. */
-export function orderOutboundItems(items: OrderItem[], shipments: Shipment[], accessibleStock: StockItem[]) {
+export function orderOutboundItems(items: OrderItem[], shipments: Shipment[], accessibleStock: StockItem[], orderTransfers: StockTransferListItem[] = []) {
   const shippedItemIds = new Set(shipments.filter((shipment) => shipment.status !== "preparing")
     .flatMap((shipment) => shipment.itemStockIds ?? []));
   const inventoryActiveItems = items.filter((item) => !item.inventoryRemovedAt);
   const unshippedItems = inventoryActiveItems.filter((item) => !shippedItemIds.has(item.stockItemId));
   const findStock = (id: string) => accessibleStock.find((stock) => stock.id === id);
+  // This separate, order-authorized projection never expands general inventory visibility.
+  const findTransfer = (id: string) => orderTransfers.find((item) => item.stockItemId === id);
   return {
     shippedItemIds,
     inventoryActiveItems,
@@ -18,12 +35,14 @@ export function orderOutboundItems(items: OrderItem[], shipments: Shipment[], ac
     lostUnshippedItems: unshippedItems.filter((item) => findStock(item.stockItemId)?.lost),
     transferUnshippedItems: unshippedItems.filter((item) => {
       const stock = findStock(item.stockItemId);
-      return Boolean(stock && isStockInTransfer(stock));
+      return stock ? isStockInTransfer(stock) : Boolean(findTransfer(item.stockItemId));
     }),
-    unavailableUnshippedItems: unshippedItems.filter((item) => !findStock(item.stockItemId)),
+    unavailableUnshippedItems: unshippedItems.filter((item) => !findStock(item.stockItemId) && !findTransfer(item.stockItemId)),
     shippableUnshippedItems: unshippedItems.filter((item) => {
       const stock = findStock(item.stockItemId);
-      return Boolean(stock) && !stock?.lost && !isStockInTransfer(stock!);
+      // These are this existing order's fish, never candidates for a new sale.
+      // In-transit candidates need a separate explicit direct-dispatch confirmation.
+      return stock ? !stock.lost : Boolean(findTransfer(item.stockItemId));
     }),
   };
 }

@@ -44,6 +44,7 @@ test("transfer concurrency snapshots are strict allowlists and stable for missin
     toSiteId: "",
     toSubTankId: "",
     toTankName: "",
+    dispatchedAt: "", dispatchedBy: "", dispatchSiteId: "", dispatchSiteName: "", orderId: "", shipmentId: "",
   });
   assert.equal(Object.prototype.hasOwnProperty.call(
     stockTransferConcurrencySnapshot({ ...active, tankTransfer: { ...active.tankTransfer, privateField: "must-not-project" } }),

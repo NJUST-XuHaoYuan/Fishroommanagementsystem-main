@@ -176,10 +176,10 @@ export type PurchaseBatch = {
 export type StockStatus = "healthy" | "sick" | "feeding";
 export type StockPriceMode = "product" | "manual" | "legacy";
 
-/** Latest transfer snapshot; the full issue/receipt history lives in bioRecords. */
+/** Latest transfer snapshot; the full issue/receipt/dispatch history lives in bioRecords. */
 export type StockTankTransfer = {
   id: string;
-  status: "in_transit" | "received";
+  status: "in_transit" | "received" | "dispatched";
   issuedAt: string;
   issuedBy: string;
   fromSiteId: string;
@@ -191,6 +191,12 @@ export type StockTankTransfer = {
   toSiteId?: string;
   toSubTankId?: string;
   toTankName?: string;
+  dispatchedAt?: string;
+  dispatchedBy?: string;
+  dispatchSiteId?: string;
+  dispatchSiteName?: string;
+  orderId?: string;
+  shipmentId?: string;
 };
 
 /** Safe cross-site projection, not a StockItem or an order/customer record. */
@@ -212,6 +218,19 @@ export type StockTransferListItem = {
   issuedAt: string;
   issuedBy: string;
   notes: string;
+};
+
+/** Safe completed-transfer projection; deliberately excludes order/customer/money data. */
+export type StockTransferHistoryItem = StockTransferListItem & {
+  transferStatus: "received" | "dispatched";
+  completedAt: string;
+  completedBy: string;
+  toSiteId?: string;
+  toSiteName?: string;
+  toSubTankId?: string;
+  toTankName?: string;
+  dispatchSiteId?: string;
+  dispatchSiteName?: string;
 };
 
 export type StockItem = {

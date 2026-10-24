@@ -28,6 +28,12 @@ export function stockTransferConcurrencySnapshot(item = {}) {
     toSiteId: id(transfer.toSiteId),
     toSubTankId: id(transfer.toSubTankId),
     toTankName: String(transfer.toTankName ?? "").trim(),
+    dispatchedAt: String(transfer.dispatchedAt ?? "").trim(),
+    dispatchedBy: String(transfer.dispatchedBy ?? "").trim(),
+    dispatchSiteId: id(transfer.dispatchSiteId),
+    dispatchSiteName: String(transfer.dispatchSiteName ?? "").trim(),
+    orderId: id(transfer.orderId),
+    shipmentId: id(transfer.shipmentId),
   };
 }
 
