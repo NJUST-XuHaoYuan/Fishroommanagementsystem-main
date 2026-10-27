@@ -388,14 +388,28 @@ export function buildPurchaseBatchOrderDetail(state, options, feeBreakdownForOrd
     || array(shipment.damageReplacements).some((relation) => isBatchFish(relation.originalStockItemId) || isBatchFish(relation.replacementStockItemId)));
   // Check the explicit ID join again in memory: SQL projection is not authority.
   if (!directlyRelated && !shipmentRelated) fail("订单不属于该采购批次或无权查看", 404, "BATCH_ORDER_NOT_FOUND");
+  const detail = buildReadonlyOrderDetail(state, order, feeBreakdownForOrder, {
+    batchFishIds, siteName: context.locations.siteName(orderSiteId), batchRelated: true, directlyRelated,
+  });
+  return { ok: true, batch: { id: id(context.batch.id), batchNo: text(context.batch.batchNo), siteId: options.siteId, siteName: context.locations.siteName(options.siteId) }, order: detail };
+}
+
+/** Shared presentation only; callers must authorize the order and its context first. */
+export function buildReadonlyOrderDetail(state, order, feeBreakdownForOrder, options = {}) {
+  const orderSiteId = text(order.siteId) || defaultSite;
+  const shipments = [...uniqueById(state.shipments, "发货单").values()].filter((shipment) => id(shipment.orderId) === id(order.id));
+  const products = uniqueById(state.products, "商品");
+  const speciesById = uniqueById(state.species, "物种");
+  const batchFishIds = options.batchFishIds ?? new Set();
+  const isBatchFish = (key) => batchFishIds.has(id(key));
   const replacements = new Set(shipments.flatMap((shipment) => array(shipment.damageReplacements).map((relation) => id(relation.replacementStockItemId))));
   const linesByStock = indexBy(array(order.items), (item) => id(item.stockItemId));
-  const warnings = ["金额为整张订单口径，未分摊到本采购批次或单条鱼；商品名称和规格优先使用订单快照，缺失时参考现存商品档案"];
-  if (!directlyRelated) warnings.push("本批次通过发货或原鱼补发记录关联此订单；当前商品行可能已替换为其他批次的补发鱼");
+  const warnings = [options.batchRelated ? "金额为整张订单口径，未分摊到本采购批次或单条鱼；商品名称和规格优先使用订单快照，缺失时参考现存商品档案" : "商品名称和规格优先使用订单快照，缺失时参考现存商品档案；已核销和待核销款项分别列示"];
+  if (options.batchRelated && !options.directlyRelated) warnings.push("本批次通过发货或原鱼补发记录关联此订单；当前商品行可能已替换为其他批次的补发鱼");
   if (order.status === "cancelled") warnings.push("该订单已取消，以下是留存账单及资金记录，不代表仍需收款");
   const items = array(order.items).map((item) => {
-    const product = context.products.get(id(item.productId)) ?? {};
-    const species = context.species.get(id(product.speciesId)) ?? {};
+    const product = products.get(id(item.productId)) ?? {};
+    const species = speciesById.get(id(product.speciesId)) ?? {};
     const kind = replacements.has(id(item.stockItemId)) ? "replacement" : "sale";
     const price = itemPrice(item.price);
     const notes = [];
@@ -433,10 +447,10 @@ export function buildPurchaseBatchOrderDetail(state, options, feeBreakdownForOrd
     deliveredAt: date(shipment.deliveredAt), damagedAt: date(shipment.damagedAt), actualShippingFee: itemPrice(shipment.actualShippingFee),
     damageResolution: text(shipment.damageResolution), damageRefundAmount: itemPrice(shipment.damageRefundAmount) }))
     .sort((a, b) => compareHistoryDate(a.createdAt || a.outboundDate || a.shipDate, b.createdAt || b.outboundDate || b.shipDate) || a.id.localeCompare(b.id));
-  return { ok: true, batch: { id: id(context.batch.id), batchNo: text(context.batch.batchNo), siteId: options.siteId, siteName: context.locations.siteName(options.siteId) },
-    order: { id: id(order.id), orderNo: text(order.orderNo), siteId: orderSiteId, siteName: context.locations.siteName(orderSiteId), date: date(order.date),
+  return { id: id(order.id), orderNo: text(order.orderNo), siteId: orderSiteId, siteName: text(options.siteName), date: date(order.date),
       status: text(order.status), statusLabel: orderStatus[order.status] || text(order.status), customerName: text(customer?.name) || text(order.customerName), source: text(order.source),
-      items, totals, payments, shipments: shipping, warnings } };
+      ...(options.includeReviewContext ? { notes: text(order.notes), contactPerson: text(order.contactPerson), platformOrderNo: text(order.platformOrderNo) } : {}),
+      items, totals, payments, shipments: shipping, warnings };
 }
 
 function safeMedia(value) {

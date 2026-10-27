@@ -19,6 +19,7 @@ import {
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import { newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
+import { buildNewCustomerLinkedDetail } from "./new-customer-linked-detail.mjs";
 import { reconcileCommissionLedger, personalCommissionSummary, monthlyCommissionSummary, invalidateCommissionAllocations } from "./commission-ledger.mjs";
 import { lossPricingSnapshot, lossStockPricingUpdate, planLossPriceUpdate } from "./stock-loss-price.mjs";
 import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "./order-fulfillment-stock.mjs";
@@ -8553,7 +8554,8 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
-      url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail") {
+      url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
+      url.pathname === "/api/orders/new-customer/linked-detail") {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -12255,6 +12257,33 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/orders/acquisition-tag" && req.method === "POST") {
     sendJson(req, res, 410, { ok: false, code: "ACQUISITION_TAG_RETIRED", error: "获新订单已改为新客提成审批，请由订单负责人提交申请，再由管理员审批" });
+    return;
+  }
+
+  if (url.pathname === "/api/orders/new-customer/linked-detail" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+                data -> 'orders' AS orders, data -> 'customers' AS customers,
+                data -> 'products' AS products, data -> 'species' AS species, data -> 'shipments' AS shipments
+         FROM app_state WHERE id = $1`, [stateId]
+      );
+      const state = rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const detail = buildNewCustomerLinkedDetail(state, {
+        orderId: url.searchParams.get("orderId"), targetOrderId: url.searchParams.get("targetOrderId"),
+        kind: url.searchParams.get("kind"), visibleSiteIds: visibleSiteIdsForAccount(req.auth.account, state),
+      }, (order, shipments) => calculateOrderFeeBreakdown(order, {
+        billableShippingFee: getBillableShippingFeeForOrder(order, shipments),
+        damageRefundAdjustment: calcDamageRefundAdjustmentForOrder(order, shipments),
+      }));
+      sendJson(req, res, 200, detail, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      const statusCode = Number(error?.statusCode ?? 500);
+      if (statusCode >= 500) console.error("Failed to load new customer linked detail:", error);
+      sendJson(req, res, statusCode, { ok: false, error: statusCode >= 500 ? "关联资料加载失败，请重试" : error.message,
+        ...(error?.code ? { code: error.code } : {}) }, { "Cache-Control": "no-store, private" });
+    }
     return;
   }
 

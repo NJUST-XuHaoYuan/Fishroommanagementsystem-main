@@ -4,6 +4,8 @@ import {
   CircleAlert,
   Clock3,
   Loader2,
+  FileText,
+  UserRound,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -22,6 +24,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import { Textarea } from "./ui/textarea";
+import { NewCustomerLinkedDetailDialog, type NewCustomerLinkedTarget } from "./NewCustomerLinkedDetailDialog";
 
 export type NewCustomerApprovalUpdatedOrder = { id: string } & Record<string, unknown>;
 
@@ -110,6 +113,7 @@ export function NewCustomerApprovalPanel({
   const [reviewNote, setReviewNote] = useState("");
   const [confirmUnknownCustomer, setConfirmUnknownCustomer] = useState(false);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [linkedTarget, setLinkedTarget] = useState<NewCustomerLinkedTarget | null>(null);
   const mutationPendingRef = useRef(false);
   const requestRef = useRef<{ sequence: number; controller: AbortController | null }>({
     sequence: 0,
@@ -155,6 +159,7 @@ export function NewCustomerApprovalPanel({
   }, [approvalRequestId, notificationId, orderId]);
 
   useEffect(() => {
+    setLinkedTarget(null);
     setActionError("");
     setRequestReason("");
     setReviewNote("");
@@ -376,6 +381,20 @@ export function NewCustomerApprovalPanel({
             )}
           </div>
 
+          <div className="flex flex-wrap gap-2" aria-label="审核关联资料">
+            <Button type="button" variant="outline" className="min-h-11" disabled={loading || busyAction !== null}
+              onClick={() => setLinkedTarget({ kind: "order", targetOrderId: detail.orderId })}>
+              <FileText className="size-4" aria-hidden="true" />查看订单
+            </Button>
+            <Button type="button" variant="outline" className="min-h-11" disabled={!detail.currentOrder.customerId || loading || busyAction !== null}
+              onClick={() => setLinkedTarget({ kind: "customer", customerId: detail.currentOrder.customerId! })}>
+              <UserRound className="size-4" aria-hidden="true" />查看客户
+            </Button>
+            <p className="w-full text-xs leading-5 text-muted-foreground">
+              {detail.currentOrder.customerId ? "在本页查看，关闭资料后继续审核，已填写的审批说明会保留。" : "未关联客户档案，可先查看订单核对客户识别信息。"}
+            </p>
+          </div>
+
           <div className="rounded-md border bg-muted/20 px-3 py-3">
             <div className="flex items-center gap-2 text-sm font-medium">
               <ShieldCheck className="size-4 text-sky-700" aria-hidden="true" />客户与首单核验
@@ -399,7 +418,11 @@ export function NewCustomerApprovalPanel({
                 <ul className="mt-2 space-y-1.5">
                   {detail.customerEvidence.priorOrders.map((order) => (
                     <li key={order.id} className="flex flex-wrap justify-between gap-x-3 gap-y-1 border-t pt-1.5 first:border-t-0 first:pt-0">
-                      <span>{order.orderNo || order.id}</span>
+                      <button type="button" className="min-h-11 text-left font-medium text-sky-800 underline underline-offset-4 hover:text-sky-950 focus-visible:outline-2 focus-visible:outline-offset-2"
+                        disabled={loading || busyAction !== null}
+                        onClick={() => setLinkedTarget({ kind: "order", targetOrderId: order.id })}>
+                        查看订单 {order.orderNo || order.id}
+                      </button>
                       <span>{[order.date, order.status].filter(Boolean).join(" · ") || "信息未完整"}</span>
                     </li>
                   ))}
@@ -554,6 +577,12 @@ export function NewCustomerApprovalPanel({
           {actionError}
         </div>
       )}
+      {linkedTarget && <NewCustomerLinkedDetailDialog
+        key={JSON.stringify([orderId, linkedTarget])}
+        orderId={orderId}
+        target={linkedTarget}
+        onClose={() => setLinkedTarget(null)}
+      />}
     </div>
   );
 }

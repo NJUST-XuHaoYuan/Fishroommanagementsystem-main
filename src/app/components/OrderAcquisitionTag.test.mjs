@@ -148,6 +148,48 @@ test("approved state explains current-month true-up without rewriting prior mont
   assert.doesNotMatch(markup, /申请新客首单审批/);
 });
 
+test("approval has direct current order, customer and historical order entry points", () => {
+  const markup = renderPanel(detail({ customerEvidence: { identityKnown: true, otherOrderCount: 1,
+    priorOrders: [{ id: "prior-1", orderNo: "SO-HISTORY", date: "2026-10-01", status: "completed" }] } }));
+  assert.match(markup, /审核关联资料/);
+  assert.match(markup, /查看订单/);
+  assert.match(markup, /查看客户/);
+  assert.match(markup, /查看订单 SO-HISTORY/);
+  assert.match(markup, /已填写的审批说明会保留/);
+  const customerButton = markup.match(/<button[^>]*>[^]*?<\/button>/g).find(button => button.includes("查看客户"));
+  assert.doesNotMatch(customerButton, /disabled=""/);
+});
+
+test("unlinked customer cannot open an unrelated customer and still permits checking the order", () => {
+  const value = detail(); value.currentOrder.customerId = "";
+  value.customerEvidence = { identityKnown: false, otherOrderCount: 0, priorOrders: [] };
+  const markup = renderPanel(value);
+  const customerButton = markup.match(/<button[^>]*>[^]*?<\/button>/g).find(button => button.includes("查看客户"));
+  assert.match(customerButton, /disabled=""/);
+  assert.match(markup, /可先查看订单核对客户识别信息/);
+});
+
+test("linked detail display is read only and uses generic order wording", async () => {
+  const { ApprovalCustomerContent } = await server.ssrLoadModule("/src/app/components/NewCustomerLinkedDetailDialog.tsx");
+  const { ReadonlyOrderContent } = await server.ssrLoadModule("/src/app/components/BatchOrderDialog.tsx");
+  const customerMarkup = renderToStaticMarkup(createElement(ApprovalCustomerContent, {
+    customer: { id: "c1", name: "核对客户", phone: "123", wechat: "wx-test", notes: "核对备注" },
+    orders: [{ id: "o1", orderNo: "SO-CUSTOMER", date: "2026-10-03", siteName: "南京", statusLabel: "已完成" }],
+    onOpenOrder: () => {},
+  }));
+  assert.match(customerMarkup, /客户历史订单（1 笔）/);
+  assert.match(customerMarkup, /SO-CUSTOMER/);
+  assert.match(customerMarkup, /wx-test/);
+  const orderMarkup = renderToStaticMarkup(createElement(ReadonlyOrderContent, { order: {
+    id: "o1", orderNo: "SO-CUSTOMER", status: "confirmed", statusLabel: "已确认", contactPerson: "负责人甲", notes: "首次购买核实", platformOrderNo: "PLATFORM-1",
+    items: [], payments: [], shipments: [], warnings: [], totals: {},
+  } }));
+  assert.match(orderMarkup, /负责人甲/);
+  assert.match(orderMarkup, /PLATFORM-1/);
+  assert.match(orderMarkup, /首次购买核实/);
+  assert.doesNotMatch(orderMarkup, /本批次|采购批次|<button|批准并采用|修改订单/);
+});
+
 test("approval merge is versioned, metadata-only and never reinserts absent orders", () => {
   const current = [{
     id: "order-1",

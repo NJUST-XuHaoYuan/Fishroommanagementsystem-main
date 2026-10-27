@@ -114,3 +114,101 @@ test("deleting an unpaid order closes pending new-customer notices instead of le
   assert.equal(notifications.length, 2);
   assert.ok(notifications.every((item) => item.status === "completed" && item.resolution === "rejected"));
 });
+
+const linkedPath = (kind, extra = {}) => `/api/orders/new-customer/linked-detail?${new URLSearchParams({ orderId: "ORDER-PENDING", kind, ...extra })}`;
+
+test("approval linked order shows full authoritative amounts and safe review fields without changing approval or business records", async (t) => {
+  const f = fixture();
+  Object.assign(f.state.orders[0], { notes: "核对首次交易", platformOrderNo: "PLATFORM-IDENTITY", paymentAccount: "PRIVATE_ACCOUNT", secret: "PRIVATE_ORDER_SECRET",
+    shippingFeeMode: "prepaid", shippingFee: 20, packagingFee: 10, discount: 3.45,
+    payments: [{ id: "receipt", type: "balance", amount: 100, verificationStatus: "verified", account: "PRIVATE_PAYMENT_ACCOUNT", proof: ["PRIVATE_PROOF"] },
+      { id: "pending", type: "balance", amount: 50, verificationStatus: "pending" }] });
+  f.state.customers[0].password = "PRIVATE_CUSTOMER_SECRET";
+  const s = await setup(t, f); ok(await s.submit()); const before = await s.readPersistedState();
+  for (const token of [s.admin, s.owner]) {
+    const detail = await s.request(linkedPath("order"), { token }); ok(detail);
+    assert.equal(detail.response.headers.get("cache-control"), "no-store, private");
+    assert.equal(detail.body.approvalOrderId, "ORDER-PENDING");
+    assert.equal(detail.body.kind, "order");
+    assert.equal(detail.body.order.id, "ORDER-PENDING");
+    assert.equal(detail.body.order.customerName, "新客户");
+    assert.equal(detail.body.order.contactPerson, "价格测试editor");
+    assert.equal(detail.body.order.notes, "核对首次交易");
+    assert.equal(detail.body.order.platformOrderNo, "PLATFORM-IDENTITY");
+    assert.equal(detail.body.order.totals.goodsNetTotal, 120);
+    assert.equal(detail.body.order.totals.calculatedReceivable, 150);
+    assert.equal(detail.body.order.totals.netReceived, 100);
+    assert.equal(detail.body.order.totals.pendingReceived, 50);
+    assert.equal(detail.body.order.totals.balance, 50);
+    assert.ok(detail.body.order.items.every((item) => item.isBatchFish === false));
+    assert.doesNotMatch(JSON.stringify(detail.body), /PRIVATE_|"personnel"|"password"|"newCustomerApproval"|"proof"|"account"|本批次/);
+  }
+  assert.deepEqual(await s.readPersistedState(), before);
+});
+
+test("approval customer detail is derived from the current order, allowlisted and includes only authorized same-customer history", async (t) => {
+  const f = fixture(); Object.assign(f.state.customers[0], { phone: "13000000000", address: "测试地址", notes: "身份核对备注", secret: "PRIVATE_CUSTOMER_SECRET" });
+  f.state.customers.push({ id: "unrelated-customer", name: "PRIVATE_OTHER_CUSTOMER", phone: "PRIVATE_PHONE" });
+  f.state.orders.push({ ...f.state.orders[0], id: "same-customer", orderNo: "RELATED", createdAt: "2026-10-03T12:00:00+08:00", status: "cancelled" },
+    { ...f.state.orders[0], id: "hidden-customer-order", orderNo: "PRIVATE_JY_ORDER", siteId: "jiangyin" },
+    { ...f.state.orders[0], id: "unrelated-order", orderNo: "PRIVATE_OTHER_ORDER", customerId: "unrelated-customer" });
+  const s = await setup(t, f); const before = await s.readPersistedState();
+  const detail = await s.request(linkedPath("customer", { customerId: "unrelated-customer", siteId: "jiangyin" }), { token: s.owner }); ok(detail);
+  assert.equal(detail.body.customer.id, "new-customer");
+  assert.equal(detail.body.customer.phone, "13000000000");
+  assert.equal(detail.body.customer.address, "测试地址");
+  assert.equal(detail.body.customer.notes, "身份核对备注");
+  assert.deepEqual(detail.body.orders.map((order) => order.id), ["same-customer", "ORDER-PENDING"]);
+  assert.equal(detail.body.orders[0].statusLabel, "已取消");
+  assert.doesNotMatch(JSON.stringify(detail.body), /PRIVATE_|hidden-customer-order|jiangyin|"payments"|"items"|"secret"/);
+  ok(await s.request(linkedPath("order", { targetOrderId: "same-customer" }), { token: s.owner }));
+  const admin = await s.request(linkedPath("customer"), { token: s.admin }); ok(admin);
+  assert.ok(admin.body.orders.some((order) => order.id === "hidden-customer-order"));
+  assert.deepEqual(await s.readPersistedState(), before);
+});
+
+test("approval navigation cannot use a visible context to open unrelated or hidden orders or borrow another site's permissions", async (t) => {
+  const f = fixture();
+  f.state.orders.push({ ...f.state.orders[0], id: "hidden-order", orderNo: "PRIVATE_JY_ORDER", siteId: "jiangyin" },
+    { ...f.state.orders[0], id: "unrelated-order", orderNo: "PRIVATE_UNRELATED_ORDER", customerId: "unrelated" });
+  const s = await setup(t, f);
+  for (const params of [{ targetOrderId: "hidden-order" }, { orderId: "hidden-order" }, { orderId: "hidden-order", targetOrderId: "ORDER-PENDING" }, { targetOrderId: "unrelated-order" }]) {
+    const result = await s.request(linkedPath("order", { siteId: "nanjing", ...params }), { token: s.owner });
+    assert.ok([403, 404].includes(result.response.status), JSON.stringify(result.body));
+    assert.equal(result.body.order, undefined); assert.doesNotMatch(JSON.stringify(result.body), /PRIVATE_|new-client|123\.45/);
+  }
+  assert.equal((await s.request(linkedPath("customer", { orderId: "hidden-order" }), { token: s.owner })).response.status, 403);
+  assert.equal((await s.request(linkedPath("order", { targetOrderId: "unrelated-order" }), { token: s.admin })).response.status, 404);
+  ok(await s.request(linkedPath("order", { targetOrderId: "hidden-order" }), { token: s.admin }));
+});
+
+test("approval navigation handles unlinked or deleted customers and deleted or duplicate orders without stale snapshot fallback", async (t) => {
+  const unknown = await setup(t, fixture({ known: false }));
+  assert.equal((await unknown.request(linkedPath("customer"), { token: unknown.admin })).body.code, "NEW_CUSTOMER_CUSTOMER_UNLINKED");
+  ok(await unknown.request(linkedPath("order"), { token: unknown.admin }));
+  const f = fixture(); f.state.customers = [];
+  f.state.orders[0].newCustomerApproval = { customerSnapshot: { id: "new-customer", phone: "PRIVATE_STALE_PHONE" } };
+  const deleted = await setup(t, f);
+  const customer = await deleted.request(linkedPath("customer"), { token: deleted.admin });
+  assert.equal(customer.response.status, 404); assert.doesNotMatch(JSON.stringify(customer.body), /PRIVATE_STALE_PHONE/);
+  assert.equal((await deleted.request(linkedPath("order", { orderId: "deleted-order" }), { token: deleted.admin })).response.status, 404);
+  assert.equal((await deleted.request(linkedPath("order", { targetOrderId: "deleted-order" }), { token: deleted.admin })).response.status, 404);
+  const duplicate = fixture(); duplicate.state.orders.push({ ...duplicate.state.orders[0], siteId: "jiangyin" });
+  const d = await setup(t, duplicate);
+  assert.equal((await d.request(linkedPath("order"), { token: d.owner })).response.status, 409);
+  const duplicateCustomer = fixture(); duplicateCustomer.state.customers.push({ ...duplicateCustomer.state.customers[0] });
+  const c = await setup(t, duplicateCustomer);
+  assert.equal((await c.request(linkedPath("customer"), { token: c.admin })).response.status, 409);
+});
+
+test("approval linked detail requires current enabled authentication and validates request kinds", async (t) => {
+  const s = await setup(t);
+  const anonymous = await s.request(linkedPath("order"));
+  assert.equal(anonymous.response.status, 401); assert.equal(anonymous.response.headers.get("cache-control"), "no-store, private");
+  assert.equal((await s.request(linkedPath("invalid"), { token: s.admin })).response.status, 400);
+  assert.equal((await s.request(linkedPath("order", { orderId: "" }), { token: s.admin })).response.status, 400);
+  await s.patchTestPersonnel("pricing-editor", { visibleSiteIds: ["jiangyin"] });
+  assert.equal((await s.request(linkedPath("order"), { token: s.owner })).response.status, 403);
+  await s.patchTestPersonnel("pricing-editor", { accountEnabled: false });
+  assert.equal((await s.request(linkedPath("customer"), { token: s.owner })).response.status, 401);
+});

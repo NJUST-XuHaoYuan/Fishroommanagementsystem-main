@@ -70,7 +70,7 @@ type OrderTotals = {
   pendingRefunded: number | null;
   balance: number | null;
 };
-type OrderDetail = {
+export type ReadonlyOrderDetail = {
   id: string;
   orderNo: string;
   siteId: string;
@@ -80,6 +80,9 @@ type OrderDetail = {
   statusLabel: string;
   customerName: string;
   source: string;
+  contactPerson?: string;
+  platformOrderNo?: string;
+  notes?: string;
   items: OrderItem[];
   totals: OrderTotals;
   payments: OrderPayment[];
@@ -89,7 +92,7 @@ type OrderDetail = {
 type BatchOrderResponse = {
   ok: boolean;
   batch: { id: string; batchNo: string; siteId: string; siteName: string };
-  order: OrderDetail;
+  order: ReadonlyOrderDetail;
 };
 
 function Field({ label, value }: { label: string; value?: string | number | null }) {
@@ -122,12 +125,12 @@ function LoadingOrder() {
   </div>;
 }
 
-function OrderItems({ items }: { items: OrderItem[] }) {
+function OrderItems({ items, batchContext = true }: { items: OrderItem[]; batchContext?: boolean }) {
   const batchCount = items.filter(item => item.isBatchFish).length;
   return <section aria-labelledby="batch-order-items-heading">
     <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
       <h3 id="batch-order-items-heading" className="font-semibold">订单商品</h3>
-      <p className="text-xs text-muted-foreground">{items.length} 条记录 · 本批次 {batchCount} 条</p>
+      <p className="text-xs text-muted-foreground">{items.length} 条记录{batchContext && ` · 本批次 ${batchCount} 条`}</p>
     </div>
     {items.length === 0 ? <p className="text-sm text-muted-foreground">未留存订单商品记录。</p> : <ul className="divide-y overflow-hidden rounded-lg border">
       {items.map((item, index) => <li key={`${item.stockItemId}:${item.kind}:${index}`}
@@ -154,11 +157,11 @@ function OrderItems({ items }: { items: OrderItem[] }) {
   </section>;
 }
 
-function OrderAmounts({ totals, cancelled }: { totals: OrderTotals; cancelled: boolean }) {
+function OrderAmounts({ totals, cancelled, batchContext = true }: { totals: OrderTotals; cancelled: boolean; batchContext?: boolean }) {
   const shippingMode = ({ prepaid: "寄付", collect: "到付", free: "包邮" } as Record<string, string>)[totals.shippingFeeMode] || "未记录";
   return <section aria-labelledby="batch-order-amounts-heading" className="border-t pt-5">
     <h3 id="batch-order-amounts-heading" className="font-semibold">订单费用与收款</h3>
-    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">以下为整张订单的金额，包含其他批次商品，不是本批次回款。已核销与待核销分别列示。</p>
+    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{batchContext ? "以下为整张订单的金额，包含其他批次商品，不是本批次回款。" : "以下为整张订单的金额，运费、包装费单独列示。"}已核销与待核销分别列示。</p>
     {cancelled && <p className="mt-2 text-sm text-amber-900">订单已取消：下列应收及差额仅为留存账单计算，不代表继续向客户收款。</p>}
     <div className="mt-3 grid gap-5 sm:grid-cols-2 sm:gap-8">
       <dl>
@@ -201,14 +204,14 @@ function PaymentRecords({ payments }: { payments: OrderPayment[] }) {
   </details>;
 }
 
-function ShipmentRecords({ shipments }: { shipments: OrderShipment[] }) {
+function ShipmentRecords({ shipments, batchContext = true }: { shipments: OrderShipment[]; batchContext?: boolean }) {
   return <section aria-labelledby="batch-order-shipments-heading" className="border-t pt-5">
     <h3 id="batch-order-shipments-heading" className="font-semibold">发货快照 <span className="text-sm font-normal text-muted-foreground">{shipments.length} 次</span></h3>
     {shipments.length === 0 ? <p className="mt-3 text-sm text-muted-foreground">暂未留存发货记录。</p> : <ol className="mt-3 divide-y">
       {shipments.map((shipment, index) => <li key={`${shipment.id}:${index}`} className="py-4 first:pt-0 last:pb-0">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
           <p className="font-medium">{shipment.shipMethod === "pickup" ? "客户自取" : shipment.carrier || "发货记录"} <span className="ml-1 font-normal text-muted-foreground">· {shipment.statusLabel || "状态未记录"}</span></p>
-          <p className="text-xs text-muted-foreground">{shipment.itemCount} 条 · 本批次 {shipment.batchFishCount} 条</p>
+          <p className="text-xs text-muted-foreground">{shipment.itemCount} 条{batchContext && ` · 本批次 ${shipment.batchFishCount} 条`}</p>
         </div>
         <dl className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3">
           {shipment.shipMethod !== "pickup" && <Field label="物流单号" value={shipment.trackingNo} />}
@@ -224,6 +227,29 @@ function ShipmentRecords({ shipments }: { shipments: OrderShipment[] }) {
       </li>)}
     </ol>}
   </section>;
+}
+
+/** Shared read-only order presentation; no edit, approval or fulfillment actions. */
+export function ReadonlyOrderContent({ order }: { order: ReadonlyOrderDetail }) {
+  return <div className="space-y-5">
+    <dl className="grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3">
+      <Field label="订单状态" value={order.statusLabel} />
+      <Field label="订单所属场地" value={order.siteName} />
+      <Field label="下单时间" value={batchRecordDate(order.date)} />
+      <Field label="客户" value={order.customerName} />
+      <Field label="订单来源" value={order.source} />
+      <Field label="订单负责人" value={order.contactPerson} />
+      {!!order.platformOrderNo && <Field label="平台订单号" value={order.platformOrderNo} />}
+    </dl>
+    {!!order.notes && <section className="border-t pt-3 text-sm"><h3 className="font-semibold">订单备注</h3><p className="mt-2 whitespace-pre-wrap break-words">{order.notes}</p></section>}
+    {!!order.warnings?.length && <ul className="space-y-1 border-t pt-3 text-xs leading-relaxed text-muted-foreground">
+      {order.warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+    </ul>}
+    <OrderItems items={order.items} batchContext={false} />
+    <OrderAmounts totals={order.totals} cancelled={order.status === "cancelled"} batchContext={false} />
+    <PaymentRecords payments={order.payments} />
+    <ShipmentRecords shipments={order.shipments} batchContext={false} />
+  </div>;
 }
 
 function RequestedBatchOrderDialog({ request, onClose }: { request: BatchOrderRequest; onClose: () => void }) {
