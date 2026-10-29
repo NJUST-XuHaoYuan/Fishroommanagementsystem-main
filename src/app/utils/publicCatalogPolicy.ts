@@ -15,6 +15,7 @@ export type PublicCatalogPolicy = {
   hiddenMajorCategoryKeys: PublicCatalogMajorCategoryKey[];
   hiddenProductIds: string[];
   hiddenSpeciesIds: string[];
+  hiddenStockIds: string[];
   productDisplayCaps: Record<string, number>;
 };
 
@@ -22,6 +23,7 @@ export const DEFAULT_PUBLIC_CATALOG_POLICY: PublicCatalogPolicy = {
   hiddenMajorCategoryKeys: [],
   hiddenProductIds: [],
   hiddenSpeciesIds: [],
+  hiddenStockIds: [],
   productDisplayCaps: {},
 };
 
@@ -82,6 +84,7 @@ export function normalizePublicCatalogPolicy(value: unknown): PublicCatalogPolic
     hiddenMajorCategoryKeys,
     hiddenProductIds: uniqueStrings(source.hiddenProductIds),
     hiddenSpeciesIds: uniqueStrings(source.hiddenSpeciesIds),
+    hiddenStockIds: uniqueStrings(source.hiddenStockIds),
     productDisplayCaps,
   };
 }
@@ -92,6 +95,7 @@ export function copyPublicCatalogPolicy(value: unknown): PublicCatalogPolicy {
     hiddenMajorCategoryKeys: [...normalized.hiddenMajorCategoryKeys],
     hiddenProductIds: [...normalized.hiddenProductIds],
     hiddenSpeciesIds: [...normalized.hiddenSpeciesIds],
+    hiddenStockIds: [...normalized.hiddenStockIds],
     productDisplayCaps: { ...normalized.productDisplayCaps },
   };
 }
@@ -103,6 +107,7 @@ export function publicCatalogPolicyFingerprint(value: unknown): string {
     hiddenMajorCategoryKeys: [...normalized.hiddenMajorCategoryKeys].sort(),
     hiddenProductIds: [...normalized.hiddenProductIds].sort(),
     hiddenSpeciesIds: [...normalized.hiddenSpeciesIds].sort(),
+    hiddenStockIds: [...normalized.hiddenStockIds].sort(),
     productDisplayCaps: Object.fromEntries(
       Object.entries(normalized.productDisplayCaps).sort(([left], [right]) => left.localeCompare(right))
     ),

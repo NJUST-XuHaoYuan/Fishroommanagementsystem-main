@@ -58,6 +58,7 @@ export function normalizePublicCatalogPolicy(value = {}) {
     .filter((key) => PUBLIC_CATALOG_MAJOR_CATEGORY_KEYS.has(key));
   const hiddenProductIds = uniqueNormalizedIds(source.hiddenProductIds);
   const hiddenSpeciesIds = uniqueNormalizedIds(source.hiddenSpeciesIds);
+  const hiddenStockIds = uniqueNormalizedIds(source.hiddenStockIds);
   const sourceCaps = isPlainObject(source.productDisplayCaps) ? source.productDisplayCaps : {};
   const productDisplayCapEntries = [];
   let capCount = 0;
@@ -73,6 +74,7 @@ export function normalizePublicCatalogPolicy(value = {}) {
     hiddenMajorCategoryKeys,
     hiddenProductIds,
     hiddenSpeciesIds,
+    hiddenStockIds,
     productDisplayCaps: Object.fromEntries(productDisplayCapEntries),
   };
 }
@@ -173,12 +175,13 @@ function assertUniqueStringArray(value, label) {
 }
 
 /** Validate policy writes strictly before canonicalizing and persisting them. */
-export function validatePublicCatalogPolicyWrite(value, { products = [], species = [] } = {}) {
+export function validatePublicCatalogPolicyWrite(value, { products = [], species = [], stock = [] } = {}) {
   if (!isPlainObject(value)) throw new Error("鱼单展示设置必须是普通对象");
   const allowedKeys = new Set([
     "hiddenMajorCategoryKeys",
     "hiddenProductIds",
     "hiddenSpeciesIds",
+    "hiddenStockIds",
     "productDisplayCaps",
   ]);
   const unexpectedKey = Object.keys(value).find((key) => !allowedKeys.has(key));
@@ -190,6 +193,7 @@ export function validatePublicCatalogPolicyWrite(value, { products = [], species
   }
   const hiddenProductIds = assertUniqueStringArray(value.hiddenProductIds ?? [], "隐藏商品");
   const hiddenSpeciesIds = assertUniqueStringArray(value.hiddenSpeciesIds ?? [], "隐藏物种");
+  const hiddenStockIds = assertUniqueStringArray(value.hiddenStockIds ?? [], "隐藏鱼只");
   if (!isPlainObject(value.productDisplayCaps ?? {})) throw new Error("商品展示数量设置必须是普通对象");
   const capEntries = Object.entries(value.productDisplayCaps ?? {});
   if (capEntries.length > MAX_POLICY_ENTITY_IDS) throw new Error("商品展示数量设置过多");
@@ -202,6 +206,7 @@ export function validatePublicCatalogPolicyWrite(value, { products = [], species
 
   const validProductIds = uniqueEntityIdSet(products);
   const validSpeciesIds = uniqueEntityIdSet(species);
+  const validStockIds = uniqueEntityIdSet(stock);
   const referencedProductIds = new Set([...hiddenProductIds, ...capEntries.map(([productId]) => productId)]);
   if ([...referencedProductIds].some((id) => !validProductIds.has(id))) {
     throw new Error("鱼单展示设置引用了不存在或不唯一的商品");
@@ -209,20 +214,49 @@ export function validatePublicCatalogPolicyWrite(value, { products = [], species
   if (hiddenSpeciesIds.some((id) => !validSpeciesIds.has(id))) {
     throw new Error("鱼单展示设置引用了不存在或不唯一的物种");
   }
+  if (hiddenStockIds.some((id) => !validStockIds.has(id))) {
+    throw new Error("鱼单展示设置引用了不存在或不唯一的鱼只");
+  }
   return normalizePublicCatalogPolicy(value);
 }
 
-export function prunePublicCatalogPolicyReferences(value, { products = [], species = [] } = {}) {
+export function prunePublicCatalogPolicyReferences(value, { products = [], species = [], stock } = {}) {
   const policy = normalizePublicCatalogPolicy(value);
   const validProductIds = uniqueEntityIdSet(products);
   const validSpeciesIds = uniqueEntityIdSet(species);
+  const validStockIds = Array.isArray(stock) ? uniqueEntityIdSet(stock) : null;
   return {
     ...policy,
     hiddenProductIds: policy.hiddenProductIds.filter((id) => validProductIds.has(id)),
     hiddenSpeciesIds: policy.hiddenSpeciesIds.filter((id) => validSpeciesIds.has(id)),
+    // Product/species-only edits must not accidentally clear single-fish rules
+    // when their deliberately small read projection does not include stock.
+    hiddenStockIds: validStockIds
+      ? policy.hiddenStockIds.filter((id) => validStockIds.has(id))
+      : policy.hiddenStockIds,
     productDisplayCaps: Object.fromEntries(
       Object.entries(policy.productDisplayCaps).filter(([id]) => validProductIds.has(id))
     ),
+  };
+}
+
+/** The management picker is read-only, including when it previews draft rules. */
+export function parsePublicCatalogStockOptionsInput(value = {}) {
+  if (!isPlainObject(value)) throw new Error("鱼只筛选条件必须是普通对象");
+  const search = String(value.search ?? "").trim();
+  const siteId = String(value.siteId ?? "all").trim() || "all";
+  const filter = value.filter ?? "all";
+  const page = Number(value.page ?? 1);
+  const pageSize = Number(value.pageSize ?? 30);
+  if (search.length > 120 || siteId.length > MAX_POLICY_ENTITY_ID_LENGTH) throw new Error("鱼只搜索条件过长");
+  if (!["all", "hidden"].includes(filter)) throw new Error("不支持的鱼只筛选条件");
+  if (!Number.isSafeInteger(page) || page < 1 || page > 1_000_000 ||
+      !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("分页参数无效");
+  return {
+    search, siteId, filter, page, pageSize,
+    hiddenStockIds: Object.prototype.hasOwnProperty.call(value, "hiddenStockIds")
+      ? assertUniqueStringArray(value.hiddenStockIds, "隐藏鱼只")
+      : undefined,
   };
 }
 
@@ -263,7 +297,7 @@ function auditGroup(label, items = []) {
 export function describePublicCatalogPolicyChanges(
   previousValue,
   nextValue,
-  { products = [], species = [] } = {}
+  { products = [], species = [], stock = [] } = {}
 ) {
   const previous = normalizePublicCatalogPolicy(previousValue);
   const next = normalizePublicCatalogPolicy(nextValue);
@@ -273,11 +307,15 @@ export function describePublicCatalogPolicyChanges(
   const nextProducts = new Set(next.hiddenProductIds);
   const previousSpecies = new Set(previous.hiddenSpeciesIds);
   const nextSpecies = new Set(next.hiddenSpeciesIds);
+  const previousStock = new Set(previous.hiddenStockIds);
+  const nextStock = new Set(next.hiddenStockIds);
   const productLabels = uniqueEntityAuditLabels(products);
   const speciesLabels = uniqueEntityAuditLabels(species);
   const majorLabel = (key) => PUBLIC_CATALOG_MAJOR_CATEGORY_LABELS.get(key) ?? key;
   const productLabel = (id) => productLabels.get(id) ?? clippedAuditText(id);
   const speciesLabel = (id) => speciesLabels.get(id) ?? clippedAuditText(id);
+  const stockLabels = uniqueEntityAuditLabels(stock.map((item) => ({ ...item, name: item?.code })));
+  const stockLabel = (id) => stockLabels.get(id) ?? clippedAuditText(id);
 
   const hiddenMajor = orderedDifference(next.hiddenMajorCategoryKeys, previousMajor).map(majorLabel);
   const restoredMajor = orderedDifference(previous.hiddenMajorCategoryKeys, nextMajor).map(majorLabel);
@@ -285,6 +323,8 @@ export function describePublicCatalogPolicyChanges(
   const restoredProducts = orderedDifference(previous.hiddenProductIds, nextProducts).map(productLabel);
   const hiddenSpecies = orderedDifference(next.hiddenSpeciesIds, previousSpecies).map(speciesLabel);
   const restoredSpecies = orderedDifference(previous.hiddenSpeciesIds, nextSpecies).map(speciesLabel);
+  const hiddenStock = orderedDifference(next.hiddenStockIds, previousStock).map(stockLabel);
+  const restoredStock = orderedDifference(previous.hiddenStockIds, nextStock).map(stockLabel);
 
   const changedCaps = [];
   const clearedCaps = [];
@@ -315,12 +355,15 @@ export function describePublicCatalogPolicyChanges(
     auditGroup("恢复物种", restoredSpecies),
     auditGroup("隐藏商品", hiddenProducts),
     auditGroup("恢复商品", restoredProducts),
+    auditGroup("隐藏鱼只", hiddenStock),
+    auditGroup("恢复鱼只", restoredStock),
     auditGroup("设置/调整商品上限", changedCaps),
     auditGroup("清除商品上限", clearedCaps),
   ].filter(Boolean);
   const totalChanges = hiddenMajor.length + restoredMajor.length +
     hiddenSpecies.length + restoredSpecies.length +
     hiddenProducts.length + restoredProducts.length +
+    hiddenStock.length + restoredStock.length +
     changedCaps.length + clearedCaps.length;
   const prefix = `鱼单规则变更（共${totalChanges}项）`;
   const detail = `${prefix}：${groups.join("；") || "无实际差异"}`;
@@ -458,6 +501,7 @@ export function selectPublicCatalogStock({
     .map((item) => [normalizedId(item?.id), item])
     .filter(([id]) => uniqueSpeciesIds.has(id)));
   const hiddenProductIds = new Set(policy.hiddenProductIds);
+  const hiddenStockIds = new Set(policy.hiddenStockIds);
   const hiddenSpeciesIds = new Set(policy.hiddenSpeciesIds);
   const hiddenMajorCategoryKeys = new Set(policy.hiddenMajorCategoryKeys);
   const allowedProductIds = new Set(
@@ -477,6 +521,7 @@ export function selectPublicCatalogStock({
     .map((item, inventoryIndex) => ({ item, inventoryIndex }))
     .filter(({ item }) =>
       uniqueStockIds.has(normalizedId(item?.id)) &&
+      !hiddenStockIds.has(normalizedId(item?.id)) &&
       allowedProductIds.has(normalizedId(item?.productId))
     );
   const candidatesByProductId = new Map();

@@ -38,7 +38,9 @@ test("fish-list management is the only visibility control for active products", 
   assert.match(catalogManagementSource, /不在鱼单/);
   assert.match(catalogManagementSource, /在鱼单/);
   assert.match(catalogManagementSource, /disabled=\{!canEdit \|\| saving \|\| productHidden \|\| inheritedHidden\}/);
-  assert.match(catalogManagementSource, /xl:grid-cols-4/);
+  assert.match(catalogManagementSource, /xl:grid-cols-5/);
+  assert.match(catalogManagementSource, /normalizedDraft.hiddenStockIds.length\} 条/);
+  assert.match(catalogManagementSource, /按单鱼/);
 });
 
 test("product management no longer exposes a competing public-visibility control", () => {

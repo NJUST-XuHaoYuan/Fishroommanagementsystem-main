@@ -5,6 +5,7 @@ let state = fixture.state && typeof fixture.state === "object" ? fixture.state :
 let revision = String(fixture.revision ?? "1");
 const persistWrites = process.env.FISHROOM_TEST_PERSIST_WRITES === "1";
 let writeLock = Promise.resolve();
+let failStatusHistoryWrite = fixture.failStatusHistoryWrite === true;
 // Test-only IPC reads the committed backing store, bypassing response redaction
 // without inventing a debug HTTP route in the application.
 if (persistWrites && typeof process.send === "function") process.on("message", (message) => {
@@ -152,6 +153,13 @@ function appStateRow(sql, values = []) {
     const ordered = (statuses) => list(state.orders).some((order) => statuses(order.status) && list(order.items).some((line) => line.stockItemId === stockId && !String(line.inventoryRemovedAt ?? "").trim()));
     row.stock_item_count = matches.length;
     row.stock_item = item;
+    if (/\bAS\s+status_history_records\b/i.test(sql)) {
+      const records = list(state.stockStatusHistory).map((record, index) => ({ record, index }))
+        .filter(({ record }) => record.stockItemId === stockId)
+        .sort((a, b) => String(b.record.changedAt).localeCompare(String(a.record.changedAt)) || b.index - a.index);
+      row.history_total = records.length;
+      row.status_history_records = records.slice(Number(values[3]), Number(values[3]) + Number(values[2])).map(({ record }) => record);
+    }
     row.bio_records = list(state.bioRecords).filter((record) => /\btarget_stock\s+AS\s+MATERIALIZED\b/.test(sql)
       ? record.stockItemId === stockId : record.id === String(values[2] ?? ""));
     if (/\bAS\s+stock_is_out\b/i.test(sql)) row.stock_is_out = Boolean(values[3]) && (shipped || ordered((status) => status === "completed"));
@@ -284,6 +292,8 @@ function runQuery(query, values = []) {
         if (stockReplace) state.stock = (state.stock ?? []).map((item) => item.id === values[Number(stockReplace[1]) - 1] ? JSON.parse(values[Number(stockReplace[2]) - 1]) : item);
         const appendRecord = sql.match(/data\s*->\s*'bioRecords'[\s\S]*?\|\|\s*jsonb_build_array\(\$(\d+)::jsonb\)/);
         if (appendRecord) state.bioRecords = [...(state.bioRecords ?? []), JSON.parse(values[Number(appendRecord[1]) - 1])];
+        const appendStatusHistory = sql.match(/COALESCE\(data\s*->\s*'stockStatusHistory',\s*'\[\]'::jsonb\)\s*\|\|\s*\$(\d+)::jsonb/);
+        if (appendStatusHistory) state.stockStatusHistory = [...(state.stockStatusHistory ?? []), ...JSON.parse(values[Number(appendStatusHistory[1]) - 1])];
       }
     }
     return result([], 1);
@@ -310,7 +320,14 @@ class TestClient {
     if (!this.workingState) return runQuery(query, values);
     const persisted = state;
     state = this.workingState;
-    try { return runQuery(query, values); }
+    try {
+      const response = runQuery(query, values);
+      if (failStatusHistoryWrite && /^UPDATE\b/i.test(sql) && sql.includes("'{stockStatusHistory}'")) {
+        failStatusHistoryWrite = false;
+        throw Object.assign(new Error("Injected status journal database failure"), { code: "XX000" });
+      }
+      return response;
+    }
     finally { this.workingState = state; state = persisted; }
   }
 

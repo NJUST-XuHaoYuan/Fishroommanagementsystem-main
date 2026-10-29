@@ -28,6 +28,7 @@ import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../ut
 import { MediaVideo } from "./MediaVideo";
 import { buildStockPriceBaselines, buildStockPriceDetailsPatch, isStockSpecialPrice, stockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
 import { StockPriceField } from "./StockPriceField";
+import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
@@ -1820,6 +1821,8 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                 />
               </div>
             </div>
+
+            {bioOpen && bioItemId && <StockStatusHistoryPanel key={bioItemId} stockItemId={bioItemId} />}
 
             {/* 时间轴 */}
             <div>

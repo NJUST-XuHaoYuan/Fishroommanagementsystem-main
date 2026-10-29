@@ -96,10 +96,10 @@ test("generic settings and customer source patches read only their own fields", 
   assert.deepEqual(plan, ["systemSettings", "customerSources"]);
 });
 
-test("fish-list policy reads the referenced products and species for strict validation", () => {
+test("fish-list policy reads referenced entities and current account for strict validation", () => {
   assert.deepEqual(
     planGenericStatePatchReadKeys(["publicCatalogPolicy"]),
-    ["species", "publicCatalogPolicy", "products"],
+    ["personnel", "species", "publicCatalogPolicy", "products", "stock"],
   );
   assert.deepEqual(planStateSliceDependencies(["publicCatalogPolicy"]), {
     requestedKeys: ["publicCatalogPolicy"],

@@ -191,6 +191,7 @@ import {
   migrateLegacyPublicCatalogVisibilityState,
   normalizePublicCatalogCategoryMajorMap,
   normalizePublicCatalogPolicy,
+  parsePublicCatalogStockOptionsInput,
   prunePublicCatalogPolicyReferences,
   selectPublicCatalogStock,
   validatePublicCatalogPolicyWrite,
@@ -214,6 +215,13 @@ import {
   planBioRecordSave,
 } from "./bio-record-rules.mjs";
 import { appendBioRecordsMutationSql } from "./bio-record-save-sql.mjs";
+import {
+  STOCK_STATUS_HISTORY_SQL,
+  appendStockStatusHistorySql,
+  stockStatusChanges,
+  stockStatusHistoryForResponse,
+  stockStatusHistoryPageQuery,
+} from "./stock-status-history.mjs";
 import {
   assertMaintenanceExpectedItems,
   findMaintenanceMutationLog,
@@ -2275,6 +2283,8 @@ function sanitizeStateForResponse(data = {}, req) {
   if (Array.isArray(next.stock)) next.stock = sanitizedTransfers.stock;
   if (Array.isArray(next.bioRecords)) next.bioRecords = sanitizedTransfers.bioRecords;
   delete next.notifications;
+  // Status journals have a dedicated per-fish, site-authorized paginated reader.
+  delete next.stockStatusHistory;
   // The commission journal is private. Staff receive only their own monthly aggregate.
   delete next.commissionLedgerV1;
   delete next.approvalRequests;
@@ -2445,6 +2455,7 @@ function statePatchOperationLogs(req, current = {}, next = {}, patchedKeys = [])
       ? describePublicCatalogPolicyChanges(current[key], next[key], {
         products: next.products,
         species: next.species,
+        stock: next.stock,
       })
       : `已通过服务端校验保存「${moduleLabel}」变更`;
     return [createOperationLog(
@@ -4271,6 +4282,13 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
     batches: nextBatches,
     orders: nextOrders,
     shipments: nextShipments,
+    ...(deleteIdSet.size > 0 && state.publicCatalogPolicy ? {
+      publicCatalogPolicy: {
+        ...state.publicCatalogPolicy,
+        hiddenStockIds: (Array.isArray(state.publicCatalogPolicy.hiddenStockIds) ? state.publicCatalogPolicy.hiddenStockIds : [])
+          .filter((id) => !deleteIdSet.has(String(id))),
+      },
+    } : {}),
     operationLogs: operationLog ? pushOperationLog(operationLogs, operationLog) : operationLogs,
   };
   return {
@@ -8555,7 +8573,8 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
-      url.pathname === "/api/orders/new-customer/linked-detail") {
+      url.pathname === "/api/orders/new-customer/linked-detail" || url.pathname === "/api/public-catalog/stock-options" ||
+      url.pathname === "/api/stock/status-history") {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -8737,6 +8756,68 @@ async function handleApi(req, res, url) {
                 ? "视频源文件类型无效"
                 : "视频预览生成失败，请稍后重试",
       }, { "Cache-Control": "no-store" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/public-catalog/stock-options" && req.method === "POST") {
+    try {
+      if (req.auth?.account?.accessRole !== "admin") throw httpError(403, "仅管理员可以管理鱼单展示");
+      const input = parsePublicCatalogStockOptionsInput(JSON.parse(await readBody(req, 2 * 1024 * 1024)));
+      const { rows } = await pool.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+                data -> 'stock' AS stock, data -> 'products' AS products, data -> 'species' AS species,
+                data -> 'tankGroups' AS tank_groups, data -> 'orders' AS orders,
+                data -> 'shipments' AS shipments, data -> 'publicCatalogPolicy' AS public_catalog_policy
+         FROM app_state WHERE id = $1`, [stateId]
+      );
+      const row = rows[0];
+      if (!row) throw httpError(404, "系统状态不存在");
+      const state = normalizePickupShipmentsForState({ ...publicCatalogProjectionFromRow(row), personnel: row.personnel });
+      refreshLockedMutationAuth(req, state, { code: "PUBLIC_CATALOG_ACCOUNT_CHANGED" });
+      if (req.auth?.account?.accessRole !== "admin") throw httpError(403, "仅管理员可以管理鱼单展示");
+      const sites = getSitesFromState(state).map(({ id, name }) => ({ id, name }));
+      if (input.siteId !== ALL_SITE_ID && !sites.some((site) => site.id === input.siteId)) {
+        throw httpError(400, "场地不存在，请刷新后重试");
+      }
+      const hiddenIds = new Set(input.hiddenStockIds ?? normalizePublicCatalogPolicy(state.publicCatalogPolicy).hiddenStockIds);
+      const uniqueIds = uniqueNonEmptyEntityIds(state.stock);
+      const shippedIds = shippedOutStockIds(state);
+      const reservedIds = orderActiveStockIds(state);
+      const products = new Map(state.products.map((item) => [String(item?.id ?? ""), item]));
+      const species = new Map(state.species.map((item) => [String(item?.id ?? ""), item]));
+      const siteNames = new Map(sites.map((site) => [site.id, site.name]));
+      const needle = input.search.toLocaleLowerCase();
+      const matches = [];
+      for (const item of state.stock) {
+        const id = String(item?.id ?? "").trim();
+        if (!uniqueIds.has(id)) continue;
+        const hidden = hiddenIds.has(id);
+        const outStock = shippedIds.has(id);
+        if ((item.lost || outStock) && !hidden) continue;
+        if (input.filter === "hidden" && !hidden) continue;
+        const siteId = stockSiteId(state, item);
+        if (input.siteId !== ALL_SITE_ID && input.siteId !== siteId) continue;
+        const product = products.get(String(item.productId ?? ""));
+        const tank = findSubTank(state, item.subTankId);
+        const candidate = {
+          id, code: String(item.code ?? ""), productId: String(item.productId ?? ""),
+          productName: String(product?.name ?? "未知商品"),
+          speciesName: String(species.get(String(product?.speciesId ?? ""))?.name ?? ""),
+          siteId, siteName: siteNames.get(siteId) || siteId,
+          tankName: [tank?.group?.name, tank?.subTank?.name].filter(Boolean).join(" / "),
+          status: String(item.status ?? "healthy"), sold: Boolean(item.sold || reservedIds.has(id)),
+          inTransit: isStockInTransfer(item), lost: Boolean(item.lost), outStock, hidden,
+        };
+        if (needle && ![candidate.id, candidate.code, candidate.productName, candidate.speciesName,
+          candidate.siteName, candidate.tankName].some((value) => value.toLocaleLowerCase().includes(needle))) continue;
+        matches.push(candidate);
+      }
+      const page = Math.min(input.page, Math.max(1, Math.ceil(matches.length / input.pageSize)));
+      sendJson(req, res, 200, { ok: true, items: matches.slice((page - 1) * input.pageSize, page * input.pageSize),
+        total: matches.length, page, pageSize: input.pageSize, sites });
+    } catch (error) {
+      sendJson(req, res, error?.statusCode || 400, { ok: false, error: error.message || "鱼只列表加载失败" });
     }
     return;
   }
@@ -11640,6 +11721,36 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/stock/status-history" && req.method === "GET") {
+    try {
+      const { stockItemId, offset, limit } = stockStatusHistoryPageQuery(url.searchParams);
+      const { rows } = await pool.query(STOCK_STATUS_HISTORY_SQL, [stateId, stockItemId, limit, offset]);
+      const row = rows[0] ?? {};
+      const stockItem = row.stock_item;
+      const state = { personnel: row.personnel, sites: row.sites, tankGroups: row.tank_groups,
+        stock: stockItem ? [stockItem] : [] };
+      refreshLockedMutationAuth(req, state, { code: "STATUS_HISTORY_ACCOUNT_CHANGED" });
+      if (!["daily", "stockIn"].some((module) => ["create", "update", "delete"].some((action) =>
+        hasModulePermission(req.auth?.account, module, action)))) {
+        throw httpError(403, "当前账户没有查看鱼只状态记录的权限", "PERMISSION_FORBIDDEN");
+      }
+      if (Number(row.stock_item_count) > 1) throw httpError(409, "库存鱼 ID 不唯一，无法安全查看状态记录");
+      const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
+      if (!stockItem || !canAccessBioStockSite({ account: req.auth?.account, visibleSiteIds,
+        stockSiteId: normalizeSiteId(findSubTank(state, stockItem.subTankId)?.group?.siteId ?? stockItem.siteId) })) {
+        throw httpError(404, "库存鱼不存在或无权查看");
+      }
+      sendJson(req, res, 200, { ok: true, stockItemId, offset, limit,
+        total: Number(row.history_total ?? 0), records: stockStatusHistoryForResponse(row.status_history_records),
+      }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, Number(error?.statusCode ?? 400), { ok: false,
+        error: error.message || "状态记录加载失败", ...(error?.code ? { code: error.code } : {}),
+      }, { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/bio-records" && req.method === "GET") {
     try {
       const stockItemId = String(url.searchParams.get("stockItemId") ?? "").trim();
@@ -11744,6 +11855,7 @@ async function handleApi(req, res, url) {
         `SELECT
            data -> 'sites' AS sites,
            data -> 'tankGroups' AS tank_groups,
+           data -> 'personnel' AS personnel,
            stock_target.stock_item_count,
            stock_target.stock_item,
            (SELECT product_row.product_item
@@ -11815,7 +11927,12 @@ async function handleApi(req, res, url) {
         tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
         stock: projectedStockItem ? [projectedStockItem] : [],
         bioRecords: Array.isArray(rows[0]?.bio_records) ? rows[0].bio_records : [],
+        personnel: Array.isArray(rows[0]?.personnel) ? rows[0].personnel : [],
       };
+      refreshLockedMutationAuth(req, state, { code: "BIO_ACCOUNT_CHANGED" });
+      for (const requiredAction of bioRecordRequiredActions(action, { includesRecord: Boolean(body?.record) })) {
+        requireModulePermissionForAuth(req, "daily", requiredAction);
+      }
       const storedStockItem = findUniqueBioStockItem(state.stock, stockItemId);
       const visibleSiteIds = visibleSiteIdsForAccount(req.auth?.account, state);
       const storedStockSiteId = storedStockItem ? normalizeSiteId(
@@ -11911,6 +12028,10 @@ async function handleApi(req, res, url) {
           bindValue,
         });
       }
+      dataExpression = appendStockStatusHistorySql(dataExpression, stockStatusChanges({
+        before: [stockItem], after: plan.changedKeys.includes("stock") ? [plan.stockItem] : [],
+        account: req.auth.account, source: "bio_details", changedAt: operationLog.time,
+      }), bindValue);
       const operationLogParam = bindValue(JSON.stringify(operationLog));
       const maxExistingOperationLogsParam = bindValue(Math.max(0, MAX_OPERATION_LOGS - 1));
       dataExpression = `jsonb_set(
@@ -13923,6 +14044,8 @@ async function handleApi(req, res, url) {
 	        current.publicCatalogPolicy = normalizePublicCatalogPolicy(current.publicCatalogPolicy);
 	      }
 	      if (Object.prototype.hasOwnProperty.call(rawPatch, "publicCatalogPolicy")) {
+	        refreshLockedMutationAuth(req, current, { code: "PUBLIC_CATALOG_ACCOUNT_CHANGED" });
+	        requireAdminForAuth(req, "仅管理员可以管理鱼单展示");
 	        if (!Object.prototype.hasOwnProperty.call(basePatch, "publicCatalogPolicy") ||
 	            stableJson(normalizePublicCatalogPolicy(basePatch.publicCatalogPolicy)) !== stableJson(current.publicCatalogPolicy)) {
 	          const error = new Error("鱼单展示设置已被其他管理员修改，请刷新后重试");
@@ -13933,6 +14056,7 @@ async function handleApi(req, res, url) {
 	        rawPatch.publicCatalogPolicy = validatePublicCatalogPolicyWrite(rawPatch.publicCatalogPolicy, {
 	          products: current.products,
 	          species: current.species,
+	          stock: current.stock,
 	        });
 	      }
 	      if (Array.isArray(rawPatch.shipments)) {
@@ -13981,7 +14105,7 @@ async function handleApi(req, res, url) {
 	      if (Object.keys(patch).some((key) => key === "products" || key === "species")) {
 	        stateWithoutLogs.publicCatalogPolicy = prunePublicCatalogPolicyReferences(
 	          stateWithoutLogs.publicCatalogPolicy,
-	          { products: stateWithoutLogs.products, species: stateWithoutLogs.species }
+	          { products: stateWithoutLogs.products, species: stateWithoutLogs.species, stock: stateWithoutLogs.stock }
 	        );
 	      }
 	      const appliedOperationLogs = statePatchOperationLogs(req, current, stateWithoutLogs, Object.keys(patch));
@@ -14145,7 +14269,14 @@ async function handleApi(req, res, url) {
           visibleSiteIds: creatorVisibleSiteIds,
           requireReviewedPricingSnapshot: true,
         });
-        stateAfterMutation = mutation.nextState;
+        stateAfterMutation = {
+          ...mutation.nextState,
+          stockStatusHistory: [...(Array.isArray(state.stockStatusHistory) ? state.stockStatusHistory : []),
+            ...stockStatusChanges({ before: state.stock, after: mutation.stockUpdates,
+              account: req.auth.account, source: "stock_approval", changedAt: resolvedAt,
+              requestedBy: approvalRequest.createdBy, requestedByName: approvalRequest.createdByName,
+            })],
+        };
       }
 
       const actionLabel = approvalRequest.approvalAction === "delete_stock"
@@ -14399,6 +14530,7 @@ async function handleApi(req, res, url) {
         await client.query("BEGIN");
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+	        refreshLockedMutationAuth(req, state, { code: "STOCK_ACCOUNT_CHANGED" });
 	        const stock = Array.isArray(state.stock) ? state.stock : [];
 	        if (rawUpsert.some((item) => !String(item?.id ?? "").trim())) {
 	          const error = new Error("库存记录必须包含明确且非空的编号");
@@ -14630,6 +14762,9 @@ async function handleApi(req, res, url) {
 		        };
 		        const nextState = {
 		          ...mutation.nextState,
+		          stockStatusHistory: [...(Array.isArray(state.stockStatusHistory) ? state.stockStatusHistory : []),
+		            ...stockStatusChanges({ before: state.stock, after: mutation.stockUpdates,
+		              account: req.auth.account, source: "stock_mutation", changedAt: operationLog.time })],
 		          inventoryAdjustmentDrafts: adjustmentContext?.draftId
 		            ? clearInventoryAdjustmentDraft(state, operator, adjustmentContext.draftId)
 		            : currentInventoryAdjustmentDrafts(state),
@@ -15124,6 +15259,11 @@ async function handleApi(req, res, url) {
 		        if (batchUpdates.length > 0) setJsonKey("batches", nextBatches);
 		        if (bioRecordUpdates.length > 0) setJsonKey("bioRecords", nextBioRecords);
 		        if (lossRecordUpdates.length > 0) setJsonKey("lossRecords", nextLossRecords);
+		        const statusChanges = stockStatusChanges({ before: stock, after: stockUpdates,
+		          account: req.auth.account, source: "batch_status", changedAt: operationLog.time });
+		        dataExpression = appendStockStatusHistorySql(dataExpression, statusChanges, (value) => {
+		          updateValues.push(value); return `$${updateValues.length}`;
+		        });
 		        setJsonKey("operationLogs", nextOperationLogs);
 		        await client.query(
 		          `UPDATE app_state

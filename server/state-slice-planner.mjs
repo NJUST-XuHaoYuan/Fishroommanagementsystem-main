@@ -36,7 +36,7 @@ const GENERIC_STATE_PATCH_DEPENDENCIES = Object.freeze({
   species: ["species", "publicCatalogPolicy", "products"],
   speciesCategories: ["speciesCategories"],
   speciesCategoryMajorMap: ["speciesCategoryMajorMap"],
-  publicCatalogPolicy: ["species", "publicCatalogPolicy", "products"],
+  publicCatalogPolicy: ["personnel", "species", "publicCatalogPolicy", "products", "stock"],
   products: ["species", "publicCatalogPolicy", "products", "stock", "orders"],
   productOrigins: ["productOrigins"],
   tankGroups: ["sites", "tankGroups"],

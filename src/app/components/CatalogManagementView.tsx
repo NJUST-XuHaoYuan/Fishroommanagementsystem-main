@@ -31,6 +31,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Switch } from "./ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { CatalogStockRules } from "./CatalogStockRules";
 
 type ProductSummary = {
   product: Product;
@@ -40,7 +41,7 @@ type ProductSummary = {
   displayCap?: number;
 };
 
-type CatalogRuleTab = "major" | "species" | "product";
+type CatalogRuleTab = "major" | "species" | "product" | "stock";
 
 const PAGE_SIZE = 20;
 
@@ -61,6 +62,7 @@ function policyRuleCount(policy: PublicCatalogPolicy) {
   return uniqueCount(policy.hiddenMajorCategoryKeys) +
     uniqueCount(policy.hiddenSpeciesIds) +
     uniqueCount(policy.hiddenProductIds) +
+    uniqueCount(policy.hiddenStockIds) +
     Object.keys(policy.productDisplayCaps).length;
 }
 
@@ -340,7 +342,7 @@ export function CatalogManagementView() {
   const visibleProducts = filteredProducts.slice((clampedProductPage - 1) * PAGE_SIZE, clampedProductPage * PAGE_SIZE);
 
   const updateHidden = (
-    key: "hiddenMajorCategoryKeys" | "hiddenProductIds" | "hiddenSpeciesIds",
+    key: "hiddenMajorCategoryKeys" | "hiddenProductIds" | "hiddenSpeciesIds" | "hiddenStockIds",
     id: string,
     hidden: boolean
   ) => {
@@ -386,10 +388,15 @@ export function CatalogManagementView() {
     const nextPolicy = normalizePublicCatalogPolicy(draft);
     if (!confirmWrite("修改", "保存鱼单展示规则；新的公开网站和小程序请求会立即按新规则生成目录和库存数量。")) return;
     setSaving(true);
-    const ok = await saveStateTransform((latest) => ({
-      ...latest,
-      publicCatalogPolicy: nextPolicy,
-    }));
+    const ok = await saveStateTransform((latest) => {
+      // Recheck at mutation time: a background refresh can update the store
+      // after this draft was rendered but before the save confirmation closes.
+      if (publicCatalogPolicyFingerprint(latest.publicCatalogPolicy) !== baselinePolicyFingerprint) {
+        setRemotePolicyChanged(true);
+        throw new Error("鱼单规则已被其他管理员更新，请载入最新规则后重试");
+      }
+      return { ...latest, publicCatalogPolicy: nextPolicy };
+    });
     setSaving(false);
     if (!ok) return toast.error("鱼单规则未保存。可能已有其他管理员更新，请刷新页面后重新确认");
     const storedPolicy = copyPublicCatalogPolicy(nextPolicy);
@@ -415,7 +422,7 @@ export function CatalogManagementView() {
               {changed && <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">有未保存修改</Badge>}
             </div>
             <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-              控制客户在公开网站和小程序看到的类型、物种、商品和库存数量。规则对所有场地生效。
+              控制客户在公开网站和小程序看到的类型、物种、商品、单只鱼和库存数量。规则对所有场地生效。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -460,7 +467,7 @@ export function CatalogManagementView() {
             </div>
             <Badge variant="outline">规则全局生效</Badge>
           </div>
-          <div className="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4" aria-live="polite">
+          <div className="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-5" aria-live="polite">
             <div className="px-4 py-3">
               <div className="text-xs text-muted-foreground">隐藏类型</div>
               <div className="mt-1 text-lg font-semibold tabular-nums">{normalizedDraft.hiddenMajorCategoryKeys.length} 个</div>
@@ -472,6 +479,10 @@ export function CatalogManagementView() {
             <div className="px-4 py-3">
               <div className="text-xs text-muted-foreground">直接隐藏商品</div>
               <div className="mt-1 text-lg font-semibold tabular-nums">{normalizedDraft.hiddenProductIds.length} 款</div>
+            </div>
+            <div className="px-4 py-3">
+              <div className="text-xs text-muted-foreground">单只隐藏</div>
+              <div className="mt-1 text-lg font-semibold tabular-nums">{normalizedDraft.hiddenStockIds.length} 条</div>
             </div>
             <div className="px-4 py-3">
               <div className="text-xs text-muted-foreground">设置数量上限</div>
@@ -486,7 +497,7 @@ export function CatalogManagementView() {
           className="gap-4"
         >
           <TabsList
-            className="h-auto w-full justify-start overflow-x-auto rounded-md border bg-muted/50 p-1 sm:w-fit"
+            className="h-auto w-full flex-wrap justify-start gap-1 rounded-md border bg-muted/50 p-1 sm:w-fit sm:flex-nowrap"
             aria-label="鱼单规则设置方式"
           >
             <TabsTrigger
@@ -517,6 +528,15 @@ export function CatalogManagementView() {
                   ...normalizedDraft.hiddenProductIds,
                   ...Object.keys(normalizedDraft.productDisplayCaps),
                 ])}
+              </span>
+            </TabsTrigger>
+            <TabsTrigger
+              value="stock"
+              className="!min-h-[44px] rounded-md px-3 text-muted-foreground hover:bg-background/70 hover:text-foreground data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm dark:data-[state=active]:bg-primary dark:data-[state=active]:text-primary-foreground sm:!min-h-9"
+            >
+              按单鱼
+              <span className={`min-w-5 rounded-full px-1.5 py-0.5 text-center text-[11px] ${activeRuleTab === "stock" ? "bg-primary-foreground/15 text-primary-foreground" : "bg-background text-muted-foreground"}`}>
+                {normalizedDraft.hiddenStockIds.length}
               </span>
             </TabsTrigger>
           </TabsList>
@@ -758,6 +778,15 @@ export function CatalogManagementView() {
               <PageNavigator page={clampedProductPage} totalItems={filteredProducts.length} onChange={setProductPage} />
             </section>
           </TabsContent>
+          <TabsContent value="stock">
+            <CatalogStockRules
+              key={draftSessionKey}
+              policy={normalizedDraft}
+              productRules={new Map(productSummaries.map(summary => [summary.product.id, summary]))}
+              disabled={!canEdit || saving}
+              onHiddenChange={(stockId, hidden) => updateHidden("hiddenStockIds", stockId, hidden)}
+            />
+          </TabsContent>
         </Tabs>
 
         <section className="rounded-md border bg-card px-4 py-4" aria-labelledby="catalog-fill-rule-title">
@@ -768,7 +797,7 @@ export function CatalogManagementView() {
             <div className="min-w-0">
               <h2 id="catalog-fill-rule-title" className="font-semibold">限量展示与自动补位</h2>
               <p className="mt-1 max-w-4xl text-sm leading-6 text-muted-foreground">
-                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗或变为病鱼后，系统会在下一次公开鱼单请求时自动补位，不需要重新保存规则。
+                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗、变为病鱼或单只隐藏后，系统会在下一次公开鱼单请求时自动补位。单只隐藏需要先保存规则。
               </p>
             </div>
           </div>

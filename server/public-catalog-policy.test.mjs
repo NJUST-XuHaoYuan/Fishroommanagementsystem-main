@@ -7,6 +7,7 @@ import {
   isPublicCatalogProductAllowed,
   migrateLegacyPublicCatalogVisibilityState,
   normalizePublicCatalogPolicy,
+  parsePublicCatalogStockOptionsInput,
   prunePublicCatalogPolicyReferences,
   selectPublicCatalogStock,
   validatePublicCatalogPolicyWrite,
@@ -22,6 +23,39 @@ const products = [
   { id: "torch", speciesId: "species-coral" },
 ];
 const categoryMap = { 刺尾鱼科: "marineFish", "LPS 珊瑚": "coral" };
+
+test("single-fish hiding applies before the cap, refills automatically and leaves siblings independent", () => {
+  const stock = ["newest", "older", "no-media"].map((id) => ({ id, productId: "gold-tang" }));
+  const media = { newest: "2026-10-29T09:00:00+08:00", older: "2026-10-28T09:00:00+08:00" };
+  const policy = { productDisplayCaps: { "gold-tang": 1 }, hiddenStockIds: ["newest"] };
+  assert.deepEqual(select(stock, policy, media), ["older"]);
+  assert.deepEqual(select(stock.filter((item) => item.id !== "older"), policy, media), ["no-media"]);
+  assert.deepEqual(select(stock, { ...policy, hiddenStockIds: [] }, media), ["newest"]);
+  assert.deepEqual(select(stock, { hiddenStockIds: ["older"] }, media), ["newest", "no-media"]);
+  assert.deepEqual(select(stock, { ...policy, hiddenProductIds: ["gold-tang"] }, media), []);
+});
+
+test("single-fish policy validates IDs and preserves references during unrelated partial pruning", () => {
+  const stock = [{ id: "fish-189", code: "189" }];
+  const policy = { hiddenStockIds: ["fish-189"] };
+  assert.deepEqual(validatePublicCatalogPolicyWrite(policy, { products, species, stock }).hiddenStockIds, ["fish-189"]);
+  for (const hiddenStockIds of [["missing"], ["fish-189", "fish-189"], [""], [1]]) {
+    assert.throws(() => validatePublicCatalogPolicyWrite({ hiddenStockIds }, { products, species, stock }));
+  }
+  assert.throws(() => validatePublicCatalogPolicyWrite(policy, { products, species, stock: [...stock, ...stock] }), /不存在或不唯一的鱼只/);
+  assert.deepEqual(prunePublicCatalogPolicyReferences(policy, { products, species }).hiddenStockIds, ["fish-189"]);
+  assert.deepEqual(prunePublicCatalogPolicyReferences(policy, { products, species, stock: [] }).hiddenStockIds, []);
+  assert.match(describePublicCatalogPolicyChanges({}, policy, { stock }), /隐藏鱼只（1项）：189（fish-189）/);
+  assert.match(describePublicCatalogPolicyChanges(policy, {}, { stock }), /恢复鱼只（1项）：189（fish-189）/);
+});
+
+test("stock picker pagination and draft hidden inputs are bounded and validated", () => {
+  assert.deepEqual(parsePublicCatalogStockOptionsInput({}), { search: "", siteId: "all", filter: "all", page: 1, pageSize: 30, hiddenStockIds: undefined });
+  assert.deepEqual(parsePublicCatalogStockOptionsInput({ filter: "hidden", hiddenStockIds: ["189"], pageSize: 50 }).hiddenStockIds, ["189"]);
+  for (const input of [{ pageSize: 51 }, { page: 0 }, { page: 1.5 }, { search: "x".repeat(121) }, { hiddenStockIds: "189" }, { filter: "unrestricted" }]) {
+    assert.throws(() => parsePublicCatalogStockOptionsInput(input));
+  }
+});
 
 function select(stock, policy = {}, latestMediaAtByStockId = {}) {
   return selectPublicCatalogStock({
@@ -62,6 +96,7 @@ test("migrates active legacy-hidden products into the policy and removes the leg
     hiddenMajorCategoryKeys: ["coral"],
     hiddenProductIds: ["already-hidden", "legacy-hidden"],
     hiddenSpeciesIds: ["species-coral"],
+    hiddenStockIds: [],
     productDisplayCaps: { "already-public": 8 },
   });
   assert.equal(
@@ -148,12 +183,14 @@ test("normalizes the persisted policy and drops unsupported or unsafe entries", 
     hiddenMajorCategoryKeys: ["marineFish", "coral"],
     hiddenProductIds: ["gold-tang"],
     hiddenSpeciesIds: ["species-fish"],
+    hiddenStockIds: [],
     productDisplayCaps: { "gold-tang": 100 },
   });
   assert.deepEqual(normalizePublicCatalogPolicy(null), {
     hiddenMajorCategoryKeys: [],
     hiddenProductIds: [],
     hiddenSpeciesIds: [],
+    hiddenStockIds: [],
     productDisplayCaps: {},
   });
 });
@@ -163,6 +200,7 @@ test("strict write validation rejects malformed values and stale entity referenc
     hiddenMajorCategoryKeys: ["marineFish"],
     hiddenProductIds: ["gold-tang"],
     hiddenSpeciesIds: ["species-coral"],
+    hiddenStockIds: [],
     productDisplayCaps: { "purple-tang": 25 },
   };
   assert.deepEqual(validatePublicCatalogPolicyWrite(valid, { products, species }), valid);
@@ -203,6 +241,7 @@ test("hard-deleted products and species are pruned without blocking later policy
     hiddenMajorCategoryKeys: [],
     hiddenProductIds: ["purple-tang"],
     hiddenSpeciesIds: ["species-fish"],
+    hiddenStockIds: [],
     productDisplayCaps: { "purple-tang": 5 },
   });
   assert.doesNotThrow(() => validatePublicCatalogPolicyWrite({

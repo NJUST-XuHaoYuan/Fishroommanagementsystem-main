@@ -27,6 +27,7 @@ test("normalizes catalog policy and discards unsafe cap values", () => {
     hiddenMajorCategoryKeys: ["marineFish"],
     hiddenProductIds: ["product-1", "22"],
     hiddenSpeciesIds: ["species-1"],
+    hiddenStockIds: [],
     productDisplayCaps: { "product-1": 100, "product-4": 12 },
   });
 });
@@ -34,10 +35,18 @@ test("normalizes catalog policy and discards unsafe cap values", () => {
 test("missing policy starts with independent empty collections", () => {
   const first = copyPublicCatalogPolicy(undefined);
   first.hiddenProductIds.push("product-1");
+  first.hiddenStockIds.push("fish-189");
   first.productDisplayCaps["product-1"] = 10;
 
   const second = copyPublicCatalogPolicy(undefined);
   assert.deepEqual(second, DEFAULT_PUBLIC_CATALOG_POLICY);
+});
+
+test("single-fish policy normalizes exact identities and participates in draft dirty/conflict fingerprints", () => {
+  const first = copyPublicCatalogPolicy({ hiddenStockIds: [" fish-189 ", "fish-189", "fish-190", null] });
+  assert.deepEqual(first.hiddenStockIds, ["fish-189", "fish-190"]);
+  assert.equal(publicCatalogPolicyFingerprint(first), publicCatalogPolicyFingerprint({ hiddenStockIds: ["fish-190", "fish-189"] }));
+  assert.notEqual(publicCatalogPolicyFingerprint(first), publicCatalogPolicyFingerprint({ hiddenStockIds: ["fish-190"] }));
 });
 
 test("prototype-like product ids do not appear capped unless explicitly configured", () => {

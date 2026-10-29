@@ -24,6 +24,7 @@ import { getInventoryOutStockIds, isVisibleInStockInventory, normalizeInventoryI
 import { usePermission } from "../utils/permissions";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockPriceMode } from "../utils/stockPricing";
 import { StockPriceField } from "./StockPriceField";
+import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { linkedOrdersForStock, orderItemKeepsInventory } from "../utils/stockOrders";
 import { orderSourceLabel } from "../utils/orderSources";
 import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
@@ -1395,6 +1396,8 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
                   />
                 </div>
               )}
+
+              {open && editing.id && <StockStatusHistoryPanel key={editing.id} stockItemId={editing.id} />}
 
 		              {editing.id && permission.canDelete && (
 	                <Button variant="ghost" className="text-red-600 justify-start" onClick={() => { setDel(editing); setOpen(false); }}>
