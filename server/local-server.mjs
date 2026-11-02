@@ -11526,7 +11526,7 @@ async function handleApi(req, res, url) {
     try {
       const key = cosKeyFromUrl(url.searchParams.get("url") ?? "");
       if (!key) {
-        sendJson(req, res, 400, { error: "Invalid COS media URL" });
+        sendJson(req, res, 400, { error: "Invalid COS media URL" }, { "Cache-Control": "no-store, private" });
         return;
       }
       const previewQuery = url.searchParams.get("preview") === "image"
@@ -11534,12 +11534,12 @@ async function handleApi(req, res, url) {
         : "";
       const signedUrl = await signedCosObjectUrl(key, previewQuery);
       if (!signedUrl) {
-        sendJson(req, res, 503, { error: "COS is not configured" });
+        sendJson(req, res, 503, { error: "COS is not configured" }, { "Cache-Control": "no-store, private" });
         return;
       }
-      sendJson(req, res, 200, { url: signedUrl, expiresIn: 3600 });
+      sendJson(req, res, 200, { url: signedUrl, expiresIn: 3600 }, { "Cache-Control": "no-store, private" });
     } catch (error) {
-      sendJson(req, res, 502, { error: "Failed to sign COS media URL" });
+      sendJson(req, res, 502, { error: "Failed to sign COS media URL" }, { "Cache-Control": "no-store, private" });
     }
     return;
   }

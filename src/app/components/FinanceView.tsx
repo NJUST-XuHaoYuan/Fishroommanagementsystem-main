@@ -12,7 +12,7 @@ import {
   useStore,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
-import { uploadOriginalMedia, resolveMediaUrl } from "../utils/media";
+import { uploadOriginalMedia } from "../utils/media";
 import {
   isPlatformOrderSource,
   isPlatformPaymentChannel,
@@ -23,6 +23,7 @@ import {
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -459,15 +460,6 @@ async function readCsvFileText(file: File) {
   }
 }
 
-async function openProofImage(source: string) {
-  const popup = window.open("", "_blank");
-  const resolved = await resolveMediaUrl(source).catch(() => source);
-  if (popup) {
-    popup.opener = null;
-    popup.location.href = resolved;
-  }
-}
-
 function LoadingRows() {
   return (
     <div className="divide-y rounded-lg border bg-card" aria-label="财务数据加载中">
@@ -512,12 +504,11 @@ function ProofUploader({
     <div className="flex flex-wrap items-start gap-2">
       {images.map((image, index) => (
         <div key={`${image}-${index}`} className="group relative">
-          <ImageWithFallback
-            src={image}
-            alt="资金凭证"
-            className="size-14 cursor-pointer rounded-md border object-cover"
-            onClick={() => void openProofImage(image)}
-          />
+          <MediaPreviewTrigger src={image} mediaType="image" title={`资金凭证 ${index + 1}`}
+            filename={`资金凭证-${index + 1}.jpg`} ariaLabel={`预览资金凭证 ${index + 1}`}
+            className="block size-14 overflow-hidden rounded-md border">
+            <ImageWithFallback src={image} alt={`资金凭证 ${index + 1}`} className="size-full object-cover" />
+          </MediaPreviewTrigger>
           <button
             type="button"
             onClick={() => onChange(images.filter((_, itemIndex) => itemIndex !== index))}
@@ -1130,13 +1121,13 @@ function OrderFinanceDialog({
                               {payment.proof.length > 0 && (
                                 <div className="mt-2 flex flex-wrap gap-1.5">
                                   {payment.proof.map((image, index) => (
-                                    <ImageWithFallback
+                                    <MediaPreviewTrigger
                                       key={`${payment.id}-proof-${index}`}
-                                      src={image}
-                                      alt="资金凭证"
-                                      className="size-10 cursor-pointer rounded border object-cover"
-                                      onClick={() => void openProofImage(image)}
-                                    />
+                                      src={image} mediaType="image" title={`资金凭证 ${index + 1}`}
+                                      filename={`资金凭证-${payment.id}-${index + 1}.jpg`} ariaLabel={`预览资金凭证 ${index + 1}`}
+                                      className="block size-11 overflow-hidden rounded border">
+                                      <ImageWithFallback src={image} alt={`资金凭证 ${index + 1}`} className="size-full object-cover" />
+                                    </MediaPreviewTrigger>
                                   ))}
                                 </div>
                               )}

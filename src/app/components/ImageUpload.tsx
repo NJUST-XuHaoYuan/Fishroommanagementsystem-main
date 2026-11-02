@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { Button } from "./ui/button";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { readAndCompressImage } from "../utils/imageUtils";
@@ -38,7 +39,10 @@ export function ImageUpload({ value, onChange, size = 96 }: Props) {
         style={{ width: size, height: size }}
       >
         {value ? (
-          <ImageWithFallback src={value} alt="" className="size-full object-cover" />
+          <MediaPreviewTrigger src={value} mediaType="image" title="图片预览" filename="图片.jpg"
+            ariaLabel="预览已上传图片" className="size-full">
+            <ImageWithFallback src={value} alt="已上传图片" className="size-full object-cover" />
+          </MediaPreviewTrigger>
         ) : (
           <span className="text-xs text-muted-foreground">无图片</span>
         )}

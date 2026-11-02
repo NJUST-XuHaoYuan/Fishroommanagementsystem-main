@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Camera, ChevronLeft, ChevronRight, Download, ExternalLink, Loader2 } from "lucide-react";
+import { AlertTriangle, Camera, ChevronLeft, ChevronRight, Download, Maximize2, Loader2 } from "lucide-react";
 import type { Shipment } from "../store";
 import { downloadMedia, useResolvedMediaUrl } from "../utils/media";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { toast } from "sonner";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 
 function shipmentProofDate(shipment: Shipment): string {
   const raw = String(shipment.shippedAt || shipment.createdAt || shipment.shipDate || "").trim();
@@ -93,7 +94,6 @@ export function ShipmentProofDialog({
   const proofs = useMemo(() => shipmentPackingProofs(shipment), [shipment]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [downloading, setDownloading] = useState(false);
-  const [activeImageUrl, setActiveImageUrl] = useState("");
   const [activeImageAvailable, setActiveImageAvailable] = useState(false);
   const boundedIndex = Math.min(activeIndex, Math.max(0, proofs.length - 1));
   const activeProof = proofs[boundedIndex];
@@ -106,7 +106,6 @@ export function ShipmentProofDialog({
   }, [open, shipment?.id]);
 
   useEffect(() => {
-    setActiveImageUrl("");
     setActiveImageAvailable(false);
   }, [activeProof]);
 
@@ -157,12 +156,10 @@ export function ShipmentProofDialog({
                 key={activeProof}
                 src={activeProof}
                 alt={`发货凭证 ${boundedIndex + 1}`}
-                onLoaded={(resolvedUrl) => {
-                  setActiveImageUrl(resolvedUrl);
+                onLoaded={() => {
                   setActiveImageAvailable(true);
                 }}
                 onFailed={() => {
-                  setActiveImageUrl("");
                   setActiveImageAvailable(false);
                 }}
               />
@@ -217,15 +214,10 @@ export function ShipmentProofDialog({
             <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-4">
               <span className="text-sm text-muted-foreground">第 {boundedIndex + 1} 张，共 {proofs.length} 张</span>
               <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={!activeImageAvailable || !activeImageUrl}
-                  onClick={() => activeImageUrl && window.open(activeImageUrl, "_blank", "noopener,noreferrer")}
-                >
-                  <ExternalLink className="size-4" />
-                  查看原图
-                </Button>
+                <MediaPreviewTrigger src={activeProof} mediaType="image" title={`发货凭证 ${boundedIndex + 1}`}
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border bg-background px-4 text-sm font-medium hover:bg-accent">
+                  <Maximize2 className="size-4" />放大预览
+                </MediaPreviewTrigger>
                 <Button type="button" variant="outline" disabled={downloading || !activeImageAvailable} onClick={downloadActiveProof}>
                   {downloading ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
                   {downloading ? "下载中" : "下载当前照片"}

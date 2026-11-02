@@ -7,6 +7,9 @@ import { batchPrice, batchRecordDate, batchSaleLabel, type BatchSale } from "../
 import { BatchOrderDialog } from "./BatchOrderDialog";
 import { BatchStockValuationSection } from "./BatchStockValuationSection";
 import type { BatchStockValuation } from "../utils/batchStockValuation";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
+import { MediaVideo } from "./MediaVideo";
+import { ImageWithFallback } from "./figma/ImageWithFallback";
 
 type FishStatus = "all" | "inStock" | "inTransit" | "sold" | "lost" | "removed" | "restricted";
 type BatchFishSummary = { total: number; inStock: number; inTransit?: number; sold: number; lost: number; removed: number; restricted?: number };
@@ -138,13 +141,20 @@ function FishHistory({ batchId, siteId, stockItemId, onOpenOrder }: {
           {"price" in event && <span>订单行价：{batchPrice(event.price)}</span>}
         </div>}
         {!!event.photos?.length && <div className="mt-3 flex flex-wrap gap-2">
-          {event.photos.map((src, index) => <a key={`${src}:${index}`} href={src} target="_blank" rel="noopener noreferrer" aria-label={`查看${event.title}照片 ${index + 1}`}>
-            <img src={src} alt={`${event.title}照片 ${index + 1}`} loading="lazy" className="size-20 rounded-md border bg-muted object-cover" />
-          </a>)}
+          {event.photos.map((src, index) => <MediaPreviewTrigger key={`${src}:${index}`} src={src} mediaType="image"
+            title={`${event.title}照片 ${index + 1}`} ariaLabel={`预览${event.title}照片 ${index + 1}`} className="size-20 overflow-hidden rounded-md border bg-muted">
+            <ImageWithFallback src={src} alt={`${event.title}照片 ${index + 1}`} loading="lazy" className="size-full object-cover" />
+          </MediaPreviewTrigger>)}
         </div>}
         {!!event.videos?.length && <div className="mt-3 grid max-w-2xl gap-3 sm:grid-cols-2">
-          {event.videos.map((src, index) => <video key={`${src}:${index}`} src={src} controls preload="none" playsInline
-            aria-label={`${event.title}视频 ${index + 1}`} className="aspect-video w-full rounded-md border bg-black" />)}
+          {event.videos.map((src, index) => <div key={`${src}:${index}`} className="overflow-hidden rounded-md border">
+            <MediaVideo src={src} controls preload="none" playsInline aria-label={`${event.title}视频 ${index + 1}`} className="aspect-video w-full bg-black" />
+            <MediaPreviewTrigger src={src} mediaType="video" title={`${event.title}视频 ${index + 1}`}
+              stockItemId={stockItemId} recordId={event.id.startsWith("bio:") ? event.id.slice(4) : undefined}
+              className="flex min-h-11 w-full items-center justify-center border-t bg-muted/40 px-3 text-xs font-medium hover:bg-muted">
+              放大预览视频
+            </MediaPreviewTrigger>
+          </div>)}
         </div>}
       </li>)}
     </ol>

@@ -16,7 +16,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-  Download,
+  Eye,
   UserRound,
   XCircle,
 } from "lucide-react";
@@ -63,6 +63,7 @@ import {
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Textarea } from "./ui/textarea";
+import { usePrivatePersonnelAttachmentPreview } from "./PrivatePersonnelAttachmentPreview";
 
 type StockApprovalLinkedOrder = {
   id: string;
@@ -350,15 +351,13 @@ function ProfileAttachmentSnapshot({
             size="sm"
             className="min-h-11 w-full"
             disabled={disabled}
-            aria-label={`${heading}：${download ? "下载附件并留痕" : "在线预览附件"}`}
+            aria-label={`${heading}：在线预览附件`}
             onClick={() => onAccess(attachment, download)}
           >
             {busy
               ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-              : download
-                ? <Download className="size-3.5" aria-hidden="true" />
-                : <ExternalLink className="size-3.5" aria-hidden="true" />}
-            {busy ? "读取中" : download ? "下载核对（留痕）" : "在线预览"}
+              : <Eye className="size-3.5" aria-hidden="true" />}
+            {busy ? "读取中" : "在线预览"}
           </Button>
         </div>
       ) : (
@@ -577,7 +576,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [loadingProfileDetails, setLoadingProfileDetails] = useState(false);
   const [profileDetailError, setProfileDetailError] = useState("");
   const [loadedProfileDetailNotificationId, setLoadedProfileDetailNotificationId] = useState("");
-  const [accessingProfileAttachmentId, setAccessingProfileAttachmentId] = useState("");
+  const attachmentPreview = usePrivatePersonnelAttachmentPreview(selectedProfileApproval?.id || "");
+  const accessingProfileAttachmentId = attachmentPreview.loadingId;
   const stockDetailRequestCoordinator = useMemo(() => createLatestRequestCoordinator(), []);
   const profileDetailRequestCoordinator = useMemo(() => createLatestRequestCoordinator(), []);
 
@@ -999,6 +999,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   };
 
   const closeProfileApproval = () => {
+    attachmentPreview.closePreview();
     profileDetailRequestCoordinator.cancel();
     setSelectedProfileApproval(null);
     setProfileDecision(null);
@@ -1006,7 +1007,6 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     setProfileDetailError("");
     setLoadedProfileDetailNotificationId("");
     setLoadingProfileDetails(false);
-    setAccessingProfileAttachmentId("");
   };
 
   const openProfileApproval = (
@@ -1067,41 +1067,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     }
   };
 
-  const accessProfileAttachment = async (attachment: PersonnelProfileAttachment, download: boolean) => {
-    if (!attachment.id || accessingProfileAttachmentId) return;
-    setAccessingProfileAttachmentId(attachment.id);
-    try {
-      const response = await fetch(
-        `/api/personnel/attachments/${encodeURIComponent(attachment.id)}${download ? "?download=1" : ""}`,
-        { headers: authJsonHeaders() }
-      );
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
-        throw new Error(result.error || (download ? "附件下载失败" : "附件预览失败"));
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      if (!download) {
-        const preview = document.createElement("a");
-        preview.href = url;
-        preview.target = "_blank";
-        preview.rel = "noopener noreferrer";
-        preview.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        return;
-      }
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = attachment.originalName || "人员资料附件";
-      anchor.rel = "noopener";
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : download ? "附件下载失败" : "附件预览失败");
-    } finally {
-      setAccessingProfileAttachmentId((current) => current === attachment.id ? "" : current);
-    }
-  };
+  const accessProfileAttachment = (attachment: PersonnelProfileAttachment, allowDownload: boolean) =>
+    attachmentPreview.openPreview(attachment, allowDownload);
 
   const filters: { value: NotificationFilter; label: string; count: number }[] = [
     { value: "all", label: "全部", count: hasFacetFilters ? facetFilteredNotifications.length : totalCount },
@@ -2136,6 +2103,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {attachmentPreview.previewDialog}
     </>
   );
 }

@@ -17,6 +17,7 @@ import { readAndCompressImage } from "../utils/imageUtils";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { authJsonHeaders } from "../utils/authSession";
 import { BatchDetailsView } from "./BatchDetailsView";
 import { BatchInfoSection } from "./BatchInfoSection";
@@ -88,7 +89,6 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
   const [editing, setEditing] = useState<PurchaseBatch | null>(null);
   const [open, setOpen] = useState(false);
   const [del, setDel] = useState<PurchaseBatch | null>(null);
-  const [proofPreview, setProofPreview] = useState<{ url: string; title: string } | null>(null);
   const [revenueMetrics, setRevenueMetrics] = useState<BatchRevenueMetric[] | null>(null);
   const [loadedRevenueScopeKey, setLoadedRevenueScopeKey] = useState("");
   const [revenueLoading, setRevenueLoading] = useState(true);
@@ -239,8 +239,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         batchInfo={selectedBatch && <BatchInfoSection batch={selectedBatch}
           revenue={revenueAvailable ? salesStats(selectedBatch.id) : null}
           loading={revenueLoading} error={revenueError} onRetry={() => setRevenueRetry(value => value + 1)}
-          onEdit={permission.canUpdate ? () => { setEditing({ ...selectedBatch, lossProof: lossProofs(selectedBatch) }); setOpen(true); } : undefined}
-          onPreview={(url, title) => setProofPreview({ url, title })} />}
+          onEdit={permission.canUpdate ? () => { setEditing({ ...selectedBatch, lossProof: lossProofs(selectedBatch) }); setOpen(true); } : undefined} />}
       /> : <>
       <div>
         <h2>采购批次管理</h2>
@@ -464,13 +463,13 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
                 <div className="flex flex-wrap gap-2">
                   {lossProofs(editing).map((url, i) => (
                     <div key={i} className="relative w-20 h-20 border rounded">
-                      <button
-                        type="button"
+                      <MediaPreviewTrigger
+                        src={url} mediaType="image" title={`${editing.batchNo} 报损凭证 ${i + 1}`}
+                        filename={`${editing.batchNo}-报损凭证-${i + 1}.jpg`} ariaLabel={`预览批次报损凭证 ${i + 1}`}
                         className="block size-full overflow-hidden rounded"
-                        onClick={() => setProofPreview({ url, title: `${editing.batchNo} 报损凭证 ${i + 1}` })}
                       >
                         <ImageWithFallback src={url} alt={`报损凭证${i+1}`} className="w-full h-full object-cover rounded" />
-                      </button>
+                      </MediaPreviewTrigger>
                       <button
                         type="button"
                         onClick={() => setEditing({ ...editing, lossProof: editing.lossProof.filter((_, idx) => idx !== i) })}
@@ -512,24 +511,6 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
             <Button onClick={save}>保存</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!proofPreview} onOpenChange={(nextOpen) => !nextOpen && setProofPreview(null)}>
-        <DialogContent aria-describedby={undefined} className="max-w-4xl">
-          <DialogHeader><DialogTitle>{proofPreview?.title ?? "报损凭证"}</DialogTitle></DialogHeader>
-          {proofPreview && (
-            <div className="flex max-h-[72vh] items-center justify-center overflow-hidden rounded-lg border bg-muted/30">
-              <ImageWithFallback
-                src={proofPreview.url}
-                alt={proofPreview.title}
-                className="max-h-[72vh] w-full object-contain"
-              />
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setProofPreview(null)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

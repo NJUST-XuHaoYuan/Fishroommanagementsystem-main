@@ -16,7 +16,7 @@ import {
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { CalendarDays, Check, ChevronDown, Eye, Image as ImageIcon, Search, X } from "lucide-react";
 import { toast } from "sonner";
-import { resolveMediaUrl } from "../utils/media";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 
 type SearchOption = {
   value: string;
@@ -686,24 +686,16 @@ export function LossRecordsView() {
                 ) : (
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     {viewing.photos.map((src, index) => (
-                      <button
+                      <MediaPreviewTrigger
                         key={index}
-                        type="button"
-                        onClick={async () => {
-                          const preview = window.open("about:blank", "_blank", "noopener,noreferrer");
-                          try {
-                            const url = await resolveMediaUrl(src);
-                            if (preview && url) preview.location.href = url;
-                            else if (url) window.open(url, "_blank", "noopener,noreferrer");
-                          } catch {
-                            preview?.close();
-                            toast.error("照片打开失败，请刷新后重试");
-                          }
-                        }}
+                        src={src}
+                        mediaType="image"
+                        title={`损耗凭证 ${index + 1}`}
+                        ariaLabel={`预览损耗凭证 ${index + 1}`}
                         className="block aspect-square overflow-hidden rounded-md border bg-muted"
                       >
                         <ImageWithFallback src={src} alt={`损耗凭证 ${index + 1}`} className="size-full object-cover" />
-                      </button>
+                      </MediaPreviewTrigger>
                     ))}
                   </div>
                 )}

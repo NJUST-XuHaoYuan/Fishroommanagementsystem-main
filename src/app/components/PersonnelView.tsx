@@ -43,7 +43,8 @@ import {
   SelectValue,
 } from "./ui/select";
 import { toast } from "sonner";
-import { Download, Eye, EyeOff, FileText, Loader2 } from "lucide-react";
+import { Eye, EyeOff, FileText, Loader2 } from "lucide-react";
+import { usePrivatePersonnelAttachmentPreview } from "./PrivatePersonnelAttachmentPreview";
 import { confirmWrite } from "../utils/writeConfirm";
 import { getSites, normalizeVisibleSiteIds } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
@@ -143,7 +144,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
   const [resigning, setResigning] = useState(false);
   const [showIdCardNo, setShowIdCardNo] = useState(false);
   const [showBankAccountNo, setShowBankAccountNo] = useState(false);
-  const [downloadingAttachmentId, setDownloadingAttachmentId] = useState("");
+  const attachmentPreview = usePrivatePersonnelAttachmentPreview(open ? editing?.id || "" : "");
   const [employmentFilter, setEmploymentFilter] = useState<EmploymentFilter>("all");
   const [accountFilter, setAccountFilter] = useState<AccountFilter>("all");
   const sites = getSites(state);
@@ -234,6 +235,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
   };
 
   const closeEditor = () => {
+    attachmentPreview.closePreview();
     sensitiveRequestSequence.current += 1;
     setOpen(false);
     setEditing(null);
@@ -320,33 +322,6 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
       toast.error(error instanceof Error ? error.message : "读取证件与工资账户信息失败");
     } finally {
       if (sensitiveRequestSequence.current === requestSequence) setSensitiveLoading(false);
-    }
-  };
-
-  const downloadAttachment = async (attachment: Personnel["idCardFrontAttachment"]) => {
-    if (!attachment?.id || downloadingAttachmentId) return;
-    setDownloadingAttachmentId(attachment.id);
-    try {
-      const response = await fetch(
-        `/api/personnel/attachments/${encodeURIComponent(attachment.id)}?download=1`,
-        { headers: authJsonHeaders() }
-      );
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
-        throw new Error(result.error || "附件下载失败");
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = attachment.originalName || "人员资料附件";
-      anchor.rel = "noopener";
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "附件下载失败");
-    } finally {
-      setDownloadingAttachmentId("");
     }
   };
 
@@ -977,13 +952,13 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
                             variant="outline"
                             size="sm"
                             className="min-h-10 w-full"
-                            disabled={Boolean(downloadingAttachmentId)}
-                            onClick={() => void downloadAttachment(attachment)}
+                            disabled={Boolean(attachmentPreview.loadingId)}
+                            onClick={() => void attachmentPreview.openPreview(attachment, true)}
                           >
-                            {downloadingAttachmentId === attachment.id
+                            {attachmentPreview.loadingId === attachment.id
                               ? <Loader2 className="size-3.5 animate-spin" />
-                              : <Download className="size-3.5" />}
-                            下载核对
+                              : <Eye className="size-3.5" />}
+                            {attachmentPreview.loadingId === attachment.id ? "读取中" : "预览核对"}
                           </Button>
                         ) : (
                           <p className="text-xs leading-5 text-amber-700">由本人在个人中心上传并提交审批</p>
@@ -1236,6 +1211,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
         </AlertDialogContent>
       </AlertDialog>
 
+      {attachmentPreview.previewDialog}
       <AlertDialog open={!!resign} onOpenChange={(nextOpen) => !nextOpen && !resigning && setResign(null)}>
         <AlertDialogContent className="w-[min(92vw,30rem)] max-w-[92vw] pb-[calc(1rem+env(safe-area-inset-bottom))] sm:pb-6">
           <AlertDialogHeader>

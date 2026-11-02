@@ -1,7 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
-import { authHeaders } from "./authSession";
+import { authHeaders, getValidAuthSession } from "./authSession";
 
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+let signedUrlSessionKey = "";
+
+export function mediaAuthSessionKey() {
+  if (typeof window === "undefined") return "anonymous";
+  const session = getValidAuthSession();
+  return session?.token ? JSON.stringify([session.username, session.role, session.token, session.expiresAt, [...new Set(session.visibleSiteIds || [])].sort()]) : "anonymous";
+}
+
+export function clearResolvedMediaCache() {
+  signedUrlCache.clear();
+}
+
+/** Only inert image/video sources may enter the media-only preview. Never render documents or SVG data. */
+export function isSafeMediaPreviewSrc(src?: string) {
+  if (typeof src !== "string" || !src.trim()) return false;
+  const value = src.trim();
+  if (/^data:/i.test(value)) return /^data:(?:image\/(?:png|jpeg|jpg|webp|gif|bmp|avif|heic|heif)|video\/(?:mp4|webm|quicktime|x-m4v|3gpp|3gpp2))(?:;[^,]*)?,/i.test(value);
+  if (/^blob:/i.test(value)) return /^blob:(?:https?:\/\/|null\/)[^\s]+$/i.test(value);
+  try {
+    const url = new URL(value, typeof window !== "undefined" ? window.location?.href || "http://localhost/" : "http://localhost/");
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password;
+  } catch { return false; }
+}
 
 export const MAX_ORIGINAL_IMAGE_BYTES = 50 * 1024 * 1024;
 export const MAX_ORIGINAL_VIDEO_BYTES = 300 * 1024 * 1024;
@@ -40,6 +63,8 @@ export function originalMediaKind(file: File): "image" | "video" | null {
 
 type ResolveMediaOptions = {
   thumbnailWidth?: number;
+  signal?: AbortSignal;
+  refreshKey?: number;
 };
 
 export function cosProxyUrl(src?: string) {
@@ -63,6 +88,12 @@ export async function resolveMediaUrl(src?: string, options: ResolveMediaOptions
   if (!src) return undefined;
   if (!isCosMediaUrl(src)) return src;
 
+  const sessionKey = mediaAuthSessionKey();
+  if (signedUrlSessionKey !== sessionKey) {
+    signedUrlCache.clear();
+    signedUrlSessionKey = sessionKey;
+  }
+
   const thumbnailWidth = Number(options.thumbnailWidth || 0);
   const cacheKey = thumbnailWidth > 0 ? `${src}#thumbnail=${thumbnailWidth}` : src;
   const cached = signedUrlCache.get(cacheKey);
@@ -75,9 +106,11 @@ export async function resolveMediaUrl(src?: string, options: ResolveMediaOptions
   }
   const response = await fetch(`/api/media/cos-url?${query.toString()}`, {
     headers: authHeaders(),
+    signal: options.signal,
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
+  if (options.signal?.aborted || mediaAuthSessionKey() !== sessionKey) throw new DOMException("登录状态已变化", "AbortError");
   const signedUrl = typeof data?.url === "string" ? data.url : "";
   if (!signedUrl) throw new Error("Missing signed media URL");
 
@@ -159,12 +192,14 @@ export function useResolvedMediaUrl(src?: string, options: ResolveMediaOptions =
   const originalSrc = typeof src === "string" ? src : undefined;
   const proxySrc = useMemo(() => cosProxyUrl(originalSrc), [originalSrc]);
   const thumbnailWidth = Number(options.thumbnailWidth || 0);
-  const [displaySrc, setDisplaySrc] = useState<string | undefined>(() =>
-    proxySrc ? undefined : originalSrc
-  );
+  const refreshKey = Number(options.refreshKey || 0);
+  const sourceKey = `${originalSrc || ""}:${thumbnailWidth}:${refreshKey}:${mediaAuthSessionKey()}`;
+  const [resolved, setResolved] = useState<{ key: string; src?: string }>(() => ({ key: sourceKey, src: proxySrc ? undefined : originalSrc }));
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const setDisplaySrc = (value?: string) => setResolved({ key: sourceKey, src: value });
     if (!originalSrc) {
       setDisplaySrc(undefined);
       return () => {
@@ -179,20 +214,21 @@ export function useResolvedMediaUrl(src?: string, options: ResolveMediaOptions =
     }
 
     setDisplaySrc(undefined);
-    resolveMediaUrl(originalSrc, { thumbnailWidth })
+    resolveMediaUrl(originalSrc, { thumbnailWidth, signal: controller.signal })
       .then((url) => {
         if (!cancelled) setDisplaySrc(url);
       })
-      .catch(() => {
-        if (!cancelled) setDisplaySrc(proxySrc);
+      .catch((error) => {
+        if (!cancelled && error?.name !== "AbortError") setDisplaySrc(proxySrc);
       });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [originalSrc, proxySrc, thumbnailWidth]);
+  }, [originalSrc, proxySrc, thumbnailWidth, refreshKey, sourceKey]);
 
-  return displaySrc;
+  return resolved.key === sourceKey ? resolved.src : proxySrc ? undefined : originalSrc;
 }
 
 function triggerDownload(url: string, filename: string) {
@@ -205,7 +241,7 @@ function triggerDownload(url: string, filename: string) {
   document.body.removeChild(link);
 }
 
-type DownloadMediaOptions = {
+export type DownloadMediaOptions = {
   mediaType?: "image" | "video";
   stockItemId?: string;
   recordId?: string;
@@ -264,6 +300,10 @@ export async function downloadMedia(
   options: DownloadMediaOptions = {},
 ): Promise<MediaDownloadResult> {
   if (!src) throw new Error("Missing media URL");
+  const sessionKey = mediaAuthSessionKey();
+  const assertCurrentSession = () => {
+    if (mediaAuthSessionKey() !== sessionKey) throw new Error("登录状态已变化，请重新打开后下载。");
+  };
   if (src.startsWith("data:")) {
     triggerDownload(src, filename);
     return { mode: "download" };
@@ -277,6 +317,7 @@ export async function downloadMedia(
     }
     try {
       const downloadUrl = await authorizedBioMediaDownloadUrl(src, filename, options);
+      assertCurrentSession();
       if (mobileWindow && !mobileWindow.closed) {
         mobileWindow.location.replace(downloadUrl);
         return { mode: "mobile-open" };
@@ -307,6 +348,7 @@ export async function downloadMedia(
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
   const blob = await response.blob();
+  assertCurrentSession();
   const objectUrl = URL.createObjectURL(blob);
   try {
     triggerDownload(objectUrl, filename);

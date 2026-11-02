@@ -2,6 +2,7 @@ import type { PurchaseBatch } from "../store";
 import { Button } from "./ui/button";
 import { batchPrice } from "../utils/batchDetailDisplay";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 
 type Revenue = {
   salesNet: number; pendingReceived: number; verifiedReceived: number;
@@ -9,14 +10,13 @@ type Revenue = {
   platformOrderCount: number; platformReceived: number;
 };
 
-export function BatchInfoSection({ batch, revenue, loading, error, onRetry, onEdit, onPreview }: {
+export function BatchInfoSection({ batch, revenue, loading, error, onRetry, onEdit }: {
   batch: PurchaseBatch;
   revenue: Revenue | null;
   loading: boolean;
   error: string;
   onRetry: () => void;
   onEdit?: () => void;
-  onPreview: (url: string, title: string) => void;
 }) {
   const proofs = Array.isArray(batch.lossProof) ? batch.lossProof : [];
   return <section aria-label="批次资料" className="rounded-lg border bg-card px-4 py-3 sm:px-5">
@@ -51,11 +51,12 @@ export function BatchInfoSection({ batch, revenue, loading, error, onRetry, onEd
         </div>}
         <p className="text-xs leading-relaxed text-muted-foreground">销售净额不含运费与包装费；批次登记数量与仍可追溯的单鱼档案数量可能不同。</p>
         <div><h4 className="mb-2 text-xs text-muted-foreground">报损凭证</h4>
-          {proofs.length ? <div className="flex flex-wrap gap-2">{proofs.map((url, index) => <button key={`${url}:${index}`} type="button"
-            aria-label={`查看批次报损凭证 ${index + 1}`} className="size-20 overflow-hidden rounded-md border bg-muted"
-            onClick={() => onPreview(url, `${batch.batchNo} 报损凭证 ${index + 1}`)}>
+          {proofs.length ? <div className="flex flex-wrap gap-2">{proofs.map((url, index) => <MediaPreviewTrigger key={`${url}:${index}`}
+            src={url} mediaType="image" title={`${batch.batchNo} 报损凭证 ${index + 1}`}
+            filename={`${batch.batchNo}-报损凭证-${index + 1}.jpg`}
+            ariaLabel={`预览批次报损凭证 ${index + 1}`} className="size-20 overflow-hidden rounded-md border bg-muted">
             <ImageWithFallback src={url} alt={`报损凭证 ${index + 1}`} loading="lazy" className="size-full object-cover" />
-          </button>)}</div> : <p className="text-sm text-muted-foreground">暂无报损凭证</p>}
+          </MediaPreviewTrigger>)}</div> : <p className="text-sm text-muted-foreground">暂无报损凭证</p>}
         </div>
         <div><h4 className="mb-1 text-xs text-muted-foreground">备注</h4><p className="whitespace-pre-wrap break-words text-sm">{batch.notes || "暂无备注"}</p></div>
       </div>

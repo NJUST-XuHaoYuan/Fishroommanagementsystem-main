@@ -26,6 +26,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { siteName } from "../utils/sites";
 import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
 import { MediaVideo } from "./MediaVideo";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { buildStockPriceBaselines, buildStockPriceDetailsPatch, isStockSpecialPrice, stockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
 import { StockPriceField } from "./StockPriceField";
 import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
@@ -1756,9 +1757,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
           <DialogHeader>
             <DialogTitle className="flex flex-wrap items-center gap-2 pr-6 text-left">
               {bioProduct?.imageUrl && (
-                <div className="size-8 rounded overflow-hidden border">
+                <MediaPreviewTrigger src={bioProduct.imageUrl} mediaType="image" title={`${bioProduct.name}商品照片`} className="size-11 overflow-hidden rounded border">
                   <ImageWithFallback src={bioProduct.imageUrl} alt="" className="size-full object-cover" />
-                </div>
+                </MediaPreviewTrigger>
               )}
               <span>生物详情</span>
               {bioProduct && (
@@ -1935,24 +1936,10 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                           {ev.photos.length > 0 && (
                             <div className="flex flex-wrap gap-2 mt-2">
                               {ev.photos.map((src, pi) => (
-                                <div key={pi} className="group relative size-16 rounded border overflow-hidden cursor-pointer">
+                                <MediaPreviewTrigger key={pi} src={src} mediaType="image" title={`养护照片 ${pi + 1}`} filename={`photo-${pi + 1}.jpg`}
+                                  ariaLabel={`预览养护照片 ${pi + 1}`} className="size-16 overflow-hidden rounded border">
                                   <ImageWithFallback src={src} alt={`照片${pi + 1}`} className="size-full object-cover" />
-                                  <button
-                                    type="button"
-                                    onClick={async (e) => {
-                                      e.stopPropagation();
-                                      try {
-                                        await downloadMedia(src, `photo-${pi + 1}.jpg`);
-                                      } catch {
-                                        toast.error("照片下载失败，请刷新后重试");
-                                      }
-                                    }}
-                                    className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                                    title="下载照片"
-                                  >
-                                    <Download className="size-4 text-white" />
-                                  </button>
-                                </div>
+                                </MediaPreviewTrigger>
                               ))}
                             </div>
                           )}
@@ -1961,6 +1948,11 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                               {(ev.videos ?? []).map((src, vi) => (
                                 <div key={vi} className="w-36 overflow-hidden rounded border bg-card">
                                   <MediaVideo src={src} className="w-full" controls />
+                                  <MediaPreviewTrigger src={src} mediaType="video" title={`养护视频 ${vi + 1}`} filename={`video-${vi + 1}.mp4`}
+                                    stockItemId={bioItem?.id ?? ""} recordId={ev.id}
+                                    className="flex min-h-11 w-full items-center justify-center border-t px-2 text-xs font-medium hover:bg-muted">
+                                    放大预览视频
+                                  </MediaPreviewTrigger>
                                   <button
                                     type="button"
                                     disabled={Boolean(downloadingMediaKey)}
@@ -2139,7 +2131,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                 <div className="flex flex-wrap gap-2">
                   {newRecord.photos.map((src, i) => (
                     <div key={i} className="relative size-14 rounded border overflow-hidden">
-                      <ImageWithFallback src={src} alt="" className="size-full object-cover" />
+                      <MediaPreviewTrigger src={src} mediaType="image" title={`待保存照片 ${i + 1}`} className="size-full">
+                        <ImageWithFallback src={src} alt={`待保存照片 ${i + 1}`} className="size-full object-cover" />
+                      </MediaPreviewTrigger>
                       <button
                         onClick={() => setNewRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
@@ -2152,7 +2146,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                 <div className="flex flex-wrap gap-2">
                   {newRecord.videos.map((src, i) => (
                     <div key={i} className="relative size-14 rounded border overflow-hidden">
-                      <video src={src} alt="" className="size-full object-cover" controls />
+                      <MediaPreviewTrigger src={src} mediaType="video" title={`待保存视频 ${i + 1}`} className="relative flex size-full items-center justify-center bg-muted" allowDownload={false}>
+                        <Video className="size-6 text-muted-foreground" aria-hidden="true" />
+                      </MediaPreviewTrigger>
                       <button
                         onClick={() => setNewRecord((p) => ({ ...p, videos: p.videos.filter((_, idx) => idx !== i) }))}
                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full size-4 flex items-center justify-center text-[10px]"
@@ -2350,7 +2346,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
 	              <div className="flex flex-wrap gap-2">
 	                {batchRecord.photos.map((src, i) => (
 	                  <div key={i} className="relative size-14 rounded border overflow-hidden">
-	                    <ImageWithFallback src={src} alt="" className="size-full object-cover" />
+	                    <MediaPreviewTrigger src={src} mediaType="image" title={`批量养护照片 ${i + 1}`} className="size-full">
+	                      <ImageWithFallback src={src} alt={`批量养护照片 ${i + 1}`} className="size-full object-cover" />
+	                    </MediaPreviewTrigger>
 	                    <button
 	                      type="button"
 	                      onClick={() => setBatchRecord((p) => ({ ...p, photos: p.photos.filter((_, idx) => idx !== i) }))}
@@ -2364,7 +2362,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
 	              <div className="flex flex-wrap gap-2">
 	                {batchRecord.videos.map((src, i) => (
 	                  <div key={i} className="relative size-14 rounded border overflow-hidden">
-	                    <video src={src} className="size-full object-cover" controls />
+	                    <MediaPreviewTrigger src={src} mediaType="video" title={`批量养护视频 ${i + 1}`} className="relative flex size-full items-center justify-center bg-muted" allowDownload={false}>
+	                      <Video className="size-6 text-muted-foreground" aria-hidden="true" />
+	                    </MediaPreviewTrigger>
 	                    <button
 	                      type="button"
 	                      onClick={() => setBatchRecord((p) => ({ ...p, videos: p.videos.filter((_, idx) => idx !== i) }))}
@@ -2551,7 +2551,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
 	                <div className="flex flex-wrap gap-2">
 	                  {lossProof.map((src, index) => (
 	                    <div key={index} className="relative size-16 rounded border overflow-hidden">
-	                      <ImageWithFallback src={src} alt="" className="size-full object-cover" />
+	                      <MediaPreviewTrigger src={src} mediaType="image" title={`损耗凭证 ${index + 1}`} className="size-full">
+	                        <ImageWithFallback src={src} alt={`损耗凭证 ${index + 1}`} className="size-full object-cover" />
+	                      </MediaPreviewTrigger>
 	                      <button
 	                        type="button"
 	                        onClick={() => setLossProof((prev) => prev.filter((_, i) => i !== index))}

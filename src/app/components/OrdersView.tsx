@@ -43,7 +43,8 @@ import { currentTankLocationLabel, orderOutboundItems, stockLocationSnapshot } f
 import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
 import { canRegisterMaintenanceLoss, requireMaintenanceLossPermissions, usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
-import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, resolveMediaUrl, uploadOriginalMedia } from "../utils/media";
+import { ORIGINAL_VIDEO_ACCEPT, downloadMedia, uploadOriginalMedia } from "../utils/media";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
 import { visibleSitesForUser } from "../utils/sites";
@@ -1883,23 +1884,17 @@ function ProofUploader({
     setLoading(false);
   };
 
-  const openImg = async (src: string) => {
-    const resolved = await resolveMediaUrl(src).catch(() => src);
-    const w = window.open();
-    w?.document.write(`<img src="${resolved}" style="max-width:100%;max-height:100vh;display:block;margin:auto;" />`);
-  };
-
   return (
     <div className="flex flex-wrap gap-2 items-start">
       {images.map((img, i) => (
         <div key={i} className="relative group shrink-0">
+          <MediaPreviewTrigger src={img} mediaType="image" title={`凭证 ${i + 1}`} ariaLabel={`预览凭证 ${i + 1}`} className="size-14 overflow-hidden rounded border hover:opacity-80">
           <ImageWithFallback
             src={img}
             alt="凭证"
-            className="size-14 object-cover rounded border cursor-pointer hover:opacity-80"
-            onClick={() => openImg(img)}
-            title="点击查看大图"
+            className="size-full object-cover"
           />
+          </MediaPreviewTrigger>
           <button
             type="button"
             className="absolute -top-1 -right-1 size-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
@@ -3091,11 +3086,6 @@ function StockItemDetailDialog({
     lost: "bg-red-100 text-red-700",
   };
 
-  const openImg = (src: string) => {
-    const w = window.open();
-    w?.document.write(`<img src="${src}" style="max-width:100%;max-height:100vh;display:block;margin:auto;" />`);
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent aria-describedby={undefined} className="max-w-md max-h-[85vh] flex flex-col">
@@ -3110,7 +3100,9 @@ function StockItemDetailDialog({
           <div className="flex gap-3">
             <div className="relative size-16 rounded-lg overflow-hidden border bg-muted shrink-0">
 	              {p?.imageUrl
-	                ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
+	                ? <MediaPreviewTrigger src={p.imageUrl} mediaType="image" title={`${p.name}商品照片`} className="size-full">
+	                    <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
+	                  </MediaPreviewTrigger>
 	                : <div className="size-full flex items-center justify-center"><Fish className="size-5 text-muted-foreground" /></div>}
 	              {s.code && (
 	                <span className="absolute inset-x-0 bottom-0 truncate bg-black/65 px-0.5 text-center text-[10px] font-semibold leading-4 text-white">
@@ -3155,11 +3147,19 @@ function StockItemDetailDialog({
                       {r.photos.length > 0 && (
                         <div className="flex gap-2 mt-2 flex-wrap">
                           {r.photos.map((img, i) => (
-                            <img key={i} src={img} className="size-14 object-cover rounded border cursor-pointer hover:opacity-80"
-                              onClick={() => openImg(img)} />
+                            <MediaPreviewTrigger key={i} src={img} mediaType="image" title={`养殖记录照片 ${i + 1}`} ariaLabel={`预览养殖记录照片 ${i + 1}`}
+                              className="size-14 overflow-hidden rounded border hover:opacity-80">
+                              <ImageWithFallback src={img} alt={`养殖记录照片 ${i + 1}`} className="size-full object-cover" />
+                            </MediaPreviewTrigger>
                           ))}
                         </div>
                       )}
+                      {!!r.videos?.length && <div className="mt-2 flex flex-wrap gap-2">
+                        {r.videos.map((src, i) => <MediaPreviewTrigger key={i} src={src} mediaType="video" title={`养殖记录视频 ${i + 1}`} stockItemId={s.id} recordId={r.id}
+                          className="inline-flex min-h-11 items-center gap-2 rounded border px-3 text-xs font-medium hover:bg-muted">
+                          <Video className="size-4" />预览视频 {i + 1}
+                        </MediaPreviewTrigger>)}
+                      </div>}
                     </div>
                   ))}
                 </div>
@@ -3590,9 +3590,9 @@ function StockPickerBioDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {product?.imageUrl && (
-              <div className="size-8 rounded overflow-hidden border">
+              <MediaPreviewTrigger src={product.imageUrl} mediaType="image" title={`${product.name}商品照片`} className="size-11 overflow-hidden rounded border">
                 <ImageWithFallback src={product.imageUrl} alt="" className="size-full object-cover" />
-              </div>
+              </MediaPreviewTrigger>
             )}
             <span>生物详情</span>
             {product && (
@@ -3707,24 +3707,10 @@ function StockPickerBioDialog({
                           {event.photos.length > 0 && (
                             <div className="mt-2 flex flex-wrap gap-2">
                               {event.photos.map((src, photoIndex) => (
-                                <div key={photoIndex} className="group relative size-16 cursor-pointer overflow-hidden rounded border">
+                                <MediaPreviewTrigger key={photoIndex} src={src} mediaType="image" title={`养护照片 ${photoIndex + 1}`} filename={`photo-${photoIndex + 1}.jpg`}
+                                  ariaLabel={`预览养护照片 ${photoIndex + 1}`} className="size-16 overflow-hidden rounded border">
                                   <ImageWithFallback src={src} alt={`照片${photoIndex + 1}`} className="size-full object-cover" />
-                                  <button
-                                    type="button"
-                                    onClick={async (e) => {
-                                      e.stopPropagation();
-                                      try {
-                                        await downloadMedia(src, `photo-${photoIndex + 1}.jpg`);
-                                      } catch {
-                                        toast.error("照片下载失败，请刷新后重试");
-                                      }
-                                    }}
-                                    className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100"
-                                    title="下载照片"
-                                  >
-                                    <Download className="size-4 text-white" />
-                                  </button>
-                                </div>
+                                </MediaPreviewTrigger>
                               ))}
                             </div>
                           )}
@@ -3733,6 +3719,11 @@ function StockPickerBioDialog({
                               {event.videos.map((src, videoIndex) => (
                                 <div key={videoIndex} className="w-36 overflow-hidden rounded border bg-card">
                                   <MediaVideo src={src} className="w-full" controls />
+                                  <MediaPreviewTrigger src={src} mediaType="video" title={`养护视频 ${videoIndex + 1}`} filename={`video-${videoIndex + 1}.mp4`}
+                                    stockItemId={item.id} recordId={event.id}
+                                    className="flex min-h-11 w-full items-center justify-center border-t px-2 text-xs font-medium hover:bg-muted">
+                                    放大预览视频
+                                  </MediaPreviewTrigger>
                                   <button
                                     type="button"
                                     disabled={Boolean(downloadingMediaKey)}
@@ -3815,7 +3806,9 @@ function StockPickerBioDialog({
                   <div className="flex flex-wrap gap-2">
                     {newRecord.photos.map((src, index) => (
                       <div key={index} className="relative size-14 overflow-hidden rounded border">
-                        <ImageWithFallback src={src} alt="" className="size-full object-cover" />
+                        <MediaPreviewTrigger src={src} mediaType="image" title={`待保存照片 ${index + 1}`} className="size-full">
+                          <ImageWithFallback src={src} alt={`待保存照片 ${index + 1}`} className="size-full object-cover" />
+                        </MediaPreviewTrigger>
                         <button type="button" onClick={() => setNewRecord((prev) => ({ ...prev, photos: prev.photos.filter((_, idx) => idx !== index) }))} className="absolute -right-1 -top-1 flex size-4 items-center justify-center rounded-full bg-red-500 text-[10px] text-white">×</button>
                       </div>
                     ))}
@@ -3825,7 +3818,9 @@ function StockPickerBioDialog({
                   <div className="flex flex-wrap gap-2">
                     {newRecord.videos.map((src, index) => (
                       <div key={index} className="relative size-14 overflow-hidden rounded border">
-                        <video src={src} className="size-full object-cover" controls />
+                        <MediaPreviewTrigger src={src} mediaType="video" title={`待保存视频 ${index + 1}`} className="flex size-full items-center justify-center bg-muted" allowDownload={false}>
+                          <Video className="size-6 text-muted-foreground" aria-hidden="true" />
+                        </MediaPreviewTrigger>
                         <button type="button" onClick={() => setNewRecord((prev) => ({ ...prev, videos: prev.videos.filter((_, idx) => idx !== index) }))} className="absolute -right-1 -top-1 flex size-4 items-center justify-center rounded-full bg-red-500 text-[10px] text-white">×</button>
                       </div>
                     ))}
@@ -3962,7 +3957,9 @@ function StockPickerBioDialog({
               <div className="flex flex-wrap gap-2">
                 {lossProof.map((src, index) => (
                   <div key={index} className="relative size-16 overflow-hidden rounded border">
-                    <ImageWithFallback src={src} alt="" className="size-full object-cover" />
+                    <MediaPreviewTrigger src={src} mediaType="image" title={`损耗凭证 ${index + 1}`} className="size-full">
+                      <ImageWithFallback src={src} alt={`损耗凭证 ${index + 1}`} className="size-full object-cover" />
+                    </MediaPreviewTrigger>
                     <button
                       type="button"
                       onClick={() => setLossProof((prev) => prev.filter((_, idx) => idx !== index))}
