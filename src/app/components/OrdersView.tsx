@@ -10,6 +10,7 @@ import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
+import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
@@ -323,7 +324,7 @@ function applyOrderApiResult(
     const shipments = Array.isArray(result.shipments) ? result.shipments : current.shipments;
     return {
       ...current,
-      orders: mergeApiRecord(orders, result.order),
+      orders: retainNewerWholesaleOrderTags(current.orders, mergeApiRecord(orders, result.order)),
       shipments: mergeApiRecord(shipments, result.shipment),
       stock: Array.isArray(result.stock) ? result.stock : current.stock,
       inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
@@ -1299,6 +1300,7 @@ function OrderStatusTags({
         </span>
       ))}
       <OrderAcquisitionBadge marked={order.isAcquisitionOrder} approvalStatus={order.newCustomerApproval?.status} />
+      <OrderWholesaleBadge marked={order.isWholesaleOrder} />
     </span>
   );
 }
@@ -5035,6 +5037,14 @@ function OrderDetailDialog({
 
           <div className="flex-1 overflow-y-auto flex flex-col gap-5 pr-1">
 
+            <OrderWholesaleTag
+              key={order.id}
+              order={order}
+              viewer={state.user}
+              canUpdate={permission.canUpdate}
+              onOrderUpdated={(updatedOrder, session) => setState((current) => mergeWholesaleOrderTagForSession(current, updatedOrder, session))}
+            />
+
             <OrderAcquisitionTag
               order={order}
               onOrderUpdated={(updatedOrder) => setState((current) => ({
@@ -7267,6 +7277,7 @@ export function OrdersView({
   const [paymentClaimData, setPaymentClaimData] = useState<OwnerPaymentClaimData>({ candidates: [], cashOrders: [] });
 
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
+  const [wholesaleFilter, setWholesaleFilter] = useState<OrderWholesaleFilterValue>("all");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [todayShipOnly, setTodayShipOnly] = useState(false);
@@ -7327,7 +7338,7 @@ export function OrdersView({
   };
 
   const syncedViewOrder = useMemo(
-    () => viewOrder ? state.orders.find((o) => o.id === viewOrder.id) ?? viewOrder : null,
+    () => viewOrder ? state.orders.find((o) => o.id === viewOrder.id) ?? null : null,
     [viewOrder, state.orders]
   );
 
@@ -7435,6 +7446,7 @@ export function OrdersView({
         order.plannedShipDate,
         getOrderStatusText(order, state.shipments),
         order.isAcquisitionOrder === true ? "获新订单" : "",
+        order.isWholesaleOrder === true ? "批发订单" : "",
         customer?.name,
         customer?.phone,
         customer?.wechat,
@@ -7460,6 +7472,7 @@ export function OrdersView({
 
 	  const filteredOrders = useMemo(() => {
 	    return orderRows.filter((o) => {
+	      if (!matchesWholesaleOrderFilter(o, wholesaleFilter)) return false;
 	      if (todayShipOnly && !hasPlannedShipPlanOnDate(o, today)) return false;
 	      if (pendingTrackingOnly && !hasPendingTrackingShipmentOrder(o, state.shipments)) return false;
 	      if (statusFilter === "active" && !isActiveOrder(o)) return false;
@@ -7469,7 +7482,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
+	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const mobileFilteredOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7477,7 +7490,7 @@ export function OrdersView({
 
   useEffect(() => {
     setMobilePage(1);
-  }, [mobileSearch, statusFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
+  }, [mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
 
   const mobileTotalPages = Math.max(1, Math.ceil(mobileFilteredOrders.length / MOBILE_ORDER_PAGE_SIZE));
   const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
@@ -7580,7 +7593,7 @@ export function OrdersView({
   ] as const;
 
   const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly || myActiveOnly;
-  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || statusFilter !== "all";
+  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || statusFilter !== "all" || wholesaleFilter !== "all";
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
@@ -7917,11 +7930,14 @@ export function OrdersView({
             </div>
           </div>
 
+          <OrderWholesaleFilter value={wholesaleFilter} onChange={setWholesaleFilter} className="mt-3" />
+
           {hasMobileFilter && (
             <button
               type="button"
               onClick={() => {
                 setStatusFilter("all");
+                setWholesaleFilter("all");
                 setDateFrom("");
                 setDateTo("");
                 setTodayShipOnly(false);
@@ -8022,6 +8038,7 @@ export function OrdersView({
 
       {/* Filter bar */}
       <div className="hidden items-center gap-3 flex-wrap md:flex">
+        <OrderWholesaleFilter value={wholesaleFilter} onChange={setWholesaleFilter} />
         <div className="flex gap-1">
           {STATUS_FILTERS.map(({ key, label }) => (
             <button

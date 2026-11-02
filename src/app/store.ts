@@ -698,6 +698,11 @@ export type Order = {
   acquisitionOrderUpdatedAt?: string;
   acquisitionOrderUpdatedBy?: string;
   acquisitionOrderUpdatedByName?: string;
+  /** 独立的订单批发分类，仅专用接口写入，不改变客户类型、金额、提成或履约流程。 */
+  isWholesaleOrder?: boolean;
+  wholesaleOrderUpdatedAt?: string;
+  wholesaleOrderUpdatedBy?: string;
+  wholesaleOrderUpdatedByName?: string;
   /** 已停用的历史提成配置；新规则由服务端固定费率计算。 */
   commissionRate?: number;
   /** 管理员或订单负责人审批的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */

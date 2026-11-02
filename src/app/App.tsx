@@ -16,6 +16,7 @@ import { StockInView } from "./components/StockInView";
 import { DailyView } from "./components/DailyView";
 import { LossRecordsView } from "./components/LossRecordsView";
 import { OrdersView } from "./components/OrdersView";
+import { retainNewerWholesaleOrderTags } from "./components/OrderWholesaleTag";
 import { CatalogManagementView } from "./components/CatalogManagementView";
 import { CustomersView } from "./components/CustomersView";
 import { FinanceView } from "./components/FinanceView";
@@ -834,6 +835,7 @@ function AdminApp() {
           userDependencyKey(current.user) !== requestedUserKey
         ) return current;
         const data = Object.fromEntries(keysStillCurrent.map((key) => [key, responseData[key]]));
+        if (Array.isArray(data.orders)) data.orders = retainNewerWholesaleOrderTags(current.orders, data.orders);
         if (keysStillCurrent.includes("stock") && responseData.inventoryProjection) {
           data.inventoryProjection = responseData.inventoryProjection;
         }
@@ -943,6 +945,7 @@ function AdminApp() {
       lastSavedState.current = {
         ...(lastSavedState.current ?? currentStateToSave),
         ...patch,
+        ...(Array.isArray(patch.orders) ? { orders: retainNewerWholesaleOrderTags(stateRef.current.orders, patch.orders) } : {}),
         inventoryProjection: result.inventoryProjection ?? currentStateToSave.inventoryProjection,
         operationLogs: currentStateToSave.operationLogs,
       };
@@ -990,6 +993,7 @@ function AdminApp() {
           {
             ...withoutUser(current),
             ...scopedStatePatch,
+            ...(Array.isArray(scopedStatePatch.orders) ? { orders: retainNewerWholesaleOrderTags(current.orders, scopedStatePatch.orders) } : {}),
             inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
             operationLogs: [
               ...(result.appliedOperationLogs ?? (Array.isArray(patchLogs) ? patchLogs : [])),
@@ -1050,6 +1054,7 @@ function AdminApp() {
           {
             ...withoutUser(current),
             ...patch,
+            ...(Array.isArray(patch.orders) ? { orders: retainNewerWholesaleOrderTags(current.orders, patch.orders) } : {}),
             inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
             operationLogs: [...appliedLogs, ...(current.operationLogs ?? [])]
               .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
@@ -1223,9 +1228,9 @@ function AdminApp() {
           stock: Array.isArray(result.stock) ? result.stock : current.stock,
           batches: Array.isArray(result.batches) ? result.batches : current.batches,
           orders: Array.isArray(result.orders)
-            ? result.orders
+            ? retainNewerWholesaleOrderTags(current.orders, result.orders)
             : orderUpdates.size > 0
-              ? current.orders.map((order) => orderUpdates.get(order.id) ?? order)
+              ? retainNewerWholesaleOrderTags(current.orders, current.orders.map((order) => orderUpdates.get(order.id) ?? order))
               : current.orders,
           shipments: Array.isArray(result.shipments)
             ? result.shipments
@@ -1616,7 +1621,7 @@ function AdminApp() {
       setStateForMutation(mutationSession, (current) => {
         const next = {
           ...current,
-          orders: Array.isArray(result.orders) ? result.orders : current.orders,
+          orders: Array.isArray(result.orders) ? retainNewerWholesaleOrderTags(current.orders, result.orders) : current.orders,
           shipments: Array.isArray(result.shipments) ? result.shipments : current.shipments,
           inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
           operationLogs: result.operationLog
@@ -1666,7 +1671,7 @@ function AdminApp() {
         const next = normalizePersistedState(
           {
             ...withoutUser(current),
-            orders: Array.isArray(result.orders) ? result.orders : current.orders,
+            orders: Array.isArray(result.orders) ? retainNewerWholesaleOrderTags(current.orders, result.orders) : current.orders,
             operationLogs: withServerOperationLog(result.operationLog, current.operationLogs),
           },
           current.user
@@ -1735,7 +1740,7 @@ function AdminApp() {
           {
             ...withoutUser(current),
             personnel: Array.isArray(result.personnel) ? result.personnel : current.personnel,
-            orders: Array.isArray(result.orders) ? result.orders : current.orders,
+            orders: Array.isArray(result.orders) ? retainNewerWholesaleOrderTags(current.orders, result.orders) : current.orders,
             operationLogs: withServerOperationLog(result.operationLog, current.operationLogs),
           },
           replacementUser ?? current.user

@@ -26,6 +26,7 @@ import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "
 import {
   assertOrderAcquisitionTagUnchanged,
 } from "./order-acquisition-tag.mjs";
+import { assertOrderWholesaleTagUnchanged, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 import {
   ORDER_SOURCE_VALUES,
   isPlatformOrderSource,
@@ -6372,6 +6373,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     if (!currentOrder) throw new Error("新建订单必须通过订单专用接口");
     if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
     assertOrderAcquisitionTagUnchanged(currentOrder, nextOrder);
+    assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
     if (stableJson(currentOrder.items ?? []) !== stableJson(nextOrder.items ?? [])) {
@@ -8600,7 +8602,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
       url.pathname === "/api/orders/new-customer/linked-detail" || url.pathname === "/api/public-catalog/stock-options" ||
-      url.pathname === "/api/stock/status-history") {
+      url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag") {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -12493,6 +12495,57 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/orders/acquisition-tag" && req.method === "POST") {
     sendJson(req, res, 410, { ok: false, code: "ACQUISITION_TAG_RETIRED", error: "获新订单已改为新客提成审批，请由订单负责人提交申请，再由管理员审批" });
+    return;
+  }
+
+  if (url.pathname === "/api/orders/wholesale-tag" && req.method === "POST") {
+    const client = await pool.connect();
+    let currentOrder = null;
+    try {
+      const body = JSON.parse(await readBody(req, 16 * 1024));
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+                data -> 'orders' AS orders, data -> 'operationLogs' AS "operationLogs"
+         FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]
+      );
+      const state = rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      if (!orderPermissionAllowedForAccount(req.auth.account, "update")) {
+        throw httpError(403, "当前账号没有订单模块的修改权限", "ORDER_UPDATE_FORBIDDEN");
+      }
+      const target = resolveAuthorizedLockedOrderTarget(req, state, body?.orderId);
+      currentOrder = target.order;
+      const result = planOrderWholesaleTag(currentOrder, body, req.auth.account);
+      if (result.unchanged) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder });
+        return;
+      }
+      const nextOrder = result.order;
+      const nextOrders = target.orders.map((order) => order === currentOrder ? nextOrder : order);
+      const operationLog = createOperationLog(req, "订单管理", nextOrder.isWholesaleOrder ? "标记批发订单" : "取消批发标记",
+        `订单「${nextOrder.orderNo || nextOrder.id}」${nextOrder.isWholesaleOrder ? "标记为批发订单" : "取消批发订单标记"}`);
+      // Only classification metadata and its audit change. Do not trigger
+      // commission reconciliation, inventory normalization, or payment edits.
+      await client.query(
+        `UPDATE app_state SET data = jsonb_set(jsonb_set(data, '{orders}', $2::jsonb, true),
+           '{operationLogs}', $3::jsonb, true), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(nextOrders), JSON.stringify(pushOperationLog(state.operationLogs, operationLog))]
+      );
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error?.statusCode || 400, {
+        ok: false,
+        ...(error?.code ? { code: error.code } : {}),
+        error: error.message || "批发订单标记保存失败",
+        ...(error?.statusCode === 409 && currentOrder ? { order: currentOrder } : {}),
+      });
+    } finally {
+      client.release();
+    }
     return;
   }
 
