@@ -60,18 +60,21 @@ test("catalog and products retain the brand, shopping purpose and original sloga
   assert.ok(total < 100 * 1024, "brand artwork should remain lightweight as a set");
 });
 
-test("category tap preserves the existing product route and encodes category keys", () => {
+test("category tap preserves the existing product route and encodes category keys", async () => {
   let definition;
   const routes = [];
+  const siteFilter = { module: { exports: {} } };
+  vm.runInNewContext(await readFile(new URL("../../utils/site-filter.js", base), "utf8"), siteFilter);
   vm.runInNewContext(source, {
     Page(value) { definition = value; },
     require(path) {
+      if (path === "../../utils/site-filter") return siteFilter.module.exports;
       return path === "../../utils/navigation" ? { getNavigationMetrics: () => ({}) } : {};
     },
     wx: { navigateTo: (value) => routes.push(value.url) }
   });
   definition.onMinorCategoryTap({ currentTarget: { dataset: { category: "coral & reef", majorKey: "coral" } } });
-  assert.deepEqual(routes, ["/pages/products/index?category=coral%20%26%20reef&majorKey=coral"]);
+  assert.deepEqual(routes, ["/pages/products/index?category=coral%20%26%20reef&majorKey=coral&siteId=all"]);
   definition.onMinorCategoryTap({ currentTarget: { dataset: {} } });
   assert.equal(routes.length, 1);
 });

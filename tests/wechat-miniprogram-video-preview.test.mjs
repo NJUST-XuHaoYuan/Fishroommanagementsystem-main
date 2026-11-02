@@ -14,6 +14,9 @@ const previewSource = await readFile(
 const refreshSource = await readFile(
   new URL("../wechat-miniprogram/utils/public-catalog-refresh.js", import.meta.url), "utf8"
 );
+const siteFilterSource = await readFile(
+  new URL("../wechat-miniprogram/utils/site-filter.js", import.meta.url), "utf8"
+);
 const productsPageSource = await readFile(
   new URL("../wechat-miniprogram/pages/products/index.js", import.meta.url),
   "utf8"
@@ -269,6 +272,7 @@ function mediaPageHarness(kind = "specimens") {
   loadCommonJs(kind === "products" ? productsPageSource : specimensPageSource, {
     "../../utils/api": {}, "../../utils/catalog": {},
     "../../utils/navigation": { getNavigationMetrics: () => ({}) },
+    "../../utils/site-filter": loadCommonJs(siteFilterSource),
     "../../utils/public-catalog-refresh": {
       ...loadCommonJs(refreshSource),
       startPublicCatalogRefresh(page) { page.__publicCatalogIsVisible = true; },

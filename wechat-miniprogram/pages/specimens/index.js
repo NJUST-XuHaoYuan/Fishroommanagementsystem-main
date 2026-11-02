@@ -1,10 +1,12 @@
 const { fetchCatalog } = require("../../utils/api");
 const { returnToParent } = require("../../utils/navigation");
+const { SITE_OPTIONS, getSiteSelection, setSiteSelection } = require("../../utils/site-filter");
 const {
   buildViewModel,
   filterSpecimens,
   groupSpecimens,
-  findProduct
+  findProduct,
+  formatMoney
 } = require("../../utils/catalog");
 const {
   beginPublicCatalogRequest,
@@ -28,12 +30,6 @@ function decodeOption(value) {
   }
 }
 
-const SITE_OPTIONS = [
-  { id: "all", label: "全部" },
-  { id: "nanjing", label: "南京" },
-  { id: "jiangyin", label: "江阴" }
-];
-
 Page({
   data: {
     loading: true,
@@ -53,9 +49,8 @@ Page({
     activePreviewId: ""
   },
 
-  onLoad(options) {
-    const siteId = decodeOption(options.siteId);
-    const site = SITE_OPTIONS.find((item) => item.id === siteId) || SITE_OPTIONS[0];
+  onLoad(options = {}) {
+    const site = getSiteSelection(decodeOption(options.siteId));
     this.setData({
       productId: decodeOption(options.productId),
       speciesId: decodeOption(options.speciesId),
@@ -66,6 +61,8 @@ Page({
   },
 
   onShow() {
+    const site = getSiteSelection();
+    this.setData({ selectedSiteId: site.id, selectedSiteName: site.label });
     startPublicCatalogRefresh(this, () => this.loadSpecimens({ force: true, refreshing: !this.data.loading }));
   },
 
@@ -174,7 +171,19 @@ Page({
     const specimens = !siteDataReady && this.data.selectedSiteId !== "all" ? [] : filterSpecimens(this.viewModel, {
       ...selection, siteId: this.data.selectedSiteId
     }, "all");
+    const prices = specimens.map((item) => item.price).filter((price) => price > 0);
+    const minPrice = prices.length ? Math.min(...prices) : 0;
+    const maxPrice = prices.length ? Math.max(...prices) : 0;
+    const priceRange = !specimens.length ? "暂无库存"
+      : this.data.productId || minPrice === maxPrice ? formatMoney(minPrice)
+      : `${formatMoney(minPrice)}-${formatMoney(maxPrice)}`;
     this.setData({
+      context: this.data.context ? {
+        ...this.data.context,
+        specimenCount: specimens.length,
+        priceRange,
+        priceNote: this.data.productId && minPrice > 0 ? "起" : ""
+      } : null,
       specimens: groupSpecimens(specimens),
       filteredSpecimenCount: specimens.length,
       siteDataReady,
@@ -190,11 +199,13 @@ Page({
     const site = SITE_OPTIONS.find((item) => item.id === siteId);
     if (!site || site.id === this.data.selectedSiteId || !this.viewModel) return;
     if (site.id !== "all" && !this.data.siteDataReady) return;
+    setSiteSelection(site.id);
     this.setData({ selectedSiteId: site.id, selectedSiteName: site.label });
     this.showAllStock();
   },
 
   onClearSite() {
+    setSiteSelection("all");
     this.setData({ selectedSiteId: "all", selectedSiteName: "全部" });
     this.showAllStock();
   },
@@ -245,7 +256,7 @@ Page({
       : `speciesId=${encodeURIComponent(this.data.speciesId || "")}`;
     return {
       title: context ? `海洋森林 · ${context.name} · ${this.data.selectedSiteId === "all" ? "可选个体" : this.data.selectedSiteName + "库存"}` : "海洋森林 · 生物选购",
-      path: `/pages/specimens/index?${query}${this.data.selectedSiteId === "all" ? "" : `&siteId=${encodeURIComponent(this.data.selectedSiteId)}`}`,
+      path: `/pages/specimens/index?${query}&siteId=${encodeURIComponent(this.data.selectedSiteId)}`,
       imageUrl: context && context.image || undefined
     };
   }

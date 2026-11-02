@@ -177,6 +177,64 @@ page {
   }
 }
 
+.catalog-site-filter {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 16px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.catalog-site-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.catalog-site-options {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+}
+
+.catalog-site-button[size="mini"] {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 8px 4px;
+  border-radius: 0;
+  color: var(--ink-soft);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.catalog-site-button[size="mini"].is-selected {
+  color: var(--brand-dark);
+  font-weight: 700;
+}
+
+.catalog-site-button[size="mini"].is-selected::before {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  width: 20px;
+  height: 2px;
+  margin-left: -10px;
+  background: var(--brand);
+  content: "";
+}
+
+.catalog-site-hover { opacity: 0.65; }
+
 view,
 text,
 scroll-view,

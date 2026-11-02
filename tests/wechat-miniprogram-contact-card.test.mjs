@@ -14,6 +14,10 @@ function load(source, dependencies = {}, globals = {}) {
   return context.module.exports;
 }
 const contact = load(await read("utils/contact-card.js"));
+const siteFilter = load(await read("utils/site-filter.js"));
+const { formatMoney } = load(await read("utils/catalog.js"), {
+  "./api": { getApiBaseUrl: () => "https://fish.example" }
+});
 
 test("only the contact button floats; transparent scroll spacing keeps the final record clear", async () => {
   const css = await read("pages/detail/index.wxss");
@@ -58,9 +62,10 @@ test("list pages only present stock and navigate to detail without preparing cus
   const dependencies = {
     "../../utils/api": {},
     "../../utils/navigation": { getNavigationMetrics: () => ({}) },
+    "../../utils/site-filter": siteFilter,
     "../../utils/public-catalog-refresh": {},
     "../../utils/card-video-preview": { stopCardVideoPreview() {} },
-    "../../utils/catalog": { filterProducts: () => [product], filterSpecimens: () => [specimen], groupSpecimens: (items) => items }
+    "../../utils/catalog": { formatMoney, filterProducts: () => [product], filterSpecimens: () => [specimen], groupSpecimens: (items) => items }
   };
   for (const route of ["products", "specimens"]) {
     let page;

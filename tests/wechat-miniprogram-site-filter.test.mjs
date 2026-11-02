@@ -4,10 +4,11 @@ import test from "node:test";
 import vm from "node:vm";
 
 const read = (path) => readFile(new URL(`../wechat-miniprogram/${path}`, import.meta.url), "utf8");
-const [catalogSource, pageSource, refreshSource, videoSource, detailSource, navigationSource, contactSource] = await Promise.all([
+const [catalogSource, pageSource, refreshSource, videoSource, detailSource, navigationSource, contactSource, siteFilterSource] = await Promise.all([
   read("utils/catalog.js"), read("pages/specimens/index.js"),
   read("utils/public-catalog-refresh.js"), read("utils/card-video-preview.js"),
   read("pages/detail/index.js"), read("utils/navigation.js"), read("utils/contact-card.js"),
+  read("utils/site-filter.js"),
 ]);
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
@@ -78,6 +79,7 @@ function pageHarness(initialCatalog = fixture()) {
     } },
     "../../utils/catalog": catalog,
     "../../utils/navigation": { returnToParent() {} },
+    "../../utils/site-filter": load(siteFilterSource, {}, { wx, getApp: () => app }),
     "../../utils/public-catalog-refresh": refresh,
     "../../utils/card-video-preview": load(videoSource, {}, { wx }),
   }, { wx, getApp: () => app, Page(value) { page = value; } });
@@ -218,7 +220,7 @@ test("the actual page switches city inventory and counts fish before grouping ca
   assert.deepEqual(fishIds(page), ["a-j1", "a-j2"]);
   harness.select("unsupported");
   assert.equal(page.data.selectedSiteId, "jiangyin");
-  assert.equal(page.data.context.specimenCount, 4, "the overview remains explicitly scoped to all locations");
+  assert.equal(page.data.context.specimenCount, 2, "the overview matches the selected city's visible fish");
 });
 
 test("species-level counts include that species' products but exclude other species", async () => {
@@ -473,7 +475,7 @@ test("an expired card preview refreshes its source and requires a fresh tap", as
   harness.page.onUnload();
 });
 
-test("shares round-trip the location for product and species links and omit the all-location default", async () => {
+test("shares round-trip the location for product and species links including explicit all locations", async () => {
   for (const selection of [{ productId: "product-a" }, { speciesId: "species-a" }]) {
     const sender = pageHarness();
     await sender.open({ ...selection, siteId: "%6A%69%61%6E%67%79%69%6E" });
@@ -486,7 +488,7 @@ test("shares round-trip the location for product and species links and omit the 
     assert.equal(recipient.page.data.selectedSiteId, "jiangyin");
     assert.deepEqual(fishIds(recipient.page), fishIds(sender.page));
     sender.page.onClearSite();
-    assert.doesNotMatch(sender.page.onShareAppMessage().path, /siteId=/);
+    assert.match(sender.page.onShareAppMessage().path, /&siteId=all$/);
   }
   for (const siteId of ["unsupported", "%E0%A4%A"]) {
     const harness = pageHarness();

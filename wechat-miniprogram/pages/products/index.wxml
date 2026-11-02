@@ -34,6 +34,23 @@
       <text wx:if="{{majorLabel}}" class="major-label">{{majorLabel}}</text>
     </view>
 
+    <view class="catalog-site-filter products-site-filter">
+      <text class="catalog-site-label">所在地</text>
+      <view class="catalog-site-options">
+        <button
+          wx:for="{{siteOptions}}"
+          wx:key="id"
+          class="catalog-site-button {{selectedSiteId === item.id ? 'is-selected' : ''}}"
+          size="mini"
+          hover-class="catalog-site-hover"
+          aria-label="所在地{{item.label}}{{selectedSiteId === item.id ? '，已选中' : ''}}"
+          aria-pressed="{{selectedSiteId === item.id}}"
+          data-site-id="{{item.id}}"
+          bindtap="onSiteTap"
+        >{{item.label}}</button>
+      </view>
+    </view>
+
     <view wx:if="{{loading}}" class="products-loading">
       <view class="skeleton loading-category"></view>
       <view class="skeleton loading-search"></view>
@@ -75,7 +92,7 @@
       </view>
 
       <view class="product-head">
-        <view class="product-heading">全部商品</view>
+        <view class="product-heading">{{selectedSiteId === 'all' ? '全部商品' : selectedSiteName + '商品'}}</view>
         <view class="product-summary">{{products.length}} 款 · {{filteredSpecimenCount}} {{categoryInfo.unit}}</view>
       </view>
 
@@ -120,6 +137,12 @@
             </view>
           </view>
         </view>
+      </view>
+
+      <view wx:elif="{{selectedSiteId !== 'all' && !categoryInfo.productCount}}" class="state-panel compact products-state">
+        <view class="empty-title">{{selectedSiteName}}暂无可选商品</view>
+        <view class="empty-text">这个小类在{{selectedSiteName}}暂时没有公开可选库存，可切换所在地查看。</view>
+        <button class="primary-button" bindtap="onClearSite">查看全部所在地</button>
       </view>
 
       <view wx:else class="state-panel compact products-state">

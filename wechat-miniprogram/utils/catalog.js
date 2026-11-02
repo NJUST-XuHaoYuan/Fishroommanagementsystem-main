@@ -309,8 +309,11 @@ function buildMajorDefinitions(normalized) {
   }));
 }
 
-function buildViewModel(catalog) {
+function buildViewModel(catalog, siteId = "all") {
   const normalized = normalizeCatalog(catalog);
+  if (siteId && siteId !== "all") {
+    normalized.stock = normalized.stock.filter((item) => item.siteId === siteId);
+  }
   const majorDefinitions = buildMajorDefinitions(normalized);
   const majorByKey = {};
   const speciesById = {};
@@ -489,7 +492,8 @@ function buildViewModel(catalog) {
 
   const speciesCards = normalized.species.map((species) => {
     const speciesSpecimens = specimens.filter((item) => item.speciesId === species.id);
-    const speciesProducts = asArray(productsBySpecies[species.id]);
+    const speciesProducts = asArray(productsBySpecies[species.id])
+      .filter((product) => productCards.some((item) => item.id === product.id));
     const featuredSpecimen = representativeSpecimen(speciesSpecimens);
     const commonNamesText = species.commonNames.join(" / ");
     return {

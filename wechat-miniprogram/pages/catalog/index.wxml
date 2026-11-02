@@ -34,6 +34,23 @@
     </button>
   </view>
 
+  <view class="catalog-site-filter">
+    <text class="catalog-site-label">所在地</text>
+    <view class="catalog-site-options">
+      <button
+        wx:for="{{siteOptions}}"
+        wx:key="id"
+        class="catalog-site-button {{selectedSiteId === item.id ? 'is-selected' : ''}}"
+        size="mini"
+        hover-class="catalog-site-hover"
+        aria-label="只看{{item.id === 'all' ? '全部所在地' : item.label}}的生物{{selectedSiteId === item.id ? '，已选中' : ''}}"
+        aria-pressed="{{selectedSiteId === item.id}}"
+        data-site-id="{{item.id}}"
+        bindtap="onSiteTap"
+      >{{item.label}}</button>
+    </view>
+  </view>
+
   <view wx:if="{{loading}}" class="catalog-loading">
     <view class="skeleton loading-heading"></view>
     <view class="skeleton loading-grid"></view>
@@ -92,7 +109,8 @@
   </view>
 
   <view wx:else class="state-panel">
-    <view class="empty-title">当前没有公开可选商品</view>
-    <view class="empty-text">下拉刷新后再试。</view>
+    <view class="empty-title">{{selectedSiteId === 'all' ? '当前没有公开可选商品' : selectedSiteName + '暂无可选生物'}}</view>
+    <view class="empty-text">{{selectedSiteId === 'all' ? '下拉刷新后再试。' : '可以切换所在地，看看其他可选生物。'}}</view>
+    <button wx:if="{{selectedSiteId !== 'all'}}" class="primary-button" bindtap="onClearSite">查看全部所在地</button>
   </view>
 </view>
