@@ -25,6 +25,34 @@ function result(rows = [], rowCount = rows.length) {
   return { rows, rowCount };
 }
 
+function catalogPickerPreviewRows(values = []) {
+  const stockIds = new Set(Array.isArray(values[1]) ? values[1] : []);
+  const records = Array.isArray(state.bioRecords) ? state.bioRecords : [];
+  const rows = [];
+  for (const [recordPosition, record] of records.entries()) {
+    if (!stockIds.has(record.stockItemId)) continue;
+    for (const kind of ["photos", "videos"]) {
+      const media = Array.isArray(record[kind]) ? record[kind] : [];
+      for (const [mediaPosition, url] of media.entries()) {
+        const value = String(url ?? "");
+        if (value.length < 1 || value.length > 4096 || !/^(\/uploads\/|https?:\/\/)/.test(value) ||
+            /(personnel-private|\/api\/|\.\.|%2e|%2f|%5c|video-derived)/i.test(value)) continue;
+        const pattern = kind === "photos" ? /\.(jpe?g|png|webp|gif|heic|heif)([?#].*)?$/i : /\.(mp4|mov|m4v|webm|3gp|3g2)([?#].*)?$/i;
+        if (!pattern.test(value)) continue;
+        rows.push({ stock_item_id: record.stockItemId, kind, picker_preview_url: value,
+          recordedAt: String(record.date ?? ""), recordPosition, mediaPosition });
+      }
+    }
+  }
+  rows.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.recordPosition - a.recordPosition || b.mediaPosition - a.mediaPosition);
+  const selected = new Map();
+  for (const row of rows) {
+    const key = JSON.stringify([row.stock_item_id, row.kind]);
+    if (!selected.has(key)) selected.set(key, { stock_item_id: row.stock_item_id, kind: row.kind, picker_preview_url: row.picker_preview_url });
+  }
+  return [...selected.values()];
+}
+
 function publicBioProjectionRow(sql, values = []) {
   if (!/\bcandidate_stock\s+AS\s+MATERIALIZED\b/i.test(sql)) return null;
   const targetId = String(values[1] ?? "").trim();
@@ -275,6 +303,7 @@ function runQuery(query, values = []) {
     });
     return result(scoped);
   }
+  if (/\bpicker_records\s+AS\s+MATERIALIZED\b/i.test(sql)) return result(catalogPickerPreviewRows(values));
   if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
     return result([appStateRow(sql, values)]);
   }

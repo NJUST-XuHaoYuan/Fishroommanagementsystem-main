@@ -18,6 +18,7 @@ import {
 } from "../store";
 import type { Product, Species, SpeciesMajorCategoryKey } from "../store";
 import {
+  applyStockVisibilitySelection,
   copyPublicCatalogPolicy,
   getPublicCatalogProductDisplayCap,
   MAX_PUBLIC_CATALOG_DISPLAY_CAP,
@@ -240,6 +241,7 @@ export function CatalogManagementView() {
   ));
   const lastSeenSavedPolicyFingerprint = useRef(savedPolicyFingerprint);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [speciesSearch, setSpeciesSearch] = useState("");
   const [productSearch, setProductSearch] = useState("");
   const [speciesPage, setSpeciesPage] = useState(1);
@@ -379,32 +381,53 @@ export function CatalogManagementView() {
   };
   const clearAllRules = () => setDraft(copyPublicCatalogPolicy(undefined));
 
-  const save = async () => {
-    if (saving || !canEdit) return;
+  const save = async (selection?: { ids: string[]; hidden: boolean }): Promise<boolean> => {
+    if (savingRef.current || !canEdit) return false;
     if (remotePolicyChanged) {
       toast.error("鱼单规则已被其他管理员更新，请先载入最新规则再修改");
-      return;
+      return false;
     }
-    const nextPolicy = normalizePublicCatalogPolicy(draft);
-    if (!confirmWrite("修改", "保存鱼单展示规则；新的公开网站和小程序请求会立即按新规则生成目录和库存数量。")) return;
+    const nextPolicy = selection
+      ? applyStockVisibilitySelection(normalizedDraft, selection.ids, selection.hidden)
+      : normalizePublicCatalogPolicy(draft);
+    if (selection && publicCatalogPolicyFingerprint(nextPolicy) === publicCatalogPolicyFingerprint(normalizedDraft)) {
+      toast.info(selection.hidden ? "选中的鱼已设为单只隐藏" : "选中的鱼没有单只隐藏限制；其他展示规则仍然生效");
+      return false;
+    }
+    const description = selection
+      ? `${selection.hidden ? "隐藏" : "恢复允许展示"}选中的 ${new Set(selection.ids).size} 条鱼并保存。${changed ? "当前其他未保存的鱼单规则也会一并保存。" : ""}${selection.hidden ? "不会改变库存、售价或健康状态。" : "恢复后仍受类型、物种、商品规则、数量上限及可售状态限制。"}`
+      : "保存鱼单展示规则；新的公开网站和小程序请求会立即按新规则生成目录和库存数量。";
+    if (!confirmWrite("修改", description)) return false;
+    savingRef.current = true;
     setSaving(true);
-    const ok = await saveStateTransform((latest) => {
-      // Recheck at mutation time: a background refresh can update the store
-      // after this draft was rendered but before the save confirmation closes.
-      if (publicCatalogPolicyFingerprint(latest.publicCatalogPolicy) !== baselinePolicyFingerprint) {
-        setRemotePolicyChanged(true);
-        throw new Error("鱼单规则已被其他管理员更新，请载入最新规则后重试");
+    try {
+      const ok = await saveStateTransform((latest) => {
+        // Recheck at mutation time: a background refresh can update the store
+        // after this draft was rendered but before the save confirmation closes.
+        if (publicCatalogPolicyFingerprint(latest.publicCatalogPolicy) !== baselinePolicyFingerprint) {
+          setRemotePolicyChanged(true);
+          throw new Error("鱼单规则已被其他管理员更新，请载入最新规则后重试");
+        }
+        return { ...latest, publicCatalogPolicy: nextPolicy };
+      });
+      if (!ok) {
+        toast.error("鱼单规则未保存。可能已有其他管理员更新，请刷新页面后重新确认");
+        return false;
       }
-      return { ...latest, publicCatalogPolicy: nextPolicy };
-    });
-    setSaving(false);
-    if (!ok) return toast.error("鱼单规则未保存。可能已有其他管理员更新，请刷新页面后重新确认");
-    const storedPolicy = copyPublicCatalogPolicy(nextPolicy);
-    setBaselinePolicy(storedPolicy);
-    setDraft(copyPublicCatalogPolicy(storedPolicy));
-    setRemotePolicyChanged(false);
-    lastSeenSavedPolicyFingerprint.current = publicCatalogPolicyFingerprint(storedPolicy);
-    toast.success("鱼单规则已保存；新请求立即生效，已打开的公开页面和小程序会在约 1 分钟内刷新");
+      const storedPolicy = copyPublicCatalogPolicy(nextPolicy);
+      setBaselinePolicy(storedPolicy);
+      setDraft(copyPublicCatalogPolicy(storedPolicy));
+      setRemotePolicyChanged(false);
+      lastSeenSavedPolicyFingerprint.current = publicCatalogPolicyFingerprint(storedPolicy);
+      toast.success("鱼单规则已保存；新请求立即生效，已打开的公开页面和小程序会在约 1 分钟内刷新");
+      return true;
+    } catch {
+      toast.error("鱼单规则未保存，请检查网络或载入最新规则后重试；选中的鱼仍保留");
+      return false;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   if (!canEdit) {
@@ -412,7 +435,7 @@ export function CatalogManagementView() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3 sm:p-6">
+    <div className="flex min-h-0 flex-col p-3 sm:p-6">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 pb-8">
         <header className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
@@ -783,8 +806,9 @@ export function CatalogManagementView() {
               key={draftSessionKey}
               policy={normalizedDraft}
               productRules={new Map(productSummaries.map(summary => [summary.product.id, summary]))}
-              disabled={!canEdit || saving}
-              onHiddenChange={(stockId, hidden) => updateHidden("hiddenStockIds", stockId, hidden)}
+              initialSiteId={state.activeSiteId}
+              disabled={!canEdit || saving || remotePolicyChanged}
+              onApplySelection={(ids, hidden) => save({ ids, hidden })}
             />
           </TabsContent>
         </Tabs>
@@ -797,7 +821,7 @@ export function CatalogManagementView() {
             <div className="min-w-0">
               <h2 id="catalog-fill-rule-title" className="font-semibold">限量展示与自动补位</h2>
               <p className="mt-1 max-w-4xl text-sm leading-6 text-muted-foreground">
-                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗、变为病鱼或单只隐藏后，系统会在下一次公开鱼单请求时自动补位。单只隐藏需要先保存规则。
+                商品设定显示上限后，先选有维护照片或视频的库存，再按最新维护时间排序；同时刻的库存随机选择，剩余名额按库存顺序补足。库存出库、售出、损耗、变为病鱼或单只隐藏后，系统会在下一次公开鱼单请求时自动补位。按单鱼选好鱼后，点击隐藏或恢复并确认即可保存。
               </p>
             </div>
           </div>

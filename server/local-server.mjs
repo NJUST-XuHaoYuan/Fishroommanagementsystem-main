@@ -1333,6 +1333,32 @@ function publicCatalogMediaUrls(value, limit = 6) {
   return publicMediaUrls(value, limit).map(publicCatalogMediaUrl);
 }
 
+// The management picker needs just one still image per visible card. Never
+// project a maintenance record, its text or an entire media list to the client.
+function catalogStockPickerImageUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.length > 4096 || /[\u0000-\u001f\u007f]/u.test(raw)) return "";
+  try {
+    const parsed = new URL(raw, "http://fishroom.local");
+    const path = decodeURIComponent(parsed.pathname);
+    if (parsed.username || parsed.password || path.includes("\\") ||
+        path.split("/").some((part) => part === ".." || part === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY || part === VIDEO_DERIVATIVE_DIRECTORY) ||
+        path.startsWith("/api/")) return "";
+    if (raw.startsWith("/uploads/")) {
+      const localPath = localUploadPathFromUrl(parsed.pathname);
+      if (!localPath || isPersonnelPrivateAttachmentPath(uploadDir, localPath) || isVideoDerivativePath(uploadDir, localPath)) return "";
+      if (!isSupportedImageMime(mimeForExtension(extname(localPath)))) return "";
+      return parsed.pathname;
+    }
+    if (!["http:", "https:"].includes(parsed.protocol) || !/^https?:\/\//i.test(raw)) return "";
+    // Raster formats only: SVG/HTML and video originals are not image previews.
+    if (!isSupportedImageMime(mimeForExtension(extname(path)))) return "";
+    return publicCatalogMediaUrl(raw);
+  } catch {
+    return "";
+  }
+}
+
 function videoDerivativeSourceDescriptor(value) {
   const raw = String(value ?? "").trim();
   if (!raw || raw.length > 4096 || raw.includes("\0")) return null;
@@ -8787,6 +8813,17 @@ async function handleApi(req, res, url) {
       const products = new Map(state.products.map((item) => [String(item?.id ?? ""), item]));
       const species = new Map(state.species.map((item) => [String(item?.id ?? ""), item]));
       const siteNames = new Map(sites.map((site) => [site.id, site.name]));
+      const tanksById = new Map();
+      for (const group of state.tankGroups) {
+        for (const subTank of Array.isArray(group?.subTanks) ? group.subTanks : []) {
+          const id = String(subTank?.id ?? "").trim();
+          if (id && !tanksById.has(id)) tanksById.set(id, { group, subTank });
+        }
+      }
+      const specialTankIds = new Set(["__in_transit__", "__unassigned__"]);
+      if (input.subTankId !== "all" && !specialTankIds.has(input.subTankId) && !tanksById.has(input.subTankId)) {
+        throw httpError(400, "缸位不存在，请刷新后重试");
+      }
       const needle = input.search.toLocaleLowerCase();
       const matches = [];
       for (const item of state.stock) {
@@ -8796,26 +8833,104 @@ async function handleApi(req, res, url) {
         const outStock = shippedIds.has(id);
         if ((item.lost || outStock) && !hidden) continue;
         if (input.filter === "hidden" && !hidden) continue;
-        const siteId = stockSiteId(state, item);
+        const tank = tanksById.get(String(item.subTankId ?? "").trim());
+        const inTransit = isStockInTransfer(item);
+        const siteId = normalizeSiteId(inTransit
+          ? item.tankTransfer?.fromSiteId || tank?.group?.siteId || item.siteId
+          : tank?.group?.siteId || item.siteId);
         if (input.siteId !== ALL_SITE_ID && input.siteId !== siteId) continue;
         const product = products.get(String(item.productId ?? ""));
-        const tank = findSubTank(state, item.subTankId);
+        const tankGroupId = inTransit ? "__in_transit__" : tank ? String(tank.group.id) : "__unassigned__";
+        const tankGroupName = inTransit ? "移缸在途" : tank ? String(tank.group.name ?? "") : "未分配/原缸位已删除";
+        const subTankId = inTransit ? "__in_transit__" : tank ? String(tank.subTank.id) : "__unassigned__";
+        const subTankName = inTransit ? "移缸在途" : tank ? String(tank.subTank.name ?? "") : "未分配/原缸位已删除";
         const candidate = {
           id, code: String(item.code ?? ""), productId: String(item.productId ?? ""),
           productName: String(product?.name ?? "未知商品"),
           speciesName: String(species.get(String(product?.speciesId ?? ""))?.name ?? ""),
+          productSize: String(product?.size ?? ""), productOrigin: String(product?.origin ?? ""),
           siteId, siteName: siteNames.get(siteId) || siteId,
-          tankName: [tank?.group?.name, tank?.subTank?.name].filter(Boolean).join(" / "),
+          tankGroupId, tankGroupName, subTankId, subTankName,
+          tankName: inTransit ? `移缸在途${item.tankTransfer?.fromTankName ? `（原缸：${String(item.tankTransfer.fromTankName)}）` : ""}`
+            : tank ? [tankGroupName, subTankName].filter(Boolean).join(" / ") : tankGroupName,
           status: String(item.status ?? "healthy"), sold: Boolean(item.sold || reservedIds.has(id)),
-          inTransit: isStockInTransfer(item), lost: Boolean(item.lost), outStock, hidden,
+          inTransit, lost: Boolean(item.lost), outStock, hidden,
         };
         if (needle && ![candidate.id, candidate.code, candidate.productName, candidate.speciesName,
-          candidate.siteName, candidate.tankName].some((value) => value.toLocaleLowerCase().includes(needle))) continue;
+          candidate.productSize, candidate.productOrigin, candidate.siteName, candidate.tankName]
+          .some((value) => value.toLocaleLowerCase().includes(needle))) continue;
         matches.push(candidate);
       }
-      const page = Math.min(input.page, Math.max(1, Math.ceil(matches.length / input.pageSize)));
-      sendJson(req, res, 200, { ok: true, items: matches.slice((page - 1) * input.pageSize, page * input.pageSize),
-        total: matches.length, page, pageSize: input.pageSize, sites });
+      const sortFields = ["siteId", "tankGroupId", "subTankId", "productId", "code", "id"];
+      matches.sort((left, right) => {
+        for (const field of sortFields) {
+          const compared = left[field].localeCompare(right[field], "zh-CN", { numeric: true });
+          if (compared) return compared;
+        }
+        return 0;
+      });
+      const tankCounts = new Map();
+      for (const item of matches) {
+        const key = JSON.stringify([item.siteId, item.tankGroupId, item.subTankId]);
+        if (!tankCounts.has(key)) {
+          const { siteId, siteName, tankGroupId, tankGroupName, subTankId, subTankName } = item;
+          tankCounts.set(key, { siteId, siteName, tankGroupId, tankGroupName, subTankId, subTankName, count: 0 });
+        }
+        tankCounts.get(key).count += 1;
+      }
+      const filteredMatches = input.subTankId === "all" ? matches : matches.filter((item) => item.subTankId === input.subTankId);
+      const page = Math.min(input.page, Math.max(1, Math.ceil(filteredMatches.length / input.pageSize)));
+      const pageItems = filteredMatches.slice((page - 1) * input.pageSize, page * input.pageSize);
+      const previewsById = new Map();
+      if (pageItems.length > 0) {
+        // Bound both the database projection and response to this page only.
+        // Photos take precedence (as in daily maintenance); video-only fish get
+        // a generated still poster, never the original video or autoplay media.
+        const previewResult = await pool.query(
+          `WITH picker_records AS MATERIALIZED (
+             SELECT record_item, record_position
+             FROM app_state,
+                  jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
+                    WITH ORDINALITY AS records(record_item, record_position)
+             WHERE id = $1 AND record_item ->> 'stockItemId' = ANY($2::text[])
+           ), picker_media AS (
+             SELECT record_item ->> 'stockItemId' AS stock_item_id,
+                    record_item ->> 'date' AS recorded_at, record_position,
+                    kind, media_url, media_position
+             FROM picker_records
+             CROSS JOIN (VALUES ('photos'), ('videos')) AS kinds(kind)
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE WHEN jsonb_typeof(record_item -> kind) = 'array'
+                 THEN record_item -> kind ELSE '[]'::jsonb END
+             ) WITH ORDINALITY AS media(media_url, media_position)
+             WHERE length(media_url) BETWEEN 1 AND 4096
+               AND media_url ~ '^(/uploads/|https?://)'
+               AND media_url !~* '(personnel-private|/api/|\\.\\.|%2e|%2f|%5c|video-derived)'
+               AND ((kind = 'photos' AND media_url ~* '\\.(jpe?g|png|webp|gif|heic|heif)([?#].*)?$')
+                 OR (kind = 'videos' AND media_url ~* '\\.(mp4|mov|m4v|webm|3gp|3g2)([?#].*)?$'))
+           ), picker_ranked AS (
+             SELECT *, row_number() OVER (
+               PARTITION BY stock_item_id, kind
+               ORDER BY recorded_at DESC NULLS LAST, record_position DESC, media_position DESC
+             ) AS preview_rank FROM picker_media
+           )
+           SELECT stock_item_id, kind, media_url AS picker_preview_url
+           FROM picker_ranked WHERE preview_rank = 1`,
+          [stateId, pageItems.map((item) => item.id)]
+        );
+        for (const preview of previewResult.rows) {
+          const entry = previewsById.get(preview.stock_item_id) ?? {};
+          if (preview.kind === "photos") entry.photo = catalogStockPickerImageUrl(preview.picker_preview_url);
+          if (preview.kind === "videos") entry.poster = publicVideoDerivativeUrl(preview.picker_preview_url, VIDEO_DERIVATIVE_KINDS.poster);
+          previewsById.set(preview.stock_item_id, entry);
+        }
+      }
+      const items = pageItems.map((item) => {
+        const preview = previewsById.get(item.id);
+        return { ...item, imageUrl: preview?.photo || preview?.poster || catalogStockPickerImageUrl(products.get(item.productId)?.imageUrl) };
+      });
+      sendJson(req, res, 200, { ok: true, items, total: filteredMatches.length, page, pageSize: input.pageSize,
+        sites, tanks: [...tankCounts.values()] });
     } catch (error) {
       sendJson(req, res, error?.statusCode || 400, { ok: false, error: error.message || "鱼只列表加载失败" });
     }

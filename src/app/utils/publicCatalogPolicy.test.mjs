@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyStockVisibilitySelection,
   DEFAULT_PUBLIC_CATALOG_POLICY,
   copyPublicCatalogPolicy,
   getPublicCatalogProductDisplayCap,
@@ -8,6 +9,22 @@ import {
   normalizePublicCatalogPolicy,
   publicCatalogPolicyFingerprint,
 } from "./publicCatalogPolicy.ts";
+
+test("batch visibility changes only selected exact stock IDs and keeps other draft rules intact", () => {
+  const original = copyPublicCatalogPolicy({
+    hiddenMajorCategoryKeys: ["coral"], hiddenSpeciesIds: ["species-a"],
+    hiddenProductIds: ["product-a"], hiddenStockIds: ["old-hidden", "restore-me"],
+    productDisplayCaps: { "product-a": 10 },
+  });
+  const before = structuredClone(original);
+  const hidden = applyStockVisibilitySelection(original, ["fish-a", "fish-b", "fish-a"], true);
+  assert.deepEqual(hidden.hiddenStockIds, ["old-hidden", "restore-me", "fish-a", "fish-b"]);
+  const restored = applyStockVisibilitySelection(hidden, ["restore-me", "fish-b"], false);
+  assert.deepEqual(restored.hiddenStockIds, ["old-hidden", "fish-a"]);
+  assert.deepEqual({ ...restored, hiddenStockIds: [] }, { ...original, hiddenStockIds: [] });
+  assert.deepEqual(original, before, "selection operations never mutate the current or baseline draft");
+  assert.deepEqual(applyStockVisibilitySelection(original, [], false), original);
+});
 
 test("normalizes catalog policy and discards unsafe cap values", () => {
   assert.deepEqual(normalizePublicCatalogPolicy({

@@ -245,15 +245,16 @@ export function parsePublicCatalogStockOptionsInput(value = {}) {
   if (!isPlainObject(value)) throw new Error("鱼只筛选条件必须是普通对象");
   const search = String(value.search ?? "").trim();
   const siteId = String(value.siteId ?? "all").trim() || "all";
+  const subTankId = String(value.subTankId ?? "all").trim() || "all";
   const filter = value.filter ?? "all";
   const page = Number(value.page ?? 1);
   const pageSize = Number(value.pageSize ?? 30);
-  if (search.length > 120 || siteId.length > MAX_POLICY_ENTITY_ID_LENGTH) throw new Error("鱼只搜索条件过长");
+  if (search.length > 120 || siteId.length > MAX_POLICY_ENTITY_ID_LENGTH || subTankId.length > MAX_POLICY_ENTITY_ID_LENGTH) throw new Error("鱼只搜索条件过长");
   if (!["all", "hidden"].includes(filter)) throw new Error("不支持的鱼只筛选条件");
   if (!Number.isSafeInteger(page) || page < 1 || page > 1_000_000 ||
       !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("分页参数无效");
   return {
-    search, siteId, filter, page, pageSize,
+    search, siteId, subTankId, filter, page, pageSize,
     hiddenStockIds: Object.prototype.hasOwnProperty.call(value, "hiddenStockIds")
       ? assertUniqueStringArray(value.hiddenStockIds, "隐藏鱼只")
       : undefined,

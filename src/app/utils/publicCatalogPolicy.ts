@@ -100,6 +100,20 @@ export function copyPublicCatalogPolicy(value: unknown): PublicCatalogPolicy {
   };
 }
 
+/** Change only the selected inventory IDs; never infer siblings from product/species. */
+export function applyStockVisibilitySelection(
+  policy: PublicCatalogPolicy,
+  stockIds: readonly string[],
+  hidden: boolean,
+): PublicCatalogPolicy {
+  const next = copyPublicCatalogPolicy(policy);
+  const selected = new Set(uniqueStrings(stockIds));
+  next.hiddenStockIds = hidden
+    ? [...new Set([...next.hiddenStockIds, ...selected])]
+    : next.hiddenStockIds.filter((id) => !selected.has(id));
+  return next;
+}
+
 /** Stable, order-insensitive identity for a policy whose ID arrays are sets. */
 export function publicCatalogPolicyFingerprint(value: unknown): string {
   const normalized = normalizePublicCatalogPolicy(value);

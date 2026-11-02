@@ -50,9 +50,10 @@ test("single-fish policy validates IDs and preserves references during unrelated
 });
 
 test("stock picker pagination and draft hidden inputs are bounded and validated", () => {
-  assert.deepEqual(parsePublicCatalogStockOptionsInput({}), { search: "", siteId: "all", filter: "all", page: 1, pageSize: 30, hiddenStockIds: undefined });
+  assert.deepEqual(parsePublicCatalogStockOptionsInput({}), { search: "", siteId: "all", subTankId: "all", filter: "all", page: 1, pageSize: 30, hiddenStockIds: undefined });
   assert.deepEqual(parsePublicCatalogStockOptionsInput({ filter: "hidden", hiddenStockIds: ["189"], pageSize: 50 }).hiddenStockIds, ["189"]);
-  for (const input of [{ pageSize: 51 }, { page: 0 }, { page: 1.5 }, { search: "x".repeat(121) }, { hiddenStockIds: "189" }, { filter: "unrestricted" }]) {
+  assert.equal(parsePublicCatalogStockOptionsInput({ subTankId: " tank-n " }).subTankId, "tank-n");
+  for (const input of [{ pageSize: 51 }, { page: 0 }, { page: 1.5 }, { search: "x".repeat(121) }, { subTankId: "x".repeat(241) }, { hiddenStockIds: "189" }, { filter: "unrestricted" }]) {
     assert.throws(() => parsePublicCatalogStockOptionsInput(input));
   }
 });

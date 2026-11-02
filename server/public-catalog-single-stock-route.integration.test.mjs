@@ -81,7 +81,7 @@ test("single-fish generic policy writes enforce administrator, exact IDs and opt
   assert.deepEqual((await s.readPersistedState()).publicCatalogPolicy.hiddenStockIds, ["fish-189"]);
 });
 
-test("stock picker is authenticated admin-only, private, bounded and contains no media/cost/business details", async (t) => {
+test("stock picker is authenticated admin-only, private, bounded and contains no record/cost/business details", async (t) => {
   const s = await setup(t); const before = await s.readPersistedState();
   for (const [token, status] of [["", 401], [s.staff, 403]]) {
     const denied = await s.picker({}, token);
@@ -90,9 +90,9 @@ test("stock picker is authenticated admin-only, private, bounded and contains no
   }
   const page = await s.picker({ pageSize: 2 }); ok(page);
   assert.equal(page.body.items.length, 2); assert.equal(page.body.total, 3);
-  assert.deepEqual(Object.keys(page.body.items[0]).sort(), ["id", "code", "productId", "productName", "speciesName", "siteId", "siteName", "tankName", "status", "sold", "inTransit", "lost", "outStock", "hidden"].sort());
-  assert.doesNotMatch(JSON.stringify(page.body), /PRIVATE_FISH_NOTE|purchasePrice|basePrice|bioRecords|\/uploads\//);
-  for (const body of [{ pageSize: 51 }, { page: 0 }, { search: "x".repeat(121) }, { siteId: "unknown" }, { hiddenStockIds: ["fish-189", "fish-189"] }]) {
+  assert.deepEqual(Object.keys(page.body.items[0]).sort(), ["id", "code", "productId", "productName", "speciesName", "siteId", "siteName", "tankName", "status", "sold", "inTransit", "lost", "outStock", "hidden", "tankGroupId", "tankGroupName", "subTankId", "subTankName", "productSize", "productOrigin", "imageUrl"].sort());
+  assert.doesNotMatch(JSON.stringify(page.body), /PRIVATE_FISH_NOTE|purchasePrice|basePrice|bioRecords|photos|videos|customerName|payments/);
+  for (const body of [{ pageSize: 51 }, { page: 0 }, { search: "x".repeat(121) }, { siteId: "unknown" }, { subTankId: "unknown" }, { hiddenStockIds: ["fish-189", "fish-189"] }]) {
     assert.equal((await s.picker(body)).response.status, 400);
   }
   assert.deepEqual(await s.readPersistedState(), before, "picker is read-only");
@@ -108,6 +108,113 @@ test("draft-aware hidden list supports exact IDs, cross-site search, restoration
   const restored = await s.picker({ hiddenStockIds: [], filter: "hidden" }); ok(restored);
   assert.equal(restored.body.total, 0);
   assert.deepEqual(await s.readPersistedState(), before);
+});
+
+test("tank picker counts ignore the chosen tank, while stable pages keep same-species products and same-name cross-site tanks separate", async (t) => {
+  const data = fixture();
+  data.state.tankGroups[0].name = "同名大缸";
+  data.state.tankGroups[1].name = "同名大缸";
+  data.state.tankGroups[0].subTanks[0].name = "同名子缸";
+  data.state.tankGroups[1].subTanks[0].name = "同名子缸";
+  data.state.stock.push({ ...data.state.stock[0], id: "other-same-species", productId: "other-product", code: "200" });
+  data.state.stock.reverse(); // Database array order must not dictate grouping/paging.
+  const s = await setup(t, data);
+  const all = await s.picker({ pageSize: 50 }); ok(all);
+  assert.deepEqual(all.body.items.map((item) => item.id), ["fish-191", "other-same-species", "fish-189", "fish-190"]);
+  assert.deepEqual(all.body.tanks.map((tank) => [tank.siteId, tank.subTankId, tank.count]), [["jiangyin", "tank-j", 1], ["nanjing", "tank-n", 3]]);
+  const pagedIds = [];
+  for (let page = 1; page <= 2; page++) {
+    const result = await s.picker({ pageSize: 2, page }); ok(result);
+    pagedIds.push(...result.body.items.map((item) => item.id));
+  }
+  assert.deepEqual(pagedIds, all.body.items.map((item) => item.id));
+  const tank = await s.picker({ subTankId: "tank-n" }); ok(tank);
+  assert.equal(tank.body.total, 3);
+  assert.deepEqual(tank.body.tanks, all.body.tanks, "tank filter must not erase other tank counters");
+  assert.deepEqual(new Set(tank.body.items.map((item) => item.productId)), new Set(["price-product", "other-product"]));
+  assert.ok(tank.body.items.every((item) => item.productSize && item.productOrigin && item.tankGroupId === "group-n"));
+  const scoped = await s.picker({ siteId: "nanjing", search: "8cm" }); ok(scoped);
+  assert.deepEqual(scoped.body.items.map((item) => item.id), ["other-same-species"]);
+  assert.deepEqual(scoped.body.tanks.map((item) => item.count), [1]);
+  const hidden = await s.picker({ filter: "hidden", hiddenStockIds: ["fish-190", "fish-191"], subTankId: "tank-n" }); ok(hidden);
+  assert.deepEqual(hidden.body.items.map((item) => item.id), ["fish-190"]);
+  assert.deepEqual(hidden.body.tanks.map((item) => item.count), [1, 1]);
+});
+
+test("in-transfer and missing historical tanks remain explicit selectable groups, and filtering never drops existing hidden rules", async (t) => {
+  const data = fixture();
+  Object.assign(data.state.stock[0], { subTankId: "", tankTransfer: {
+    id: "transfer-189", status: "in_transit", fromSiteId: "nanjing", fromTankName: "旧缸 / N1",
+  } });
+  Object.assign(data.state.stock[3], { subTankId: "deleted-tank" });
+  data.state.publicCatalogPolicy.hiddenStockIds = ["lost-fish", "fish-191"];
+  const s = await setup(t, data); const before = await s.readPersistedState();
+  const transit = await s.picker({ subTankId: "__in_transit__" }); ok(transit);
+  assert.deepEqual(transit.body.items.map((item) => item.id), ["fish-189"]);
+  assert.equal(transit.body.items[0].tankGroupName, "移缸在途");
+  assert.match(transit.body.items[0].tankName, /旧缸/);
+  const historical = await s.picker({ filter: "hidden", subTankId: "__unassigned__" }); ok(historical);
+  assert.deepEqual(historical.body.items.map((item) => item.id), ["lost-fish"]);
+  assert.equal(historical.body.items[0].subTankName, "未分配/原缸位已删除");
+  assert.equal(historical.body.items[0].hidden, true);
+  await s.picker({ siteId: "nanjing", subTankId: "tank-n", hiddenStockIds: ["lost-fish", "fish-191", "fish-190"] });
+  assert.deepEqual(await s.readPersistedState(), before, "draft filtering never mutates any persisted rule or inventory");
+  const restored = await s.picker({ filter: "hidden", hiddenStockIds: ["fish-191"], subTankId: "__unassigned__" }); ok(restored);
+  assert.equal(restored.body.total, 0);
+});
+
+test("picker previews prefer latest real fish photo, then video poster, then product image, with safe bounded public output", async (t) => {
+  const data = fixture();
+  data.state.products[0].imageUrl = "/uploads/default-fish.jpg";
+  data.state.products[1].imageUrl = "/uploads/.personnel-private/SECRET-PRODUCT.jpg";
+  data.state.stock.push({ ...data.state.stock[0], id: "no-media-default", code: "192" });
+  data.state.stock.push({ ...data.state.stock[0], id: "no-media-no-default", code: "193", productId: "other-product" });
+  data.state.bioRecords.push(
+    { id: "older-photo", stockItemId: "fish-189", date: "2026-10-28T09:00:00+08:00", photos: ["/uploads/old.jpg"], text: "PRIVATE_RECORD_BODY" },
+    { id: "latest-photo", stockItemId: "fish-189", date: "2026-11-01T09:00:00+08:00", photos: ["/uploads/latest-first.jpg", "/uploads/latest-last.jpg"], text: "PRIVATE_RECORD_BODY" },
+    { id: "newest-video", stockItemId: "fish-189", date: "2026-11-02T09:00:00+08:00", videos: ["/uploads/newest.mp4"] },
+    { id: "private-photo", stockItemId: "fish-191", date: "2026-11-02T09:00:00+08:00", photos: ["/uploads/.personnel-private/SECRET-ATTACHMENT.jpg"], videos: ["/uploads/.personnel-private/SECRET-VIDEO.mp4"] },
+    { id: "script-photo", stockItemId: "no-media-no-default", date: "2026-11-02T09:00:00+08:00", photos: ["javascript:alert(1)", "/uploads/unsafe.svg", "/api/personnel/SECRET.jpg"] },
+    { id: "off-page-secret", stockItemId: "lost-fish", date: "2026-11-02T09:00:00+08:00", photos: ["/uploads/OFF-PAGE-URL.jpg"], text: "PRIVATE_RECORD_BODY" },
+  );
+  const s = await setup(t, data); const before = await s.readPersistedState();
+  const response = await s.picker({ pageSize: 50 }); ok(response);
+  const byId = new Map(response.body.items.map((item) => [item.id, item]));
+  assert.equal(byId.get("fish-189").imageUrl, "/uploads/latest-last.jpg");
+  const poster = new URL(byId.get("fish-190").imageUrl, "http://localhost");
+  assert.equal(poster.pathname, "/api/public/media/video-derivative");
+  assert.equal(poster.searchParams.get("kind"), "poster");
+  assert.equal(poster.searchParams.get("url"), "/uploads/fish-190.mp4");
+  assert.ok(poster.searchParams.get("signature"));
+  assert.equal(byId.get("fish-191").imageUrl, "/uploads/default-fish.jpg");
+  assert.equal(byId.get("no-media-default").imageUrl, "/uploads/default-fish.jpg");
+  assert.equal(byId.get("no-media-no-default").imageUrl, "");
+  assert.doesNotMatch(JSON.stringify(response.body), /SECRET|PRIVATE_RECORD_BODY|OFF-PAGE-URL|newest\.mp4|photos|videos|operator|text|videoPreviews|videoPlaybacks/);
+  const page = await s.picker({ search: "189", pageSize: 1 }); ok(page);
+  assert.doesNotMatch(JSON.stringify(page.body), /fish-190\.mp4|default-fish\.jpg/);
+  assert.deepEqual(await s.readPersistedState(), before);
+});
+
+test("picker limits a large tank to fifty cards per page without losing its total or leaking off-page media", async (t) => {
+  const data = fixture();
+  const template = data.state.stock[0];
+  data.state.stock = Array.from({ length: 63 }, (_, index) => ({ ...template, id: `large-${index}`, code: String(index) }));
+  data.state.bioRecords = data.state.stock.map((item) => ({
+    id: `media-${item.id}`, stockItemId: item.id, date: "2026-11-01T09:00:00+08:00",
+    photos: [`/uploads/${item.id}.jpg`], text: "PRIVATE-LARGE-RECORD",
+  }));
+  const s = await setup(t, data);
+  const first = await s.picker({ pageSize: 50 }); ok(first);
+  assert.equal(first.body.items.length, 50);
+  assert.equal(first.body.total, 63);
+  assert.equal(first.body.tanks[0].count, 63);
+  assert.doesNotMatch(JSON.stringify(first.body), /large-50\.jpg|PRIVATE-LARGE-RECORD/);
+  const second = await s.picker({ pageSize: 50, page: 2 }); ok(second);
+  assert.equal(second.body.items.length, 13);
+  assert.equal(new Set([...first.body.items, ...second.body.items].map((item) => item.id)).size, 63);
+  const clamped = await s.picker({ pageSize: 50, page: 100 }); ok(clamped);
+  assert.equal(clamped.body.page, 2);
+  assert.deepEqual(clamped.body.items, second.body.items);
 });
 
 test("revoked administrator access cannot use stale authentication cache to read picker or save visibility", async (t) => {
