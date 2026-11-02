@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const read = (path) => readFile(new URL(`../wechat-miniprogram/${path}`, import.meta.url), "utf8");
-const paths = ["utils/site-filter.js", "utils/catalog.js", "utils/public-catalog-refresh.js", "utils/navigation.js",
+const paths = ["utils/site-filter.js", "utils/config.js", "utils/catalog.js", "utils/public-catalog-refresh.js", "utils/navigation.js",
   "utils/card-video-preview.js", "pages/catalog/index.js", "pages/products/index.js", "pages/specimens/index.js"];
 const sources = Object.fromEntries(await Promise.all(paths.map(async (path) => [path, await read(path)])));
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -72,6 +72,7 @@ function environment(initialCatalog = fixture(), preferredSite) {
       return state.pending ? await state.pending : state.catalog;
     } },
     "../../utils/catalog": catalog,
+    "../../utils/config": load(sources["utils/config.js"]),
     "../../utils/site-filter": site,
     "../../utils/navigation": load(sources["utils/navigation.js"], {}, globals),
     "../../utils/public-catalog-refresh": load(sources["utils/public-catalog-refresh.js"], {}, globals),
@@ -102,6 +103,12 @@ function environment(initialCatalog = fixture(), preferredSite) {
 }
 
 const select = (page, siteId) => page.onSiteTap({ currentTarget: { dataset: { siteId } } });
+async function resumeInCity(harness, page, siteId) {
+  page.onHide();
+  harness.site.setSiteSelection(siteId);
+  page.onShow();
+  await page.lastLoad;
+}
 const ids = (items) => plain(items.map((item) => item.id)).sort();
 const product = (model, id = "shared") => model.productCards.find((item) => item.id === id);
 const productOptions = { category: "Reef%20%26%20fish", majorKey: "marineFish" };
@@ -257,7 +264,7 @@ test("a home city with no stock stays an empty result and can return to all", as
   assert.equal(h.state.requests.length, 1);
 });
 
-test("product search intersects city stock and switching city recalculates price and tags immediately", async () => {
+test("product search intersects city stock and resuming with a home preference recalculates price and tags", async () => {
   const h = environment();
   const page = await h.open("products", { ...productOptions, siteId: "nanjing" });
   assert.deepEqual(ids(page.data.products), ["n-only", "shared"]);
@@ -265,7 +272,7 @@ test("product search intersects city stock and switching city recalculates price
   assert.deepEqual(ids(page.data.products), ["shared"]);
   assert.equal(page.data.filteredSpecimenCount, 2);
   assert.equal(page.data.products[0].price, 180);
-  select(page, "jiangyin");
+  await resumeInCity(h, page, "jiangyin");
   assert.equal(page.data.keyword, "blue");
   assert.equal(page.data.filteredSpecimenCount, 1);
   assert.equal(page.data.products[0].price, 260);
@@ -273,11 +280,11 @@ test("product search intersects city stock and switching city recalculates price
   page.onSearchInput({ detail: { value: "yellow" } });
   assert.deepEqual(plain(page.data.products), []);
   assert.equal(page.data.error, "");
-  select(page, "nanjing");
+  await resumeInCity(h, page, "nanjing");
   assert.deepEqual(ids(page.data.products), ["n-only"]);
   page.onClearSearch();
   assert.deepEqual(ids(page.data.products), ["n-only", "shared"]);
-  assert.equal(h.state.requests.length, 1);
+  assert.equal(h.state.requests.length, 3, "each foreground return refreshes while search stays local");
   assert.equal(h.app.globalData.catalogViewModel.totalSpecimens, 5);
   page.onProductTap({ currentTarget: { dataset: { id: "shared" } } });
   assert.equal(new URL(h.state.navigations.at(-1), "https://fish.example").searchParams.get("siteId"), "nanjing");
@@ -289,13 +296,17 @@ test("late product refresh preserves the latest city and search while replacing 
   const delayed = pending();
   h.state.pending = delayed.promise;
   const loading = page.loadProducts({ force: true, refreshing: true });
-  select(page, "jiangyin");
+  const current = pending();
+  h.state.pending = current.promise;
+  const resumed = resumeInCity(h, page, "jiangyin");
   page.onSearchInput({ detail: { value: "blue" } });
   assert.equal(page.data.refreshing, true);
   assert.equal(page.data.products[0].price, 260);
   const fresh = fixture();
   fresh.stock.find((item) => item.id === "j-blue").basePrice = 275;
-  delayed.resolve(fresh);
+  current.resolve(fresh);
+  await resumed;
+  delayed.resolve(fixture());
   await loading;
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.equal(page.data.keyword, "blue");
@@ -303,6 +314,8 @@ test("late product refresh preserves the latest city and search while replacing 
   assert.equal(page.data.filteredSpecimenCount, 1);
   assert.equal(page.data.refreshing, false);
   assert.equal(h.app.globalData.catalogViewModel.totalSpecimens, 5);
+  assert.equal(h.app.globalData.catalog.stock.find((item) => item.id === "j-blue").basePrice, 275,
+    "a response from the visit before returning home cannot overwrite the new snapshot");
 });
 
 test("a product category absent from the selected city is an empty result, not an API error", async () => {
@@ -312,10 +325,17 @@ test("a product category absent from the selected city is an empty result, not a
   assert.equal(page.data.categoryInfo.label, "Coral");
   assert.equal(page.data.filteredSpecimenCount, 0);
   assert.deepEqual(plain(page.data.products), []);
-  page.onClearSite();
-  assert.equal(page.data.selectedSiteId, "all");
-  assert.deepEqual(ids(page.data.products), ["j-only"]);
+  page.onChangeSiteTap();
+  assert.equal(h.state.navigations.at(-1), "/pages/catalog/index");
+  assert.equal(page.data.selectedSiteId, "nanjing");
+  assert.equal(h.site.getSiteSelection().id, "nanjing", "recovery navigates without widening the selected city");
+  assert.deepEqual(plain(page.data.products), []);
   assert.equal(h.state.requests.length, 1);
+  const home = await h.open("catalog");
+  assert.equal(home.data.selectedSiteId, "nanjing");
+  select(home, "all");
+  const recovered = await h.open("products", { category: "Coral", majorKey: "coral" });
+  assert.deepEqual(ids(recovered.data.products), ["j-only"]);
 });
 
 test("explicit all-city shares override a recipient's saved city on every filterable page", async () => {
@@ -331,7 +351,7 @@ test("explicit all-city shares override a recipient's saved city on every filter
   }
 });
 
-test("the specimen selection follows shared preference and returns to existing parents with that city", async () => {
+test("the inherited specimen city survives normal back navigation to both existing parents", async () => {
   const h = environment(fixture(), "nanjing");
   const home = await h.open("catalog");
   home.onHide();
@@ -341,23 +361,60 @@ test("the specimen selection follows shared preference and returns to existing p
   const specimens = await h.open("specimens", { productId: "shared" });
   assert.equal(specimens.data.filteredSpecimenCount, 2);
   assert.equal(specimens.data.context.priceRange, "¥180");
-  select(specimens, "jiangyin");
-  assert.equal(specimens.data.context.specimenCount, 1);
-  assert.equal(specimens.data.context.priceRange, "¥260");
+  assert.equal(specimens.data.context.specimenCount, 2);
   specimens.onBackTap();
   assert.deepEqual(h.state.navigations.at(-1), { back: 1 });
   assert.equal(h.state.pages.at(-1), products);
   products.onShow();
   await products.lastLoad;
-  assert.equal(products.data.selectedSiteId, "jiangyin");
-  assert.equal(products.data.products[0].price, 260);
+  assert.equal(products.data.selectedSiteId, "nanjing");
+  assert.equal(products.data.products.find((item) => item.id === "shared").price, 180);
   products.onBackTap();
   assert.deepEqual(h.state.navigations.at(-1), { back: 1 });
   assert.equal(h.state.pages.at(-1), home);
   home.onShow();
   await home.lastLoad;
-  assert.equal(home.data.selectedSiteId, "jiangyin");
-  assert.equal(home.data.totalSpecimens, 2);
+  assert.equal(home.data.selectedSiteId, "nanjing");
+  assert.equal(home.data.totalSpecimens, 3);
   assert.equal(h.app.globalData.catalogViewModel.totalSpecimens, 5);
   assert.equal(h.app.globalData.siteId, "all");
+});
+
+test("inner empty-state recovery reuses home without changing city, including deep-link fallback", async () => {
+  for (const [name, options] of [
+    ["products", { category: "Coral", majorKey: "coral" }],
+    ["specimens", { productId: "j-only" }],
+  ]) {
+    for (const hasHome of [true, false]) {
+      const h = environment(fixture(), "nanjing");
+      const home = hasHome ? await h.open("catalog") : null;
+      home?.onHide();
+      if (hasHome && name === "specimens") {
+        const products = await h.open("products", { category: "Coral", majorKey: "coral" });
+        products.onHide();
+      }
+      const page = await h.open(name, options);
+      assert.equal(page.data.error, "");
+      assert.equal(page.data.filteredSpecimenCount, 0);
+      const cache = h.app.globalData.catalogViewModel;
+      const requestCount = h.state.requests.length;
+      assert.equal(page.onSiteTap, undefined, "inner pages cannot directly switch city");
+      assert.equal(page.onClearSite, undefined, "inner pages cannot clear the city");
+      page.onChangeSiteTap();
+      assert.equal(h.site.getSiteSelection().id, "nanjing");
+      assert.equal(h.storage.get(storageKey), "nanjing");
+      assert.equal(page.data.selectedSiteId, "nanjing");
+      assert.equal(h.app.globalData.catalogViewModel, cache);
+      assert.equal(h.state.requests.length, requestCount);
+      if (hasHome) {
+        assert.deepEqual(h.state.navigations.at(-1), { back: name === "specimens" ? 2 : 1 });
+        assert.equal(h.state.pages.at(-1), home);
+        home.onShow();
+        await home.lastLoad;
+        assert.equal(home.data.selectedSiteId, "nanjing");
+      } else {
+        assert.equal(h.state.navigations.at(-1), "/pages/catalog/index");
+      }
+    }
+  }
 });

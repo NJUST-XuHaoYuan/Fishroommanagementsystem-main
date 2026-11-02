@@ -1,4 +1,5 @@
 const { fetchCatalog } = require("../../utils/api");
+const { showCustomerTools } = require("../../utils/config");
 const { buildViewModel } = require("../../utils/catalog");
 const { getNavigationMetrics } = require("../../utils/navigation");
 const { SITE_OPTIONS, getSiteSelection, setSiteSelection } = require("../../utils/site-filter");
@@ -11,6 +12,7 @@ const {
 
 Page({
   data: {
+    showCustomerTools,
     loading: true,
     refreshing: false,
     error: "",

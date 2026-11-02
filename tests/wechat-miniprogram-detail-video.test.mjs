@@ -4,13 +4,14 @@ import test from "node:test";
 import vm from "node:vm";
 
 const read = (path) => readFile(new URL(`../wechat-miniprogram/${path}`, import.meta.url), "utf8");
-const [catalogSource, detailSource, refreshSource, contactSource, template, styles] = await Promise.all([
+const [catalogSource, detailSource, refreshSource, contactSource, template, styles, configSource] = await Promise.all([
   read("utils/catalog.js"),
   read("pages/detail/index.js"),
   read("utils/public-catalog-refresh.js"),
   read("utils/contact-card.js"),
   read("pages/detail/index.wxml"),
-  read("pages/detail/index.wxss")
+  read("pages/detail/index.wxss"),
+  read("utils/config.js")
 ]);
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -34,6 +35,7 @@ function load(source, dependencies = {}, globals = {}) {
 
 const catalog = load(catalogSource, { "./api": { getApiBaseUrl: () => origin } }, { Date });
 const contact = load(contactSource);
+const config = load(configSource);
 
 function records(src = original) {
   return [{
@@ -100,6 +102,7 @@ async function harness({ previewMode = "normal" } = {}) {
   load(detailSource, {
     "../../utils/api": api,
     "../../utils/catalog": catalog,
+    "../../utils/config": config,
     "../../utils/public-catalog-refresh": refresh,
     "../../utils/contact-card": contact,
     "../../utils/navigation": { returnToParent() {} }

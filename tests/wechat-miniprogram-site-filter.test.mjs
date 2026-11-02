@@ -4,11 +4,11 @@ import test from "node:test";
 import vm from "node:vm";
 
 const read = (path) => readFile(new URL(`../wechat-miniprogram/${path}`, import.meta.url), "utf8");
-const [catalogSource, pageSource, refreshSource, videoSource, detailSource, navigationSource, contactSource, siteFilterSource] = await Promise.all([
+const [catalogSource, pageSource, refreshSource, videoSource, detailSource, navigationSource, contactSource, siteFilterSource, configSource] = await Promise.all([
   read("utils/catalog.js"), read("pages/specimens/index.js"),
   read("utils/public-catalog-refresh.js"), read("utils/card-video-preview.js"),
   read("pages/detail/index.js"), read("utils/navigation.js"), read("utils/contact-card.js"),
-  read("utils/site-filter.js"),
+  read("utils/site-filter.js"), read("utils/config.js"),
 ]);
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
@@ -56,7 +56,7 @@ function fixture() {
 
 function pageHarness(initialCatalog = fixture()) {
   const app = { globalData: { catalog: null, catalogViewModel: null, loadedAt: 0 } };
-  const state = { catalog: initialCatalog, fetchCount: 0, playCount: 0, pauseCount: 0, renders: [] };
+  const state = { catalog: initialCatalog, fetchCount: 0, playCount: 0, pauseCount: 0, renders: [], returns: [] };
   const timers = new Map();
   let timerId = 0;
   const wx = {
@@ -69,6 +69,7 @@ function pageHarness(initialCatalog = fixture()) {
     setInterval(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearInterval(id) { timers.delete(id); },
   });
+  const site = load(siteFilterSource, {}, { wx, getApp: () => app });
   let page;
   load(pageSource, {
     "../../utils/api": { async fetchCatalog() {
@@ -78,8 +79,8 @@ function pageHarness(initialCatalog = fixture()) {
       return plain(state.catalog);
     } },
     "../../utils/catalog": catalog,
-    "../../utils/navigation": { returnToParent() {} },
-    "../../utils/site-filter": load(siteFilterSource, {}, { wx, getApp: () => app }),
+    "../../utils/navigation": { returnToParent(...args) { state.returns.push(args); } },
+    "../../utils/site-filter": site,
     "../../utils/public-catalog-refresh": refresh,
     "../../utils/card-video-preview": load(videoSource, {}, { wx }),
   }, { wx, getApp: () => app, Page(value) { page = value; } });
@@ -95,7 +96,7 @@ function pageHarness(initialCatalog = fixture()) {
     return this.lastLoad;
   };
   return {
-    page, app, state, timers,
+    page, app, state, timers, site,
     async open(options = { productId: "product-a" }) {
       page.route = "pages/specimens/index";
       page.options = plain(options);
@@ -103,7 +104,12 @@ function pageHarness(initialCatalog = fixture()) {
       page.onShow();
       await page.lastLoad;
     },
-    select(siteId) { page.onSiteTap({ currentTarget: { dataset: { siteId } } }); },
+    async resumeAtSite(siteId) {
+      page.onHide();
+      site.setSiteSelection(siteId);
+      page.onShow();
+      await page.lastLoad;
+    },
     preview() {
       const card = page.data.specimens[0];
       page.onPreviewToggle({ currentTarget: { dataset: { id: card.id, preview: card.previewVideo } } });
@@ -128,6 +134,7 @@ async function detailBackHarness(parentHarness, stockItemId = "a-j1") {
       fetchBioRecords: async (id) => plain(parentHarness.state.catalog.bioRecords.filter((item) => item.stockItemId === id)),
     },
     "../../utils/catalog": catalog,
+    "../../utils/config": load(configSource),
     "../../utils/navigation": load(navigationSource, {}, { wx, getCurrentPages }),
     "../../utils/contact-card": load(contactSource),
     "../../utils/public-catalog-refresh": load(refreshSource),
@@ -142,7 +149,6 @@ async function detailBackHarness(parentHarness, stockItemId = "a-j1") {
   return { detail, calls, pages };
 }
 
-const counts = (page) => Object.fromEntries(page.data.siteOptions.map(({ id, count }) => [id, count]));
 const fishIds = (page) => plain(page.data.specimens.flatMap((card) => card.members.map((member) => member.id))).sort();
 
 function templateValue(template, pattern, context) {
@@ -200,7 +206,7 @@ test("site filters intersect with both product and species instead of widening t
   assert.deepEqual(selectIds({ productId: "product-a", siteId: "unsupported" }), []);
 });
 
-test("the actual page switches city inventory and counts fish before grouping cards", async () => {
+test("the actual page inherits city inventory and counts fish before grouping cards", async () => {
   const harness = pageHarness();
   const { page } = harness;
   await harness.open();
@@ -208,19 +214,19 @@ test("the actual page switches city inventory and counts fish before grouping ca
   assert.equal(page.data.filteredSpecimenCount, 4);
   assert.equal(page.data.siteDataReady, true);
   assert.equal(page.data.specimens.length, 2);
-  assert.deepEqual(counts(page), { all: 4, nanjing: 2, jiangyin: 2 });
-  harness.select("nanjing");
+  await harness.resumeAtSite("nanjing");
   assert.equal(page.data.selectedSiteName, "南京");
   assert.equal(page.data.filteredSpecimenCount, 2);
   assert.equal(page.data.specimens.length, 1);
   assert.deepEqual(fishIds(page), ["a-n1", "a-n2"]);
-  assert.deepEqual(counts(page), { all: 4, nanjing: 2, jiangyin: 2 });
-  harness.select("jiangyin");
+  await harness.resumeAtSite("jiangyin");
   assert.equal(page.data.selectedSiteName, "江阴");
   assert.deepEqual(fishIds(page), ["a-j1", "a-j2"]);
-  harness.select("unsupported");
+  await harness.resumeAtSite("unsupported");
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.equal(page.data.context.specimenCount, 2, "the overview matches the selected city's visible fish");
+  assert.equal(page.onSiteTap, undefined);
+  assert.equal(page.onClearSite, undefined);
 });
 
 test("species-level counts include that species' products but exclude other species", async () => {
@@ -228,30 +234,33 @@ test("species-level counts include that species' products but exclude other spec
   await harness.open({ speciesId: "species-a", siteId: "jiangyin" });
   assert.equal(harness.page.data.filteredSpecimenCount, 3);
   assert.deepEqual(fishIds(harness.page), ["a-j1", "a-j2", "b-j1"]);
-  assert.deepEqual(counts(harness.page), { all: 6, nanjing: 3, jiangyin: 3 });
 });
 
-test("a zero-stock city remains selectable and the empty state can return to all locations", async () => {
+test("a zero-stock inherited city returns to home without clearing the preference", async () => {
   const data = fixture();
   data.stock = data.stock.filter((item) => item.productId !== "product-a" || item.siteId === "nanjing");
   const harness = pageHarness(data);
   const { page } = harness;
-  await harness.open();
+  await harness.open({ productId: "product-a", siteId: "jiangyin" });
   assert.equal(page.data.siteDataReady, true);
-  harness.select("jiangyin");
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.equal(page.data.error, "");
   assert.equal(page.data.filteredSpecimenCount, 0);
   assert.deepEqual(fishIds(page), []);
-  assert.deepEqual(counts(page), { all: 2, nanjing: 2, jiangyin: 0 });
-  page.onClearSite();
-  assert.equal(page.data.selectedSiteId, "all");
+  assert.equal(page.data.context.specimenCount, 0);
+  assert.equal(page.data.context.priceRange, "暂无库存");
+  page.onChangeSiteTap();
+  assert.deepEqual(harness.state.returns, [["pages/catalog/index"]]);
+  assert.equal(harness.site.getSiteSelection().id, "jiangyin");
+  assert.equal(page.data.selectedSiteId, "jiangyin");
+  assert.equal(page.data.filteredSpecimenCount, 0);
+  await harness.resumeAtSite("all");
   assert.equal(page.data.selectedSiteName, "全部");
   assert.equal(page.data.filteredSpecimenCount, 2);
   assert.deepEqual(fishIds(page), ["a-n1", "a-n2"]);
 });
 
-test("missing or partial site data keeps all fish browseable and shows unavailable cities instead of zero stock", async () => {
+test("missing or partial site data keeps all fish browseable and explicitly marks unavailable location data", async () => {
   const template = await read("pages/specimens/index.wxml");
   for (const missingMode of ["all", "partial"]) {
     const data = fixture();
@@ -264,23 +273,18 @@ test("missing or partial site data keeps all fish browseable and shows unavailab
     assert.equal(page.data.siteDataReady, false, missingMode);
     assert.equal(page.data.filteredSpecimenCount, 4);
     assert.deepEqual(fishIds(page), ["a-j1", "a-j2", "a-n1", "a-n2"]);
-    for (const item of page.data.siteOptions) {
-      const context = { ...plain(page.data), item: plain(item) };
-      const displayedCount = templateValue(template, /class="site-filter-count">\{\{(.+?)\}\}/, context);
-      const disabled = templateValue(template, /disabled="\{\{(.+?)\}\}"/, context);
-      assert.equal(displayedCount, item.id === "all" ? 4 : "—");
-      assert.equal(disabled, item.id !== "all");
-      if (item.id !== "all") {
-        harness.select(item.id);
-        assert.equal(page.data.selectedSiteId, "all", "missing data must not be interpreted as an empty city");
-        assert.equal(page.data.filteredSpecimenCount, 4);
-      }
+    assert.equal(templateValue(template, /wx:if="\{\{(.+?)\}\}" class="site-unavailable"/, plain(page.data)), true);
+    assert.match(template, /所在地信息暂不可用，请重新加载/);
+    for (const siteId of ["nanjing", "jiangyin"]) {
+      await harness.resumeAtSite(siteId);
+      assert.equal(page.data.siteDataReady, false);
+      assert.deepEqual(fishIds(page), []);
+      assert.equal(templateValue(template, /class="empty-title">\{\{(.+?)\}\}/, plain(page.data)), "所在地信息暂不可用");
     }
-    assert.match(template, /wx:if="\{\{!siteDataReady\}\}"[^>]*>暂无法按所在地筛选/);
   }
 });
 
-test("city deep links with legacy catalog data show unavailable location information and recover to all fish", async () => {
+test("city deep links with legacy data return home before recovering to all fish", async () => {
   const data = fixture();
   data.stock.forEach((item) => { delete item.siteId; delete item.siteName; });
   const harness = pageHarness(data);
@@ -292,11 +296,12 @@ test("city deep links with legacy catalog data show unavailable location informa
   assert.deepEqual(fishIds(page), []);
   const template = await read("pages/specimens/index.wxml");
   assert.equal(templateValue(template, /class="empty-title">\{\{(.+?)\}\}/, plain(page.data)), "所在地信息暂不可用");
-  const selectedCity = page.data.siteOptions.find((item) => item.id === page.data.selectedSiteId);
-  assert.equal(templateValue(template, /class="site-filter-count">\{\{(.+?)\}\}/,
-    { ...plain(page.data), item: plain(selectedCity) }), "—");
-  assert.match(template, /wx:if="\{\{selectedSiteId !== 'all'\}\}"[^>]*bindtap="onClearSite">查看全部所在地/);
-  page.onClearSite();
+  assert.match(template, /wx:if="\{\{selectedSiteId !== 'all'\}\}"[^>]*bindtap="onChangeSiteTap">返回首页切换所在地/);
+  page.onChangeSiteTap();
+  assert.deepEqual(harness.state.returns, [["pages/catalog/index"]]);
+  assert.equal(page.data.selectedSiteId, "jiangyin");
+  assert.equal(harness.site.getSiteSelection().id, "jiangyin");
+  await harness.resumeAtSite("all");
   assert.equal(page.data.selectedSiteId, "all");
   assert.equal(page.data.selectedSiteName, "全部");
   assert.equal(page.data.siteDataReady, false);
@@ -316,14 +321,12 @@ test("refresh preserves the chosen city while updating location counts and visib
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.equal(page.data.selectedSiteName, "江阴");
   assert.equal(page.data.filteredSpecimenCount, 0);
-  assert.deepEqual(counts(page), { all: 2, nanjing: 2, jiangyin: 0 });
   state.catalog.stock.find((item) => item.id === "a-n2").siteId = "jiangyin";
   const [{ callback }] = harness.timers.values();
   callback();
   await page.lastLoad;
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.deepEqual(fishIds(page), ["a-n2"]);
-  assert.deepEqual(counts(page), { all: 2, nanjing: 1, jiangyin: 1 });
 });
 
 test("hide and show retain the city selection, stop video, and refresh that city's stock", async () => {
@@ -345,13 +348,12 @@ test("hide and show retain the city selection, stop video, and refresh that city
   assert.equal(timers.size, 1);
   assert.equal(page.data.selectedSiteId, "nanjing");
   assert.deepEqual(fishIds(page), ["a-n1"]);
-  assert.deepEqual(counts(page), { all: 3, nanjing: 1, jiangyin: 2 });
 });
 
-test("city changes do not end a pending refresh or let an old video start", async () => {
+test("returning home during a refresh preserves the city and keeps old video disabled until fresh data arrives", async () => {
   const harness = pageHarness();
   const { page, state, timers } = harness;
-  await harness.open();
+  await harness.open({ productId: "product-a", siteId: "jiangyin" });
   let resolveCatalog;
   state.pendingCatalog = new Promise((resolve) => { resolveCatalog = resolve; });
   [...timers.values()][0].callback();
@@ -359,11 +361,11 @@ test("city changes do not end a pending refresh or let an old video start", asyn
   assert.equal(page.data.loading, false);
   harness.preview();
   assert.equal(state.playCount, 0);
-  harness.select("jiangyin");
+  page.onChangeSiteTap();
+  assert.deepEqual(state.returns, [["pages/catalog/index"]]);
   assert.equal(page.data.selectedSiteId, "jiangyin");
-  assert.equal(page.data.refreshing, true, "filtering the old list must not mark the request complete");
-  page.onClearSite();
-  assert.equal(page.data.refreshing, true);
+  assert.equal(harness.site.getSiteSelection().id, "jiangyin");
+  assert.equal(page.data.refreshing, true, "navigation must not mark the request complete");
   harness.preview();
   assert.equal(state.playCount, 0);
   assert.equal(state.fetchCount, 2);
@@ -413,7 +415,7 @@ test("detail back navigates to the existing species or product parent and preser
   for (const options of [{ speciesId: "species-a" }, { productId: "product-a" }]) {
     const parent = pageHarness();
     await parent.open(options);
-    parent.select("jiangyin");
+    await parent.resumeAtSite("jiangyin");
     const expectedFishIds = fishIds(parent.page);
     parent.page.onHide();
     const { detail, calls, pages } = await detailBackHarness(parent);
@@ -433,7 +435,7 @@ test("detail back from an unrelated species or product parent falls back to the 
   for (const options of [{ speciesId: "species-b" }, { productId: "product-c", speciesId: "species-a" }]) {
     const parent = pageHarness();
     await parent.open(options);
-    parent.select("jiangyin");
+    await parent.resumeAtSite("jiangyin");
     parent.page.onHide();
     const { detail, calls } = await detailBackHarness(parent);
     detail.onBackTap();
@@ -442,16 +444,23 @@ test("detail back from an unrelated species or product parent falls back to the 
   }
 });
 
-test("switching city and clearing the filter pause the current card video", async () => {
+test("leaving for home stops the current card video and a resumed home preference stays scoped", async () => {
   const harness = pageHarness();
   const { page, state } = harness;
   await harness.open();
   harness.preview();
-  harness.select("jiangyin");
+  page.onChangeSiteTap();
+  assert.deepEqual(state.returns, [["pages/catalog/index"]]);
+  page.onHide();
   assert.equal(state.pauseCount, 1);
   assert.equal(page.data.activePreviewId, "");
+  harness.site.setSiteSelection("jiangyin");
+  page.onShow();
+  await page.lastLoad;
+  assert.equal(page.data.selectedSiteId, "jiangyin");
+  assert.deepEqual(fishIds(page), ["a-j1", "a-j2"]);
   harness.preview();
-  page.onClearSite();
+  page.onHide();
   assert.equal(state.pauseCount, 2);
   assert.equal(page.data.activePreviewId, "");
 });
@@ -487,7 +496,7 @@ test("shares round-trip the location for product and species links including exp
     await recipient.open(Object.fromEntries(new URL(share.path, "https://fish.example").searchParams));
     assert.equal(recipient.page.data.selectedSiteId, "jiangyin");
     assert.deepEqual(fishIds(recipient.page), fishIds(sender.page));
-    sender.page.onClearSite();
+    await sender.resumeAtSite("all");
     assert.match(sender.page.onShareAppMessage().path, /&siteId=all$/);
   }
   for (const siteId of ["unsupported", "%E0%A4%A"]) {
@@ -499,7 +508,7 @@ test("shares round-trip the location for product and species links including exp
   }
 });
 
-test("refresh errors fail closed without allowing city switches to resurrect cached fish", async () => {
+test("refresh errors fail closed without allowing home navigation to resurrect cached fish", async () => {
   const harness = pageHarness();
   const { page, state, app } = harness;
   await harness.open({ productId: "product-a", siteId: "jiangyin" });
@@ -515,9 +524,10 @@ test("refresh errors fail closed without allowing city switches to resurrect cac
   assert.equal(page.data.activePreviewId, "");
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.equal(page.data.filteredSpecimenCount, 0);
-  assert.deepEqual(counts(page), { all: 0, nanjing: 0, jiangyin: 0 });
   assert.deepEqual(fishIds(page), []);
-  harness.select("nanjing");
+  page.onChangeSiteTap();
+  assert.deepEqual(state.returns, [["pages/catalog/index"]]);
+  assert.equal(harness.site.getSiteSelection().id, "jiangyin");
   assert.equal(page.data.selectedSiteId, "jiangyin");
   assert.deepEqual(fishIds(page), []);
   state.catalog = fixture();
@@ -528,34 +538,19 @@ test("refresh errors fail closed without allowing city switches to resurrect cac
   assert.deepEqual(fishIds(page), ["a-j1", "a-j2"]);
 });
 
-test("location labels and empty-state recovery are wired to the user-facing templates", async () => {
-  const [specimens, detail, styles] = await Promise.all([
-    read("pages/specimens/index.wxml"), read("pages/detail/index.wxml"), read("pages/specimens/index.wxss"),
+test("only home offers city controls while inner pages display location and return home for recovery", async () => {
+  const [home, products, specimens, detail] = await Promise.all([
+    read("pages/catalog/index.wxml"), read("pages/products/index.wxml"),
+    read("pages/specimens/index.wxml"), read("pages/detail/index.wxml"),
   ]);
-  assert.match(specimens, /data-site-id="\{\{item.id\}\}" bindtap="onSiteTap"/);
-  assert.match(specimens, /class="site-filter-row">\s*<text class="site-filter-label">所在地<\/text>/);
-  assert.doesNotMatch(specimens, /class="(?:list-heading|section-count)"/);
-  assert.match(specimens, /bindtap="onClearSite">查看全部所在地/);
-  const harness = pageHarness();
-  await harness.open();
-  harness.select("jiangyin");
-  assert.deepEqual(plain(harness.page.data.siteOptions.map((item) => item.id)), ["all", "nanjing", "jiangyin"]);
-  for (const item of harness.page.data.siteOptions) {
-    const context = { ...plain(harness.page.data), item: plain(item) };
-    assert.equal(templateValue(specimens, /class="site-filter-count">\{\{(.+?)\}\}/, context), item.count);
-    assert.equal(templateValue(specimens, /aria-pressed="\{\{(.+?)\}\}"/, context), item.id === "jiangyin");
-    assert.equal(templateValue(specimens, /wx:if="\{\{(.+?)\}\}" class="site-selected-line"/, context), item.id === "jiangyin");
-    const label = specimens.match(/aria-label="(所在地\{\{item.label\}\}[^"\n]*)"/)?.[1];
-    assert.ok(label, "each location button must have a readable label and count");
-    const renderedLabel = label.replace(/\{\{(.+?)\}\}/g, (_, expression) => vm.runInNewContext(`(${expression})`, context));
-    assert.equal(renderedLabel, `所在地${item.label}，${item.count}条${item.id === "jiangyin" ? "，已选中" : ""}`);
+  assert.match(home, /wx:for="\{\{siteOptions\}\}"/);
+  assert.match(home, /bindtap="onSiteTap"/);
+  for (const template of [products, specimens]) {
+    assert.doesNotMatch(template, /onSiteTap|onClearSite|siteOptions|data-site-id|aria-pressed/);
+    assert.match(template, /所在地 · \{\{selectedSiteName\}\}/);
+    assert.match(template, /bindtap="onChangeSiteTap">返回首页切换所在地/);
   }
-  assert.match(specimens, /class="site-selected-line" aria-hidden="true"/);
-  const buttonStyles = styles.match(/\.specimens-page \.site-filter-button\s*\{([^}]+)\}/)?.[1];
-  assert.ok(buttonStyles, "location buttons need their own minimum touch dimensions");
-  assert.ok(Number(buttonStyles.match(/min-height:\s*([\d.]+)px/)?.[1]) >= 44);
-  assert.ok(Number(buttonStyles.match(/min-width:\s*([\d.]+)px/)?.[1]) >= 44);
-  assert.match(styles, /\.site-selected-line\s*\{[^}]*height:\s*2px/);
+  assert.doesNotMatch(specimens, /class="(?:list-toolbar|site-options|list-heading|section-count)"/);
   for (const [stock, expected] of [
     [{ siteId: "nanjing", siteName: "南京" }, "所在地 · 南京"],
     [{ siteId: "jiangyin", siteName: "江阴" }, "所在地 · 江阴"],

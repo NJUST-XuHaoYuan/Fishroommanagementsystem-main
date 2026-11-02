@@ -1,4 +1,5 @@
 const { fetchCatalog, fetchBioRecords } = require("../../utils/api");
+const { showCustomerTools } = require("../../utils/config");
 const { returnToParent } = require("../../utils/navigation");
 const { specimenContactCard } = require("../../utils/contact-card");
 const {
@@ -18,6 +19,7 @@ const {
 
 Page({
   data: {
+    showCustomerTools,
     loading: true,
     refreshing: false,
     error: "",

@@ -25,7 +25,7 @@
     </view>
   </view>
 
-  <view class="catalog-utilities">
+  <view wx:if="{{showCustomerTools}}" class="catalog-utilities">
     <button class="utility-button" size="mini" open-type="contact" show-message-card="{{true}}" send-message-title="海洋森林 · 生物选购" send-message-path="/pages/catalog/index">
       <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text>
     </button>

@@ -64,11 +64,14 @@ test("category tap preserves the existing product route and encodes category key
   let definition;
   const routes = [];
   const siteFilter = { module: { exports: {} } };
+  const config = { module: { exports: {} } };
   vm.runInNewContext(await readFile(new URL("../../utils/site-filter.js", base), "utf8"), siteFilter);
+  vm.runInNewContext(await readFile(new URL("../../utils/config.js", base), "utf8"), config);
   vm.runInNewContext(source, {
     Page(value) { definition = value; },
     require(path) {
       if (path === "../../utils/site-filter") return siteFilter.module.exports;
+      if (path === "../../utils/config") return config.module.exports;
       return path === "../../utils/navigation" ? { getNavigationMetrics: () => ({}) } : {};
     },
     wx: { navigateTo: (value) => routes.push(value.url) }

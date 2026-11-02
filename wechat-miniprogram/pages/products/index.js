@@ -4,7 +4,7 @@ const {
   filterProducts
 } = require("../../utils/catalog");
 const { getNavigationMetrics, returnToParent } = require("../../utils/navigation");
-const { SITE_OPTIONS, getSiteSelection, setSiteSelection } = require("../../utils/site-filter");
+const { getSiteSelection } = require("../../utils/site-filter");
 const {
   beginPublicCatalogRequest,
   isCurrentPublicCatalogRequest,
@@ -30,7 +30,6 @@ Page({
     majorKey: "",
     categoryInfo: null,
     majorLabel: "",
-    siteOptions: SITE_OPTIONS,
     selectedSiteId: "all",
     selectedSiteName: "全部",
     keyword: "",
@@ -166,23 +165,8 @@ Page({
     });
   },
 
-  onSiteTap(event) {
-    this.selectSite(event.currentTarget.dataset.siteId);
-  },
-
-  onClearSite() {
-    this.selectSite("all");
-  },
-
-  selectSite(siteId) {
-    const site = setSiteSelection(siteId);
-    if (!site || site.id === this.data.selectedSiteId) return;
-    this.setData({ selectedSiteId: site.id, selectedSiteName: site.label });
-    if (this.catalog) {
-      this.applySiteFilter();
-    } else if (!this.data.loading) {
-      this.loadProducts({ force: true });
-    }
+  onChangeSiteTap() {
+    returnToParent("pages/catalog/index");
   },
 
   onSearchInput(event) {

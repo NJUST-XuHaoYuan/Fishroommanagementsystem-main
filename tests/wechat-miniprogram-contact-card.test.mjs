@@ -15,11 +15,12 @@ function load(source, dependencies = {}, globals = {}) {
 }
 const contact = load(await read("utils/contact-card.js"));
 const siteFilter = load(await read("utils/site-filter.js"));
+const config = load(await read("utils/config.js"));
 const { formatMoney } = load(await read("utils/catalog.js"), {
   "./api": { getApiBaseUrl: () => "https://fish.example" }
 });
 
-test("only the contact button floats; transparent scroll spacing keeps the final record clear", async () => {
+test("when customer tools are enabled, only the contact button floats and its spacer stays transparent", async () => {
   const css = await read("pages/detail/index.wxss");
   const template = await read("pages/detail/index.wxml");
   assert.match(css, /\.detail-page\.safe-page\s*\{[^}]*--contact-space-height:\s*calc\([^;]+env\(safe-area-inset-bottom\)\)[^}]*padding-bottom:\s*0/);
@@ -31,7 +32,51 @@ test("only the contact button floats; transparent scroll spacing keeps the final
   assert.match(css, /\.detail-page \.detail-contact-button\s*\{[^}]*position: fixed[^}]*bottom: calc\(var\(--contact-button-inset\) \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(css, /\.detail-page \.detail-contact-button\s*\{[^}]*right: 16px;[^}]*left: auto;[^}]*width: var\(--contact-button-height\);[^}]*height: var\(--contact-button-height\);[^}]*border-radius: 50%/);
   assert.doesNotMatch(css, /\.detail-contact-button\[/);
-  assert.match(template, /<block wx:if="\{\{!loading && !error && specimen\}\}">\s*<view class="detail-contact-space" aria-hidden="true"><\/view>\s*<button class="detail-contact-button\b/);
+  assert.match(template, /<block wx:if="\{\{showCustomerTools && !loading && !error && specimen\}\}">\s*<view class="detail-contact-space" aria-hidden="true"><\/view>\s*<button class="detail-contact-button\b/);
+});
+
+test("customer tools are disabled in real page data and hide every consultation entry and its spacer", async () => {
+  assert.equal(config.showCustomerTools, false);
+  const dependencies = {
+    "../../utils/config": config,
+    "../../utils/api": {},
+    "../../utils/catalog": {},
+    "../../utils/navigation": { getNavigationMetrics: () => ({}) },
+    "../../utils/site-filter": siteFilter,
+    "../../utils/public-catalog-refresh": {},
+    "../../utils/customer-auth": {},
+    "../../utils/contact-card": contact
+  };
+  const templates = {};
+  for (const route of ["catalog", "account", "detail"]) {
+    let page;
+    load(await read(`pages/${route}/index.js`), dependencies, { Page(value) { page = value; } });
+    assert.equal(page.data.showCustomerTools, false, `${route} must use the disabled customer-tools configuration`);
+    const template = await read(`pages/${route}/index.wxml`);
+    templates[route] = template;
+    const guards = route === "catalog"
+      ? [template.match(/<view\b[^>]*class="catalog-utilities"[^>]*>/)?.[0]]
+      : route === "account"
+        ? [template.match(/<button\b[^>]*open-type="contact"[^>]*>/)?.[0],
+          template.match(/<view\b[^>]*class="account-row service-account"[^>]*>/)?.[0]]
+        : [template.match(/<block\b[^>]*>\s*<view class="detail-contact-space"/)?.[0]];
+    for (const guard of guards) {
+      const expression = guard?.match(/wx:if="\{\{(.+?)\}\}"/)?.[1];
+      assert.ok(expression, `${route} entry must be conditionally rendered`);
+      const readyState = { ...page.data, loading: false, error: "", specimen: { id: "ready" }, contactCard: {} };
+      assert.equal(Boolean(vm.runInNewContext(`(${expression})`, readyState)), false,
+        `${route} entry must stay hidden even after data has loaded`);
+      assert.equal(Boolean(vm.runInNewContext(`(${expression})`, { ...readyState, showCustomerTools: true })), true,
+        `${route} entry must be controlled by the customer-tools flag`);
+    }
+  }
+  const utilities = templates.catalog.match(/<view\b[^>]*class="catalog-utilities"[^>]*>[\s\S]*?<\/view>/)?.[0];
+  assert.match(utilities, /open-type="contact"/);
+  assert.match(utilities, /bindtap="onAccountTap"/);
+  assert.equal((templates.catalog.match(/open-type="contact"|bindtap="onAccountTap"/g) || []).length, 2);
+  assert.equal((templates.account.match(/open-type="contact"/g) || []).length, 1);
+  assert.match(templates.account, /<view\b[^>]*class="account-row service-account"[^>]*>[\s\S]*?bindtap="onCopyServiceAccount"/);
+  assert.equal((templates.detail.match(/open-type="contact"/g) || []).length, 1);
 });
 
 test("individual cards preserve human numbers; IDs are encoded only in the destination", () => {
@@ -80,7 +125,7 @@ test("list pages only present stock and navigate to detail without preparing cus
   }
 });
 
-test("only detail offers product consultation with a readable brand-green icon and label button", async () => {
+test("the hidden detail consultation retains its message card and readable brand-green button", async () => {
   for (const route of ["products", "specimens"]) {
     const template = await read(`pages/${route}/index.wxml`);
     const outerCard = template.match(new RegExp(`<view\\b[^>]*class="${route === "products" ? "product" : "specimen"}-card"[^>]*>`))[0];

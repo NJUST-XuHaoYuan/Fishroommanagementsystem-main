@@ -1,6 +1,6 @@
 const { fetchCatalog } = require("../../utils/api");
 const { returnToParent } = require("../../utils/navigation");
-const { SITE_OPTIONS, getSiteSelection, setSiteSelection } = require("../../utils/site-filter");
+const { getSiteSelection } = require("../../utils/site-filter");
 const {
   buildViewModel,
   filterSpecimens,
@@ -45,7 +45,6 @@ Page({
     selectedSiteId: "all",
     selectedSiteName: "全部",
     siteDataReady: false,
-    siteOptions: SITE_OPTIONS.map((item) => ({ ...item, count: 0 })),
     activePreviewId: ""
   },
 
@@ -151,8 +150,7 @@ Page({
         context: null,
         specimens: [],
         filteredSpecimenCount: 0,
-        siteDataReady: false,
-        siteOptions: SITE_OPTIONS.map((item) => ({ ...item, count: 0 }))
+        siteDataReady: false
       });
     } finally {
       if (isCurrentPublicCatalogRequest(this, requestGeneration)) wx.stopPullDownRefresh();
@@ -186,28 +184,12 @@ Page({
       } : null,
       specimens: groupSpecimens(specimens),
       filteredSpecimenCount: specimens.length,
-      siteDataReady,
-      siteOptions: SITE_OPTIONS.map((item) => ({
-        ...item,
-        count: allSpecimens.filter((specimen) => item.id === "all" || specimen.siteId === item.id).length
-      }))
+      siteDataReady
     });
   },
 
-  onSiteTap(event) {
-    const siteId = event.currentTarget.dataset.siteId;
-    const site = SITE_OPTIONS.find((item) => item.id === siteId);
-    if (!site || site.id === this.data.selectedSiteId || !this.viewModel) return;
-    if (site.id !== "all" && !this.data.siteDataReady) return;
-    setSiteSelection(site.id);
-    this.setData({ selectedSiteId: site.id, selectedSiteName: site.label });
-    this.showAllStock();
-  },
-
-  onClearSite() {
-    setSiteSelection("all");
-    this.setData({ selectedSiteId: "all", selectedSiteName: "全部" });
-    this.showAllStock();
+  onChangeSiteTap() {
+    returnToParent("pages/catalog/index");
   },
 
   onBackTap() {

@@ -1,8 +1,9 @@
 const auth = require("../../utils/customer-auth");
+const { showCustomerTools } = require("../../utils/config");
 const { returnToParent } = require("../../utils/navigation");
 
 Page({
-  data: { customer: null, checking: true, busy: false, accepted: false, error: "" },
+  data: { showCustomerTools, customer: null, checking: true, busy: false, accepted: false, error: "" },
   onShow() { this.refreshAccount(); },
   onBackTap() { returnToParent("pages/catalog/index"); },
   async refreshAccount() {
@@ -28,7 +29,7 @@ Page({
     if (this.data.busy || this.data.checking) return;
     wx.showModal({
       title: deleting ? "注销账号？" : "退出登录？",
-      content: deleting ? "将删除本小程序的访客账号并退出所有设备。微信客服会话不会被删除。注销后仍可浏览鱼单。" : "退出后仍可浏览鱼单和咨询客服。",
+      content: deleting ? "将删除本小程序的访客账号并退出所有设备。微信客服会话不会被删除。注销后仍可浏览鱼单。" : "退出后仍可浏览鱼单。",
       confirmText: deleting ? "确认注销" : "退出登录",
       confirmColor: deleting ? "#b43232" : "#07544e",
       success: async (result) => {

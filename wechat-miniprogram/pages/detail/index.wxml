@@ -157,7 +157,7 @@
       </view>
     </view>
   </view>
-  <block wx:if="{{!loading && !error && specimen}}">
+  <block wx:if="{{showCustomerTools && !loading && !error && specimen}}">
     <view class="detail-contact-space" aria-hidden="true"></view>
     <button class="detail-contact-button {{refreshing || !contactCard ? 'is-disabled' : ''}}" size="mini" open-type="contact" show-message-card="{{true}}"
       send-message-title="{{contactCard.title}}" send-message-path="{{contactCard.path}}" send-message-img="{{specimen.image || '/assets/brand-logo.jpg'}}"

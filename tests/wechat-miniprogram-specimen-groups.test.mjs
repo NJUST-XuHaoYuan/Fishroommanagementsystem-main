@@ -17,6 +17,7 @@ function load(sourceText, dependencies = {}, globals = {}) {
 }
 const catalog = load(source, { "./api": { getApiBaseUrl: () => "https://fish.example" } }, { Date });
 const contact = load(await read("utils/contact-card.js"));
+const config = load(await read("utils/config.js"));
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function fixture() {
@@ -98,6 +99,7 @@ test("group inquiries keep group identity and direct links locate the exact fish
   const refresh = load(refreshSource, {}, { getApp: () => app, setInterval, clearInterval });
   let page;
   load(detailSource, { "../../utils/api": api, "../../utils/catalog": catalog, "../../utils/public-catalog-refresh": refresh,
+    "../../utils/config": config,
     "../../utils/navigation": { returnToParent() {} }, "../../utils/contact-card": contact }, {
     getApp: () => app, Page: (value) => { page = value; },
     wx: { stopPullDownRefresh() {} },
@@ -161,7 +163,7 @@ test("numbered or individually noted fish remain separate even when the full his
   assert.equal(catalog.groupSpecimens(catalog.buildViewModel(data).specimens).length, 3, "legacy APIs without notes cannot prove there is no individual note");
 });
 
-test("stock cards show blue identifiers, red notes and location filtering, but no tank position or status filters", async () => {
+test("stock cards show blue identifiers, red notes and location labels, but no inner city controls, tank position or status filters", async () => {
   const template = await read("pages/specimens/index.wxml");
   const page = await read("pages/specimens/index.js");
   const styles = await read("app.wxss");
@@ -170,7 +172,8 @@ test("stock cards show blue identifiers, red notes and location filtering, but n
   assert.ok(template.indexOf('class="specimen-number"') < template.indexOf('class="specimen-note"'));
   assert.doesNotMatch(template, /item\.location|class="filter-row"|onFilterTap|鱼码/);
   assert.doesNotMatch(page, /filterOptions|activeFilter|onFilterTap/);
-  assert.match(template, /bindtap="onSiteTap"/);
+  assert.doesNotMatch(template, /bindtap="onSiteTap"|siteOptions|data-site-id/);
+  assert.match(template, /class="species-site">所在地 · \{\{selectedSiteName\}\}/);
   assert.match(template, /class="specimen-site">\{\{[^}]*item.siteName[^}]*\}\}/);
   assert.match(page, /\}, "all"\)/);
   assert.match(template, /class="price-unit"> \/ \{\{item.unit\}\}/);

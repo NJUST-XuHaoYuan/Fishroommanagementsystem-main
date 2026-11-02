@@ -20,6 +20,8 @@
     <view class="species-intro">
       <view class="species-name">{{context.name}}</view>
       <view class="species-scientific">{{context.subtitle}}</view>
+      <view class="species-site">所在地 · {{selectedSiteName}}</view>
+      <view wx:if="{{!siteDataReady}}" class="site-unavailable">所在地信息暂不可用，请重新加载</view>
       <view class="species-overview">
         <view class="overview-item">
           <text class="overview-value">{{context.specimenCount}}</text>
@@ -31,28 +33,6 @@
           <text class="overview-label">/ {{unit}}</text>
         </view>
       </view>
-    </view>
-
-    <view class="list-toolbar">
-      <view class="site-filter-row">
-        <text class="site-filter-label">所在地</text>
-        <view class="site-options">
-          <button
-            wx:for="{{siteOptions}}" wx:key="id"
-            class="site-filter-button {{selectedSiteId === item.id ? 'is-selected' : ''}} {{!siteDataReady && item.id !== 'all' ? 'is-unavailable' : ''}}"
-            size="mini" hover-class="site-filter-hover"
-            data-site-id="{{item.id}}" bindtap="onSiteTap"
-            disabled="{{!siteDataReady && item.id !== 'all'}}"
-            aria-label="所在地{{item.label}}，{{siteDataReady || item.id === 'all' ? item.count + unit : '暂不可用'}}{{selectedSiteId === item.id ? '，已选中' : ''}}"
-            aria-pressed="{{selectedSiteId === item.id}}"
-          >
-            <text>{{item.label}}</text>
-            <text class="site-filter-count">{{siteDataReady || item.id === 'all' ? item.count : '—'}}</text>
-            <view wx:if="{{selectedSiteId === item.id}}" class="site-selected-line" aria-hidden="true"></view>
-          </button>
-        </view>
-      </view>
-      <view wx:if="{{!siteDataReady}}" class="site-unavailable">暂无法按所在地筛选</view>
     </view>
 
     <view wx:if="{{specimens.length}}" class="specimen-list">
@@ -149,7 +129,7 @@
 
     <view wx:else class="state-panel compact">
       <view class="empty-title">{{!siteDataReady && selectedSiteId !== 'all' ? '所在地信息暂不可用' : selectedSiteId === 'all' ? '暂无可选库存' : selectedSiteName + '暂无可选库存'}}</view>
-      <button wx:if="{{selectedSiteId !== 'all'}}" class="primary-button" bindtap="onClearSite">查看全部所在地</button>
+      <button wx:if="{{selectedSiteId !== 'all'}}" class="primary-button" bindtap="onChangeSiteTap">返回首页切换所在地</button>
     </view>
   </view>
 </view>

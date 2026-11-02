@@ -19,10 +19,10 @@
     <view wx:if="{{error}}" class="account-error" role="alert">{{error}}</view>
   </view>
   <view class="account-actions">
-    <button class="account-row" open-type="contact" show-message-card="{{true}}" send-message-title="海洋森林 · 生物选购" send-message-path="/pages/catalog/index">
+    <button wx:if="{{showCustomerTools}}" class="account-row" open-type="contact" show-message-card="{{true}}" send-message-title="海洋森林 · 生物选购" send-message-path="/pages/catalog/index">
       <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text><text class="row-arrow" aria-hidden="true">›</text>
     </button>
-    <view class="account-row service-account">
+    <view wx:if="{{showCustomerTools}}" class="account-row service-account">
       <view><view class="service-label">客服微信</view><text class="service-id">marineforest2024</text></view>
       <button class="account-copy" size="mini" bindtap="onCopyServiceAccount">复制</button>
     </view>

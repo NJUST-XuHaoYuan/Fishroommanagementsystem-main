@@ -76,10 +76,6 @@
   line-height: 16px;
 }
 
-.products-site-filter {
-  margin: 0 0 24rpx;
-}
-
 .category-band {
   display: flex;
   min-height: 144rpx;
