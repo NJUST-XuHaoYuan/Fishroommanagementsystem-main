@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Real HTTP/router/domain code; PG adapter deliberately models only app_state transactions. */
-export async function startMutableRouteServer(fixture, { port: requestedPort = 0 } = {}) {
+export async function startMutableRouteServer(fixture, { port: requestedPort = 0, env = {} } = {}) {
   const socket = createServer();
   await new Promise((resolve, reject) => { socket.once("error", reject); socket.listen(requestedPort, "127.0.0.1", resolve); });
   const port = socket.address().port;
@@ -22,7 +22,7 @@ export async function startMutableRouteServer(fixture, { port: requestedPort = 0
     env: { ...process.env, NODE_ENV: "test", HOST: "127.0.0.1", PORT: String(port),
       AUTH_SESSION_SECRET: "replace_with_stock_pricing_integration_secret", UPLOAD_DIR: uploadDir,
       TRANSCODE_VIDEO_UPLOADS: "false", FISHROOM_TEST_PERSIST_WRITES: "1",
-      FISHROOM_TEST_DATABASE_FIXTURE_JSON: JSON.stringify(fixture) },
+      FISHROOM_TEST_DATABASE_FIXTURE_JSON: JSON.stringify(fixture), ...env },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let output = "";

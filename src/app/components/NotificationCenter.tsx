@@ -48,6 +48,8 @@ import {
   NewCustomerApprovalPanel,
   type NewCustomerApprovalUpdatedOrder,
 } from "./NewCustomerApprovalPanel";
+import { isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
+import { mergeNewCustomerApproval } from "./OrderAcquisitionTag";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -742,10 +744,10 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     void markRead(notification);
   };
 
-  const applyNewCustomerOrder = (order: NewCustomerApprovalUpdatedOrder) => {
-    setState((current) => ({
+  const applyNewCustomerOrder = (order: NewCustomerApprovalUpdatedOrder, session?: NewCustomerSession) => {
+    setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
       ...current,
-      orders: mergeEntityChanges<Order>(current.orders, [order as Order]),
+      orders: mergeNewCustomerApproval(current.orders, order),
     }));
   };
 

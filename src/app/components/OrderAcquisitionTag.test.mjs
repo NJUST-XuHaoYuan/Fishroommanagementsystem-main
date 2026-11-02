@@ -238,7 +238,7 @@ test("frontend uses dedicated request, review and detail contracts with optimist
   assert.match(panelSource, /expectedApprovalVersion: detail\?\.approval\?\.version \?\? 0/);
   assert.match(panelSource, /confirmCustomerIdentity: true/);
   assert.match(panelSource, /response\.status === 409/);
-  assert.match(panelSource, /onOrderUpdated\?\.\(order\)/);
+  assert.match(panelSource, /onOrderUpdated\?\.\(order, session\)/);
   assert.doesNotMatch(panelSource, /orders\/acquisition-tag/);
 });
 

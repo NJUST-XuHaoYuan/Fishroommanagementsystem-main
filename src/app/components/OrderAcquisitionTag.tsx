@@ -8,7 +8,6 @@ import type {
 import {
   NewCustomerApprovalPanel,
   type NewCustomerApprovalPanelProps,
-  type NewCustomerApprovalUpdatedOrder,
 } from "./NewCustomerApprovalPanel";
 import { Badge } from "./ui/badge";
 
@@ -114,7 +113,7 @@ export type OrderAcquisitionTagProps = {
     newCustomerApproval?: NewCustomerApprovalRecord | null;
   };
   initialDetail?: NewCustomerApprovalDetail | null;
-  onOrderUpdated?: (order: NewCustomerApprovalUpdatedOrder) => void;
+  onOrderUpdated?: NewCustomerApprovalPanelProps["onOrderUpdated"];
   onApprovalChanged?: NewCustomerApprovalPanelProps["onChanged"];
   /** @deprecated Accepted temporarily so the parent can remove the old toggle wiring independently. */
   isAdmin?: boolean;

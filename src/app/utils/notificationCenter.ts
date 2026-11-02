@@ -1,4 +1,5 @@
 import { stockPriceModeLabel } from "./stockPricing.ts";
+import { normalizeNewCustomerEvidence, type NewCustomerEvidenceAttachment } from "./newCustomerEvidence.ts";
 
 export type LatestRequestToken = Readonly<{
   notificationId: string;
@@ -30,6 +31,7 @@ export type NewCustomerApprovalRecord = {
   version: number;
   customerSnapshot?: unknown;
   customerIdentityConfirmed?: boolean;
+  evidenceAttachments?: NewCustomerEvidenceAttachment[];
 };
 
 export type NewCustomerApprovalDetail = {
@@ -38,6 +40,8 @@ export type NewCustomerApprovalDetail = {
   approval?: NewCustomerApprovalRecord | null;
   canRequest: boolean;
   canApprove: boolean;
+  canViewEvidence?: boolean;
+  draftEvidenceAttachments?: NewCustomerEvidenceAttachment[];
   customerEvidence: {
     customerId?: string;
     identityKnown: boolean;
@@ -82,7 +86,13 @@ export function newCustomerApprovalDetailFromPayload(payload: unknown): NewCusto
   const evidence = objectValue(candidate.customerEvidence);
   const orderId = String(candidate.orderId ?? currentOrder?.id ?? "").trim();
   if (!orderId || !currentOrder || !evidence) return null;
-  return candidate as NewCustomerApprovalDetail;
+  const approval = objectValue(candidate.approval);
+  if (!approval && candidate.draftEvidenceAttachments === undefined) return candidate as NewCustomerApprovalDetail;
+  return {
+    ...candidate,
+    ...(approval ? { approval: { ...approval, evidenceAttachments: normalizeNewCustomerEvidence(approval.evidenceAttachments) } } : {}),
+    ...(candidate.draftEvidenceAttachments !== undefined ? { draftEvidenceAttachments: candidate.canRequest === true ? normalizeNewCustomerEvidence(candidate.draftEvidenceAttachments) : [] } : {}),
+  } as NewCustomerApprovalDetail;
 }
 
 export function newCustomerRequestActionReady({

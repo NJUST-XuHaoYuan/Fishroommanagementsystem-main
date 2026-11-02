@@ -6,6 +6,7 @@ let revision = String(fixture.revision ?? "1");
 const persistWrites = process.env.FISHROOM_TEST_PERSIST_WRITES === "1";
 let writeLock = Promise.resolve();
 let failStatusHistoryWrite = fixture.failStatusHistoryWrite === true;
+let failNewCustomerEvidenceWrite = fixture.failNewCustomerEvidenceWrite === true;
 // Test-only IPC reads the committed backing store, bypassing response redaction
 // without inventing a debug HTTP route in the application.
 if (persistWrites && typeof process.send === "function") process.on("message", (message) => {
@@ -354,6 +355,10 @@ class TestClient {
       if (failStatusHistoryWrite && /^UPDATE\b/i.test(sql) && sql.includes("'{stockStatusHistory}'")) {
         failStatusHistoryWrite = false;
         throw Object.assign(new Error("Injected status journal database failure"), { code: "XX000" });
+      }
+      if (failNewCustomerEvidenceWrite && /^UPDATE\b/i.test(sql) && sql.includes("'{newCustomerEvidenceAttachments}'")) {
+        failNewCustomerEvidenceWrite = false;
+        throw Object.assign(new Error("Injected evidence database failure"), { code: "XX000" });
       }
       return response;
     }

@@ -1,4 +1,5 @@
 import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
+import { normalizeNewCustomerEvidenceIds, newCustomerEvidenceMetadata } from "./new-customer-evidence.mjs";
 
 export const NEW_CUSTOMER_COMMISSION_POLICY_EFFECTIVE_DATE = "2026-10-01";
 const POLICY_START_MS = Date.parse("2026-10-01T00:00:00+08:00");
@@ -87,6 +88,24 @@ function requestBlock(state, order, account) {
   return "";
 }
 
+export function assertCanUploadNewCustomerEvidence(state, order, account) {
+  const owner = resolveNewCustomerOrderOwner(state.personnel, order);
+  if (!owner || text(owner.id) !== text(account?.id) || text(owner.username) !== text(account?.username)) {
+    fail(403, "NEW_CUSTOMER_OWNER_REQUIRED", "仅该订单负责人本人可以上传新客凭证");
+  }
+  const blocked = requestBlock(state, order, account);
+  if (blocked) fail(409, "NEW_CUSTOMER_REQUEST_BLOCKED", blocked);
+}
+
+// Site access and fresh session authentication are enforced by each caller.
+export function canViewNewCustomerEvidence(state, order, account, record = null) {
+  const owner = resolveNewCustomerOrderOwner(state.personnel, order);
+  return Boolean(isPersonnelAccountEnabled(account) && (account.accessRole === "admin" ||
+    (text(owner?.id) === text(account.id) && text(owner?.username) === text(account.username)) ||
+    (record ? record.uploaderPersonnelId === account.id && record.uploaderUsername === account.username
+      : text(order.newCustomerApproval?.requestedBy) === text(account.username))));
+}
+
 export function newCustomerApprovalDetail(state = {}, order = {}, account = {}) {
   const requestBlockedReason = requestBlock(state, order, account);
   const approval = order.newCustomerApproval ?? null;
@@ -100,6 +119,7 @@ export function newCustomerApprovalDetail(state = {}, order = {}, account = {}) 
   }
   return {
     orderId: text(order.id), approval, canRequest: !requestBlockedReason, requestBlockedReason,
+    canViewEvidence: canViewNewCustomerEvidence(state, order, account),
     canApprove: approval?.status === "pending" && account?.accessRole === "admin" && isPersonnelAccountEnabled(account),
     customerEvidence,
     currentOrder: Object.fromEntries(["id", "orderNo", "date", "createdAt", "customerId", "contactPersonnelId", "contactPerson"].map((key) => [key, order[key] ?? ""])),
@@ -114,21 +134,27 @@ function requireVersion(order, body) {
   }
 }
 
-export function planNewCustomerRequest(state, order, account, body, { requestId, now = new Date().toISOString() }) {
+export function planNewCustomerRequest(state, order, account, body, { requestId, now = new Date().toISOString(), evidenceAttachments = [] }) {
   const reason = text(body.reason);
+  const evidenceIds = normalizeNewCustomerEvidenceIds(body.evidenceIds);
   if (reason.length < 5 || reason.length > 1000) fail(400, "NEW_CUSTOMER_REASON_REQUIRED", "请填写新客身份识别依据和申请说明（5 至 1000 字）");
   const owner = resolveNewCustomerOrderOwner(state.personnel, order);
   if (!owner || !isPersonnelAccountEnabled(owner) || text(owner.id) !== text(account?.id) || text(owner.username) !== text(account?.username)) {
     fail(403, "NEW_CUSTOMER_OWNER_REQUIRED", "仅该订单负责人本人可以申请新客提成");
   }
   const previous = order.newCustomerApproval;
-  if (previous?.status === "pending" && identityMatches(state, order, previous) && previous.reason === reason) return { order, unchanged: true };
+  if (previous?.status === "pending" && identityMatches(state, order, previous) && previous.reason === reason &&
+      JSON.stringify(list(previous.evidenceAttachments).map((item) => item.id)) === JSON.stringify(evidenceIds)) return { order, unchanged: true };
   requireVersion(order, body);
   const blocked = requestBlock(state, order, account);
   if (blocked) fail(409, "NEW_CUSTOMER_REQUEST_BLOCKED", blocked);
+  if (JSON.stringify(evidenceAttachments.map((item) => item.id)) !== JSON.stringify(evidenceIds)) {
+    fail(400, "NEW_CUSTOMER_EVIDENCE_UNVERIFIED", "申请凭证未经服务器验证");
+  }
   const approval = {
     status: "pending", requestId, requestedAt: now, requestedBy: text(account.username), requestedByName: text(account.name || account.username),
     reason, customerId: text(order.customerId), customerSnapshot: customerSnapshot(state, order), contactPersonnelId: text(owner.id),
+    evidenceAttachments: evidenceAttachments.map(newCustomerEvidenceMetadata),
     version: newCustomerApprovalVersion(order) + 1,
   };
   return { order: { ...order, newCustomerApproval: approval }, unchanged: false };

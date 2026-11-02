@@ -25,6 +25,11 @@ import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import { Textarea } from "./ui/textarea";
 import { NewCustomerLinkedDetailDialog, type NewCustomerLinkedTarget } from "./NewCustomerLinkedDetailDialog";
+import { NewCustomerEvidenceGallery, NewCustomerEvidenceUploader } from "./NewCustomerEvidence";
+import {
+  captureNewCustomerSession, isNewCustomerSessionCurrent, normalizeNewCustomerEvidence,
+  type NewCustomerEvidenceAttachment, type NewCustomerSession,
+} from "../utils/newCustomerEvidence";
 
 export type NewCustomerApprovalUpdatedOrder = { id: string } & Record<string, unknown>;
 
@@ -36,7 +41,7 @@ export type NewCustomerApprovalPanelProps = {
   approvalRequestId?: string;
   /** Optional server-provided detail for embedding or deterministic rendering. */
   initialDetail?: NewCustomerApprovalDetail | null;
-  onOrderUpdated?: (order: NewCustomerApprovalUpdatedOrder) => void;
+  onOrderUpdated?: (order: NewCustomerApprovalUpdatedOrder, session?: NewCustomerSession) => void;
   onChanged?: (change: {
     action: "request" | "approve" | "reject";
     order?: NewCustomerApprovalUpdatedOrder;
@@ -95,7 +100,12 @@ function resultOrder(payload: unknown): NewCustomerApprovalUpdatedOrder | undefi
   return id ? order as NewCustomerApprovalUpdatedOrder : undefined;
 }
 
-export function NewCustomerApprovalPanel({
+export function NewCustomerApprovalPanel(props: NewCustomerApprovalPanelProps) {
+  const sessionKey = captureNewCustomerSession()?.key || "";
+  return <NewCustomerApprovalPanelContent key={JSON.stringify([props.orderId, props.notificationId, props.approvalRequestId, sessionKey])} {...props} />;
+}
+
+function NewCustomerApprovalPanelContent({
   orderId,
   notificationId,
   approvalRequestId,
@@ -114,6 +124,18 @@ export function NewCustomerApprovalPanel({
   const [confirmUnknownCustomer, setConfirmUnknownCustomer] = useState(false);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [linkedTarget, setLinkedTarget] = useState<NewCustomerLinkedTarget | null>(null);
+  const [draftEvidence, setDraftEvidence] = useState<NewCustomerEvidenceAttachment[]>(() => initialMatches && initialDetail?.canRequest ? normalizeNewCustomerEvidence(initialDetail.draftEvidenceAttachments) : []);
+  const [evidenceBusy, setEvidenceBusy] = useState(false);
+  const evidenceBusyRef = useRef(false);
+  const draftEvidenceRef = useRef(draftEvidence);
+  const draftsRestoredRef = useRef(initialMatches && initialDetail?.draftEvidenceAttachments !== undefined);
+  const mountedRef = useRef(true);
+  const ownerSessionRef = useRef(captureNewCustomerSession());
+  const mutationControllerRef = useRef<AbortController | null>(null);
+  const onEvidenceBusyChange = useCallback((busy: boolean) => { evidenceBusyRef.current = busy; setEvidenceBusy(busy); }, []);
+  const onEvidenceChange = useCallback((attachments: NewCustomerEvidenceAttachment[]) => {
+    draftEvidenceRef.current = attachments; setDraftEvidence(attachments);
+  }, []);
   const mutationPendingRef = useRef(false);
   const requestRef = useRef<{ sequence: number; controller: AbortController | null }>({
     sequence: 0,
@@ -127,7 +149,9 @@ export function NewCustomerApprovalPanel({
     requestRef.current = { sequence, controller };
     setLoading(true);
     setLoadError("");
+    const session = captureNewCustomerSession();
     try {
+      if (!session || session.key !== ownerSessionRef.current?.key) throw new Error("登录状态已变化，请重新打开申请。");
       const endpoint = notificationId && !fromOrderEndpoint
         ? `/api/notifications/detail?id=${encodeURIComponent(notificationId)}`
         : `/api/orders/new-customer/detail?orderId=${encodeURIComponent(orderId)}`;
@@ -140,23 +164,42 @@ export function NewCustomerApprovalPanel({
       if (!response.ok || (payload as { ok?: boolean }).ok === false) {
         throw new Error(errorMessage(payload, "新客首单申请详情加载失败"));
       }
-      const nextDetail = newCustomerApprovalDetailFromPayload(payload);
+      let nextDetail = newCustomerApprovalDetailFromPayload(payload);
       if (!nextDetail) throw new Error("服务端未返回可核对的新客首单申请详情");
+      // Notification snapshots do not load the private draft registry. Recover the
+      // current applicant's drafts from the order endpoint before enabling upload.
+      if (notificationId && !fromOrderEndpoint && nextDetail.canRequest && nextDetail.draftEvidenceAttachments === undefined) {
+        if (controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
+        const orderResponse = await fetch(`/api/orders/new-customer/detail?orderId=${encodeURIComponent(orderId)}`, { headers: authJsonHeaders(), signal: controller.signal, cache: "no-store" });
+        const orderPayload = await orderResponse.json().catch(() => ({}));
+        if (!orderResponse.ok || orderPayload.ok === false) throw new Error(errorMessage(orderPayload, "图片草稿恢复失败，请重试"));
+        nextDetail = newCustomerApprovalDetailFromPayload(orderPayload);
+        if (!nextDetail) throw new Error("图片草稿恢复失败，请重试");
+      }
       if (nextDetail.orderId !== orderId) throw new Error("申请详情与当前订单不匹配，请重新打开后重试");
       if (
         approvalRequestId &&
         String(nextDetail.approval?.requestId ?? "") !== String(approvalRequestId)
       ) throw new Error("站内信与当前审批申请不匹配，请刷新后重试");
-      if (requestRef.current.sequence !== sequence || controller.signal.aborted) return;
+      if (requestRef.current.sequence !== sequence || controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
+      if (!draftsRestoredRef.current && nextDetail.canRequest) {
+        draftsRestoredRef.current = true;
+        onEvidenceChange(normalizeNewCustomerEvidence([...draftEvidenceRef.current, ...normalizeNewCustomerEvidence(nextDetail.draftEvidenceAttachments)]));
+      }
       setDetail(nextDetail);
       setConfirmUnknownCustomer(false);
     } catch (error) {
-      if (controller.signal.aborted || requestRef.current.sequence !== sequence) return;
+      if (controller.signal.aborted || requestRef.current.sequence !== sequence || (session && !isNewCustomerSessionCurrent(session))) return;
       setLoadError(error instanceof Error ? error.message : "新客首单申请详情加载失败");
     } finally {
       if (requestRef.current.sequence === sequence && !controller.signal.aborted) setLoading(false);
     }
-  }, [approvalRequestId, notificationId, orderId]);
+  }, [approvalRequestId, notificationId, onEvidenceChange, orderId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; mutationControllerRef.current?.abort(); };
+  }, []);
 
   useEffect(() => {
     setLinkedTarget(null);
@@ -169,6 +212,7 @@ export function NewCustomerApprovalPanel({
       setDetail(initialDetail);
       setLoadError("");
       setLoading(false);
+      if (initialDetail.canRequest && initialDetail.draftEvidenceAttachments === undefined) void loadDetail(true);
     } else {
       setDetail(null);
       void loadDetail();
@@ -176,16 +220,19 @@ export function NewCustomerApprovalPanel({
     return () => requestRef.current.controller?.abort();
   }, [initialDetail, loadDetail, orderId]);
 
-  const applyReturnedOrder = (payload: unknown) => {
+  const mutationCurrent = (session: NewCustomerSession) => mountedRef.current && session.key === ownerSessionRef.current?.key && isNewCustomerSessionCurrent(session);
+
+  const applyReturnedOrder = (payload: unknown, session: NewCustomerSession) => {
     const order = resultOrder(payload);
-    if (order) {
+    if (order?.id === orderId && mutationCurrent(session)) {
       try {
-        onOrderUpdated?.(order);
+        onOrderUpdated?.(order, session);
       } catch {
         toast.error("审批已保存，但订单列表同步失败，请手动刷新");
       }
+      return order;
     }
-    return order;
+    return undefined;
   };
 
   const notifyChanged = async (change: {
@@ -199,19 +246,24 @@ export function NewCustomerApprovalPanel({
     }
   };
 
-  const handleConflict = async (payload: unknown, fallback: string) => {
-    applyReturnedOrder(payload);
+  const handleConflict = async (payload: unknown, fallback: string, session: NewCustomerSession) => {
+    if (!mutationCurrent(session)) return;
+    applyReturnedOrder(payload, session);
     await loadDetail(true);
-    setActionError(errorMessage(payload, fallback));
+    if (mutationCurrent(session)) setActionError(errorMessage(payload, fallback));
   };
 
   const submitRequest = async () => {
-    if (mutationPendingRef.current || !newCustomerRequestActionReady({
+    if (mutationPendingRef.current || evidenceBusyRef.current || !newCustomerRequestActionReady({
       orderId,
       canRequest: detail?.canRequest,
       reason: requestReason,
-      processing: busyAction !== null,
+      processing: busyAction !== null || evidenceBusy || loading,
     })) return;
+    const session = captureNewCustomerSession();
+    if (!session || !mutationCurrent(session)) { setActionError("登录状态已变化，请重新打开申请后提交。"); return; }
+    const controller = new AbortController();
+    mutationControllerRef.current = controller;
     mutationPendingRef.current = true;
     setBusyAction("request");
     setActionError("");
@@ -219,30 +271,35 @@ export function NewCustomerApprovalPanel({
       const response = await fetch("/api/orders/new-customer/request", {
         method: "POST",
         headers: authJsonHeaders(),
+        signal: controller.signal,
         body: JSON.stringify({
           orderId,
           reason: requestReason.trim(),
           expectedApprovalVersion: detail?.approval?.version ?? 0,
+          evidenceIds: draftEvidenceRef.current.map(attachment => attachment.id),
         }),
       });
       const payload = await response.json().catch(() => ({}));
+      if (!mutationCurrent(session)) return;
       if (response.status === 409) {
-        await handleConflict(payload, "申请状态已变化，已刷新为最新内容");
+        await handleConflict(payload, "申请状态已变化，已刷新为最新内容", session);
         return;
       }
       if (!response.ok || (payload as { ok?: boolean }).ok === false) {
         throw new Error(errorMessage(payload, "新客首单申请提交失败"));
       }
-      const order = applyReturnedOrder(payload);
+      const order = applyReturnedOrder(payload, session);
+      onEvidenceChange([]);
       setRequestReason("");
       await loadDetail(true);
+      if (!mutationCurrent(session)) return;
       await notifyChanged({ action: "request", order });
       toast.success("新客首单申请已提交，等待管理员审批");
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "新客首单申请提交失败");
+      if (mutationCurrent(session)) setActionError(error instanceof Error ? error.message : "新客首单申请提交失败");
     } finally {
       mutationPendingRef.current = false;
-      setBusyAction(null);
+      if (mountedRef.current) setBusyAction(null);
     }
   };
 
@@ -254,8 +311,12 @@ export function NewCustomerApprovalPanel({
       note: reviewNote,
       identityKnown: detail?.customerEvidence.identityKnown,
       confirmCustomerIdentity: confirmUnknownCustomer,
-      processing: busyAction !== null,
+      processing: busyAction !== null || loading,
     })) return;
+    const session = captureNewCustomerSession();
+    if (!session || !mutationCurrent(session)) { setActionError("登录状态已变化，请重新打开申请后审批。"); return; }
+    const controller = new AbortController();
+    mutationControllerRef.current = controller;
     mutationPendingRef.current = true;
     setBusyAction(decision);
     setActionError("");
@@ -263,6 +324,7 @@ export function NewCustomerApprovalPanel({
       const response = await fetch("/api/orders/new-customer/review", {
         method: "POST",
         headers: authJsonHeaders(),
+        signal: controller.signal,
         body: JSON.stringify({
           orderId,
           requestId: detail?.approval?.requestId,
@@ -277,24 +339,26 @@ export function NewCustomerApprovalPanel({
         }),
       });
       const payload = await response.json().catch(() => ({}));
+      if (!mutationCurrent(session)) return;
       if (response.status === 409) {
-        await handleConflict(payload, "该申请已被其他管理员处理，已刷新为最新状态");
+        await handleConflict(payload, "该申请已被其他管理员处理，已刷新为最新状态", session);
         return;
       }
       if (!response.ok || (payload as { ok?: boolean }).ok === false) {
         throw new Error(errorMessage(payload, decision === "approve" ? "批准失败" : "驳回失败"));
       }
-      const order = applyReturnedOrder(payload);
+      const order = applyReturnedOrder(payload, session);
       setReviewNote("");
       setConfirmUnknownCustomer(false);
       await loadDetail(true);
+      if (!mutationCurrent(session)) return;
       await notifyChanged({ action: decision, order });
       toast.success(decision === "approve" ? "新客首单申请已批准" : "新客首单申请已驳回");
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : decision === "approve" ? "批准失败" : "驳回失败");
+      if (mutationCurrent(session)) setActionError(error instanceof Error ? error.message : decision === "approve" ? "批准失败" : "驳回失败");
     } finally {
       mutationPendingRef.current = false;
-      setBusyAction(null);
+      if (mountedRef.current) setBusyAction(null);
     }
   };
 
@@ -306,7 +370,7 @@ export function NewCustomerApprovalPanel({
     orderId,
     canRequest: detail?.canRequest,
     reason: requestReason,
-    processing: busyAction !== null,
+    processing: busyAction !== null || evidenceBusy || loading,
   });
   const canApprove = newCustomerReviewActionReady({
     requestId: approval?.requestId,
@@ -315,7 +379,7 @@ export function NewCustomerApprovalPanel({
     note: reviewNote,
     identityKnown,
     confirmCustomerIdentity: confirmUnknownCustomer,
-    processing: busyAction !== null,
+    processing: busyAction !== null || loading,
   });
   const canReject = newCustomerReviewActionReady({
     requestId: approval?.requestId,
@@ -324,7 +388,7 @@ export function NewCustomerApprovalPanel({
     note: reviewNote,
     identityKnown,
     confirmCustomerIdentity: confirmUnknownCustomer,
-    processing: busyAction !== null,
+    processing: busyAction !== null || loading,
   });
 
   return (
@@ -441,6 +505,11 @@ export function NewCustomerApprovalPanel({
               <div className="mt-1 whitespace-pre-wrap break-words">
                 <span className="text-muted-foreground">申请理由：</span>{approval.reason || "未填写"}
               </div>
+              <div className="mt-3 space-y-2">
+                <h4 className="text-sm font-medium">{approval.status === "rejected" ? "上次申请图片凭证" : "申请图片凭证"}</h4>
+                {detail.canViewEvidence === false ? <p className="text-xs text-muted-foreground">仅申请人、订单负责人和管理员可查看凭证。</p> : <NewCustomerEvidenceGallery orderId={orderId} attachments={normalizeNewCustomerEvidence(approval.evidenceAttachments)} />}
+                {normalizeNewCustomerEvidence(approval.evidenceAttachments).length > 0 && detail.canViewEvidence !== false && <p className="text-xs text-muted-foreground">已随申请提交，只读查看，不可修改或删除。</p>}
+              </div>
               {approval.reviewedAt && (
                 <div className="mt-1">
                   <span className="text-muted-foreground">审批人：</span>
@@ -543,6 +612,7 @@ export function NewCustomerApprovalPanel({
                   <span>{requestReason.trim().length}/1000</span>
                 </div>
               </div>
+              <NewCustomerEvidenceUploader orderId={orderId} attachments={draftEvidence} disabled={busyAction !== null || loading} onChange={onEvidenceChange} onBusyChange={onEvidenceBusyChange} />
               <div className="flex justify-end">
                 <Button
                   type="button"

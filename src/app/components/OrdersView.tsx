@@ -10,6 +10,7 @@ import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
+import { isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -5047,7 +5048,7 @@ function OrderDetailDialog({
 
             <OrderAcquisitionTag
               order={order}
-              onOrderUpdated={(updatedOrder) => setState((current) => ({
+              onOrderUpdated={(updatedOrder, session) => setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
                 ...current,
                 orders: mergeNewCustomerApproval(current.orders, updatedOrder),
               }))}

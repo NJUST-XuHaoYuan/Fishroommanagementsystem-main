@@ -1,5 +1,5 @@
-import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants, createReadStream, createWriteStream, existsSync } from "node:fs";
+import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
@@ -18,7 +18,14 @@ import {
   selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
-import { newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
+import { assertCanUploadNewCustomerEvidence, canViewNewCustomerEvidence, newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
+import {
+  NEW_CUSTOMER_EVIDENCE_DIRECTORY, NEW_CUSTOMER_EVIDENCE_MAX_BYTES, NEW_CUSTOMER_EVIDENCE_DRAFT_TTL,
+  newCustomerEvidenceId, isNewCustomerEvidenceId, newCustomerEvidencePath, isNewCustomerEvidencePath,
+  newCustomerEvidenceMetadata, newCustomerEvidenceFilename, normalizeNewCustomerEvidenceIds,
+  resolveNewCustomerEvidence, resolveEvidenceForSubmission, checkNewCustomerEvidenceQuota,
+  evidenceIsBound, evidenceIsExpired, encryptNewCustomerEvidence, decryptNewCustomerEvidence, normalizeNewCustomerEvidenceImage,
+} from "./new-customer-evidence.mjs";
 import { buildNewCustomerLinkedDetail } from "./new-customer-linked-detail.mjs";
 import { reconcileCommissionLedger, personalCommissionSummary, monthlyCommissionSummary, invalidateCommissionAllocations } from "./commission-ledger.mjs";
 import { lossPricingSnapshot, lossStockPricingUpdate, planLossPriceUpdate } from "./stock-loss-price.mjs";
@@ -430,6 +437,56 @@ if (process.env.NODE_ENV === "production" && !configuredPersonnelDataKeyring) {
   throw new Error("PERSONNEL_DATA_KEYRING_JSON must be set in production");
 }
 const personnelDataKeyring = parsePersonnelDataKeyring(configuredPersonnelDataKeyring);
+const newCustomerEvidenceLimiter = createConcurrencyLimiter({ concurrency: 1, maxPending: 2, queueFullMessage: "凭证图片处理繁忙，请稍后重试" });
+
+const NEW_CUSTOMER_EVIDENCE_SELECT = `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+  data -> 'orders' AS orders, data -> 'customers' AS customers,
+  data -> 'newCustomerEvidenceAttachments' AS "newCustomerEvidenceAttachments" FROM app_state WHERE id = $1`;
+
+async function readNewCustomerEvidence(record) {
+  const path = newCustomerEvidencePath(uploadDir, record.id);
+  let handle;
+  try {
+    // Refuse symlinks; only our immutable files are admissible.
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > NEW_CUSTOMER_EVIDENCE_MAX_BYTES * 2) throw new Error("Invalid evidence file");
+    return decryptNewCustomerEvidence(await handle.readFile(), record, personnelDataKeyring);
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw Object.assign(new Error("凭证文件暂不可用，请联系管理员"), { statusCode: 409, code: "NEW_CUSTOMER_EVIDENCE_FILE_UNAVAILABLE" });
+  } finally { await handle?.close(); }
+}
+
+// Only unsubmitted drafts expire. Bound evidence survives approvals/rejections forever.
+async function cleanupNewCustomerEvidenceDrafts() {
+  const client = await pool.connect();
+  const removed = [];
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(`SELECT data -> 'newCustomerEvidenceAttachments' AS "newCustomerEvidenceAttachments" FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]);
+    const records = Array.isArray(rows[0]?.newCustomerEvidenceAttachments) ? rows[0].newCustomerEvidenceAttachments : [];
+    const expired = records.filter((record) => isNewCustomerEvidenceId(record?.id) && evidenceIsExpired(record));
+    const retained = records.filter((record) => !expired.includes(record));
+    if (expired.length) await client.query("UPDATE app_state SET data = jsonb_set(data, '{newCustomerEvidenceAttachments}', $2::jsonb, true), updated_at = now() WHERE id = $1", [stateId, JSON.stringify(retained)]);
+    // The writer also takes this row lock before creating files. Reconcile crash orphans
+    // only after the full TTL, and only generated .bin names in our dedicated directory.
+    const known = new Set(retained.map((record) => record?.id));
+    const files = await readdir(join(uploadDir, NEW_CUSTOMER_EVIDENCE_DIRECTORY), { withFileTypes: true }).catch((error) => { if (error.code === "ENOENT") return []; throw error; });
+    for (const file of files) {
+      const id = file.name.endsWith(".bin") ? file.name.slice(0, -4) : "";
+      if (!file.isFile() || !isNewCustomerEvidenceId(id) || known.has(id)) continue;
+      const path = newCustomerEvidencePath(uploadDir, id);
+      const info = await stat(path);
+      if (expired.some((record) => record.id === id) || info.mtimeMs + NEW_CUSTOMER_EVIDENCE_DRAFT_TTL < Date.now()) removed.push(path);
+    }
+    await client.query("COMMIT");
+    for (const path of removed) await rm(path, { force: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.warn("[new-customer-evidence] draft cleanup failed", error.code || "unknown");
+  } finally { client.release(); }
+}
 const allowDefaultCredentials = process.env.ALLOW_DEFAULT_CREDENTIALS === "true";
 const BOOTSTRAP_AUTH_ACCOUNTS = [
   { id: "person-admin", name: "admin", username: "admin", password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "", accessRole: "admin", employmentStatus: "active" },
@@ -1343,7 +1400,7 @@ function catalogStockPickerImageUrl(value) {
     const parsed = new URL(raw, "http://fishroom.local");
     const path = decodeURIComponent(parsed.pathname);
     if (parsed.username || parsed.password || path.includes("\\") ||
-        path.split("/").some((part) => part === ".." || part === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY || part === VIDEO_DERIVATIVE_DIRECTORY) ||
+        path.split("/").some((part) => part === ".." || part === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY || part === NEW_CUSTOMER_EVIDENCE_DIRECTORY || part === VIDEO_DERIVATIVE_DIRECTORY) ||
         path.startsWith("/api/")) return "";
     if (raw.startsWith("/uploads/")) {
       const localPath = localUploadPathFromUrl(parsed.pathname);
@@ -2317,6 +2374,7 @@ function sanitizeStateForResponse(data = {}, req) {
   delete next.approvalRequests;
   delete next.personnelProfileRequests;
   delete next.personnelPrivateAttachments;
+  delete next.newCustomerEvidenceAttachments;
   delete next.retiredPersonnelUsernames;
   delete next.inventoryAdjustmentDrafts;
   delete next._personnelPrivateAttachmentEncryptionKid;
@@ -7107,6 +7165,8 @@ function localUploadPathFromUrl(value) {
   if (typeof value !== "string" || !value.startsWith("/uploads/")) return "";
   const relative = decodeURIComponent(value.replace(/^\/uploads\/?/, ""));
   const candidate = normalize(join(uploadDir, relative));
+  // Private files must never be copied into COS or decoded by a public media route.
+  if (isNewCustomerEvidencePath(uploadDir, candidate) || isPersonnelPrivateAttachmentPath(uploadDir, candidate)) return "";
   return candidate === uploadDir || candidate.startsWith(`${uploadDir}/`) ? candidate : "";
 }
 
@@ -8602,7 +8662,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
       url.pathname === "/api/orders/new-customer/linked-detail" || url.pathname === "/api/public-catalog/stock-options" ||
-      url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag") {
+      url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag" || url.pathname.startsWith("/api/orders/new-customer/evidence")) {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -8907,7 +8967,7 @@ async function handleApi(req, res, url) {
              ) WITH ORDINALITY AS media(media_url, media_position)
              WHERE length(media_url) BETWEEN 1 AND 4096
                AND media_url ~ '^(/uploads/|https?://)'
-               AND media_url !~* '(personnel-private|/api/|\\.\\.|%2e|%2f|%5c|video-derived)'
+               AND media_url !~* '(personnel-private|new-customer-evidence|/api/|\\.\\.|%2e|%2f|%5c|video-derived)'
                AND ((kind = 'photos' AND media_url ~* '\\.(jpe?g|png|webp|gif|heic|heif)([?#].*)?$')
                  OR (kind = 'videos' AND media_url ~* '\\.(mp4|mov|m4v|webm|3gp|3g2)([?#].*)?$'))
            ), picker_ranked AS (
@@ -12549,6 +12609,95 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/new-customer/evidence" && req.method === "POST") {
+    let releaseSlot = null, client = null, createdPath = "", record = null, commitAttempted = false;
+    try {
+      const orderId = String(url.searchParams.get("orderId") || "").trim();
+      const preflight = (await pool.query(NEW_CUSTOMER_EVIDENCE_SELECT, [stateId])).rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, preflight);
+      const before = resolveAuthorizedLockedOrderTarget(req, preflight, orderId);
+      assertCanUploadNewCustomerEvidence(preflight, before.order, req.auth.account);
+      if (!personnelDataKeyring) throw Object.assign(new Error("凭证安全存储暂不可用，请联系管理员"), { statusCode: 503 });
+      const mime = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) throw Object.assign(new Error("仅支持 JPG、PNG、WebP 图片"), { statusCode: 415 });
+      if (Number(req.headers["content-length"] || 0) > NEW_CUSTOMER_EVIDENCE_MAX_BYTES) throw Object.assign(new Error("每张凭证图片不能超过 10 MB"), { statusCode: 413 });
+      const originalName = newCustomerEvidenceFilename(req.headers["x-file-name"]);
+      checkNewCustomerEvidenceQuota(preflight.newCustomerEvidenceAttachments, req.auth.account.id, orderId, 0);
+      releaseSlot = await newCustomerEvidenceLimiter.acquire();
+      const image = await normalizeNewCustomerEvidenceImage(await readRawBody(req, NEW_CUSTOMER_EVIDENCE_MAX_BYTES), mime, { ffmpegPath: FFMPEG_PATH, ffprobePath: FFPROBE_PATH });
+      client = await pool.connect();
+      await client.query("BEGIN");
+      const state = (await client.query(`${NEW_CUSTOMER_EVIDENCE_SELECT} FOR UPDATE`, [stateId])).rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const target = resolveAuthorizedLockedOrderTarget(req, state, orderId);
+      assertCanUploadNewCustomerEvidence(state, target.order, req.auth.account);
+      const registry = Array.isArray(state.newCustomerEvidenceAttachments) ? state.newCustomerEvidenceAttachments : [];
+      checkNewCustomerEvidenceQuota(registry, req.auth.account.id, orderId, image.length);
+      record = { id: newCustomerEvidenceId(), orderId, uploaderPersonnelId: req.auth.account.id, uploaderUsername: req.auth.account.username,
+        originalName, mime: "image/jpeg", size: image.length, createdAt: new Date().toISOString(), boundRequestIds: [] };
+      createdPath = newCustomerEvidencePath(uploadDir, record.id);
+      await mkdir(join(uploadDir, NEW_CUSTOMER_EVIDENCE_DIRECTORY), { recursive: true, mode: 0o700 });
+      const handle = await open(createdPath, "wx", 0o600);
+      try { await handle.writeFile(encryptNewCustomerEvidence(image, record, personnelDataKeyring)); await handle.sync(); } finally { await handle.close(); }
+      await client.query("UPDATE app_state SET data = jsonb_set(data, '{newCustomerEvidenceAttachments}', $2::jsonb, true), updated_at = now() WHERE id = $1", [stateId, JSON.stringify([...registry, record])]);
+      commitAttempted = true;
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, attachment: newCustomerEvidenceMetadata(record) }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client?.query("ROLLBACK").catch(() => undefined);
+      if (createdPath) {
+        // COMMIT acknowledgement may be lost. Never delete a possibly committed proof.
+        let knownAbsent = !commitAttempted;
+        if (commitAttempted) {
+          try {
+            const { rows } = await pool.query(`SELECT data -> 'newCustomerEvidenceAttachments' AS "newCustomerEvidenceAttachments" FROM app_state WHERE id = $1`, [stateId]);
+            knownAbsent = !Array.isArray(rows[0]?.newCustomerEvidenceAttachments) || !rows[0].newCustomerEvidenceAttachments.some((item) => item?.id === record.id);
+          } catch { /* A private orphan is reconciled after 24h when storage is available. */ }
+        }
+        if (knownAbsent) await rm(createdPath, { force: true }).catch(() => undefined);
+      }
+      const status = error.statusCode || 500;
+      sendJson(req, res, status, { ok: false, code: error.code, error: status >= 500 ? "凭证上传暂不可用，请稍后重试" : error.message }, { "Cache-Control": "no-store, private" });
+    } finally { client?.release(); releaseSlot?.(); }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/orders/new-customer/evidence/") && ["GET", "DELETE"].includes(req.method)) {
+    let client = null, fileToDelete = "";
+    try {
+      const id = url.pathname.slice("/api/orders/new-customer/evidence/".length);
+      const deleting = req.method === "DELETE";
+      if (deleting) { client = await pool.connect(); await client.query("BEGIN"); }
+      const state = (await (client || pool).query(`${NEW_CUSTOMER_EVIDENCE_SELECT}${deleting ? " FOR UPDATE" : ""}`, [stateId])).rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const record = resolveNewCustomerEvidence(state.newCustomerEvidenceAttachments, id);
+      const { order } = resolveAuthorizedLockedOrderTarget(req, state, record.orderId);
+      const own = record.uploaderPersonnelId === req.auth.account.id && record.uploaderUsername === req.auth.account.username;
+      if (deleting ? !own : evidenceIsBound(record) ? !canViewNewCustomerEvidence(state, order, req.auth.account, record) : !own) {
+        throw Object.assign(new Error("无权查看或修改此凭证"), { statusCode: 403, code: "NEW_CUSTOMER_EVIDENCE_FORBIDDEN" });
+      }
+      if (deleting) {
+        if (evidenceIsBound(record)) throw Object.assign(new Error("已提交的凭证不能删除或替换"), { statusCode: 409, code: "NEW_CUSTOMER_EVIDENCE_IMMUTABLE" });
+        await client.query("UPDATE app_state SET data = jsonb_set(data, '{newCustomerEvidenceAttachments}', $2::jsonb, true), updated_at = now() WHERE id = $1",
+          [stateId, JSON.stringify(state.newCustomerEvidenceAttachments.filter((item) => item.id !== id))]);
+        fileToDelete = newCustomerEvidencePath(uploadDir, id);
+        await client.query("COMMIT");
+        await rm(fileToDelete, { force: true }).catch(() => undefined);
+        sendJson(req, res, 200, { ok: true }, { "Cache-Control": "no-store, private" });
+      } else {
+        if (evidenceIsExpired(record)) throw Object.assign(new Error("凭证草稿已过期，请重新上传"), { statusCode: 410 });
+        const image = await readNewCustomerEvidence(record);
+        res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": image.length, "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff", "Content-Disposition": "inline; filename=\"evidence.jpg\"", "Cross-Origin-Resource-Policy": "same-origin" });
+        res.end(image);
+      }
+    } catch (error) {
+      await client?.query("ROLLBACK").catch(() => undefined);
+      const status = error.statusCode || 500;
+      sendJson(req, res, status, { ok: false, code: error.code, error: status >= 500 ? "凭证暂不可用，请稍后重试" : error.message }, { "Cache-Control": "no-store, private" });
+    } finally { client?.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/orders/new-customer/linked-detail" && req.method === "GET") {
     try {
       const { rows } = await pool.query(
@@ -12578,16 +12727,16 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/orders/new-customer/detail" && req.method === "GET") {
     try {
-      const { rows } = await pool.query(
-        `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
-                data -> 'orders' AS orders, data -> 'customers' AS customers
-         FROM app_state WHERE id = $1`, [stateId]
-      );
+      const { rows } = await pool.query(NEW_CUSTOMER_EVIDENCE_SELECT, [stateId]);
       const state = rows[0] ?? {};
       refreshLockedOrderMutationAuth(req, state);
       const { order } = resolveUniqueOrderMutationTarget(state, url.searchParams.get("orderId"));
       requireVisibleSiteForAuth(req, state, order.siteId, "不能查看未授权场地的订单");
-      sendJson(req, res, 200, { ok: true, ...newCustomerApprovalDetail(state, order, req.auth.account) }, { "Cache-Control": "no-store, private" });
+      const detail = newCustomerApprovalDetail(state, order, req.auth.account);
+      const drafts = detail.canRequest && Array.isArray(state.newCustomerEvidenceAttachments) ? state.newCustomerEvidenceAttachments.filter((record) =>
+        record.orderId === order.id && record.uploaderPersonnelId === req.auth.account.id && record.uploaderUsername === req.auth.account.username &&
+        !evidenceIsBound(record) && !evidenceIsExpired(record)).map(newCustomerEvidenceMetadata) : [];
+      sendJson(req, res, 200, { ok: true, ...detail, draftEvidenceAttachments: drafts }, { "Cache-Control": "no-store, private" });
     } catch (error) {
       sendJson(req, res, error?.statusCode || 400, { ok: false, code: error.code, error: error.message });
     }
@@ -12605,6 +12754,7 @@ async function handleApi(req, res, url) {
         `SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
                 data -> 'orders' AS orders, data -> 'customers' AS customers,
                 data -> 'shipments' AS shipments, data -> 'commissionLedgerV1' AS "commissionLedgerV1",
+                data -> 'newCustomerEvidenceAttachments' AS "newCustomerEvidenceAttachments",
                 data -> 'notifications' AS "notifications", data -> 'operationLogs' AS "operationLogs"
          FROM app_state WHERE id = $1 FOR UPDATE`, [stateId]
       );
@@ -12615,8 +12765,10 @@ async function handleApi(req, res, url) {
       currentOrder = target.order;
       const review = url.pathname.endsWith("/review");
       const now = new Date().toISOString();
+      const evidenceRecords = review ? [] : resolveEvidenceForSubmission(state.newCustomerEvidenceAttachments, normalizeNewCustomerEvidenceIds(body.evidenceIds), currentOrder, account);
+      for (const record of evidenceRecords) await readNewCustomerEvidence(record);
       const result = review ? planNewCustomerReview(state, currentOrder, account, body, now)
-        : planNewCustomerRequest(state, currentOrder, account, body, { requestId: uid("new-customer"), now });
+        : planNewCustomerRequest(state, currentOrder, account, body, { requestId: uid("new-customer"), now, evidenceAttachments: evidenceRecords.map(newCustomerEvidenceMetadata) });
       if (result.unchanged) {
         await client.query("COMMIT");
         sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder });
@@ -12625,6 +12777,12 @@ async function handleApi(req, res, url) {
       const nextOrder = result.order;
       const nextOrders = target.orders.map((order) => order.id === currentOrder.id ? nextOrder : order);
       const approval = nextOrder.newCustomerApproval;
+      if (evidenceRecords.length) {
+        const ids = new Set(evidenceRecords.map((record) => record.id));
+        const registry = state.newCustomerEvidenceAttachments.map((record) => ids.has(record.id)
+          ? { ...record, boundRequestIds: [...new Set([...(record.boundRequestIds || []), approval.requestId])] } : record);
+        await client.query("UPDATE app_state SET data = jsonb_set(data, '{newCustomerEvidenceAttachments}', $2::jsonb, true), updated_at = now() WHERE id = $1", [stateId, JSON.stringify(registry)]);
+      }
       const notificationResult = review
         ? resolveNewCustomerApprovalNotifications(currentStationNotifications(state), approval.requestId, {
           resolution: approval.status, resolvedAt: now, resolvedBy: account.username,
@@ -16345,6 +16503,8 @@ async function serveUpload(req, res, url) {
   if (
     relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
     relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`) ||
+    relative === NEW_CUSTOMER_EVIDENCE_DIRECTORY ||
+    relative.startsWith(`${NEW_CUSTOMER_EVIDENCE_DIRECTORY}/`) ||
     relative === VIDEO_DERIVATIVE_DIRECTORY ||
     relative.startsWith(`${VIDEO_DERIVATIVE_DIRECTORY}/`)
   ) {
@@ -16354,6 +16514,7 @@ async function serveUpload(req, res, url) {
   const candidate = normalize(join(uploadDir, relative));
   if (
     isPersonnelPrivateAttachmentPath(uploadDir, candidate) ||
+    isNewCustomerEvidencePath(uploadDir, candidate) ||
     isVideoDerivativePath(uploadDir, candidate)
   ) {
     sendJson(req, res, 404, { error: "Upload file not found" });
@@ -16546,4 +16707,7 @@ server.listen(port, host, () => {
   console.log(`Local Fishroom API/static server: http://${host}:${port}`);
   console.log(`PostgreSQL state table: ${pgConfig.database}.app_state`);
   scheduleAutomaticOrderTransitions();
+  // A bounded, dedicated cleanup never touches normal uploads or submitted proof.
+  const evidenceCleanupTimer = setInterval(() => cleanupNewCustomerEvidenceDrafts().catch(() => undefined), 30 * 60 * 1000);
+  evidenceCleanupTimer.unref?.();
 });
