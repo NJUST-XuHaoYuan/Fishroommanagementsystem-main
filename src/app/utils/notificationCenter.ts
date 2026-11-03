@@ -41,6 +41,11 @@ export type NewCustomerApprovalDetail = {
   canRequest: boolean;
   canApprove: boolean;
   canViewEvidence?: boolean;
+  linkedCustomer?: { id: string; name: string; phone?: string; wechat?: string; douyin?: string } | null;
+  canManageCustomer?: boolean;
+  canCreateCustomer?: boolean;
+  customerBlockedReason?: string;
+  approvalBlockedReason?: string;
   draftEvidenceAttachments?: NewCustomerEvidenceAttachment[];
   customerEvidence: {
     customerId?: string;
@@ -99,17 +104,24 @@ export function newCustomerRequestActionReady({
   orderId,
   canRequest,
   reason,
+  identityKnown,
+  customerId,
+  evidenceCount,
   processing,
 }: {
   orderId?: unknown;
   canRequest?: boolean;
   reason?: unknown;
+  identityKnown?: boolean;
+  customerId?: string;
+  evidenceCount?: number;
   processing?: boolean;
 }): boolean {
   const normalizedReason = String(reason ?? "").trim();
   return Boolean(
     String(orderId ?? "").trim() &&
     canRequest === true &&
+    identityKnown === true && Boolean(customerId?.trim()) && Number(evidenceCount) >= 1 && Number(evidenceCount) <= 6 &&
     normalizedReason.length >= 5 &&
     normalizedReason.length <= 1000 &&
     !processing
@@ -122,7 +134,9 @@ export function newCustomerReviewActionReady({
   canApprove,
   note,
   identityKnown,
-  confirmCustomerIdentity,
+  customerId,
+  evidenceCount,
+  approvalBlockedReason,
   processing,
 }: {
   requestId?: unknown;
@@ -130,14 +144,16 @@ export function newCustomerReviewActionReady({
   canApprove?: boolean;
   note?: unknown;
   identityKnown?: boolean;
-  confirmCustomerIdentity?: boolean;
+  customerId?: string;
+  evidenceCount?: number;
+  approvalBlockedReason?: string;
   processing?: boolean;
 }): boolean {
   const normalizedDecision = String(decision ?? "").trim();
   if (!String(requestId ?? "").trim() || canApprove !== true || processing) return false;
   if (normalizedDecision === "reject") return Boolean(String(note ?? "").trim());
   if (normalizedDecision !== "approve") return false;
-  return identityKnown === true || confirmCustomerIdentity === true;
+  return identityKnown === true && Boolean(customerId?.trim()) && Number(evidenceCount) >= 1 && Number(evidenceCount) <= 6 && !approvalBlockedReason;
 }
 
 export function createLatestRequestCoordinator(): LatestRequestCoordinator {

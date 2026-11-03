@@ -50,6 +50,7 @@ import {
 } from "./NewCustomerApprovalPanel";
 import { isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
 import { mergeNewCustomerApproval } from "./OrderAcquisitionTag";
+import { mergeNewCustomerLink } from "../utils/newCustomerLink";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -1459,6 +1460,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               notificationId={selectedNewCustomerApproval.id}
               approvalRequestId={selectedNewCustomerApproval.approvalRequestId}
               onOrderUpdated={applyNewCustomerOrder}
+              onCustomerLinked={(change, session) => setState(current => mergeNewCustomerLink(current, change, session))}
               onChanged={() => finishNewCustomerApproval()}
             />
           )}

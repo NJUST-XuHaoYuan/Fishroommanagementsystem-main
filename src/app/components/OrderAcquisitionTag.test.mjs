@@ -37,6 +37,7 @@ function detail(overrides = {}) {
     approval: null,
     canRequest: true,
     canApprove: false,
+    linkedCustomer: { id: "customer-1", name: "核对客户", phone: "", wechat: "", douyin: "" },
     customerEvidence: {
       customerId: "customer-1",
       identityKnown: true,
@@ -93,7 +94,7 @@ test("order panel explains the confirmed commission replacement and renders an a
   assert.match(markup, /disabled=""/);
 });
 
-test("unknown customer identity requires an explicit administrator confirmation before approval", () => {
+test("unknown customer and missing proof block approval without hiding reasoned rejection", () => {
   const approval = {
     status: "pending",
     requestId: "request-1",
@@ -117,8 +118,9 @@ test("unknown customer identity requires an explicit administrator confirmation 
     },
   }));
   assert.match(markup, /待管理员审批/);
-  assert.match(markup, /当前订单未关联客户档案/);
-  assert.match(markup, /我已人工核对客户身份和历史订单/);
+  assert.match(markup, /未关联有效客户档案/);
+  assert.match(markup, /未上传添加微信证明/);
+  assert.doesNotMatch(markup, /我已人工核对客户身份和历史订单|role="checkbox"/);
   assert.match(markup, /批准并采用 5%/);
   assert.match(markup, /驳回时必填/);
   const disabledButtons = markup.match(/<button[^>]*disabled=""[^>]*>/g) ?? [];
@@ -145,6 +147,7 @@ test("approved state explains current-month true-up without rewriting prior mont
   assert.match(markup, /未核销不计提/);
   assert.match(markup, /批准当月补计新客提成差额/);
   assert.match(markup, /往月不改写/);
+  assert.match(markup, /历史已批准记录保留原审批结果/);
   assert.doesNotMatch(markup, /申请新客首单审批/);
 });
 
@@ -236,7 +239,7 @@ test("frontend uses dedicated request, review and detail contracts with optimist
   assert.match(panelSource, /\/api\/orders\/new-customer\/request/);
   assert.match(panelSource, /\/api\/orders\/new-customer\/review/);
   assert.match(panelSource, /expectedApprovalVersion: detail\?\.approval\?\.version \?\? 0/);
-  assert.match(panelSource, /confirmCustomerIdentity: true/);
+  assert.doesNotMatch(panelSource, /confirmCustomerIdentity|confirmUnknownCustomer/);
   assert.match(panelSource, /response\.status === 409/);
   assert.match(panelSource, /onOrderUpdated\?\.\(order, session\)/);
   assert.doesNotMatch(panelSource, /orders\/acquisition-tag/);

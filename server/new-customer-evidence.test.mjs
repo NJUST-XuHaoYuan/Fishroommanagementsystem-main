@@ -63,12 +63,12 @@ test("image processing rejects unsupported, empty, huge and forged MIME before d
 
 test("pending approval idempotency includes attachment identity and order, never client metadata", () => {
   const account = { id: "p", username: "u", name: "Owner", accountEnabled: true, employmentStatus: "active", accessRole: "staff" };
-  const order = { id: "o", createdAt: "2026-10-02T01:00:00Z", status: "pending", contactPersonnelId: "p", customerId: "" };
-  const state = { personnel: [account], orders: [order] }, r = record();
+  const order = { id: "o", createdAt: "2026-10-02T01:00:00Z", status: "pending", contactPersonnelId: "p", customerId: "customer" };
+  const state = { personnel: [account], orders: [order], customers: [{ id: "customer", name: "真实客户" }] }, r = record();
   const body = { reason: "核对微信聊天记录确认为新客户", expectedApprovalVersion: 0, evidenceIds: [r.id] };
   assert.throws(() => planNewCustomerRequest(state, order, account, body, { requestId: "r" }), { code: "NEW_CUSTOMER_EVIDENCE_UNVERIFIED" });
   const planned = planNewCustomerRequest(state, order, account, body, { requestId: "r", evidenceAttachments: [r] });
   assert.deepEqual(planned.order.newCustomerApproval.evidenceAttachments, [newCustomerEvidenceMetadata(r)]);
-  assert.equal(planNewCustomerRequest(state, planned.order, account, body, { requestId: "r2" }).unchanged, true);
-  assert.throws(() => planNewCustomerRequest(state, planned.order, account, { ...body, evidenceIds: [] }, { requestId: "r2" }), { statusCode: 409 });
+  assert.equal(planNewCustomerRequest(state, planned.order, account, body, { requestId: "r2", evidenceAttachments: [r] }).unchanged, true);
+  assert.throws(() => planNewCustomerRequest(state, planned.order, account, { ...body, evidenceIds: [] }, { requestId: "r2" }), { code: "NEW_CUSTOMER_EVIDENCE_REQUIRED" });
 });

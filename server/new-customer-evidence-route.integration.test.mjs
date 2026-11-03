@@ -54,7 +54,7 @@ test("bound proof is immutable, survives review/rejection and supports exact ide
   const requested = await s.submit([attachment.id], { evidenceAttachments: [{ id: attachment.id, originalName: "forged" }] }); ok(requested);
   assert.deepEqual(requested.body.order.newCustomerApproval.evidenceAttachments, [attachment]);
   const retry = await s.submit([attachment.id]); ok(retry); assert.equal(retry.body.unchanged, true);
-  assert.equal((await s.submit([])).response.status, 409);
+  assert.equal((await s.submit([])).body.code, "NEW_CUSTOMER_EVIDENCE_REQUIRED");
   assert.equal((await s.get(attachment.id, s.owner, "DELETE")).status, 409);
   assert.equal((await s.get(attachment.id, s.admin)).status, 200);
   assert.equal((await s.get(attachment.id, s.other)).status, 403);
@@ -122,8 +122,8 @@ test("draft deletion is uploader-only, quota recovers and submit/delete races ne
   } else { assert.equal(removed.status, 200); assert.equal(submitted.response.status, 404); }
 });
 
-test("old no-image requests remain valid; submitted images obey fresh account and current site access", async (t) => {
-  const old = await setup(t); ok(await old.submit()); ok(await old.review());
+test("new no-image requests fail; submitted images obey fresh account and current site access", async (t) => {
+  const old = await setup(t); assert.equal((await old.submit()).body.code, "NEW_CUSTOMER_EVIDENCE_REQUIRED");
   const s = await setup(t); const uploaded = await s.upload(); ok(uploaded); const id = uploaded.body.attachment.id; ok(await s.submit([id]));
   await s.patchTestPersonnel("pricing-editor", { visibleSiteIds: ["jiangyin"] });
   assert.equal((await s.get(id)).status, 403);

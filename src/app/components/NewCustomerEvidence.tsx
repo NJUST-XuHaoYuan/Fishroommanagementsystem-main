@@ -144,8 +144,8 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
   };
 
   return <section className="space-y-2" aria-label="上传新客审批图片凭证" aria-busy={busy}>
-    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">图片凭证 <span className="font-normal text-muted-foreground">（选填）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
-    <p className="text-xs leading-5 text-muted-foreground">可多选聊天截图、首次成交依据等；最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
+    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">添加微信证明<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
+    <p className="text-xs leading-5 text-muted-foreground">请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
     <p className="text-xs leading-5 text-muted-foreground">上传后需提交申请才会绑定；本人本单未提交的图片草稿 24 小时内可恢复，过期后需重新上传。</p>
     <NewCustomerEvidenceGallery orderId={orderId} attachments={attachments} onRemove={id => void remove(id)} disabled={disabled || busy} />
     <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden" aria-label="选择图片凭证" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onChange={event => {

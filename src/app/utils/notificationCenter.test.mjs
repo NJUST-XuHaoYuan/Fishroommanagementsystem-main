@@ -36,22 +36,29 @@ test("new-customer detail parser accepts direct and notification payloads but re
   assert.equal(newCustomerApprovalDetailFromPayload({ ok: true, orderId: "order-a" }), null);
 });
 
-test("new-customer request requires server authority and a 5 to 1000 character reason", () => {
-  const base = { orderId: "order-a", canRequest: true };
+test("new-customer request requires linked customer, proof, authority and a 5 to 1000 character reason", () => {
+  const base = { orderId: "order-a", canRequest: true, identityKnown: true, customerId: "customer-a", evidenceCount: 1 };
   assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单" }), true);
   assert.equal(newCustomerRequestActionReady({ ...base, reason: "首单" }), false);
   assert.equal(newCustomerRequestActionReady({ ...base, reason: "a".repeat(1001) }), false);
   assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单", canRequest: false }), false);
   assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单", processing: true }), false);
+  for (const missing of [{ identityKnown: false }, { customerId: "" }, { evidenceCount: 0 }, { evidenceCount: 7 }]) {
+    assert.equal(newCustomerRequestActionReady({ ...base, reason: "首次成交订单", ...missing }), false);
+  }
 });
 
-test("new-customer review requires a reasoned rejection and explicit confirmation for unknown identity", () => {
-  const base = { requestId: "request-a", canApprove: true };
+test("new-customer review cannot bypass customer or proof; rejection remains possible", () => {
+  const base = { requestId: "request-a", canApprove: true, customerId: "customer-a", evidenceCount: 1 };
   assert.equal(newCustomerReviewActionReady({
     ...base,
     decision: "approve",
     identityKnown: true,
   }), true);
+  for (const missing of [{ customerId: "" }, { evidenceCount: 0 }, { evidenceCount: 7 }, { approvalBlockedReason: "资料缺失" }]) {
+    assert.equal(newCustomerReviewActionReady({ ...base, decision: "approve", identityKnown: true, ...missing }), false);
+  }
+  assert.equal(newCustomerReviewActionReady({ requestId: "request-a", canApprove: true, decision: "reject", note: "请补齐材料", identityKnown: false, evidenceCount: 0, approvalBlockedReason: "资料缺失" }), true);
   assert.equal(newCustomerReviewActionReady({
     ...base,
     decision: "approve",
@@ -63,7 +70,7 @@ test("new-customer review requires a reasoned rejection and explicit confirmatio
     decision: "approve",
     identityKnown: false,
     confirmCustomerIdentity: true,
-  }), true);
+  }), false);
   assert.equal(newCustomerReviewActionReady({ ...base, decision: "reject", note: "信息不足" }), true);
   assert.equal(newCustomerReviewActionReady({ ...base, decision: "reject", note: "   " }), false);
   assert.equal(newCustomerReviewActionReady({ ...base, decision: "approve", identityKnown: true, processing: true }), false);

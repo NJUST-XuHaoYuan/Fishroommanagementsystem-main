@@ -18,7 +18,7 @@ import {
   selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
-import { assertCanUploadNewCustomerEvidence, canViewNewCustomerEvidence, newCustomerApprovalDetail, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
+import { assertCanUploadNewCustomerEvidence, assertNewCustomerCustomerUnchanged, canViewNewCustomerEvidence, newCustomerApprovalDetail, newCustomerApprovalVersion, newCustomerCustomerManagementBlock, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
 import {
   NEW_CUSTOMER_EVIDENCE_DIRECTORY, NEW_CUSTOMER_EVIDENCE_MAX_BYTES, NEW_CUSTOMER_EVIDENCE_DRAFT_TTL,
   newCustomerEvidenceId, isNewCustomerEvidenceId, newCustomerEvidencePath, isNewCustomerEvidencePath,
@@ -2714,6 +2714,30 @@ function normalizeCustomerInput(input = {}) {
   };
 }
 
+function newCustomerDetailForAccount(state, order, account) {
+  return newCustomerApprovalDetail(state, order, account, {
+    canUpdateOrder: hasModulePermission(account, "orders", "update"),
+    canCreateCustomer: hasModulePermission(account, "customers", "create"),
+  });
+}
+
+function requireNewCustomerManagement(req, state, order) {
+  requireModulePermissionForAuth(req, "orders", "update");
+  const blocked = newCustomerCustomerManagementBlock(state, order, req.auth.account);
+  if (blocked) throw httpError(["pending", "approved"].includes(order.newCustomerApproval?.status) ? 409 : 403,
+    blocked, "NEW_CUSTOMER_CUSTOMER_BLOCKED");
+}
+
+function safeNewCustomerRecord(customer) {
+  return Object.fromEntries(["id", "name", "phone", "wechat", "douyin"].map((key) => [key, String(customer?.[key] ?? "").trim()]));
+}
+
+function linkedCustomerMutationRecord(customer) {
+  // Complete customer-model fields for a store merge; never spread unknown properties.
+  return Object.fromEntries(["id", "name", "phone", "wechat", "douyin", "customerType", "addedDate", "source", "address", "notes"]
+    .map((key) => [key, String(customer?.[key] ?? "")]));
+}
+
 function countAdmins(personnel = [], excludeId = "") {
   return (Array.isArray(personnel) ? personnel : [])
     .filter((person) =>
@@ -3169,7 +3193,7 @@ function stationNotificationForAuth(state = {}, req, notification = {}, options 
   if (notification?.type === "new_customer_approval") {
     const order = visibleOrdersForNotificationAuth(state, req.auth?.account)
       .find((item) => String(item?.id ?? "") === String(notification?.orderId ?? ""));
-    const detail = order ? newCustomerApprovalDetail(state, order, req.auth?.account) : null;
+    const detail = order ? newCustomerDetailForAccount(state, order, req.auth?.account) : null;
     const matchesRequest = order?.newCustomerApproval?.requestId === notification.approvalRequestId;
     return { ...safeNotification, canApprove: notification.notificationRole === "approver" &&
       notification.status === "pending" && matchesRequest && detail?.canApprove === true,
@@ -5849,11 +5873,16 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
   if (source && !ORDER_SOURCE_VALUES.has(source)) throw new Error("请选择有效订单来源");
   const isPlatformOrder = isPlatformOrderSource(source);
   const isPickupOrder = source === "线下";
-  const requestedCustomerId = String(body.customerId ?? currentOrder?.customerId ?? "").trim();
+  // Older platform forms submit an empty customerId. Preserve a customer linked
+  // through the dedicated approval flow instead of silently invalidating it.
+  const requestedCustomerId = String((isPlatformOrder && currentOrder?.customerId && !String(body.customerId ?? "").trim())
+    ? currentOrder.customerId : body.customerId ?? currentOrder?.customerId ?? "").trim();
   const customerExists = (Array.isArray(state.customers) ? state.customers : [])
-    .some((customer) => String(customer?.id ?? "") === requestedCustomerId);
+    .filter((customer) => String(customer?.id ?? "") === requestedCustomerId).length === 1;
   if (!isPlatformOrder && (!requestedCustomerId || !customerExists)) throw new Error("请选择有效客户");
-  const customerId = isPlatformOrder ? "" : requestedCustomerId;
+  if (requestedCustomerId && !customerExists) throw new Error("关联客户档案不存在或不唯一，请先核对客户资料");
+  const customerId = requestedCustomerId;
+  if (currentOrder) assertNewCustomerCustomerUnchanged(currentOrder, { customerId });
   const platformOrderNo = isPlatformOrder
     ? String(body.platformOrderNo ?? body.douyinOrderNo ?? platformOrderNoForOrder(currentOrder)).trim()
     : "";
@@ -6431,6 +6460,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     if (!currentOrder) throw new Error("新建订单必须通过订单专用接口");
     if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
     assertOrderAcquisitionTagUnchanged(currentOrder, nextOrder);
+    assertNewCustomerCustomerUnchanged(currentOrder, nextOrder);
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
@@ -12725,6 +12755,90 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/new-customer/customers" && req.method === "GET") {
+    try {
+      const state = (await pool.query(NEW_CUSTOMER_EVIDENCE_SELECT, [stateId])).rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const { order } = resolveAuthorizedLockedOrderTarget(req, state, url.searchParams.get("orderId"));
+      requireNewCustomerManagement(req, state, order);
+      const q = String(url.searchParams.get("q") ?? "").trim().toLowerCase();
+      if (q.length > 100) throw httpError(400, "搜索内容过长");
+      const customers = (Array.isArray(state.customers) ? state.customers : []).filter((customer) => customer?.id && String(customer.name ?? "").trim())
+        .map(safeNewCustomerRecord).filter((customer) => !q || [customer.name, customer.phone, customer.wechat, customer.douyin].some((value) => value.toLowerCase().includes(q)))
+        .sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.id.localeCompare(b.id));
+      sendJson(req, res, 200, { ok: true, customers: customers.slice(0, 30), hasMore: customers.length > 30 }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message }, { "Cache-Control": "no-store, private" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/new-customer/customer" && req.method === "POST") {
+    const client = await pool.connect();
+    let currentOrder = null;
+    try {
+      const body = JSON.parse(await readBody(req, 16 * 1024));
+      const hasCustomer = Object.prototype.hasOwnProperty.call(body, "customer");
+      const hasId = Object.prototype.hasOwnProperty.call(body, "customerId");
+      if (hasCustomer === hasId || typeof body.expectedCustomerId !== "string" || !Number.isSafeInteger(body.expectedApprovalVersion)) {
+        throw httpError(400, "请提供当前客户及申请版本，并选择已有客户或新建客户（不可同时提供）", "NEW_CUSTOMER_CUSTOMER_INPUT_INVALID");
+      }
+      await client.query("BEGIN");
+      const state = (await client.query(`SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites,
+        data -> 'orders' AS orders, data -> 'customers' AS customers, data -> 'customerSources' AS "customerSources",
+        data -> 'operationLogs' AS "operationLogs" FROM app_state WHERE id = $1 FOR UPDATE`, [stateId])).rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const target = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      currentOrder = target.order;
+      requireNewCustomerManagement(req, state, currentOrder);
+      if (body.expectedCustomerId !== String(currentOrder.customerId ?? "") || body.expectedApprovalVersion !== newCustomerApprovalVersion(currentOrder)) {
+        throw httpError(409, "订单客户或新客申请已变化，请刷新后重试", "NEW_CUSTOMER_CUSTOMER_CONFLICT");
+      }
+      const customers = Array.isArray(state.customers) ? state.customers : [];
+      let customer;
+      if (hasCustomer) {
+        requireModulePermissionForAuth(req, "customers", "create");
+        if (!body.customer || typeof body.customer !== "object" || Array.isArray(body.customer)) throw httpError(400, "请填写客户资料");
+        const fields = ["name", "phone", "wechat", "douyin", "customerType", "addedDate", "source", "address", "notes"];
+        if (fields.some((key) => body.customer[key] !== undefined && (typeof body.customer[key] !== "string" || body.customer[key].length > 2000))) throw httpError(400, "客户资料格式不正确或内容过长");
+        customer = normalizeCustomerInput({ ...Object.fromEntries(fields.filter((key) => body.customer[key] !== undefined).map((key) => [key, body.customer[key]])), id: uid("customer") });
+        if (customers.some((item) => ["wechat", "phone"].some((key) => customer[key] && String(item?.[key] ?? "").trim() === customer[key]))) {
+          throw httpError(409, "该微信或电话已有客户档案，请搜索并选择已有客户，避免重复建档", "CUSTOMER_DUPLICATE");
+        }
+        if (customers.some((item) => item?.id === customer.id)) throw httpError(409, "客户编号冲突，请重试");
+      } else {
+        if (typeof body.customerId !== "string" || !body.customerId.trim()) throw httpError(400, "请选择客户档案");
+        const matches = customers.filter((item) => String(item?.id ?? "") === body.customerId.trim());
+        if (matches.length !== 1 || !String(matches[0].name ?? "").trim()) throw httpError(409, "客户档案不存在、不唯一或缺少名称，请先核对客户资料", "NEW_CUSTOMER_IDENTITY_CONFLICT");
+        customer = matches[0];
+      }
+      if (!hasCustomer && String(currentOrder.customerId ?? "") === customer.id) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder, customer: linkedCustomerMutationRecord(customer) }, { "Cache-Control": "no-store, private" });
+        return;
+      }
+      const order = { ...currentOrder, customerId: customer.id };
+      const orders = target.orders.map((item) => item.id === currentOrder.id ? order : item);
+      const operationLog = createOperationLog(req, "订单管理", "关联新客客户档案", `订单「${order.orderNo || order.id}」${hasCustomer ? "新建并" : ""}关联客户「${customer.name}」`);
+      if (hasCustomer) {
+        const sources = Array.isArray(state.customerSources) ? state.customerSources : [];
+        await client.query(`UPDATE app_state SET data = jsonb_set(data, '{customers}', $2::jsonb, true), updated_at = now() WHERE id = $1`, [stateId, JSON.stringify([...customers, customer])]);
+        if (customer.source && !sources.includes(customer.source)) {
+          await client.query(`UPDATE app_state SET data = jsonb_set(data, '{customerSources}', $2::jsonb, true), updated_at = now() WHERE id = $1`, [stateId, JSON.stringify([...sources, customer.source])]);
+        }
+      }
+      await client.query(`UPDATE app_state SET data = jsonb_set(jsonb_set(data, '{orders}', $2::jsonb, true), '{operationLogs}', $3::jsonb, true), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(orders), JSON.stringify(pushOperationLog(state.operationLogs, operationLog))]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order, customer: linkedCustomerMutationRecord(customer), operationLog }, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message,
+        ...(error.statusCode === 409 && currentOrder ? { order: currentOrder } : {}) }, { "Cache-Control": "no-store, private" });
+    } finally { client.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/orders/new-customer/detail" && req.method === "GET") {
     try {
       const { rows } = await pool.query(NEW_CUSTOMER_EVIDENCE_SELECT, [stateId]);
@@ -12732,7 +12846,7 @@ async function handleApi(req, res, url) {
       refreshLockedOrderMutationAuth(req, state);
       const { order } = resolveUniqueOrderMutationTarget(state, url.searchParams.get("orderId"));
       requireVisibleSiteForAuth(req, state, order.siteId, "不能查看未授权场地的订单");
-      const detail = newCustomerApprovalDetail(state, order, req.auth.account);
+      const detail = newCustomerDetailForAccount(state, order, req.auth.account);
       const drafts = detail.canRequest && Array.isArray(state.newCustomerEvidenceAttachments) ? state.newCustomerEvidenceAttachments.filter((record) =>
         record.orderId === order.id && record.uploaderPersonnelId === req.auth.account.id && record.uploaderUsername === req.auth.account.username &&
         !evidenceIsBound(record) && !evidenceIsExpired(record)).map(newCustomerEvidenceMetadata) : [];
@@ -12765,9 +12879,21 @@ async function handleApi(req, res, url) {
       currentOrder = target.order;
       const review = url.pathname.endsWith("/review");
       const now = new Date().toISOString();
-      const evidenceRecords = review ? [] : resolveEvidenceForSubmission(state.newCustomerEvidenceAttachments, normalizeNewCustomerEvidenceIds(body.evidenceIds), currentOrder, account);
+      let evidenceRecords = [];
+      if (!review) {
+        evidenceRecords = resolveEvidenceForSubmission(state.newCustomerEvidenceAttachments, normalizeNewCustomerEvidenceIds(body.evidenceIds), currentOrder, account);
+      } else if (body.decision === "approve" && currentOrder.newCustomerApproval?.status === "pending" && currentOrder.newCustomerApproval.requestId === body.requestId) {
+        if (account.accessRole !== "admin") throw httpError(403, "仅启用中的管理员可以审批新客提成", "NEW_CUSTOMER_ADMIN_REQUIRED");
+        const approval = currentOrder.newCustomerApproval;
+        evidenceRecords = resolveEvidenceForSubmission(state.newCustomerEvidenceAttachments,
+          (Array.isArray(approval.evidenceAttachments) ? approval.evidenceAttachments : []).map((item) => item.id), currentOrder,
+          { id: approval.contactPersonnelId, username: approval.requestedBy });
+        if (evidenceRecords.some((record) => !Array.isArray(record.boundRequestIds) || !record.boundRequestIds.includes(approval.requestId))) {
+          throw httpError(409, "此申请的凭证关联不正确，请驳回后补充重提", "NEW_CUSTOMER_EVIDENCE_UNVERIFIED");
+        }
+      }
       for (const record of evidenceRecords) await readNewCustomerEvidence(record);
-      const result = review ? planNewCustomerReview(state, currentOrder, account, body, now)
+      const result = review ? planNewCustomerReview(state, currentOrder, account, body, now, { evidenceAttachments: evidenceRecords.map(newCustomerEvidenceMetadata) })
         : planNewCustomerRequest(state, currentOrder, account, body, { requestId: uid("new-customer"), now, evidenceAttachments: evidenceRecords.map(newCustomerEvidenceMetadata) });
       if (result.unchanged) {
         await client.query("COMMIT");
@@ -12777,7 +12903,7 @@ async function handleApi(req, res, url) {
       const nextOrder = result.order;
       const nextOrders = target.orders.map((order) => order.id === currentOrder.id ? nextOrder : order);
       const approval = nextOrder.newCustomerApproval;
-      if (evidenceRecords.length) {
+      if (!review && evidenceRecords.length) {
         const ids = new Set(evidenceRecords.map((record) => record.id));
         const registry = state.newCustomerEvidenceAttachments.map((record) => ids.has(record.id)
           ? { ...record, boundRequestIds: [...new Set([...(record.boundRequestIds || []), approval.requestId])] } : record);

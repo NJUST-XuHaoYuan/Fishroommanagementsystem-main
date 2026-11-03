@@ -114,6 +114,7 @@ export type OrderAcquisitionTagProps = {
   };
   initialDetail?: NewCustomerApprovalDetail | null;
   onOrderUpdated?: NewCustomerApprovalPanelProps["onOrderUpdated"];
+  onCustomerLinked?: NewCustomerApprovalPanelProps["onCustomerLinked"];
   onApprovalChanged?: NewCustomerApprovalPanelProps["onChanged"];
   /** @deprecated Accepted temporarily so the parent can remove the old toggle wiring independently. */
   isAdmin?: boolean;
@@ -131,6 +132,7 @@ export function OrderAcquisitionTag({
   order,
   initialDetail,
   onOrderUpdated,
+  onCustomerLinked,
   onApprovalChanged,
 }: OrderAcquisitionTagProps) {
   return (
@@ -154,6 +156,7 @@ export function OrderAcquisitionTag({
         orderId={order.id}
         initialDetail={initialDetail}
         onOrderUpdated={onOrderUpdated}
+        onCustomerLinked={onCustomerLinked}
         onChanged={onApprovalChanged}
       />
     </section>

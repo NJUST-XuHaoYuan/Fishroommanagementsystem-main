@@ -22,10 +22,11 @@ import {
 } from "../utils/notificationCenter";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
-import { Checkbox } from "./ui/checkbox";
 import { Textarea } from "./ui/textarea";
 import { NewCustomerLinkedDetailDialog, type NewCustomerLinkedTarget } from "./NewCustomerLinkedDetailDialog";
 import { NewCustomerEvidenceGallery, NewCustomerEvidenceUploader } from "./NewCustomerEvidence";
+import { NewCustomerAssociation } from "./NewCustomerAssociation";
+import type { NewCustomerLinkChange } from "../utils/newCustomerLink";
 import {
   captureNewCustomerSession, isNewCustomerSessionCurrent, normalizeNewCustomerEvidence,
   type NewCustomerEvidenceAttachment, type NewCustomerSession,
@@ -42,6 +43,7 @@ export type NewCustomerApprovalPanelProps = {
   /** Optional server-provided detail for embedding or deterministic rendering. */
   initialDetail?: NewCustomerApprovalDetail | null;
   onOrderUpdated?: (order: NewCustomerApprovalUpdatedOrder, session?: NewCustomerSession) => void;
+  onCustomerLinked?: (change: NewCustomerLinkChange, session: NewCustomerSession) => void;
   onChanged?: (change: {
     action: "request" | "approve" | "reject";
     order?: NewCustomerApprovalUpdatedOrder;
@@ -111,6 +113,7 @@ function NewCustomerApprovalPanelContent({
   approvalRequestId,
   initialDetail = null,
   onOrderUpdated,
+  onCustomerLinked,
   onChanged,
   className = "",
 }: NewCustomerApprovalPanelProps) {
@@ -121,14 +124,16 @@ function NewCustomerApprovalPanelContent({
   const [actionError, setActionError] = useState("");
   const [requestReason, setRequestReason] = useState("");
   const [reviewNote, setReviewNote] = useState("");
-  const [confirmUnknownCustomer, setConfirmUnknownCustomer] = useState(false);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [linkedTarget, setLinkedTarget] = useState<NewCustomerLinkedTarget | null>(null);
   const [draftEvidence, setDraftEvidence] = useState<NewCustomerEvidenceAttachment[]>(() => initialMatches && initialDetail?.canRequest ? normalizeNewCustomerEvidence(initialDetail.draftEvidenceAttachments) : []);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
+  const [customerBusy, setCustomerBusy] = useState(false);
+  const customerBusyRef = useRef(false);
+  const onCustomerBusyChange = useCallback((busy: boolean) => { customerBusyRef.current = busy; setCustomerBusy(busy); }, []);
   const evidenceBusyRef = useRef(false);
   const draftEvidenceRef = useRef(draftEvidence);
-  const draftsRestoredRef = useRef(initialMatches && initialDetail?.draftEvidenceAttachments !== undefined);
+  const draftsRestoredRef = useRef(initialMatches && initialDetail?.canRequest && initialDetail?.draftEvidenceAttachments !== undefined);
   const mountedRef = useRef(true);
   const ownerSessionRef = useRef(captureNewCustomerSession());
   const mutationControllerRef = useRef<AbortController | null>(null);
@@ -187,7 +192,6 @@ function NewCustomerApprovalPanelContent({
         onEvidenceChange(normalizeNewCustomerEvidence([...draftEvidenceRef.current, ...normalizeNewCustomerEvidence(nextDetail.draftEvidenceAttachments)]));
       }
       setDetail(nextDetail);
-      setConfirmUnknownCustomer(false);
     } catch (error) {
       if (controller.signal.aborted || requestRef.current.sequence !== sequence || (session && !isNewCustomerSessionCurrent(session))) return;
       setLoadError(error instanceof Error ? error.message : "新客首单申请详情加载失败");
@@ -206,7 +210,6 @@ function NewCustomerApprovalPanelContent({
     setActionError("");
     setRequestReason("");
     setReviewNote("");
-    setConfirmUnknownCustomer(false);
     if (initialDetail?.orderId === orderId) {
       requestRef.current.controller?.abort();
       setDetail(initialDetail);
@@ -254,11 +257,14 @@ function NewCustomerApprovalPanelContent({
   };
 
   const submitRequest = async () => {
-    if (mutationPendingRef.current || evidenceBusyRef.current || !newCustomerRequestActionReady({
+    if (mutationPendingRef.current || evidenceBusyRef.current || customerBusyRef.current || !newCustomerRequestActionReady({
       orderId,
       canRequest: detail?.canRequest,
       reason: requestReason,
-      processing: busyAction !== null || evidenceBusy || loading,
+      identityKnown,
+      customerId: detail?.currentOrder.customerId,
+      evidenceCount: draftEvidenceRef.current.length,
+      processing: busyAction !== null || evidenceBusy || customerBusy || loading,
     })) return;
     const session = captureNewCustomerSession();
     if (!session || !mutationCurrent(session)) { setActionError("登录状态已变化，请重新打开申请后提交。"); return; }
@@ -304,14 +310,16 @@ function NewCustomerApprovalPanelContent({
   };
 
   const submitReview = async (decision: "approve" | "reject") => {
-    if (mutationPendingRef.current || !newCustomerReviewActionReady({
+    if (mutationPendingRef.current || customerBusyRef.current || !newCustomerReviewActionReady({
       requestId: detail?.approval?.requestId,
       decision,
       canApprove: detail?.canApprove,
       note: reviewNote,
-      identityKnown: detail?.customerEvidence.identityKnown,
-      confirmCustomerIdentity: confirmUnknownCustomer,
-      processing: busyAction !== null || loading,
+      identityKnown,
+      customerId: detail?.currentOrder.customerId,
+      evidenceCount: normalizeNewCustomerEvidence(detail?.approval?.evidenceAttachments).length,
+      approvalBlockedReason: detail?.approvalBlockedReason,
+      processing: busyAction !== null || customerBusy || loading,
     })) return;
     const session = captureNewCustomerSession();
     if (!session || !mutationCurrent(session)) { setActionError("登录状态已变化，请重新打开申请后审批。"); return; }
@@ -331,11 +339,6 @@ function NewCustomerApprovalPanelContent({
           decision,
           note: reviewNote.trim(),
           expectedApprovalVersion: detail?.approval?.version ?? 0,
-          ...(
-            decision === "approve" && detail?.customerEvidence.identityKnown !== true
-              ? { confirmCustomerIdentity: true }
-              : {}
-          ),
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -349,7 +352,6 @@ function NewCustomerApprovalPanelContent({
       }
       const order = applyReturnedOrder(payload, session);
       setReviewNote("");
-      setConfirmUnknownCustomer(false);
       await loadDetail(true);
       if (!mutationCurrent(session)) return;
       await notifyChanged({ action: decision, order });
@@ -365,12 +367,20 @@ function NewCustomerApprovalPanelContent({
   const approval = detail?.approval;
   const statusCopy = approval ? STATUS_COPY[approval.status] : null;
   const StatusIcon = statusCopy?.icon;
-  const identityKnown = detail?.customerEvidence.identityKnown === true;
+  const identityKnown = detail?.customerEvidence.identityKnown === true && Boolean(detail.currentOrder.customerId)
+    && detail.linkedCustomer?.id === detail.currentOrder.customerId && Boolean(detail.linkedCustomer.name?.trim());
+  const customerIdentityRestricted = detail?.canViewEvidence === false && Boolean(detail.currentOrder.customerId);
+  const submittedEvidenceCount = normalizeNewCustomerEvidence(approval?.evidenceAttachments).length;
+  const missingApprovalConditions = [!identityKnown && "未关联有效客户档案", submittedEvidenceCount < 1 && "未上传添加微信证明"].filter(Boolean);
+  const approvalBlockedReason = detail?.approvalBlockedReason || (missingApprovalConditions.length ? `${missingApprovalConditions.join("；")}。请驳回，由负责人补齐后重新申请。` : "");
   const canSubmitRequest = newCustomerRequestActionReady({
     orderId,
     canRequest: detail?.canRequest,
     reason: requestReason,
-    processing: busyAction !== null || evidenceBusy || loading,
+    identityKnown,
+    customerId: detail?.currentOrder.customerId,
+    evidenceCount: draftEvidence.length,
+    processing: busyAction !== null || evidenceBusy || customerBusy || loading,
   });
   const canApprove = newCustomerReviewActionReady({
     requestId: approval?.requestId,
@@ -378,8 +388,10 @@ function NewCustomerApprovalPanelContent({
     canApprove: detail?.canApprove,
     note: reviewNote,
     identityKnown,
-    confirmCustomerIdentity: confirmUnknownCustomer,
-    processing: busyAction !== null || loading,
+    customerId: detail?.currentOrder.customerId,
+    evidenceCount: submittedEvidenceCount,
+    approvalBlockedReason,
+    processing: busyAction !== null || customerBusy || loading,
   });
   const canReject = newCustomerReviewActionReady({
     requestId: approval?.requestId,
@@ -387,8 +399,7 @@ function NewCustomerApprovalPanelContent({
     canApprove: detail?.canApprove,
     note: reviewNote,
     identityKnown,
-    confirmCustomerIdentity: confirmUnknownCustomer,
-    processing: busyAction !== null || loading,
+    processing: busyAction !== null || customerBusy || loading,
   });
 
   return (
@@ -450,12 +461,12 @@ function NewCustomerApprovalPanelContent({
               onClick={() => setLinkedTarget({ kind: "order", targetOrderId: detail.orderId })}>
               <FileText className="size-4" aria-hidden="true" />查看订单
             </Button>
-            <Button type="button" variant="outline" className="min-h-11" disabled={!detail.currentOrder.customerId || loading || busyAction !== null}
+            <Button type="button" variant="outline" className="min-h-11" disabled={!identityKnown || loading || busyAction !== null}
               onClick={() => setLinkedTarget({ kind: "customer", customerId: detail.currentOrder.customerId! })}>
               <UserRound className="size-4" aria-hidden="true" />查看客户
             </Button>
             <p className="w-full text-xs leading-5 text-muted-foreground">
-              {detail.currentOrder.customerId ? "在本页查看，关闭资料后继续审核，已填写的审批说明会保留。" : "未关联客户档案，可先查看订单核对客户识别信息。"}
+              {identityKnown ? "在本页查看，关闭资料后继续审核，已填写的审批说明会保留。" : customerIdentityRestricted ? "客户核验资料仅向申请人、订单负责人和管理员开放。" : "未关联有效客户档案，可先查看订单核对客户识别信息。"}
             </p>
           </div>
 
@@ -466,7 +477,8 @@ function NewCustomerApprovalPanelContent({
             <dl className="mt-2 grid gap-x-5 gap-y-2 text-sm sm:grid-cols-2">
               <div>
                 <dt className="text-xs text-muted-foreground">客户身份</dt>
-                <dd className="mt-0.5">{identityKnown ? "已关联客户档案" : "未关联客户档案"}</dd>
+                <dd className="mt-0.5">{identityKnown ? `已关联客户档案${detail.linkedCustomer?.name ? `：${detail.linkedCustomer.name}` : ""}` : customerIdentityRestricted ? "已有关联，当前账号无权核对" : "未关联客户档案"}</dd>
+                {identityKnown && (detail.linkedCustomer?.wechat || detail.linkedCustomer?.phone) && <dd className="mt-1 break-words text-xs text-muted-foreground">{[detail.linkedCustomer.wechat && `微信：${detail.linkedCustomer.wechat}`, detail.linkedCustomer.phone && `电话：${detail.linkedCustomer.phone}`].filter(Boolean).join(" · ")}</dd>}
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">同一客户其他订单</dt>
@@ -494,6 +506,28 @@ function NewCustomerApprovalPanelContent({
               </details>
             )}
           </div>
+
+          {!identityKnown && !customerIdentityRestricted && approval?.status !== "approved" && <NewCustomerAssociation
+            detail={detail}
+            disabled={loading || busyAction !== null || evidenceBusy}
+            onBusyChange={onCustomerBusyChange}
+            onConflict={async (change, session) => {
+              if (!mutationCurrent(session)) return;
+              try {
+                if (change) { onCustomerLinked?.(change, session); onOrderUpdated?.(change.order, session); }
+                await loadDetail(true);
+              } finally { if (mountedRef.current) onCustomerBusyChange(false); }
+            }}
+            onLinked={async (change, session) => {
+              if (!mutationCurrent(session)) return;
+              try {
+                onCustomerLinked?.(change, session);
+                // Only reload server eligibility; entered reason and recovered image drafts stay intact.
+                await loadDetail(true);
+                if (mutationCurrent(session)) toast.success("客户档案已关联，请由订单负责人补充添加微信证明并提交申请");
+              } finally { if (mountedRef.current) onCustomerBusyChange(false); }
+            }}
+          />}
 
           {approval && (
             <div className="text-sm leading-6">
@@ -526,6 +560,7 @@ function NewCustomerApprovalPanelContent({
                   未核销不计提；已有核销的，批准当月补计新客提成差额，往月不改写。退款仍在核销月份扣回。
                 </p>
               )}
+              {approval.status === "approved" && detail.canViewEvidence !== false && (!identityKnown || submittedEvidenceCount < 1) && <p className="mt-2 text-xs leading-5 text-muted-foreground">历史已批准记录保留原审批结果，不按新增材料要求追溯修改。</p>}
             </div>
           )}
 
@@ -545,26 +580,19 @@ function NewCustomerApprovalPanelContent({
                   placeholder="批准可填写核对依据；驳回请说明需补充或修正的内容"
                 />
               </div>
-              {!identityKnown && (
+              {approvalBlockedReason && (
                 <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-950">
                   <div className="flex gap-2">
                     <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                     <div>
-                      <div className="font-medium">当前订单未关联客户档案，系统无法自动确认是否首单</div>
-                      <label className="mt-2 flex cursor-pointer items-start gap-2 leading-5" htmlFor={`confirm-new-customer-identity-${orderId}`}>
-                        <Checkbox
-                          id={`confirm-new-customer-identity-${orderId}`}
-                          checked={confirmUnknownCustomer}
-                          disabled={busyAction !== null}
-                          onCheckedChange={(checked) => setConfirmUnknownCustomer(checked === true)}
-                          className="mt-0.5"
-                        />
-                        <span>我已人工核对客户身份和历史订单，确认可按新客首单批准。</span>
-                      </label>
+                      <div className="font-medium">暂不能批准</div>
+                      <p className="mt-1 leading-6">{approvalBlockedReason}</p>
+                      <p className="mt-1 text-xs">可填写驳回说明，让负责人补齐后重新申请；不能用人工确认跳过客户档案或图片证明。</p>
                     </div>
                   </div>
                 </div>
               )}
+              {!approvalBlockedReason && <p className="text-xs leading-5 text-muted-foreground">批准前请核对客户档案、历史订单及添加微信截图。系统不自动识别图片真伪。</p>}
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <Button
                   type="button"
@@ -612,7 +640,8 @@ function NewCustomerApprovalPanelContent({
                   <span>{requestReason.trim().length}/1000</span>
                 </div>
               </div>
-              <NewCustomerEvidenceUploader orderId={orderId} attachments={draftEvidence} disabled={busyAction !== null || loading} onChange={onEvidenceChange} onBusyChange={onEvidenceBusyChange} />
+              <NewCustomerEvidenceUploader orderId={orderId} attachments={draftEvidence} disabled={busyAction !== null || customerBusy || loading} onChange={onEvidenceChange} onBusyChange={onEvidenceBusyChange} />
+              {!canSubmitRequest && !busyAction && <p className="text-xs leading-5 text-muted-foreground">{evidenceBusy ? "图片处理中，请稍候。" : [!identityKnown && "请先关联有效客户档案", draftEvidence.length < 1 && "请至少上传 1 张添加微信证明", requestReason.trim().length < 5 && "申请理由至少填写 5 个字"].filter(Boolean).join("；")}</p>}
               <div className="flex justify-end">
                 <Button
                   type="button"

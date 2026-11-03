@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startMutableRouteServer } from "./test-support/mutable-route-server.mjs";
 import { stockPricingFixture, PRICING_TEST_PASSWORD } from "./test-support/stock-pricing-fixture.mjs";
+import { requiredProofEnv, uploadRequiredProof } from "./test-support/new-customer-required-proof.mjs";
 
 const ok = (result) => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 function fixture({ known = true } = {}) {
@@ -14,12 +15,18 @@ function fixture({ known = true } = {}) {
   return value;
 }
 async function setup(t, data = fixture()) {
-  const server = await startMutableRouteServer(data); t.after(() => server.stop());
+  const server = await startMutableRouteServer(data, { env: requiredProofEnv }); t.after(() => server.stop());
   const admin = await server.login("pricing-admin", PRICING_TEST_PASSWORD);
   const owner = await server.login("pricing-editor", PRICING_TEST_PASSWORD);
   const other = await server.login("pricing-viewer", PRICING_TEST_PASSWORD);
   const read = async () => (await server.readPersistedState()).orders[0];
-  const request = (body = {}, token = owner) => server.request("/api/orders/new-customer/request", { token, body: { orderId: "ORDER-PENDING", reason: "已核对客户微信身份且首次购买", expectedApprovalVersion: 0, ...body } });
+  const proofByToken = new Map();
+  const request = async (body = {}, token = owner) => {
+    const detail = token ? await server.request("/api/orders/new-customer/detail?orderId=ORDER-PENDING", { token }) : null;
+    if (body.evidenceIds === undefined && detail?.body?.canRequest && !proofByToken.has(token)) proofByToken.set(token, await uploadRequiredProof(server, token, "ORDER-PENDING"));
+    return server.request("/api/orders/new-customer/request", { token, body: { orderId: "ORDER-PENDING", reason: "已核对客户微信身份且首次购买", expectedApprovalVersion: 0,
+      evidenceIds: proofByToken.has(token) ? [proofByToken.get(token).id] : [], ...body } });
+  };
   const review = async (body = {}, token = admin) => { const order = await read(); return server.request("/api/orders/new-customer/review", { token, body: {
     orderId: order.id, requestId: order.newCustomerApproval?.requestId, expectedApprovalVersion: order.newCustomerApproval?.version,
     decision: "approve", ...body,
@@ -70,19 +77,22 @@ test("October creation gate rejects old, missing and malformed timestamps even w
   }
 });
 
-test("platform approval needs explicit identity confirmation; rejection returns to owner and allows CAS resubmission", async (t) => {
-  const s = await setup(t, fixture({ known: false })); ok(await s.submit());
-  assert.equal((await s.review()).body.code, "NEW_CUSTOMER_IDENTITY_CONFIRMATION_REQUIRED");
+test("platform orders require a real linked customer; rejection returns to owner and allows CAS resubmission", async (t) => {
+  const s = await setup(t, fixture({ known: false }));
+  assert.equal((await s.submit({ confirmCustomerIdentity: true })).body.code, "NEW_CUSTOMER_CUSTOMER_REQUIRED");
+  ok(await s.request("/api/orders/new-customer/customer", { token: s.owner, body: { orderId: "ORDER-PENDING", expectedCustomerId: "", expectedApprovalVersion: 0, customerId: "new-customer" } }));
+  ok(await s.submit());
   assert.equal((await s.review({ decision: "reject" })).response.status, 400);
   ok(await s.review({ decision: "reject", note: "请补充首次购买的核实依据" }));
   assert.equal((await s.submit()).response.status, 409);
   const again = await s.submit({ expectedApprovalVersion: 2 }); ok(again);
   const approved = await s.review({ confirmCustomerIdentity: true }); ok(approved);
-  assert.equal(approved.body.order.newCustomerApproval.customerIdentityConfirmed, true);
+  assert.equal(approved.body.order.newCustomerApproval.customerId, "new-customer");
+  assert.equal(approved.body.order.newCustomerApproval.customerIdentityConfirmed, undefined);
 });
 
 test("owner changes after submission invalidate approval and forged generic state approval cannot bypass review", async (t) => {
-  const s = await setup(t, fixture({ known: false })); ok(await s.submit()); const order = await s.read();
+  const s = await setup(t); ok(await s.submit()); const order = await s.read();
   const forged = { ...order, newCustomerApproval: { ...order.newCustomerApproval, status: "approved", reviewedBy: "pricing-admin" } };
   const patch = await s.request("/api/state/patch", { token: s.owner, body: { patch: { orders: [forged] }, basePatch: { orders: [order] } } });
   assert.equal(patch.response.status, 409);

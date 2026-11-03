@@ -40,6 +40,35 @@ function customerSnapshot(state, order) {
   return Object.fromEntries(["id", "phone", "wechat", "douyin"].map((key) => [key, text(matches[0][key])]));
 }
 
+function requireCustomerProfile(state, order) {
+  const snapshot = customerSnapshot(state, order);
+  if (!snapshot) fail(409, "NEW_CUSTOMER_CUSTOMER_REQUIRED", "请先在系统中创建并关联真实客户档案，再申请新客提成");
+  const customer = list(state.customers).find((item) => text(item.id) === snapshot.id);
+  if (!text(customer?.name)) fail(409, "NEW_CUSTOMER_IDENTITY_CONFLICT", "关联的客户档案缺少名称，请先完善客户资料");
+  return snapshot;
+}
+
+function requireVerifiedEvidence(ids, attachments) {
+  if (!ids.length) fail(400, "NEW_CUSTOMER_EVIDENCE_REQUIRED", "请至少上传一张添加客户微信的证明图片");
+  if (JSON.stringify(list(attachments).map((item) => item.id)) !== JSON.stringify(ids)) {
+    fail(400, "NEW_CUSTOMER_EVIDENCE_UNVERIFIED", "申请凭证未经服务器验证，请重新上传证明图片");
+  }
+}
+
+export function newCustomerCustomerManagementBlock(state, order, account) {
+  const owner = resolveNewCustomerOrderOwner(state.personnel, order);
+  if (!isPersonnelAccountEnabled(account) || (account.accessRole !== "admin" &&
+      (!owner || text(owner.id) !== text(account.id) || text(owner.username) !== text(account.username)))) return "仅订单负责人或管理员可以关联客户档案";
+  if (["pending", "approved"].includes(order?.newCustomerApproval?.status)) return "新客申请待审批或已批准，不能变更客户；待审批申请请先驳回后补全重提";
+  return "";
+}
+
+export function assertNewCustomerCustomerUnchanged(currentOrder, nextOrder) {
+  if (["pending", "approved"].includes(currentOrder?.newCustomerApproval?.status) && text(currentOrder.customerId) !== text(nextOrder.customerId)) {
+    fail(409, "NEW_CUSTOMER_CUSTOMER_LOCKED", "新客申请待审批或已批准，不能变更关联客户");
+  }
+}
+
 export function newCustomerOrderEvidence(state = {}, order = {}) {
   const customerId = text(order.customerId);
   const candidates = customerId ? list(state.orders).filter((item) => text(item?.customerId) === customerId && item?.status !== "cancelled")
@@ -50,7 +79,7 @@ export function newCustomerOrderEvidence(state = {}, order = {}) {
     customerId, identityKnown: Boolean(customerId), creationTimesKnown, firstOrderId: creationTimesKnown ? text(candidates[0]?.id) : "", otherOrderCount: others.length,
     priorOrders: others.slice(0, 20).map(({ id, orderNo, date, status }) => ({ id, orderNo, date, status })),
     warning: customerId ? !creationTimesKnown ? "同客户历史订单缺少可靠创建时间，无法认定首单，请先核对历史记录。" : "仅按现有客户档案核对；请同时确认没有重复客户档案或线下历史交易。"
-      : "此订单没有关联客户档案，系统无法判断是否首单；请核对负责人提供的客户识别依据后明确确认。",
+      : "此订单没有关联客户档案，请先创建并关联真实客户档案；管理员确认不能替代客户档案。",
   };
 }
 
@@ -80,7 +109,7 @@ function requestBlock(state, order, account) {
   const owner = resolveNewCustomerOrderOwner(state.personnel, order);
   if (!owner || !isPersonnelAccountEnabled(owner)) return "订单负责人未关联唯一启用账号，请先核对负责人";
   if (text(owner.id) !== text(account?.id) || text(owner.username) !== text(account?.username)) return "仅该订单负责人本人可以申请新客提成";
-  try { customerSnapshot(state, order); } catch (error) { return error.message; }
+  try { requireCustomerProfile(state, order); } catch (error) { return error.message; }
   const evidence = newCustomerOrderEvidence(state, order);
   if (evidence.identityKnown && evidence.firstOrderId !== text(order.id)) return "该客户已有更早的非取消订单，本订单不能申请新客首单提成";
   if (order?.newCustomerApproval?.status === "pending") return "已有待处理申请，请等待管理员审批";
@@ -106,10 +135,21 @@ export function canViewNewCustomerEvidence(state, order, account, record = null)
       : text(order.newCustomerApproval?.requestedBy) === text(account.username))));
 }
 
-export function newCustomerApprovalDetail(state = {}, order = {}, account = {}) {
+export function newCustomerApprovalDetail(state = {}, order = {}, account = {}, { canUpdateOrder = true, canCreateCustomer = false } = {}) {
   const requestBlockedReason = requestBlock(state, order, account);
   const approval = order.newCustomerApproval ?? null;
   const customerEvidence = newCustomerOrderEvidence(state, order);
+  const customerBlockedReason = newCustomerCustomerManagementBlock(state, order, account) || (!canUpdateOrder ? "当前账号没有订单修改权限，请联系管理员关联客户" : "");
+  const matches = list(state.customers).filter((customer) => text(customer.id) === text(order.customerId));
+  const linkedCustomer = matches.length === 1 && text(matches[0].name) && canViewNewCustomerEvidence(state, order, account)
+    ? Object.fromEntries(["id", "name", "phone", "wechat", "douyin"].map((key) => [key, text(matches[0][key])])) : null;
+  let approvalBlockedReason = "";
+  if (approval?.status === "pending") {
+    try {
+      requireCustomerProfile(state, order);
+      if (!list(approval.evidenceAttachments).length) fail(400, "NEW_CUSTOMER_EVIDENCE_REQUIRED", "此申请缺少添加微信的证明图片，请驳回后补充重提");
+    } catch (error) { approvalBlockedReason = error.message; }
+  }
   if (account?.accessRole !== "admin") {
     const visibleIds = new Set(list(state.orders).filter((item) => list(account.visibleSiteIds).includes(text(item.siteId))).map((item) => text(item.id)));
     customerEvidence.priorOrders = customerEvidence.priorOrders.filter((item) => visibleIds.has(text(item.id)));
@@ -121,6 +161,8 @@ export function newCustomerApprovalDetail(state = {}, order = {}, account = {}) 
     orderId: text(order.id), approval, canRequest: !requestBlockedReason, requestBlockedReason,
     canViewEvidence: canViewNewCustomerEvidence(state, order, account),
     canApprove: approval?.status === "pending" && account?.accessRole === "admin" && isPersonnelAccountEnabled(account),
+    linkedCustomer, canManageCustomer: !customerBlockedReason, canCreateCustomer: !customerBlockedReason && canCreateCustomer,
+    customerBlockedReason, approvalBlockedReason,
     customerEvidence,
     currentOrder: Object.fromEntries(["id", "orderNo", "date", "createdAt", "customerId", "contactPersonnelId", "contactPerson"].map((key) => [key, order[key] ?? ""])),
     policyEffectiveDate: NEW_CUSTOMER_COMMISSION_POLICY_EFFECTIVE_DATE,
@@ -143,14 +185,15 @@ export function planNewCustomerRequest(state, order, account, body, { requestId,
     fail(403, "NEW_CUSTOMER_OWNER_REQUIRED", "仅该订单负责人本人可以申请新客提成");
   }
   const previous = order.newCustomerApproval;
+  // Validate before pending retry idempotency: legacy incomplete requests are not valid new submissions.
+  requireCustomerProfile(state, order);
+  const blocked = requestBlock(state, order, account);
+  if (blocked && previous?.status !== "pending") fail(409, "NEW_CUSTOMER_REQUEST_BLOCKED", blocked);
+  requireVerifiedEvidence(evidenceIds, evidenceAttachments);
   if (previous?.status === "pending" && identityMatches(state, order, previous) && previous.reason === reason &&
       JSON.stringify(list(previous.evidenceAttachments).map((item) => item.id)) === JSON.stringify(evidenceIds)) return { order, unchanged: true };
   requireVersion(order, body);
-  const blocked = requestBlock(state, order, account);
   if (blocked) fail(409, "NEW_CUSTOMER_REQUEST_BLOCKED", blocked);
-  if (JSON.stringify(evidenceAttachments.map((item) => item.id)) !== JSON.stringify(evidenceIds)) {
-    fail(400, "NEW_CUSTOMER_EVIDENCE_UNVERIFIED", "申请凭证未经服务器验证");
-  }
   const approval = {
     status: "pending", requestId, requestedAt: now, requestedBy: text(account.username), requestedByName: text(account.name || account.username),
     reason, customerId: text(order.customerId), customerSnapshot: customerSnapshot(state, order), contactPersonnelId: text(owner.id),
@@ -160,7 +203,7 @@ export function planNewCustomerRequest(state, order, account, body, { requestId,
   return { order: { ...order, newCustomerApproval: approval }, unchanged: false };
 }
 
-export function planNewCustomerReview(state, order, account, body, now = new Date().toISOString()) {
+export function planNewCustomerReview(state, order, account, body, now = new Date().toISOString(), { evidenceAttachments = [] } = {}) {
   if (account?.accessRole !== "admin" || !isPersonnelAccountEnabled(account)) fail(403, "NEW_CUSTOMER_ADMIN_REQUIRED", "仅启用中的管理员可以审批新客提成");
   if (!["approve", "reject"].includes(body.decision)) fail(400, "NEW_CUSTOMER_DECISION_INVALID", "请选择批准或驳回");
   const previous = order.newCustomerApproval;
@@ -174,10 +217,11 @@ export function planNewCustomerReview(state, order, account, body, now = new Dat
   if (status === "approved") {
     if (!isCommissionEligibleOrder(order)) fail(409, "NEW_CUSTOMER_ORDER_INELIGIBLE", "订单创建于政策生效前或缺少可靠创建时间，不能批准新客提成");
     if (order.status === "cancelled") fail(409, "NEW_CUSTOMER_REQUEST_BLOCKED", "已取消订单不能批准新客提成");
+    requireCustomerProfile(state, order);
+    requireVerifiedEvidence(normalizeNewCustomerEvidenceIds(list(previous.evidenceAttachments).map((item) => item.id)), evidenceAttachments);
     if (!identityMatches(state, order, previous)) fail(409, "NEW_CUSTOMER_IDENTITY_CONFLICT", "订单客户或负责人已变化，请驳回原申请后重新提交");
     const evidence = newCustomerOrderEvidence(state, order);
     if (evidence.identityKnown && evidence.firstOrderId !== text(order.id)) fail(409, "NEW_CUSTOMER_NOT_FIRST_ORDER", "客户已有更早的非取消订单，不能批准本订单为新客首单");
-    if (!evidence.identityKnown && body.confirmCustomerIdentity !== true) fail(400, "NEW_CUSTOMER_IDENTITY_CONFIRMATION_REQUIRED", "订单未关联客户档案，请明确确认已核实新客身份及首单依据");
     if (evidence.identityKnown && list(state.orders).some((other) => text(other.id) !== text(order.id) && other.status !== "cancelled" &&
         text(other.customerId) === evidence.customerId && other.newCustomerApproval?.status === "approved")) {
       fail(409, "NEW_CUSTOMER_ALREADY_APPROVED", "该客户已有其他获批的新客订单，不能重复批准");
@@ -185,6 +229,6 @@ export function planNewCustomerReview(state, order, account, body, now = new Dat
   }
   return { unchanged: false, order: { ...order, newCustomerApproval: {
     ...previous, status, reviewedAt: now, reviewedBy: text(account.username), reviewedByName: text(account.name || account.username), reviewNote: note,
-    version: previous.version + 1, ...(status === "approved" && !text(order.customerId) ? { customerIdentityConfirmed: true } : {}),
+    version: previous.version + 1,
   } } };
 }

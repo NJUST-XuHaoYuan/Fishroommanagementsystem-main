@@ -3,6 +3,7 @@ import test from "node:test";
 import { startMutableRouteServer } from "./test-support/mutable-route-server.mjs";
 import { stockPricingFixture, PRICING_TEST_PASSWORD } from "./test-support/stock-pricing-fixture.mjs";
 import { reconcileCommissionLedger } from "./commission-ledger.mjs";
+import { requiredProofEnv, uploadRequiredProof } from "./test-support/new-customer-required-proof.mjs";
 
 const ok = (result) => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 const currentMonth = () => new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 7);
@@ -45,13 +46,14 @@ function fixture() {
 }
 
 async function setup(t, data = fixture(), { approve = true } = {}) {
-  const server = await startMutableRouteServer(data);
+  const server = await startMutableRouteServer(data, { env: requiredProofEnv });
   t.after(() => server.stop());
   const admin = await server.login("pricing-admin", PRICING_TEST_PASSWORD);
   const a = await server.login("pricing-editor", PRICING_TEST_PASSWORD);
   const b = await server.login("pricing-viewer", PRICING_TEST_PASSWORD);
   if (approve && data.state.orders.some((item) => item.id === "A-NEW")) {
-    const requested = await server.request("/api/orders/new-customer/request", { token: a, body: { orderId: "A-NEW", reason: "已核实客户身份与首次购买", expectedApprovalVersion: 0 } });
+    const proof = await uploadRequiredProof(server, a, "A-NEW");
+    const requested = await server.request("/api/orders/new-customer/request", { token: a, body: { orderId: "A-NEW", reason: "已核实客户身份与首次购买", evidenceIds: [proof.id], expectedApprovalVersion: 0 } });
     ok(requested);
     const approval = requested.body.order.newCustomerApproval;
     const reviewed = await server.request("/api/orders/new-customer/review", { token: admin, body: { orderId: "A-NEW", requestId: approval.requestId, decision: "approve", note: "测试核实首次购买", expectedApprovalVersion: approval.version } });

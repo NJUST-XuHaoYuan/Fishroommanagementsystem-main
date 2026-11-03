@@ -16,7 +16,7 @@ before(async () => {
 after(async () => { await server?.close(); });
 
 const attachment = { id: "evidence-1", originalName: "客户聊天.png", mime: "image/jpeg", size: 1234, createdAt: "2026-11-02T03:00:00.000Z" };
-const detail = overrides => ({ orderId: "order-1", canRequest: true, canApprove: false, approval: null, currentOrder: { id: "order-1", contactPerson: "负责人" }, customerEvidence: { identityKnown: true, otherOrderCount: 0, priorOrders: [] }, policyEffectiveDate: "2026-10-01", ...overrides });
+const detail = overrides => ({ orderId: "order-1", canRequest: true, canApprove: false, linkedCustomer: { id: "customer-1", name: "客户" }, approval: null, currentOrder: { id: "order-1", customerId: "customer-1", contactPerson: "负责人" }, customerEvidence: { identityKnown: true, otherOrderCount: 0, priorOrders: [] }, policyEffectiveDate: "2026-10-01", ...overrides });
 const approval = { status: "pending", requestId: "request-1", version: 1, reason: "这是首次成交依据", requestedAt: attachment.createdAt, requestedBy: "sales-a", evidenceAttachments: [attachment] };
 const renderPanel = value => renderToStaticMarkup(createElement(Panel, { orderId: "order-1", initialDetail: detail(value) }));
 
@@ -108,9 +108,10 @@ test("private previews fetch authenticated blobs, reject unauthorized and unsafe
   } finally { globalThis.fetch = original; }
 }));
 
-test("new request has an optional multi-image input and explicit clarity, format, size and draft limits", () => {
+test("new request requires WeChat proof with explicit clarity, format, size and draft limits", () => {
   const markup = renderPanel({});
-  assert.match(markup, /图片凭证.*选填/);
+  assert.match(markup, /添加微信证明.*必填，至少1张/);
+  assert.match(markup, /系统不会自动识别图片真伪/);
   assert.match(markup, /multiple=""/);
   assert.match(markup, /最多 6 张.*10 MB.*JPG、PNG、WebP/);
   assert.match(markup, /HEIC.*文字清晰/);

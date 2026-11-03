@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { startMutableRouteServer } from "./test-support/mutable-route-server.mjs";
 import { stockPricingFixture, PRICING_TEST_PASSWORD } from "./test-support/stock-pricing-fixture.mjs";
 import { ORDER_ACQUISITION_TAG_FIELDS } from "./order-acquisition-tag.mjs";
+import { requiredProofEnv, uploadRequiredProof } from "./test-support/new-customer-required-proof.mjs";
 
 const ok = (result) => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 const tag = (order) => Object.fromEntries(ORDER_ACQUISITION_TAG_FIELDS.map((key) => [key, order[key]]));
@@ -14,20 +15,23 @@ async function setup(t) {
     paymentChannel: "douyin", paymentAccount: "synthetic-account", plannedShipDate: "2026-09-15",
     contactPersonnelId: "pricing-admin", contactPerson: "价格测试admin" });
   fixture.state.orders = [order];
+  order.customerId = "new-client";
+  fixture.state.customers = [{ id: "new-client", name: "平台客户", wechat: "platform-client" }];
   fixture.state.shipments = [];
   fixture.state.logs = [];
   fixture.state.checks = [];
-  const server = await startMutableRouteServer(fixture);
+  const server = await startMutableRouteServer(fixture, { env: requiredProofEnv });
   t.after(() => server.stop());
   const admin = await server.login("pricing-admin", PRICING_TEST_PASSWORD);
   const staff = await server.login("pricing-editor", PRICING_TEST_PASSWORD);
   const result = await server.request("/api/orders/update", { token: admin, body: { ...order, orderId: order.id } });
   ok(result);
   const readOrder = async () => (await server.readPersistedState()).orders.find((item) => item.id === order.id);
+  const proof = await uploadRequiredProof(server, admin, order.id);
   const mark = async (value, previous = null) => {
     const before = previous ?? await readOrder();
     const request = await server.request("/api/orders/new-customer/request", { token: admin, body: {
-      orderId: order.id, reason: "核实平台客户为首次购买", expectedApprovalVersion: before.newCustomerApproval?.version ?? 0,
+      orderId: order.id, reason: "核实平台客户为首次购买", evidenceIds: [proof.id], expectedApprovalVersion: before.newCustomerApproval?.version ?? 0,
     } }); ok(request);
     return server.request("/api/orders/new-customer/review", { token: admin, body: {
       orderId: order.id, requestId: request.body.order.newCustomerApproval.requestId,

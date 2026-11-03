@@ -10,6 +10,7 @@ import { DataTable } from "./common";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
+import { mergeNewCustomerLink } from "../utils/newCustomerLink";
 import { isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
@@ -4583,7 +4584,7 @@ function OrderDetailDialog({
       const result = await postOrderApi("orders/update", {
         orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
         orderId: order.id,
-        customerId: isPlatformOrderSource(editForm.source) ? "" : editForm.customerId,
+        customerId: isPlatformOrderSource(editForm.source) ? (order.customerId || editForm.customerId) : editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
         platformOrderNo: isPlatformOrderSource(editForm.source) ? editForm.platformOrderNo.trim() : "",
@@ -4660,7 +4661,7 @@ function OrderDetailDialog({
       return {
         ...form,
         source: nextSource,
-        customerId: isPlatformOrderSource(nextSource) ? "" : form.customerId,
+        customerId: form.customerId || (isPlatformOrderSource(nextSource) ? order.customerId : ""),
         platformOrderNo: isPlatformOrderSource(nextSource) ? form.platformOrderNo : "",
         paymentMethodId: selectedPaymentMethod?.id ?? "",
         paymentChannel: selectedPaymentMethod?.channel ?? "",
@@ -5045,6 +5046,7 @@ function OrderDetailDialog({
 
             <OrderAcquisitionTag
               order={order}
+              onCustomerLinked={(change, session) => setState(current => mergeNewCustomerLink(current, change, session))}
               onOrderUpdated={(updatedOrder, session) => setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
                 ...current,
                 orders: mergeNewCustomerApproval(current.orders, updatedOrder),
