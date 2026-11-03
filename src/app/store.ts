@@ -656,6 +656,25 @@ export type CreditSaleApproval = {
   approverUsernames?: string[];
 };
 
+export type OrderOwnerAssignment = {
+  requestId: string;
+  version?: number;
+  status: "pending" | "accepted" | "rejected" | "cancelled";
+  fromPersonnelId: string;
+  fromName: string;
+  toPersonnelId: string;
+  toUsername: string;
+  toName: string;
+  requestedBy: string;
+  requestedByPersonnelId: string;
+  requestedByName: string;
+  requestedAt: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  note?: string;
+};
+
 export type Order = {
   id: string;
   siteId?: string;
@@ -682,6 +701,8 @@ export type Order = {
   /** Stable personnel reference for the order owner. `contactPerson` remains the saved display-name snapshot. */
   contactPersonnelId?: string;
   contactPerson?: string;
+  /** 负责人转交由接收账号本人确认；确认前 contactPersonnelId 仍为当前有效负责人。 */
+  ownerAssignment?: OrderOwnerAssignment | null;
   items: OrderItem[];
   /** 物流订单的运费承担方式；历史订单未设置时按寄付处理。 */
   shippingFeeMode?: ShippingFeeMode;

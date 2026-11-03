@@ -147,7 +147,7 @@ test("orders integration filters desktop/mobile rows and updates current detail 
   assert.match(source, /<OrderWholesaleTag[\s\S]{0,160}canUpdate=\{permission.canUpdate\}/);
   assert.match(source, /viewer=\{state.user\}/);
   assert.match(source, /setState\(\(current\) => mergeWholesaleOrderTagForSession\(current, updatedOrder, session\)\)/);
-  assert.match(source, /orders: retainNewerWholesaleOrderTags\(current.orders, mergeApiRecord\(orders, result.order\)\)/);
+  assert.match(source, /orders: retainNewerOwnerAssignments\(current.orders, retainNewerWholesaleOrderTags\(current.orders, mergeApiRecord\(orders, result.order\)\)\)/);
   assert.match(source, /state.orders.find\(\(o\) => o.id === viewOrder.id\) \?\? null/);
 });
 

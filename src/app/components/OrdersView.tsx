@@ -11,7 +11,9 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } from "./OrderAcquisitionTag";
 import { mergeNewCustomerLink } from "../utils/newCustomerLink";
-import { isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
+import { OrderOwnerAssignmentBadge, OrderOwnerAssignmentPanel, useOrderOwnerCandidates } from "./OrderOwnerAssignment";
+import { mergeOwnerAssignmentForSession, ownerSelectionHint, retainNewerOwnerAssignments } from "../utils/orderOwnerAssignment";
 import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -278,7 +280,7 @@ async function postOrderApi(path: string, body: Record<string, unknown>) {
     body: JSON.stringify(body),
   });
   const result = await response.json().catch(() => ({}));
-  if (result.notification || result.code === "CREDIT_SALE_CONFIRMATION_REQUIRED") {
+  if (result.notification || result.order?.ownerAssignment || result.code === "CREDIT_SALE_CONFIRMATION_REQUIRED") {
     window.dispatchEvent(new CustomEvent("fishroom:notifications-refresh"));
   }
   if (!response.ok || !result.ok) {
@@ -316,9 +318,11 @@ function applyOrderApiResult(
   options: {
     requireExistingShipmentId?: string;
     shouldApply?: () => boolean;
+    session?: NewCustomerSession;
   } = {}
 ) {
   setState((current) => {
+    if (options.session && !isNewCustomerSessionCurrent(options.session, current.user)) return current;
     if (options.shouldApply && !options.shouldApply()) return current;
     if (options.requireExistingShipmentId && !current.shipments.some(
       (shipment) => shipment.id === options.requireExistingShipmentId
@@ -327,7 +331,7 @@ function applyOrderApiResult(
     const shipments = Array.isArray(result.shipments) ? result.shipments : current.shipments;
     return {
       ...current,
-      orders: retainNewerWholesaleOrderTags(current.orders, mergeApiRecord(orders, result.order)),
+      orders: retainNewerOwnerAssignments(current.orders, retainNewerWholesaleOrderTags(current.orders, mergeApiRecord(orders, result.order))),
       shipments: mergeApiRecord(shipments, result.shipment),
       stock: Array.isArray(result.stock) ? result.stock : current.stock,
       inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
@@ -607,11 +611,10 @@ function normalizedContactReference(value?: string): string {
 function getDefaultContactPersonnel(personnel: Personnel[], username?: string): Personnel | undefined {
   const activePersonnel = personnel.filter((person) => !isPersonnelResigned(person));
   const reference = normalizedContactReference(username);
-  if (!reference) return activePersonnel[0];
+  if (!reference) return undefined;
   const usernameMatch = activePersonnel.find((person) => normalizedContactReference(person.username) === reference);
   if (usernameMatch) return usernameMatch;
-  const nameMatches = activePersonnel.filter((person) => normalizedContactReference(person.name) === reference);
-  return nameMatches.length === 1 ? nameMatches[0] : activePersonnel[0];
+  return undefined;
 }
 
 function resolveOrderContactPersonnel(
@@ -639,10 +642,6 @@ function resolveOrderContactPersonnel(
 
 function isActiveOrder(order: Order): boolean {
   return order.status !== "completed" && order.status !== "cancelled";
-}
-
-function getContactPersonOptions(personnel: Personnel[]): Personnel[] {
-  return personnel.filter((person) => !isPersonnelResigned(person));
 }
 
 function excelEscape(value: unknown): string {
@@ -1304,6 +1303,7 @@ function OrderStatusTags({
       ))}
       <OrderAcquisitionBadge marked={order.isAcquisitionOrder} approvalStatus={order.newCustomerApproval?.status} />
       <OrderWholesaleBadge marked={order.isWholesaleOrder} />
+      <OrderOwnerAssignmentBadge order={order} />
     </span>
   );
 }
@@ -4281,6 +4281,9 @@ type EditForm = {
   customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPersonnelId: string; contactPerson: string; notes: string;
   shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
+  expectedContactPersonnelId: string;
+  expectedOwnerAssignmentRequestId: string;
+  ownerSelectionChanged: boolean;
 };
 
 type ReshipReplacement = {
@@ -4310,6 +4313,8 @@ function OrderDetailDialog({
 
   const [editMode, setEditMode] = useState(false);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const editSaveLock = useRef(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [orderTransferSnapshot, setOrderTransferSnapshot] = useState<{ orderId: string; viewerKey: string; items: StockTransferListItem[] } | null>(null);
@@ -4372,7 +4377,8 @@ function OrderDetailDialog({
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
   const personnel = state.personnel ?? [];
   const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
-  const editContactOptions = getContactPersonOptions(personnel);
+  const ownerCandidates = useOrderOwnerCandidates(order?.siteId, state.user, open && editMode, personnel, order?.contactPersonnelId || resolveOrderContactPersonnel(personnel, order || {})?.id);
+  const editContactOptions = ownerCandidates.options;
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const editPaymentOptions = useMemo(() => {
     if (!editForm) return [];
@@ -4534,6 +4540,9 @@ function OrderDetailDialog({
       shippingAddress: order.shippingAddress ?? "",
       contactPersonnelId: resolvedContactPersonnel?.id ?? "",
       contactPerson: resolvedContactPersonnel?.name ?? order.contactPerson ?? "",
+      expectedContactPersonnelId: String(order.contactPersonnelId || ""),
+      expectedOwnerAssignmentRequestId: String(order.ownerAssignment?.requestId || ""),
+      ownerSelectionChanged: false,
       notes: order.notes ?? "",
       shippingFeeMode: orderShippingFeeMode(order), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
@@ -4560,7 +4569,7 @@ function OrderDetailDialog({
   const cancelEdit = () => { setEditMode(false); setEditForm(null); };
 
   const saveEdit = async () => {
-    if (!order || !editForm) return;
+    if (!order || !editForm || editSaveLock.current) return;
     if (!permission.requirePermission("update")) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
@@ -4572,14 +4581,20 @@ function OrderDetailDialog({
     if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
     if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     const selectedContactPersonnel = editContactOptions.find((person) => person.id === editForm.contactPersonnelId);
-    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
+    if (editForm.ownerSelectionChanged && !selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
     if (displayGoodsNetTotal <= displayMinimumReturnTotal)
       return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${displayMinimumReturnTotal.toFixed(2)}`);
     if (!isPickupOrderSource(editForm.source) && !editForm.plannedShipDate) return toast.error("请选择预计发货日期");
     if (editForm.plannedShipDate && editForm.plannedShipDate < editForm.date)
       return toast.error("预计发货日期不能早于下单日期");
-    if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。`)) return;
+    const ownerChanged = editForm.ownerSelectionChanged && selectedContactPersonnel?.id !== editForm.expectedContactPersonnelId;
+    const ownerHint = ownerChanged ? `负责人转交给${selectedContactPersonnel!.name}需要对方确认，确认前仍由${order.contactPerson || "当前负责人"}负责。` : "";
+    if (!confirmWrite("修改", `将保存订单「${order.orderNo}」的修改。${ownerHint}`)) return;
+    const session = captureNewCustomerSession();
+    if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
+    editSaveLock.current = true; setEditSaving(true);
+    let pendingOwner = "";
     try {
       const result = await postOrderApi("orders/update", {
         orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
@@ -4595,8 +4610,12 @@ function OrderDetailDialog({
         paymentChannel: editPaymentMethod.channel,
         shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
-        contactPersonnelId: selectedContactPersonnel.id,
-        contactPerson: selectedContactPersonnel.name.trim(),
+        ...(editForm.ownerSelectionChanged && selectedContactPersonnel ? {
+          contactPersonnelId: selectedContactPersonnel.id,
+          contactPerson: selectedContactPersonnel.name.trim(),
+        } : {}),
+        expectedContactPersonnelId: editForm.expectedContactPersonnelId,
+        expectedOwnerAssignmentRequestId: editForm.expectedOwnerAssignmentRequestId,
         notes: editForm.notes,
         shippingFeeMode: isPickupOrderSource(editForm.source) ? "collect" : editForm.shippingFeeMode,
         shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
@@ -4608,13 +4627,17 @@ function OrderDetailDialog({
         })),
         operator: state.user?.username ?? "system",
       });
-      applyOrderApiResult(setState, result);
+      if (!isNewCustomerSessionCurrent(session)) return;
+      applyOrderApiResult(setState, result, { session: session! });
+      pendingOwner = result.order?.ownerAssignment?.status === "pending" ? result.order.ownerAssignment.toName : "";
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+      if (isNewCustomerSessionCurrent(session)) toast.error(error instanceof Error ? error.message : "保存失败，请重试");
       return;
+    } finally {
+      editSaveLock.current = false; setEditSaving(false);
     }
     setEditMode(false); setEditForm(null);
-    toast.success("订单已更新");
+    toast.success(pendingOwner ? `订单已保存，等待${pendingOwner}确认接手；当前负责人不变` : "订单已更新");
   };
 
   const addPickerItems = (items: OrderPickerItem[]) => {
@@ -5020,7 +5043,7 @@ function OrderDetailDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(o) => { if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
+      <Dialog open={open} onOpenChange={(o) => { if (editSaving) return; if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
         <DialogContent
           aria-describedby={undefined}
           className="max-w-none sm:max-w-none flex flex-col p-8"
@@ -5035,6 +5058,13 @@ function OrderDetailDialog({
           </DialogHeader>
 
           <div className="flex-1 overflow-y-auto flex flex-col gap-5 pr-1">
+
+            {order.ownerAssignment && <OrderOwnerAssignmentPanel
+              orderId={order.id}
+              requestId={order.ownerAssignment.requestId}
+              viewer={state.user}
+              onOrderUpdated={(updated, session) => setState(current => mergeOwnerAssignmentForSession(current, updated, session))}
+            />}
 
             <OrderWholesaleTag
               key={order.id}
@@ -5055,7 +5085,7 @@ function OrderDetailDialog({
 
             {/* ── 基本信息 ── */}
             {editMode && editForm ? (
-              <div className="rounded-lg border p-4 grid grid-cols-5 gap-3 bg-amber-50/50">
+              <div className="rounded-lg border p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-amber-50/50">
                 {!isPlatformOrderSource(editForm.source) && (
                   <div className="grid gap-1.5">
                     <Label className="text-xs">客户<span className="ml-0.5 text-red-500">*</span></Label>
@@ -5124,12 +5154,14 @@ function OrderDetailDialog({
                   <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                   <Select
                     value={editForm.contactPersonnelId}
+                    disabled={editSaving || order.ownerAssignment?.status === "pending"}
                     onValueChange={(value) => {
                       const selectedPerson = editContactOptions.find((person) => person.id === value);
                       setEditForm((form) => form && selectedPerson ? {
                         ...form,
                         contactPersonnelId: selectedPerson.id,
                         contactPerson: selectedPerson.name,
+                        ownerSelectionChanged: true,
                       } : form);
                     }}
                   >
@@ -5144,6 +5176,9 @@ function OrderDetailDialog({
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="break-words text-xs leading-5 text-muted-foreground">{ownerSelectionHint({ creating: false, currentOwnerName: order.contactPerson || "当前负责人", selectedName: editForm.contactPerson, changed: editForm.ownerSelectionChanged && editForm.contactPersonnelId !== editForm.expectedContactPersonnelId, pendingName: order.ownerAssignment?.status === "pending" ? order.ownerAssignment.toName : undefined })}</p>
+                  {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
+                  {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs">付款方式<span className="text-red-500 ml-0.5">*</span></Label>
@@ -5522,9 +5557,9 @@ function OrderDetailDialog({
           <DialogFooter className="flex-wrap gap-2 pt-2 border-t">
             {editMode ? (
               <>
-                <Button variant="ghost" onClick={cancelEdit}>取消编辑</Button>
+                <Button variant="ghost" onClick={cancelEdit} disabled={editSaving}>取消编辑</Button>
                 <div className="flex-1" />
-                <Button onClick={saveEdit}><Check className="size-4 mr-1" />保存修改</Button>
+                <Button onClick={saveEdit} disabled={editSaving}>{editSaving ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <Check className="size-4 mr-1" />}{editSaving ? "正在保存…" : "保存修改"}</Button>
               </>
             ) : (
 	              <>
@@ -6417,7 +6452,8 @@ function NewOrderDialog({
   const today = todayDateString();
   const currentUsername = state.user?.username ?? "";
   const personnel = state.personnel ?? [];
-  const defaultContactPersonnelId = getDefaultContactPersonnel(personnel, currentUsername)?.id ?? "";
+  const defaultContactPersonnelId = state.user?.account?.personnelId || getDefaultContactPersonnel(personnel, currentUsername)?.id || "";
+  const ownerCandidates = useOrderOwnerCandidates(activeSiteId, state.user, open, personnel, defaultContactPersonnelId);
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
@@ -6440,6 +6476,12 @@ function NewOrderDialog({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const createLock = useRef(false);
+
+  useEffect(() => {
+    if (open && !contactPersonnelId && ownerCandidates.currentPersonnelId) setContactPersonnelId(ownerCandidates.currentPersonnelId);
+  }, [open, contactPersonnelId, ownerCandidates.currentPersonnelId]);
 
   useEffect(() => {
     if (open) {
@@ -6525,7 +6567,7 @@ function NewOrderDialog({
   const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
   const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
-  const contactOptions = getContactPersonOptions(personnel);
+  const contactOptions = ownerCandidates.options;
   const selectedContactPersonnel = contactOptions.find((person) => person.id === contactPersonnelId);
   const contactPerson = selectedContactPersonnel?.name ?? "";
 
@@ -6582,6 +6624,7 @@ function NewOrderDialog({
   };
 
   const save = async () => {
+    if (createLock.current) return;
     if (!permission.requirePermission("create")) return;
     setSubmitAttempted(true);
     if (!source.trim()) return toast.error("请选择订单来源");
@@ -6616,8 +6659,13 @@ function NewOrderDialog({
         commissionRate: 0,
       };
     });
-    if (!confirmWrite("创建", `将创建销售订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。`)) return;
+    const assignedElsewhere = selectedContactPersonnel.username !== currentUsername;
+    if (!confirmWrite("创建", `将创建销售订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
+    const session = captureNewCustomerSession();
+    if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
+    createLock.current = true; setCreating(true);
     let createdOrderNo = "";
+    let pendingOwner = "";
     try {
       const result = await postOrderApi("orders/create", {
         orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
@@ -6640,14 +6688,18 @@ function NewOrderDialog({
         notes,
         operator: state.user?.username ?? "system",
       });
-      applyOrderApiResult(setState, result);
+      if (!isNewCustomerSessionCurrent(session)) return;
+      applyOrderApiResult(setState, result, { session: session! });
       createdOrderNo = result.order?.orderNo ?? "";
+      pendingOwner = result.order?.ownerAssignment?.status === "pending" ? result.order.ownerAssignment.toName : "";
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "创建失败，请重试");
+      if (isNewCustomerSessionCurrent(session)) toast.error(error instanceof Error ? error.message : "创建失败，请重试");
       return;
+    } finally {
+      createLock.current = false; setCreating(false);
     }
     onOpenChange(false);
-    toast.success(createdOrderNo ? `订单 ${createdOrderNo} 已创建` : "订单已创建");
+    toast.success(`${createdOrderNo ? `订单 ${createdOrderNo} 已创建` : "订单已创建"}${pendingOwner ? `，等待${pendingOwner}确认接手；确认前仍由你负责` : ""}`);
   };
 
   const excludeIds = useMemo(() => new Set(selectedItems.keys()), [selectedItems]);
@@ -6664,7 +6716,7 @@ function NewOrderDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next); }}>
         <DialogContent
           aria-describedby={undefined}
           className="fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[90vh] sm:w-[min(92vw,1080px)] sm:max-w-[min(92vw,1080px)] sm:rounded-lg sm:border sm:p-0"
@@ -6789,6 +6841,7 @@ function NewOrderDialog({
                 <Select
                   value={contactPersonnelId}
                   onValueChange={setContactPersonnelId}
+                  disabled={creating}
                 >
                   <SelectTrigger className={submitAttempted && !selectedContactPersonnel ? "border-red-500 focus-visible:ring-red-500" : ""}>
                     <SelectValue placeholder="请选择订单负责人" />
@@ -6801,6 +6854,9 @@ function NewOrderDialog({
                     ))}
                   </SelectContent>
                 </Select>
+                <p className="break-words text-xs leading-5 text-muted-foreground">{ownerSelectionHint({ creating: true, currentOwnerName: `${getDefaultContactPersonnel(personnel, currentUsername)?.name || currentUsername}（登记人）`, selectedName: contactPerson, changed: Boolean(selectedContactPersonnel && selectedContactPersonnel.username !== currentUsername) })}</p>
+                {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
+                {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
               </div>
               <div className="grid gap-2">
                 <Label>付款方式<span className="text-red-500 ml-0.5">*</span></Label>
@@ -7073,9 +7129,9 @@ function NewOrderDialog({
           )}
 
           <DialogFooter className="flex-col border-t bg-background px-4 py-3 sm:flex-row sm:px-6">
-            <Button variant="outline" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button variant="outline" className="w-full sm:w-auto" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
             {source && (
-              <Button className="w-full sm:w-auto" onClick={save}><ShoppingCart className="size-4 mr-1" />创建订单</Button>
+              <Button className="w-full sm:w-auto" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4 mr-1" />}{creating ? "正在创建…" : "创建订单"}</Button>
             )}
           </DialogFooter>
         </DialogContent>

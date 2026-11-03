@@ -35,6 +35,10 @@ import {
 } from "./order-acquisition-tag.mjs";
 import { assertOrderWholesaleTagUnchanged, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 import {
+  assertOrderOwnerAssignmentUnchanged, planOrderOwnerAssignment, orderOwnerAssignmentDetail,
+  planOrderOwnerAssignmentDecision, ownerAssignmentNotifications, closeEndedOrderOwnerAssignments, assignmentTargetBlockedReason,
+} from "./order-owner-assignment.mjs";
+import {
   ORDER_SOURCE_VALUES,
   isPlatformOrderSource,
   isPlatformPaymentChannel,
@@ -3150,7 +3154,7 @@ const STATION_NOTIFICATION_LIST_FIELDS = Object.freeze([
   "id", "type", "status", "resolution", "title", "message", "createdAt", "createdBy", "createdByName",
   "updatedAt", "readAt", "recipientUsername", "recipientName", "orderId", "orderNo", "siteId",
   "requiredOutstandingAmount", "creditSaleRequestId", "approvalRequestId", "approvalAction", "notificationRole",
-  "profileRequestId", "resolvedAt", "resolvedBy", "resolvedByName", "resolutionNote",
+  "profileRequestId", "ownerAssignmentRequestId", "resolvedAt", "resolvedBy", "resolvedByName", "resolutionNote",
 ]);
 
 function stationNotificationListRecord(notification = {}) {
@@ -3190,6 +3194,18 @@ function visibleOrdersForNotificationAuth(state = {}, account = {}) {
 function stationNotificationForAuth(state = {}, req, notification = {}, options = {}) {
   const safeNotification = stationNotificationListRecord(notification);
   const includeStockDetails = options.includeStockDetails === true;
+  if (notification?.type === "order_owner_assignment") {
+    const order = visibleOrdersForNotificationAuth(state, req.auth?.account)
+      .find((item) => String(item?.id ?? "") === String(notification?.orderId ?? ""));
+    const detail = order ? orderOwnerAssignmentDetail(state, order, req.auth.account, { canUpdateOrder: orderPermissionAllowedForAccount }) : null;
+    const matchesRequest = order?.ownerAssignment?.requestId === notification.ownerAssignmentRequestId;
+    const obsolete = !order || !matchesRequest || order.ownerAssignment?.status !== "pending" || Boolean(detail?.blockedReason);
+    return { ...safeNotification, ...(notification.status === "pending" && obsolete ? {
+      status: "completed", resolution: order?.ownerAssignment?.status === "pending" ? "order_closed" : order?.ownerAssignment?.status || "order_unavailable",
+      title: `订单 ${notification.orderNo || ""} 负责人转交已关闭`,
+    } : {}), canApprove: !obsolete && detail?.canAccept === true,
+    ...(includeStockDetails && detail && matchesRequest ? { ownerAssignmentReview: detail } : {}) };
+  }
   if (notification?.type === "new_customer_approval") {
     const order = visibleOrdersForNotificationAuth(state, req.auth?.account)
       .find((item) => String(item?.id ?? "") === String(notification?.orderId ?? ""));
@@ -5754,6 +5770,7 @@ async function loadReconciledCommissions(req, authorize = () => {}, includeFinan
 // Capture both sides of a financial edit in its existing transaction. This
 // makes journal creation independent of whether anyone opens the homepage.
 async function commissionStateForMutation(client, before, after) {
+  after = closeEndedOrderOwnerAssignments(before, after);
   const { rows } = await client.query(
     `SELECT data, batch_id, created_at, site_id FROM finance_platform_settlements
      WHERE state_id = $1 ORDER BY settlement_time, created_at`, [stateId]
@@ -6239,13 +6256,13 @@ function applyAutomaticOrderTransitions(state = {}) {
 
   return {
     changed: true,
-    state: {
+    state: closeEndedOrderOwnerAssignments(state, {
       ...state,
       shipments: nextShipments,
       orders: nextOrders,
       notifications: nextNotifications,
       operationLogs: pushOperationLog(state.operationLogs, operationLog),
-    },
+    }),
     operationLog,
     summary: { autoShippedCount, autoDeliveredCount, autoCompletedCount, paymentBlockedCount, notificationCount },
   };
@@ -6462,6 +6479,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     assertOrderAcquisitionTagUnchanged(currentOrder, nextOrder);
     assertNewCustomerCustomerUnchanged(currentOrder, nextOrder);
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
+    assertOrderOwnerAssignmentUnchanged(currentOrder, nextOrder);
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
     if (stableJson(currentOrder.items ?? []) !== stableJson(nextOrder.items ?? [])) {
@@ -8692,7 +8710,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
       url.pathname === "/api/orders/new-customer/linked-detail" || url.pathname === "/api/public-catalog/stock-options" ||
-      url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag" || url.pathname.startsWith("/api/orders/new-customer/evidence")) {
+      url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag" || url.pathname.startsWith("/api/orders/owner-assignment") || url.pathname.startsWith("/api/orders/new-customer/evidence")) {
     res.setHeader("Cache-Control", "no-store, private");
   }
 
@@ -12947,6 +12965,79 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/owner-assignment/candidates" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data -> 'personnel' AS personnel, data -> 'sites' AS sites FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0] ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      if (!["create", "update"].some((action) => orderPermissionAllowedForAccount(req.auth.account, action))) throw httpError(403, "当前账号没有订单操作权限");
+      const siteId = requireVisibleSiteForAuth(req, state, url.searchParams.get("siteId"), "不能查看未授权场地的负责人");
+      const personnel = (state.personnel ?? []).filter((person) =>
+        !assignmentTargetBlockedReason(state, { siteId }, person, (account) => orderPermissionAllowedForAccount(account, "update") ||
+          (account.id === req.auth.account.id && orderPermissionAllowedForAccount(account, "create"))))
+        .map((person) => ({ id: person.id, name: person.name || person.username, username: person.username }));
+      sendJson(req, res, 200, { ok: true, personnel, currentPersonnelId: req.auth.account.id });
+    } catch (error) { sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message }); }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/owner-assignment" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const { order } = resolveAuthorizedLockedOrderTarget(req, state, url.searchParams.get("orderId"));
+      sendJson(req, res, 200, { ok: true, order, ...orderOwnerAssignmentDetail(state, order, req.auth.account, { canUpdateOrder: orderPermissionAllowedForAccount }) });
+    } catch (error) { sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message }); }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/owner-assignment/decision" && req.method === "POST") {
+    const client = await pool.connect();
+    let currentOrder = null;
+    try {
+      const body = JSON.parse(await readBody(req, 16 * 1024));
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      const target = resolveAuthorizedLockedOrderTarget(req, state, body?.orderId);
+      currentOrder = target.order;
+      const now = new Date().toISOString();
+      const actor = req.auth.account;
+      const result = planOrderOwnerAssignmentDecision(state, currentOrder, actor, body, { now, canUpdateOrder: orderPermissionAllowedForAccount });
+      if (result.unchanged) {
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, unchanged: true, order: currentOrder, ownerAssignment: currentOrder.ownerAssignment });
+        return;
+      }
+      const order = result.order;
+      let notifications = ownerAssignmentNotifications(currentStationNotifications(state), order, { now, actor, createId: () => uid("notice") });
+      if (body.decision === "accept") {
+        notifications = resolveCreditSaleNotifications(notifications, order.id, "owner_changed", actor.username, now).notifications;
+        if (["pending", "approved"].includes(currentOrder.newCustomerApproval?.status)) notifications = resolveNewCustomerApprovalNotifications(notifications, currentOrder.newCustomerApproval.requestId, {
+          resolution: "rejected", resolvedAt: now, resolvedBy: actor.username, resolvedByName: actor.name || actor.username,
+          resolutionNote: order.newCustomerApproval.reviewNote,
+        }).notifications;
+      }
+      const label = { accept: "接受负责人转交", reject: "拒绝负责人转交", cancel: "撤回负责人转交" }[body.decision];
+      const operationLog = createOperationLog(req, "订单管理", label,
+        `订单「${order.orderNo || order.id}」${label}（申请 ${order.ownerAssignment.requestId}），当前负责人：${order.contactPerson || "未填写"}${body.decision === "accept" ? "；原新客及赊销审批失效，提成按当前有效规则重算" : ""}`);
+      const nextState = await commissionStateForMutation(client, state, {
+        ...state, orders: target.orders.map((item) => item.id === order.id ? order : item), notifications,
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      });
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order, ownerAssignment: order.ownerAssignment, operationLog });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message,
+        ...(error.statusCode === 409 && currentOrder ? { order: currentOrder } : {}) });
+    } finally { client.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/orders/create" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -12957,6 +13048,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "create");
       const orderInput = normalizeOrderMutationInput(state, body);
       requireVisibleSiteForAuth(req, state, orderInput.siteId, "不能在未授权场地创建订单");
@@ -12967,14 +13059,15 @@ async function handleApi(req, res, url) {
         label: "订单",
         conflictCode: "ORDER_ID_CONFLICT",
       });
-      const order = {
+      const ownerPlan = planOrderOwnerAssignment(state, null, {
         id: orderId,
         orderNo: nextOrderNo(state),
         createdAt: nowDatetimeInChina(),
         ...orderInput,
         status: "pending",
         payments: [],
-      };
+      }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
+      const order = ownerPlan.order;
       const nextOrders = [...(Array.isArray(state.orders) ? state.orders : []), order];
       const nextStock = setStockSoldForOrders(state, nextOrders);
       const operationLog = {
@@ -12983,12 +13076,13 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "添加记录",
-        detail: `创建订单「${order.orderNo}」${platformOrderNoForOrder(order) ? `，${platformOrderNoLabel(order.source)} ${platformOrderNoForOrder(order)}` : ""}，商品 ${order.items.length} 条`,
+        detail: `创建订单「${order.orderNo}」${platformOrderNoForOrder(order) ? `，${platformOrderNoLabel(order.source)} ${platformOrderNoForOrder(order)}` : ""}，商品 ${order.items.length} 条${ownerPlan.requested ? `，申请转交负责人给 ${order.ownerAssignment.toName}，接受前由 ${order.contactPerson} 负责（申请 ${order.ownerAssignment.requestId}）` : ""}`,
       };
       const nextState = {
         ...state,
         orders: nextOrders,
         stock: nextStock,
+        notifications: ownerAssignmentNotifications(currentStationNotifications(state), order, { now: new Date().toISOString(), actor: req.auth.account, createId: () => uid("notice") }),
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
@@ -13053,11 +13147,12 @@ async function handleApi(req, res, url) {
       const removedShippedIds = removedItemIds.filter((id) => blockingShipmentIds.has(id));
       if (removedShippedIds.length > 0) throw new Error("已出库或发货的商品不能直接从订单中删除");
 
-      let nextOrder = {
+      const ownerPlan = planOrderOwnerAssignment(state, currentOrder, {
         ...currentOrder,
         ...nextOrderInput,
-      };
-      let nextNotifications = currentStationNotifications(state);
+      }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
+      let nextOrder = ownerPlan.order;
+      let nextNotifications = ownerAssignmentNotifications(currentStationNotifications(state), nextOrder, { now: new Date().toISOString(), actor: req.auth.account, createId: () => uid("notice") });
       let creditApprovalCleared = false;
       const creditTermsChanged = creditApprovalSensitiveSnapshot(currentOrder) !== creditApprovalSensitiveSnapshot(nextOrder);
       if (creditTermsChanged) {
@@ -13082,7 +13177,7 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `修改订单「${nextOrder.orderNo}」${creditApprovalCleared ? "，原赊销确认已失效" : ""}`,
+        detail: `修改订单「${nextOrder.orderNo}」${creditApprovalCleared ? "，原赊销确认已失效" : ""}${ownerPlan.requested ? `，申请转交负责人给 ${nextOrder.ownerAssignment.toName}，接受前由 ${nextOrder.contactPerson || "原负责人"} 负责（申请 ${nextOrder.ownerAssignment.requestId}）` : ""}`,
       };
       const nextState = {
         ...state,
@@ -14580,11 +14675,18 @@ async function handleApi(req, res, url) {
           const { rows: commissionRows } = await client.query(
             `SELECT data -> 'orders' AS orders, data -> 'shipments' AS shipments,
                     data -> 'personnel' AS personnel, data -> 'customers' AS customers,
+                    data -> 'notifications' AS notifications,
                     data -> 'commissionLedgerV1' AS "commissionLedgerV1"
              FROM app_state WHERE id = $1`, [stateId]);
           const before = commissionRows[0] ?? {};
           const after = { ...before, ...Object.fromEntries(persistedKeys.map((key) => [key, nextState[key]])) };
           const commissionState = await commissionStateForMutation(client, before, after);
+          for (const key of ["orders", "notifications"]) {
+            if (stableJson(commissionState[key]) !== stableJson(after[key])) {
+              nextState[key] = commissionState[key];
+              if (!persistedKeys.includes(key)) persistedKeys.push(key);
+            }
+          }
           updateValues.push(JSON.stringify(commissionState.commissionLedgerV1));
           dataExpression = `jsonb_set(${dataExpression}, '{commissionLedgerV1}', $${updateValues.length}::jsonb, true)`;
         }

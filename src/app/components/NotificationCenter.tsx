@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Boxes,
@@ -48,7 +48,9 @@ import {
   NewCustomerApprovalPanel,
   type NewCustomerApprovalUpdatedOrder,
 } from "./NewCustomerApprovalPanel";
-import { isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
+import { OrderOwnerAssignmentPanel } from "./OrderOwnerAssignment";
+import { mergeOwnerAssignmentForSession } from "../utils/orderOwnerAssignment";
 import { mergeNewCustomerApproval } from "./OrderAcquisitionTag";
 import { mergeNewCustomerLink } from "../utils/newCustomerLink";
 import { Badge } from "./ui/badge";
@@ -206,7 +208,8 @@ type StationNotification = {
   canApprove?: boolean;
   approvalRequestId?: string;
   approvalAction?: string;
-  notificationRole?: "approver" | "requester";
+  notificationRole?: "approver" | "requester" | "assignee";
+  ownerAssignmentRequestId?: string;
   resolvedAt?: string;
   resolvedBy?: string;
   resolvedByName?: string;
@@ -261,6 +264,10 @@ function formatNotificationTime(value?: string): string {
 }
 
 function notificationResultLabel(notification: StationNotification): string {
+  if (notification.type === "order_owner_assignment") {
+    if (notification.status === "pending") return "待负责人确认";
+    return ({ accepted: "已确认接手", rejected: "已拒绝接手", cancelled: "已撤回或失效" } as Record<string, string>)[notification.resolution || ""] || "已处理";
+  }
   if (notification.status === "pending") {
     return ["stock_approval", "credit_sale_confirmation", "personnel_profile_approval", "new_customer_approval"].includes(notification.type)
       ? "待审批"
@@ -301,6 +308,7 @@ function notificationTypeLabel(notification: StationNotification): string {
   if (notification.type === "credit_sale_confirmation") return "赊销确认";
   if (notification.type === "personnel_profile_approval") return "人员资料审批";
   if (notification.type === "new_customer_approval") return "新客首单审批";
+  if (notification.type === "order_owner_assignment") return "负责人转交确认";
   return "系统消息";
 }
 
@@ -548,7 +556,10 @@ export function NotificationNavBadge({ unreadCount }: { unreadCount: number }) {
 }
 
 export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
-  const { setState, setActiveSiteId } = useStore();
+  const { state, setState, setActiveSiteId } = useStore();
+  const viewerRef = useRef(state.user);
+  viewerRef.current = state.user;
+  const notificationRequestSequence = useRef(0);
   const [loading, setLoading] = useState(true);
   const [notificationLoadError, setNotificationLoadError] = useState("");
   const [notifications, setNotifications] = useState<StationNotification[]>([]);
@@ -571,6 +582,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [loadedStockDetailNotificationId, setLoadedStockDetailNotificationId] = useState("");
   const [selectedProfileApproval, setSelectedProfileApproval] = useState<StationNotification | null>(null);
   const [selectedNewCustomerApproval, setSelectedNewCustomerApproval] = useState<StationNotification | null>(null);
+  const [selectedOwnerAssignment, setSelectedOwnerAssignment] = useState<StationNotification | null>(null);
   const [profileDecision, setProfileDecision] = useState<"approve" | "reject" | null>(null);
   const [profileNote, setProfileNote] = useState("");
   const [processingProfileApproval, setProcessingProfileApproval] = useState(false);
@@ -628,22 +640,28 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const hasFacetFilters = Boolean(startDate || endDate || typeFilter !== "all" || senderFilter !== "all");
 
   const loadNotifications = useCallback(async (silent = false) => {
+    const session = captureNewCustomerSession();
+    const sequence = ++notificationRequestSequence.current;
+    const current = () => sequence === notificationRequestSequence.current && isNewCustomerSessionCurrent(session, viewerRef.current);
+    if (!current()) return;
     if (!silent) setLoading(true);
     setNotificationLoadError("");
     try {
       const response = await fetch("/api/notifications?limit=500", { headers: authJsonHeaders() });
       const result = await response.json().catch(() => ({}));
+      if (!current()) return;
       if (!response.ok || !result.ok) throw new Error(result.error || "站内信加载失败");
       const loaded = Array.isArray(result.notifications) ? result.notifications : [];
       setNotifications(loaded);
       setTotalCount(Math.max(loaded.length, Number(result.totalCount ?? loaded.length)));
       setUnreadCount(Math.max(0, Number(result.unreadCount ?? 0)));
     } catch (error) {
+      if (!current()) return;
       const message = error instanceof Error ? error.message : "站内信加载失败";
       setNotificationLoadError(message);
       if (!silent) toast.error(message);
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && current()) setLoading(false);
     }
   }, []);
 
@@ -666,6 +684,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       stockDetailRequestCoordinator.cancel();
       profileDetailRequestCoordinator.cancel();
+      notificationRequestSequence.current += 1;
     };
   }, [loadNotifications, profileDetailRequestCoordinator, stockDetailRequestCoordinator]);
 
@@ -1362,6 +1381,11 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           {pending && notification.canApprove === true ? "审核新客首单" : "查看新客申请"}
                         </Button>
                       )}
+                      {notification.type === "order_owner_assignment" && notification.orderId && notification.ownerAssignmentRequestId && (
+                        <Button variant={pending && notification.notificationRole === "assignee" ? "default" : "outline"} className="!min-h-[44px]" onClick={() => { setSelectedOwnerAssignment(notification); void markRead(notification); }}>
+                          <UserRound className="size-4" aria-hidden="true" />{pending && notification.notificationRole === "assignee" ? "确认负责人" : "查看转交申请"}
+                        </Button>
+                      )}
                       {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
                         <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
                           <HandCoins className="size-3.5" />同意赊销
@@ -1441,6 +1465,18 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
               {confirming ? "提交中" : "同意赊销"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!selectedOwnerAssignment} onOpenChange={nextOpen => { if (!nextOpen) setSelectedOwnerAssignment(null); }}>
+        <DialogContent aria-describedby={undefined} className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader><DialogTitle className="break-words">负责人转交 · {selectedOwnerAssignment?.orderNo || "订单"}</DialogTitle><DialogDescription>核对订单后再确认接手。接收人确认前，当前负责人保持不变。</DialogDescription></DialogHeader>
+          {selectedOwnerAssignment?.orderId && <>
+            <Button type="button" variant="outline" className="!min-h-[44px] w-fit" onClick={() => { openOrder(selectedOwnerAssignment); setSelectedOwnerAssignment(null); }}><ExternalLink className="size-4" />查看订单</Button>
+            <OrderOwnerAssignmentPanel orderId={selectedOwnerAssignment.orderId} requestId={selectedOwnerAssignment.ownerAssignmentRequestId} viewer={state.user}
+              onOrderUpdated={(updated, session) => setState(current => mergeOwnerAssignmentForSession(current, updated, session))}
+              onChanged={() => { void loadNotifications(true); }} />
+          </>}
         </DialogContent>
       </Dialog>
 

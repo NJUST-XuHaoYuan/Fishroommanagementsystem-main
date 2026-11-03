@@ -8,6 +8,7 @@ import {
   shipmentIsResolvedForCompletion,
 } from "./shipment-completion-rules.mjs";
 import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
+import { closeEndedOrderOwnerAssignments } from "./order-owner-assignment.mjs";
 
 const source = await readFile(new URL("./local-server.mjs", import.meta.url), "utf8");
 
@@ -76,6 +77,7 @@ function createAutomaticTransitions(clock) {
     "shipmentsHavePendingActualShippingFee",
     "countsAsCompletionShipment",
     "shipmentIsResolvedForCompletion",
+    "closeEndedOrderOwnerAssignments",
     `"use strict";\n${validateFeesSource}\n${validateCompleteSource}\n${automaticTransitionsSource}\nreturn applyAutomaticOrderTransitions;`,
   )(
     todayInChina,
@@ -93,6 +95,7 @@ function createAutomaticTransitions(clock) {
     shipmentsHavePendingActualShippingFee,
     countsAsCompletionShipment,
     shipmentIsResolvedForCompletion,
+    closeEndedOrderOwnerAssignments,
   );
 }
 

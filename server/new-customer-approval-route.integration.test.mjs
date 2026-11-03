@@ -96,8 +96,16 @@ test("owner changes after submission invalidate approval and forged generic stat
   const forged = { ...order, newCustomerApproval: { ...order.newCustomerApproval, status: "approved", reviewedBy: "pricing-admin" } };
   const patch = await s.request("/api/state/patch", { token: s.owner, body: { patch: { orders: [forged] }, basePatch: { orders: [order] } } });
   assert.equal(patch.response.status, 409);
-  const changed = await s.request("/api/orders/update", { token: s.admin, body: { ...order, orderId: order.id, contactPersonnelId: "pricing-admin", contactPerson: "价格测试admin" } }); ok(changed);
-  const review = await s.review({ confirmCustomerIdentity: true }); assert.equal(review.body.code, "NEW_CUSTOMER_IDENTITY_CONFLICT");
+  const changed = await s.request("/api/orders/update", { token: s.admin, body: { ...order, orderId: order.id,
+    expectedContactPersonnelId: order.contactPersonnelId, expectedOwnerAssignmentRequestId: "",
+    contactPersonnelId: "pricing-admin", contactPerson: "价格测试admin" } }); ok(changed);
+  assert.equal(changed.body.order.contactPersonnelId, order.contactPersonnelId);
+  assert.equal(changed.body.order.newCustomerApproval.status, "pending");
+  const accepted = await s.request("/api/orders/owner-assignment/decision", { token: s.admin, body: {
+    orderId: order.id, requestId: changed.body.order.ownerAssignment.requestId, decision: "accept",
+  } }); ok(accepted);
+  assert.equal(accepted.body.order.newCustomerApproval.status, "rejected");
+  const review = await s.review({ confirmCustomerIdentity: true }); assert.equal(review.body.code, "NEW_CUSTOMER_APPROVAL_CONFLICT");
 });
 
 test("concurrent approvals are idempotent and an opposite stale decision conflicts", async (t) => {
