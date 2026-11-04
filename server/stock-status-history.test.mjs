@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stockStatusChanges, stockStatusHistoryForResponse, stockStatusHistoryPageQuery, appendStockStatusHistorySql, STOCK_STATUS_HISTORY_SQL } from "./stock-status-history.mjs";
+import { stockStatusChanges, orderReleasedStockChanges, stockStatusHistoryForResponse, stockStatusHistoryPageQuery, appendStockStatusHistorySql, STOCK_STATUS_HISTORY_SQL } from "./stock-status-history.mjs";
 
 const account = { id: "person1", username: "keeper", name: "张三" };
 test("only real changes are journaled, initial creation is explicit and unchanged old fish are not backfilled", () => {
@@ -31,4 +31,39 @@ test("history pagination bounded, safe allowlist and SQL append does not truncat
   assert.equal(appendStockStatusHistorySql("data", [], () => { throw new Error(); }), "data");
   assert.match(STOCK_STATUS_HISTORY_SQL, /LIMIT \$3 OFFSET \$4/);
   assert.doesNotMatch(STOCK_STATUS_HISTORY_SQL, /FOR UPDATE/);
+});
+
+test("sale-release events preserve order identity and are separate from health changes", () => {
+  const fish = { id: "fish", siteId: "nanjing", status: "feeding", sold: true };
+  const order = { id: "order", orderNo: "SO-2026-001", items: [{ stockItemId: "fish" }] };
+  const before = { stock: [fish], orders: [order] };
+  for (const orders of [[], [{ ...order, items: [] }], [{ ...order, status: "cancelled" }],
+    [{ ...order, items: [{ stockItemId: "fish", inventoryRemovedAt: "2026-11-04" }] }]]) {
+    const records = orderReleasedStockChanges({ before, after: { stock: [{ ...fish, sold: false }], orders },
+      account, source: "order_return_item", changedAt: "2026-11-04T01:00:00.000Z" });
+    assert.equal(records.length, 1);
+    const [record] = records;
+    assert.equal(record.eventType, "order_release"); assert.equal(record.previousSold, true); assert.equal(record.sold, false);
+    assert.equal(record.previousStatus, "feeding"); assert.equal(record.status, "feeding");
+    assert.equal(record.orderId, order.id); assert.equal(record.orderNo, order.orderNo);
+    assert.equal(record.operatorId, account.id); assert.equal(record.operatorName, account.name);
+    const [response] = stockStatusHistoryForResponse(records);
+    assert.equal(response.eventType, "order_release"); assert.equal(response.orderNo, order.orderNo);
+    assert.equal(response.operatorId, undefined);
+  }
+});
+
+test("sale release skips refunds, remaining reservations, deleted fish, no-ops and legacy inconsistencies", () => {
+  const fish = { id: "fish", status: "healthy", sold: true };
+  const order = { id: "order", items: [{ stockItemId: "fish" }] };
+  const before = { stock: [fish], orders: [order] };
+  for (const after of [before, { stock: [], orders: [] }, { stock: [{ ...fish, sold: false }], orders: [order] },
+    { stock: [fish], orders: [] }, { stock: [{ ...fish, sold: false }], orders: [{ ...order, id: "other" }] }]) {
+    assert.deepEqual(orderReleasedStockChanges({ before, after, account }), []);
+  }
+  assert.deepEqual(orderReleasedStockChanges({ before: { stock: [fish], orders: [] },
+    after: { stock: [{ ...fish, sold: false }], orders: [] }, account }), []);
+  assert.deepEqual(orderReleasedStockChanges({ before: { stock: [{ ...fish, sold: false }], orders: [order] },
+    after: { stock: [{ ...fish, sold: false }], orders: [] }, account }), []);
+  assert.throws(() => orderReleasedStockChanges({ before, after: { stock: [{ ...fish, sold: false }], orders: [] } }), /认证/);
 });

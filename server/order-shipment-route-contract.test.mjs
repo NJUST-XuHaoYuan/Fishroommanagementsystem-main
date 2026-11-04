@@ -52,6 +52,16 @@ test("order and shipment mutation routes resolve unique authorized targets after
   );
 });
 
+test("refund, return and delete refresh current account permissions while holding the state lock", () => {
+  for (const path of ["/api/orders/refund", "/api/orders/return-item", "/api/orders/delete"]) {
+    const block = routeBlock(path);
+    const lock = block.indexOf("SELECT data FROM app_state WHERE id = $1 FOR UPDATE");
+    const refresh = block.indexOf("refreshLockedOrderMutationAuth(req, state)");
+    const permission = block.indexOf("requireOrderPermissionForAuth(req,");
+    assert.ok(lock >= 0 && refresh > lock && permission > refresh, path);
+  }
+});
+
 test("order and shipment success payloads always build site-filtered collections", () => {
   for (const path of [
     "/api/orders/credit-sale/request",

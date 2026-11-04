@@ -13,6 +13,8 @@ import { mergeNewCustomerApproval, OrderAcquisitionBadge, OrderAcquisitionTag } 
 import { mergeNewCustomerLink } from "../utils/newCustomerLink";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerSession } from "../utils/newCustomerEvidence";
 import { OrderOwnerAssignmentBadge, OrderOwnerAssignmentPanel, useOrderOwnerCandidates } from "./OrderOwnerAssignment";
+import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
+import { StockOrderReleaseDetails, StockOrderReleaseLoadState, stockOrderReleaseTimelineEvents, useStockOrderReleaseHistory } from "./StockOrderReleaseHistory";
 import { mergeOwnerAssignmentForSession, ownerSelectionHint, retainNewerOwnerAssignments } from "../utils/orderOwnerAssignment";
 import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
@@ -1863,13 +1865,15 @@ function CustomerDetailDialog({
 // ─── ProofUploader ────────────────────────────────────────────────────────────
 
 function ProofUploader({
-  images, onChange,
-}: { images: string[]; onChange: (imgs: string[]) => void }) {
+  images, onChange, disabled = false, onUploadingChange,
+}: { images: string[]; onChange: (imgs: string[]) => void; disabled?: boolean; onUploadingChange?: (loading: boolean) => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
 
   const handleFiles = async (files: FileList) => {
+    if (disabled || loading) return;
     setLoading(true);
+    onUploadingChange?.(true);
     const results: string[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue;
@@ -1883,6 +1887,7 @@ function ProofUploader({
     }
     onChange([...images, ...results]);
     setLoading(false);
+    onUploadingChange?.(false);
   };
 
   return (
@@ -1900,6 +1905,7 @@ function ProofUploader({
             type="button"
             className="absolute -top-1 -right-1 size-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
             onClick={() => onChange(images.filter((_, j) => j !== i))}
+            disabled={disabled || loading}
           >
             <Trash2 className="size-2.5" />
           </button>
@@ -1909,7 +1915,7 @@ function ProofUploader({
         type="button"
         className="size-14 rounded border border-dashed flex items-center justify-center text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors shrink-0"
         onClick={() => fileRef.current?.click()}
-        disabled={loading}
+        disabled={disabled || loading}
         title="上传凭证图片"
       >
         {loading
@@ -1921,6 +1927,7 @@ function ProofUploader({
         type="file"
         accept="image/*"
         multiple
+        disabled={disabled || loading}
         className="hidden"
         onChange={(e) => e.target.files && handleFiles(e.target.files)}
       />
@@ -1929,6 +1936,7 @@ function ProofUploader({
 }
 
 type OrderRefundDraft = {
+  id: string;
   amount: number;
   time: string;
   proof: string[];
@@ -1949,7 +1957,10 @@ function OrderRefundDialog({
   onConfirm: (draft: OrderRefundDraft) => Promise<boolean>;
 }) {
   const { state } = useStore();
+  const [proofUploading, setProofUploading] = useState(false);
+  const [error, setError] = useState("");
   const [draft, setDraft] = useState<OrderRefundDraft>({
+    id: uid(),
     amount: 0,
     time: nowDatetimeLocal(),
     proof: [],
@@ -1959,11 +1970,14 @@ function OrderRefundDialog({
   useEffect(() => {
     if (!open || !order) return;
     setDraft({
+      id: uid(),
       amount: 0,
       time: nowDatetimeLocal(),
       proof: [],
       notes: "",
     });
+    setError("");
+    setProofUploading(false);
   }, [open, order?.id]);
 
   if (!order) return null;
@@ -1973,10 +1987,14 @@ function OrderRefundDialog({
   const refundAccount = order.paymentAccount || refundMethod?.account || "";
   const refundMethodName = order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
   const platformRefund = isPlatformPaymentChannel(refundChannel);
+  const busy = saving || proofUploading;
 
   const submit = async () => {
-    if (!Number.isFinite(draft.amount) || draft.amount <= 0) return toast.error("请输入有效退款金额");
-    if (!refundChannel || !refundAccount) return toast.error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
+    if (busy) return;
+    setError("");
+    if (!Number.isFinite(draft.amount) || draft.amount <= 0) return setError("请输入有效退款金额");
+    if (!draft.time) return setError("请选择退款时间");
+    if (!refundChannel || !refundAccount) return setError("该订单的付款方式尚未配置收款账户，请联系管理员处理");
     const confirmed = confirmWrite(
       "登记退款",
       platformRefund
@@ -1984,21 +2002,25 @@ function OrderRefundDialog({
         : `登记订单「${order.orderNo}」的账户退款 ¥${draft.amount.toFixed(2)}，后续由财务核对独立出账。`
     );
     if (!confirmed) return;
-    if (await onConfirm({ ...draft, notes: draft.notes.trim() })) {
-      onOpenChange(false);
+    try {
+      if (await onConfirm({ ...draft, notes: draft.notes.trim() })) onOpenChange(false);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "退款登记失败，请重试");
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent aria-describedby={undefined} className="max-h-[92dvh] max-w-xl overflow-y-auto">
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!busy) onOpenChange(nextOpen); }}>
+      <DialogContent aria-describedby="order-refund-inventory-hint" aria-busy={busy} className="max-h-[92dvh] max-w-xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>登记退款 · {order.orderNo}</DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <p id="order-refund-inventory-hint" className="text-sm leading-6 text-muted-foreground">仅登记资金退款，不自动退鱼、不取消已售标记，不改变已完成订单或发货状态。登记后仍需财务核销。</p>
+        <fieldset disabled={busy} className="grid min-w-0 gap-4 sm:grid-cols-2">
           <div className="grid gap-1.5">
-            <Label>退款金额（元）<span className="ml-0.5 text-red-500">*</span></Label>
+            <Label htmlFor="order-refund-amount">退款金额（元）<span className="ml-0.5 text-red-500">*</span></Label>
             <Input
+              id="order-refund-amount"
               type="number"
               min={0}
               step={0.01}
@@ -2031,8 +2053,9 @@ function OrderRefundDialog({
               : "账户退款：保留原收款入账和本次退款出账两条独立核销记录。"}
           </div>
           <div className="grid gap-1.5 sm:col-span-2">
-            <Label>备注</Label>
+            <Label htmlFor="order-refund-notes">备注</Label>
             <Textarea
+              id="order-refund-notes"
               rows={3}
               value={draft.notes}
               onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
@@ -2041,16 +2064,31 @@ function OrderRefundDialog({
           </div>
           <div className="grid gap-1.5 sm:col-span-2">
             <Label>退款凭证</Label>
-            <ProofUploader images={draft.proof} onChange={(proof) => setDraft((current) => ({ ...current, proof }))} />
+            <ProofUploader images={draft.proof} disabled={saving} onUploadingChange={setProofUploading} onChange={(proof) => setDraft((current) => ({ ...current, proof }))} />
           </div>
-        </div>
+        </fieldset>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {proofUploading && <p role="status" className="text-sm text-muted-foreground">凭证上传中，请等待上传完成后登记退款。</p>}
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
-          <Button onClick={() => void submit()} disabled={saving}>{saving ? "保存中..." : "登记退款"}</Button>
+          <Button type="button" className="min-h-11" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>取消</Button>
+          <Button type="button" className="min-h-11" onClick={() => void submit()} disabled={busy}>{saving ? "保存中..." : "登记退款"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+export function canRegisterOrderRefund(order: Pick<Order, "status"> | null, hasActuallyShipped: boolean, canUpdate: boolean) {
+  return Boolean(order && canUpdate && (order.status === "completed" || !hasActuallyShipped));
+}
+
+export function OrderRefundAction({ order, hasActuallyShipped, canUpdate, saving = false, onOpen }: {
+  order: Pick<Order, "status"> | null; hasActuallyShipped: boolean; canUpdate: boolean; saving?: boolean; onOpen: () => void;
+}) {
+  if (!canRegisterOrderRefund(order, hasActuallyShipped, canUpdate)) return null;
+  return <Button type="button" size="sm" variant="outline" className="min-h-11 border-rose-300 text-rose-700 hover:bg-rose-50" onClick={onOpen} disabled={saving}>
+    <RotateCcw className="mr-1 size-3.5" aria-hidden="true" />登记退款
+  </Button>;
 }
 
 // ─── Return Unshipped Item ────────────────────────────────────────────────────
@@ -3294,6 +3332,7 @@ function StockPickerBioDialog({
     };
   }, [open, stockItemId, setState]);
 
+  const orderReleaseHistory = useStockOrderReleaseHistory(stockItemId, open);
   if (!open || !stockItemId) return null;
 
   const subTankName = (subTankId?: string) => {
@@ -3310,6 +3349,7 @@ function StockPickerBioDialog({
   const timeline = item
     ? [
         { type: "stock_in" as const, date: item.inDate, batchNo: batch?.batchNo ?? "—" },
+        ...stockOrderReleaseTimelineEvents(orderReleaseHistory.records),
         ...state.bioRecords
           .filter((record) => record.stockItemId === item.id)
           .sort((a, b) => a.date.localeCompare(b.date))
@@ -3633,11 +3673,13 @@ function StockPickerBioDialog({
               </div>
             </div>
 
+            <StockStatusHistoryPanel key={item.id} stockItemId={item.id} />
             <div>
               <div className="mb-3 flex items-center gap-2">
                 <Clock className="size-4 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground">生物时间轴</span>
               </div>
+              <StockOrderReleaseLoadState {...orderReleaseHistory} />
               <div className="relative flex flex-col gap-0 pl-6">
                 <div className="absolute bottom-2 left-2 top-2 w-px bg-border" />
                 {timeline.map((event, index) => (
@@ -3657,7 +3699,7 @@ function StockPickerBioDialog({
                         "border-border bg-card"
                       }`}
                     >
-                      <div className="mb-1 flex items-center justify-between">
+                      {event.type === "order_release" ? <StockOrderReleaseDetails record={event.record} /> : <div className="mb-1 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           {event.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
                           {event.type === "record" && (stockTransferRecordLabel(event.sourceType) ? <ArrowRightLeft className="size-3.5 text-emerald-600" /> : <Camera className="size-3.5 text-emerald-600" />)}
@@ -3698,7 +3740,7 @@ function StockPickerBioDialog({
                             </button>
                           )}
                         </div>
-                      </div>
+                      </div>}
                       {event.type === "stock_in" && <p className="text-xs text-muted-foreground">批次：{event.batchNo}</p>}
                       {event.type === "sold" && <p className="text-xs text-yellow-700">订单：{event.orderNo}</p>}
                       {event.type === "record" && (
@@ -4372,6 +4414,11 @@ function OrderDetailDialog({
   const [returnSaving, setReturnSaving] = useState(false);
   const [refundOpen, setRefundOpen] = useState(false);
   const [refundSaving, setRefundSaving] = useState(false);
+  const refundSaveLock = useRef(false);
+  const refundContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const refundContextRef = useRef(refundContextKey);
+  refundContextRef.current = refundContextKey;
+  useEffect(() => { setRefundOpen(false); setRefundSaving(false); }, [refundContextKey]);
   const [creditSaleRequest, setCreditSaleRequest] = useState<CreditSaleRequestDialogState | null>(null);
   const [selectedCreditApprovers, setSelectedCreditApprovers] = useState<string[]>([]);
   const [requestingCreditApproval, setRequestingCreditApproval] = useState(false);
@@ -4819,27 +4866,30 @@ function OrderDetailDialog({
   };
 
   const submitOrderRefund = async (draft: OrderRefundDraft) => {
-    if (!order || refundSaving || !permission.requirePermission("update")) return false;
-    if (hasActuallyShipped) {
-      toast.error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
-      return false;
-    }
+    if (!order || refundSaveLock.current || !permission.requirePermission("update")) return false;
+    if (!canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)) throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
+    const session = captureNewCustomerSession();
+    if (!isNewCustomerSessionCurrent(session, state.user)) throw new Error("登录状态已变化，请重新登录后操作");
+    const requestContext = refundContextKey;
+    refundSaveLock.current = true;
     setRefundSaving(true);
     try {
       const result = await postOrderApi("orders/refund", {
         orderId: order.id,
         ...draft,
       });
-      applyOrderApiResult(setState, result);
+      if (!isNewCustomerSessionCurrent(session) || refundContextRef.current !== requestContext) return false;
+      applyOrderApiResult(setState, result, { session: session!, shouldApply: () => refundContextRef.current === requestContext });
       toast.success(isPlatformOrderSource(order.source) || isPlatformPaymentChannel(order.paymentChannel)
         ? "平台退款已登记，待财务按平台账单核销"
         : "账户退款已登记，待财务核对出账");
       return true;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "退款登记失败，请重试");
-      return false;
+      if (!isNewCustomerSessionCurrent(session) || refundContextRef.current !== requestContext) return false;
+      throw error;
     } finally {
-      setRefundSaving(false);
+      refundSaveLock.current = false;
+      if (refundContextRef.current === requestContext) setRefundSaving(false);
     }
   };
 
@@ -5630,16 +5680,7 @@ function OrderDetailDialog({
                   </div>
                 )}
 
-                {permission.canUpdate && !hasActuallyShipped && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-rose-300 text-rose-700 hover:bg-rose-50"
-                    onClick={() => setRefundOpen(true)}
-                  >
-                    <RotateCcw className="mr-1 size-3.5" />登记退款
-                  </Button>
-                )}
+                <OrderRefundAction order={order} hasActuallyShipped={hasActuallyShipped} canUpdate={permission.canUpdate} saving={refundSaving} onOpen={() => setRefundOpen(true)} />
 
                 <div className="flex-1" />
                 <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
@@ -5662,6 +5703,7 @@ function OrderDetailDialog({
       />
 
       <OrderRefundDialog
+        key={refundContextKey}
         order={order}
         open={refundOpen}
         saving={refundSaving}

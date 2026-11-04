@@ -184,7 +184,7 @@ function appStateRow(sql, values = []) {
     row.stock_item = item;
     if (/\bAS\s+status_history_records\b/i.test(sql)) {
       const records = list(state.stockStatusHistory).map((record, index) => ({ record, index }))
-        .filter(({ record }) => record.stockItemId === stockId)
+        .filter(({ record }) => record.stockItemId === stockId && (!values[4] || record.eventType === values[4]))
         .sort((a, b) => String(b.record.changedAt).localeCompare(String(a.record.changedAt)) || b.index - a.index);
       row.history_total = records.length;
       row.status_history_records = records.slice(Number(values[3]), Number(values[3]) + Number(values[2])).map(({ record }) => record);
@@ -351,8 +351,10 @@ class TestClient {
     const persisted = state;
     state = this.workingState;
     try {
+      const previousStatusHistoryCount = (state.stockStatusHistory ?? []).length;
       const response = runQuery(query, values);
-      if (failStatusHistoryWrite && /^UPDATE\b/i.test(sql) && sql.includes("'{stockStatusHistory}'")) {
+      if (failStatusHistoryWrite && /^UPDATE\b/i.test(sql) && (sql.includes("'{stockStatusHistory}'") ||
+          (state.stockStatusHistory ?? []).length > previousStatusHistoryCount)) {
         failStatusHistoryWrite = false;
         throw Object.assign(new Error("Injected status journal database failure"), { code: "XX000" });
       }

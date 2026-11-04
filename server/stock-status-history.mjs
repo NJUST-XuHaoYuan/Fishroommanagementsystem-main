@@ -41,6 +41,57 @@ export function stockStatusChanges({ before = [], after = [], account, source,
   });
 }
 
+// Sold is an order reservation flag, not one of the three health statuses.
+// Record only an actual true -> false transition caused by removing the final
+// active order reference. Refund-only writes, shipment cancellation and legacy
+// inconsistent flags must not manufacture a sale-release event.
+export function orderReleasedStockChanges({ before = {}, after = {}, account, source,
+  changedAt = new Date().toISOString() } = {}) {
+  const activeReferences = (orders) => {
+    const references = new Map();
+    for (const order of list(orders)) {
+      if (!order || order.status === "cancelled") continue;
+      for (const item of list(order.items)) {
+        const stockItemId = idOf(item?.stockItemId);
+        if (!stockItemId || idOf(item?.inventoryRemovedAt)) continue;
+        const byOrder = references.get(stockItemId) ?? new Map();
+        byOrder.set(idOf(order.id), order);
+        references.set(stockItemId, byOrder);
+      }
+    }
+    return references;
+  };
+  const previousReferences = activeReferences(before.orders);
+  const nextReferences = activeReferences(after.orders);
+  const previousStock = new Map(list(before.stock).map((item) => [idOf(item?.id), item]));
+  const changes = list(after.stock).flatMap((item) => {
+    const stockItemId = idOf(item?.id);
+    if (!stockItemId || previousStock.get(stockItemId)?.sold !== true || item.sold !== false ||
+        nextReferences.has(stockItemId) || !previousReferences.has(stockItemId)) return [];
+    return [...previousReferences.get(stockItemId).values()].map((order) => ({
+      id: `status_${randomUUID()}`,
+      stockItemId,
+      eventType: "order_release",
+      previousSold: true,
+      sold: false,
+      orderId: idOf(order.id),
+      orderNo: idOf(order.orderNo) || idOf(order.id),
+      previousStatus: idOf(previousStock.get(stockItemId)?.status) || null,
+      status: idOf(item.status),
+      changedAt,
+      operator: idOf(account?.username),
+      operatorName: idOf(account?.name) || idOf(account?.username),
+      operatorId: idOf(account?.id),
+      siteId: idOf(item.siteId),
+      source,
+    }));
+  });
+  if (changes.length && (!idOf(account?.username) || !idOf(account?.id))) {
+    throw new Error("状态记录缺少已认证的操作人");
+  }
+  return changes;
+}
+
 export function appendStockStatusHistorySql(dataExpression, records, bindValue) {
   if (!records.length) return dataExpression;
   const rowsParam = bindValue(JSON.stringify(records));
@@ -51,11 +102,13 @@ export function appendStockStatusHistorySql(dataExpression, records, bindValue) 
 export function stockStatusHistoryPageQuery(searchParams) {
   const stockItemId = idOf(searchParams.get("stockItemId"));
   if (!stockItemId || stockItemId.length > 160) throw new Error("缺少或无效的库存鱼编号");
+  const eventType = idOf(searchParams.get("eventType"));
+  if (eventType && eventType !== "order_release") throw new Error("状态记录类型无效");
   const offset = Number(searchParams.get("offset") ?? 0);
   const limit = Number(searchParams.get("limit") ?? 20);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000 ||
       !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("状态记录分页参数无效");
-  return { stockItemId, offset, limit };
+  return { stockItemId, offset, limit, ...(eventType ? { eventType } : {}) };
 }
 
 export function stockStatusHistoryForResponse(records) {
@@ -65,6 +118,10 @@ export function stockStatusHistoryForResponse(records) {
     status: idOf(record.status), changedAt: idOf(record.changedAt),
     operator: idOf(record.operator), operatorName: idOf(record.operatorName) || idOf(record.operator),
     source: idOf(record.source), siteId: idOf(record.siteId),
+    ...(record.eventType === "order_release" ? {
+      eventType: "order_release", previousSold: true, sold: false,
+      orderId: idOf(record.orderId), orderNo: idOf(record.orderNo),
+    } : {}),
     ...(record.requestedBy ? { requestedBy: idOf(record.requestedBy), requestedByName: idOf(record.requestedByName) || idOf(record.requestedBy) } : {}),
   }));
 }
@@ -82,6 +139,7 @@ export const STOCK_STATUS_HISTORY_SQL = `WITH source AS MATERIALIZED (
     LATERAL jsonb_array_elements(COALESCE(data -> 'stockStatusHistory', '[]'::jsonb))
       WITH ORDINALITY AS h(history_item, ordinality)
   WHERE history_item ->> 'stockItemId' = $2
+    AND ($5::text = '' OR history_item ->> 'eventType' = $5::text)
 ), status_page AS (
   SELECT history_item, ordinality FROM status_history
   ORDER BY history_item ->> 'changedAt' DESC, ordinality DESC LIMIT $3 OFFSET $4

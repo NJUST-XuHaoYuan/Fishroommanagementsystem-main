@@ -230,6 +230,7 @@ import { appendBioRecordsMutationSql } from "./bio-record-save-sql.mjs";
 import {
   STOCK_STATUS_HISTORY_SQL,
   appendStockStatusHistorySql,
+  orderReleasedStockChanges,
   stockStatusChanges,
   stockStatusHistoryForResponse,
   stockStatusHistoryPageQuery,
@@ -6092,6 +6093,13 @@ function setStockSoldForOrders(state = {}, orders = [], previousState = state) {
   return reconcileReleasedStockPricing(previousState, { ...state, orders, stock }).stock;
 }
 
+function orderReleaseHistoryPatch(req, before, after, source, changedAt) {
+  const records = orderReleasedStockChanges({ before, after, account: req.auth?.account, source, changedAt });
+  return records.length ? {
+    stockStatusHistory: [...(Array.isArray(before.stockStatusHistory) ? before.stockStatusHistory : []), ...records],
+  } : {};
+}
+
 function deletedIdsByKey(current = [], next = []) {
   const nextIds = new Set((Array.isArray(next) ? next : []).map((item) => String(item?.id ?? "")).filter(Boolean));
   return (Array.isArray(current) ? current : [])
@@ -11948,15 +11956,18 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/stock/status-history" && req.method === "GET") {
     try {
-      const { stockItemId, offset, limit } = stockStatusHistoryPageQuery(url.searchParams);
-      const { rows } = await pool.query(STOCK_STATUS_HISTORY_SQL, [stateId, stockItemId, limit, offset]);
+      const { stockItemId, offset, limit, eventType = "" } = stockStatusHistoryPageQuery(url.searchParams);
+      const { rows } = await pool.query(STOCK_STATUS_HISTORY_SQL, [stateId, stockItemId, limit, offset, eventType]);
       const row = rows[0] ?? {};
       const stockItem = row.stock_item;
       const state = { personnel: row.personnel, sites: row.sites, tankGroups: row.tank_groups,
         stock: stockItem ? [stockItem] : [] };
       refreshLockedMutationAuth(req, state, { code: "STATUS_HISTORY_ACCOUNT_CHANGED" });
-      if (!["daily", "stockIn"].some((module) => ["create", "update", "delete"].some((action) =>
-        hasModulePermission(req.auth?.account, module, action)))) {
+      const canReadHealthHistory = ["daily", "stockIn"].some((module) => ["create", "update", "delete"].some((action) =>
+        hasModulePermission(req.auth?.account, module, action)));
+      const canReadOrderReleaseHistory = eventType === "order_release" && ["create", "update", "delete"].some((action) =>
+        hasModulePermission(req.auth?.account, "orders", action));
+      if (!canReadHealthHistory && !canReadOrderReleaseHistory) {
         throw httpError(403, "当前账户没有查看鱼只状态记录的权限", "PERMISSION_FORBIDDEN");
       }
       if (Number(row.stock_item_count) > 1) throw httpError(409, "库存鱼 ID 不唯一，无法安全查看状态记录");
@@ -11965,8 +11976,13 @@ async function handleApi(req, res, url) {
         stockSiteId: normalizeSiteId(findSubTank(state, stockItem.subTankId)?.group?.siteId ?? stockItem.siteId) })) {
         throw httpError(404, "库存鱼不存在或无权查看");
       }
+      const records = stockStatusHistoryForResponse(row.status_history_records).map((record) => {
+        if (canReadHealthHistory) return record;
+        const { previousStatus: _previousStatus, status: _status, ...releaseRecord } = record;
+        return releaseRecord;
+      });
       sendJson(req, res, 200, { ok: true, stockItemId, offset, limit,
-        total: Number(row.history_total ?? 0), records: stockStatusHistoryForResponse(row.status_history_records),
+        total: Number(row.history_total ?? 0), records,
       }, { "Cache-Control": "no-store, private" });
     } catch (error) {
       sendJson(req, res, Number(error?.statusCode ?? 400), { ok: false,
@@ -13184,6 +13200,7 @@ async function handleApi(req, res, url) {
         orders: nextOrders,
         stock: nextStock,
         notifications: nextNotifications,
+        ...orderReleaseHistoryPatch(req, state, { orders: nextOrders, stock: nextStock }, "order_update", operationLog.time),
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
@@ -13522,11 +13539,12 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
       const orderId = String(currentOrder.id ?? "");
-      if (orderHasActuallyShipped(state.shipments, currentOrder.id)) {
+      if (currentOrder.status !== "completed" && orderHasActuallyShipped(state.shipments, currentOrder.id)) {
         throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
       }
 
@@ -13600,6 +13618,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const requestedOrderId = String(body.orderId ?? "").trim();
@@ -13675,6 +13694,7 @@ async function handleApi(req, res, url) {
         ...state,
         orders: nextOrders,
         stock: nextStock,
+        ...orderReleaseHistoryPatch(req, state, { orders: nextOrders, stock: nextStock }, "order_return_item", operationLog.time),
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
@@ -13784,6 +13804,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "delete");
       const requestedOrderId = String(body.orderId ?? "").trim();
       const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
@@ -13824,6 +13845,7 @@ async function handleApi(req, res, url) {
         shipments: nextShipments,
         stock: nextStock,
         notifications: nextNotifications,
+        ...orderReleaseHistoryPatch(req, state, { orders: nextOrders, stock: nextStock }, "order_delete", operationLog.time),
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);

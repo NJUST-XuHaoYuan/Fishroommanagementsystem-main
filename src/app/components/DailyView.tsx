@@ -30,6 +30,7 @@ import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { buildStockPriceBaselines, buildStockPriceDetailsPatch, isStockSpecialPrice, stockPriceMode, stockPriceModeLabel } from "../utils/stockPricing";
 import { StockPriceField } from "./StockPriceField";
 import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
+import { StockOrderReleaseDetails, StockOrderReleaseLoadState, stockOrderReleaseTimelineEvents, useStockOrderReleaseHistory, type StockOrderReleaseEvent } from "./StockOrderReleaseHistory";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
@@ -885,8 +886,10 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
   };
 
   // Build timeline for bio detail
+  const orderReleaseHistory = useStockOrderReleaseHistory(bioItemId, bioOpen);
   const buildTimeline = (item: StockItem) => {
     const events: Array<
+      | StockOrderReleaseEvent
       | { type: "stock_in"; date: string; batchNo: string }
       | {
           type: "record";
@@ -906,6 +909,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
 
     const b = batch(item.batchId);
     events.push({ type: "stock_in", date: item.inDate, batchNo: b?.batchNo ?? "—" });
+    events.push(...stockOrderReleaseTimelineEvents(orderReleaseHistory.records));
 
     const recs = state.bioRecords
       .filter((r) => r.stockItemId === item.id)
@@ -1831,6 +1835,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                 <Clock className="size-4 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground">生物时间轴</span>
               </div>
+              <StockOrderReleaseLoadState {...orderReleaseHistory} />
               <div className="relative pl-6 flex flex-col gap-0">
                 <div className="absolute left-2 top-2 bottom-2 w-px bg-border" />
                 {timeline.map((ev, idx) => (
@@ -1851,7 +1856,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                       ev.type === "record" && ev.sourceType === "dailyLog" ? "border-blue-200 bg-blue-50" :
                       "border-border bg-card"
                     }`}>
-                      <div className="mb-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      {ev.type === "order_release" ? <StockOrderReleaseDetails record={ev.record} /> : <div className="mb-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                         <div className="flex flex-wrap items-center gap-2">
                           {ev.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
                           {ev.type === "record" && ev.sourceType === "dailyLog" && <ClipboardList className="size-3.5 text-blue-600" />}
@@ -1878,7 +1883,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                           </span>
                         </div>
                         <span className="text-xs tabular-nums text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
-                      </div>
+                      </div>}
 
                       {ev.type === "stock_in" && (
                         <p className="text-muted-foreground text-xs">批次：{ev.batchNo}</p>

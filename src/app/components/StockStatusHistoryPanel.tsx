@@ -17,11 +17,17 @@ export type StockStatusHistoryRecord = {
   source?: string;
   requestedBy?: string;
   requestedByName?: string;
+  eventType?: "order_release";
+  previousSold?: boolean;
+  sold?: boolean;
+  orderId?: string;
+  orderNo?: string;
 };
 
 const statusLabels: Record<string, string> = { healthy: "正常", feeding: "开口", sick: "疾病" };
 const sourceLabels: Record<string, string> = {
   bio_details: "单只修改", batch_status: "批量修改", stock_mutation: "库存修改", stock_approval: "审批生效",
+  order_return_item: "订单退掉鱼只", order_update: "订单移除鱼只", order_delete: "取消订单", order_cancel: "取消订单",
 };
 
 export function statusHistoryTime(value: string) {
@@ -35,12 +41,17 @@ export function StockStatusHistoryList({ records }: { records: StockStatusHistor
   if (records.length === 0) return <p className="py-3 text-sm leading-6 text-muted-foreground">暂无状态变更记录。记录从功能上线后开始保存，之前的操作人和时间不作推测。</p>;
   return <ol className="divide-y" aria-label="鱼只状态变更记录">
     {records.map(record => <li key={record.id} className="flex flex-col gap-1.5 py-3 text-sm">
+      {record.eventType === "order_release" ? <>
+        <p className="break-words font-medium [overflow-wrap:anywhere]">订单取消：{record.orderNo || record.orderId || "订单号未记录"}</p>
+        <p>状态调整：已售 <span aria-label="变更为">→</span> 未售</p>
+        <p className="text-xs text-muted-foreground">操作时间：<time dateTime={record.changedAt}>{statusHistoryTime(record.changedAt)}</time></p>
+      </> :
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
         <span className="font-medium">{record.previousStatus == null ? "初始状态" : statusLabels[record.previousStatus] || "未知状态"}<span className="mx-2" aria-label="变更为">→</span>{statusLabels[record.status] || "未知状态"}</span>
         <time dateTime={record.changedAt} className="text-xs tabular-nums text-muted-foreground">{statusHistoryTime(record.changedAt)}</time>
-      </div>
+      </div>}
       <div className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-        操作人：{record.operatorName || record.operator || "未记录"}
+        {record.eventType === "order_release" ? "操作员：" : "操作人："}{record.operatorName || record.operator || "未记录"}
         {record.operatorName && record.operator && record.operatorName !== record.operator && <span>（{record.operator}）</span>}
         {record.source && sourceLabels[record.source] && <span className="ml-2">· {sourceLabels[record.source]}</span>}
       </div>
@@ -87,7 +98,7 @@ export function StockStatusHistoryPanel({ stockItemId }: { stockItemId: string }
       <span className="flex items-center gap-1 text-xs text-muted-foreground">{expanded ? "收起" : "查看操作人和时间"}<ChevronDown className={`size-4 transition-transform motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`} aria-hidden="true" /></span>
     </Button>
     {expanded && <div id={panelId}>
-      <p className="mb-1 text-xs leading-5 text-muted-foreground">自动记录正常、开口、疾病之间的变更；单只和批量操作均保留，记录不可手工修改。</p>
+      <p className="mb-1 text-xs leading-5 text-muted-foreground">自动记录正常、开口、疾病之间的变更，以及订单解除占用后的“已售 → 未售”；单只和批量操作均保留，记录不可手工修改。</p>
       {current.loading && <div role="status" className="space-y-2 py-3"><span className="sr-only">正在加载状态记录</span><Skeleton className="h-5 motion-reduce:animate-none" /><Skeleton className="h-5 w-2/3 motion-reduce:animate-none" /></div>}
       {current.error && <div role="alert" className="flex flex-wrap items-center gap-3 py-3 text-sm"><p>{current.error}</p><Button type="button" variant="outline" className="min-h-11" onClick={() => setAttempt(value => value + 1)}><RefreshCw className="size-4" aria-hidden="true" />重试</Button></div>}
       {current.data && <>
