@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import { Input } from "../../app/components/ui/input";
 import { Button } from "../../app/components/ui/button";
 import {
@@ -28,6 +28,8 @@ type Props<T> = {
   addLabel?: string;
   actions?: (row: T) => ReactNode;
   searchPlaceholder?: string;
+  searchValue?: string;
+  onSearchChange?: (value: string) => void;
   searchRank?: (row: T, query: string) => number;
   onRowDoubleClick?: (row: T) => void;
   mobileRender?: (row: T) => ReactNode;
@@ -43,14 +45,21 @@ export function DataTable<T extends { id: string }>({
   addLabel = "新增",
   actions,
   searchPlaceholder = "搜索...",
+  searchValue,
+  onSearchChange,
   searchRank,
   onRowDoubleClick,
   mobileRender,
   tableMinWidth,
 }: Props<T>) {
-  const [q, setQ] = useState("");
+  const [internalSearch, setInternalSearch] = useState("");
+  const q = searchValue ?? internalSearch;
   const [page, setPage] = useState(1);
   const tableRootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setPage(1);
+  }, [q]);
 
   const filtered = useMemo(() => {
     if (!q.trim()) return data;
@@ -124,7 +133,8 @@ export function DataTable<T extends { id: string }>({
           <Input
             value={q}
             onChange={(e) => {
-              setQ(e.target.value);
+              if (searchValue === undefined) setInternalSearch(e.target.value);
+              onSearchChange?.(e.target.value);
               changePage(1);
             }}
             placeholder={searchPlaceholder}

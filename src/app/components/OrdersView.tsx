@@ -55,6 +55,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { visibleSitesForUser } from "../utils/sites";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
+import { beijingOrderCalendar, matchesPlannedShipmentRange } from "../utils/order-date-filters";
 import {
   isPlatformOrderSource,
   isPlatformPaymentChannel,
@@ -721,12 +722,6 @@ function subTankNameFromState(state: Store, id?: string): string {
     if (tank) return `${group.name} / ${tank.name}`;
   }
   return "—";
-}
-
-function hasPlannedShipPlanOnDate(order: Order, date: string): boolean {
-  if (order.status === "cancelled") return false;
-  if (order.plannedShipDate === date) return true;
-  return order.items.some((item) => item.plannedShipDate === date);
 }
 
 function isPickupShipment(shipment: Shipment): boolean {
@@ -7378,10 +7373,69 @@ export function OrdersView({
   const [wholesaleFilter, setWholesaleFilter] = useState<OrderWholesaleFilterValue>("all");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [todayShipOnly, setTodayShipOnly] = useState(false);
+  const [shipPlanQuickFilter, setShipPlanQuickFilter] = useState<"" | "today" | "tomorrow">("");
+  const [plannedShipFrom, setPlannedShipFrom] = useState("");
+  const [plannedShipTo, setPlannedShipTo] = useState("");
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
   const [myActiveOnly, setMyActiveOnly] = useState(false);
-  const today = todayDateString();
+  const [orderCalendar, setOrderCalendar] = useState(() => beijingOrderCalendar());
+  const { today, tomorrow } = orderCalendar;
+  const todayShipOnly = shipPlanQuickFilter === "today";
+  const tomorrowShipOnly = shipPlanQuickFilter === "tomorrow";
+  const quickShipDate = todayShipOnly ? today : tomorrowShipOnly ? tomorrow : "";
+
+  useEffect(() => {
+    const updateCalendar = () => {
+      const next = beijingOrderCalendar();
+      setOrderCalendar((previous) => previous.today === next.today ? previous : next);
+    };
+    const timer = window.setInterval(updateCalendar, 60_000);
+    window.addEventListener("focus", updateCalendar);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", updateCalendar);
+    };
+  }, []);
+
+  const toggleShipPlanQuickFilter = (value: "today" | "tomorrow") => {
+    const next = shipPlanQuickFilter === value ? "" : value;
+    setShipPlanQuickFilter(next);
+    if (next) {
+      setPlannedShipFrom("");
+      setPlannedShipTo("");
+    }
+  };
+
+  const changePlannedShipFrom = (value: string) => {
+    const currentTo = quickShipDate || plannedShipTo;
+    setShipPlanQuickFilter("");
+    setPlannedShipFrom(value);
+    setPlannedShipTo(value && currentTo && currentTo < value ? "" : currentTo);
+  };
+  const changePlannedShipTo = (value: string) => {
+    const currentFrom = quickShipDate || plannedShipFrom;
+    if (value && currentFrom && value < currentFrom) {
+      toast.error("预计发货结束日期不能早于开始日期");
+      return;
+    }
+    setShipPlanQuickFilter("");
+    setPlannedShipFrom(currentFrom);
+    setPlannedShipTo(value);
+  };
+
+  const clearOrderFilters = () => {
+    setStatusFilter("all");
+    setWholesaleFilter("all");
+    setDateFrom("");
+    setDateTo("");
+    setShipPlanQuickFilter("");
+    setPlannedShipFrom("");
+    setPlannedShipTo("");
+    setPendingTrackingOnly(false);
+    setMyActiveOnly(false);
+    setMobileSearch("");
+    setMobilePage(1);
+  };
 
   const loadPaymentClaims = useCallback(async (showLoading = false) => {
     if (!permission.canUpdate) {
@@ -7571,7 +7625,10 @@ export function OrdersView({
 	  const filteredOrders = useMemo(() => {
 	    return orderRows.filter((o) => {
 	      if (!matchesWholesaleOrderFilter(o, wholesaleFilter)) return false;
-	      if (todayShipOnly && !hasPlannedShipPlanOnDate(o, today)) return false;
+	      if (!matchesPlannedShipmentRange(o, {
+          from: quickShipDate || plannedShipFrom,
+          to: quickShipDate || plannedShipTo,
+        })) return false;
 	      if (pendingTrackingOnly && !hasPendingTrackingShipmentOrder(o, state.shipments)) return false;
 	      if (statusFilter === "active" && !isActiveOrder(o)) return false;
       if (statusFilter === "completed" && o.status !== "completed") return false;
@@ -7580,7 +7637,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, todayShipOnly, today, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
+	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const mobileFilteredOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7588,7 +7645,7 @@ export function OrdersView({
 
   useEffect(() => {
     setMobilePage(1);
-  }, [mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, todayShipOnly, pendingTrackingOnly, myActiveOnly]);
+  }, [mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly]);
 
   const mobileTotalPages = Math.max(1, Math.ceil(mobileFilteredOrders.length / MOBILE_ORDER_PAGE_SIZE));
   const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
@@ -7690,16 +7747,20 @@ export function OrdersView({
     { key: "completed", label: "已完成" },
   ] as const;
 
-  const hasDateFilter = dateFrom || dateTo || todayShipOnly || pendingTrackingOnly || myActiveOnly;
-  const hasMobileFilter = hasDateFilter || Boolean(mobileSearch.trim()) || statusFilter !== "all" || wholesaleFilter !== "all";
+  const hasOrderFilter = Boolean(dateFrom || dateTo || quickShipDate || plannedShipFrom || plannedShipTo || pendingTrackingOnly || myActiveOnly || mobileSearch || statusFilter !== "all" || wholesaleFilter !== "all");
+  const orderTableFilterKey = [statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly].join("|");
   const dateFromMax = dateTo && dateTo < today ? dateTo : today;
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
     [orderList, isCurrentUserContactOrder]
   );
   const todayShipCount = useMemo(
-    () => orderList.filter((order) => hasPlannedShipPlanOnDate(order, today)).length,
+    () => orderList.filter((order) => matchesPlannedShipmentRange(order, { from: today, to: today })).length,
     [orderList, today]
+  );
+  const tomorrowShipCount = useMemo(
+    () => orderList.filter((order) => matchesPlannedShipmentRange(order, { from: tomorrow, to: tomorrow })).length,
+    [orderList, tomorrow]
   );
   const pendingTrackingCount = useMemo(
     () => orderList.filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments)).length,
@@ -7718,14 +7779,12 @@ export function OrdersView({
     const shippedIds = new Set(activeShipments.flatMap((shipment) => shipment.itemStockIds ?? []));
     const inventoryActiveItems = order.items.filter((item) => !item.inventoryRemovedAt);
     const unshippedCount = inventoryActiveItems.filter((item) => !shippedIds.has(item.stockItemId)).length;
-    const nextShipDate = order.status === "completed"
-      ? ""
-      : inventoryActiveItems
-          .map((item) => effectiveItemPlannedShipDate(order, item) || item.plannedShipDate)
-          .filter(Boolean)
-          .sort()[0] || order.plannedShipDate || "";
-    const plannedTodayCount = inventoryActiveItems.filter((item) =>
-      effectiveItemPlannedShipDate(order, item) === today || item.plannedShipDate === today
+    const nextShipDate = order.plannedShipDate || inventoryActiveItems
+      .map((item) => item.plannedShipDate)
+      .filter(Boolean)
+      .sort()[0] || "";
+    const plannedTodayCount = order.status === "completed" || order.status === "cancelled" ? 0 : inventoryActiveItems.filter((item) =>
+      (effectiveItemPlannedShipDate(order, item) || item.plannedShipDate) === today
     ).length;
     const itemNames = order.items
       .map((item) => mobileProductById.get(item.productId)?.name ?? item.productId)
@@ -7773,11 +7832,9 @@ export function OrdersView({
             <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div className="rounded-md bg-muted/35 px-2.5 py-2">
                 <div className="text-xs text-muted-foreground">{isPickupOrderSource(order.source) ? "履约方式" : "预计发货"}</div>
-                <div className={nextShipDate === today ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
+                <div className={plannedTodayCount > 0 ? "mt-0.5 font-semibold text-orange-600" : "mt-0.5 font-semibold text-foreground"}>
                   {isPickupOrderSource(order.source)
                     ? "线下自提"
-                    : order.status === "completed"
-                    ? "已完成"
                     : nextShipDate
                       ? `${nextShipDate}${plannedTodayCount > 0 ? ` · ${plannedTodayCount}件` : ""}`
                       : "未设置"}
@@ -7931,7 +7988,6 @@ export function OrdersView({
                   setStatusFilter("active");
                   setDateFrom("");
                   setDateTo("");
-                  setTodayShipOnly(false);
                   setPendingTrackingOnly(false);
                 }
               }}
@@ -7955,24 +8011,31 @@ export function OrdersView({
               type="button"
               size="sm"
               variant={todayShipOnly ? "default" : "outline"}
+              aria-pressed={todayShipOnly}
+              aria-label="筛选今日发货计划"
               className={todayShipOnly
                 ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
                 : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
               }
-              onClick={() => {
-                const next = !todayShipOnly;
-                setTodayShipOnly(next);
-                if (next) {
-                  setPendingTrackingOnly(false);
-                  setMyActiveOnly(false);
-                  setStatusFilter("all");
-                  setDateFrom("");
-                  setDateTo("");
-                }
-              }}
+              onClick={() => toggleShipPlanQuickFilter("today")}
             >
               <Truck className="size-3.5 mr-1" />
               今日发货 {todayShipCount}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={tomorrowShipOnly ? "default" : "outline"}
+              aria-pressed={tomorrowShipOnly}
+              aria-label="筛选明日发货计划"
+              className={tomorrowShipOnly
+                ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
+                : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+              }
+              onClick={() => toggleShipPlanQuickFilter("tomorrow")}
+            >
+              <Truck className="size-3.5 mr-1" />
+              明日发货 {tomorrowShipCount}
             </Button>
             <Button
               type="button"
@@ -7986,7 +8049,6 @@ export function OrdersView({
                 const next = !pendingTrackingOnly;
                 setPendingTrackingOnly(next);
                 if (next) {
-                  setTodayShipOnly(false);
                   setMyActiveOnly(false);
                   setStatusFilter("all");
                   setDateFrom("");
@@ -7994,6 +8056,10 @@ export function OrdersView({
                   setSelectedOrderIds(new Set(
                     orderList
                       .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
+                      .filter((order) => matchesPlannedShipmentRange(order, {
+                        from: quickShipDate || plannedShipFrom,
+                        to: quickShipDate || plannedShipTo,
+                      }))
                       .map((order) => order.id)
                   ));
                 }
@@ -8004,45 +8070,73 @@ export function OrdersView({
             </Button>
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <div className="grid gap-1">
-              <Label className="text-xs text-muted-foreground">开始日期</Label>
+          <fieldset className="mt-3 min-w-0">
+            <legend className="mb-2 text-xs font-medium text-foreground">下单日期筛选</legend>
+            <div className="grid grid-cols-2 gap-2">
+            <div className="grid min-w-0 gap-1">
+              <Label htmlFor="mobile-order-date-from" className="text-xs text-muted-foreground">开始日期</Label>
               <Input
+                id="mobile-order-date-from"
+                aria-label="下单开始日期"
                 type="date"
                 value={dateFrom}
                 max={dateFromMax}
                 onChange={(event) => changeDateFrom(event.target.value)}
-                className="h-10 text-sm"
+                className="h-10 min-w-0 text-sm"
               />
             </div>
-            <div className="grid gap-1">
-              <Label className="text-xs text-muted-foreground">结束日期</Label>
+            <div className="grid min-w-0 gap-1">
+              <Label htmlFor="mobile-order-date-to" className="text-xs text-muted-foreground">结束日期</Label>
               <Input
+                id="mobile-order-date-to"
+                aria-label="下单结束日期"
                 type="date"
                 value={dateTo}
                 min={dateFrom || undefined}
                 max={today}
                 onChange={(event) => changeDateTo(event.target.value)}
-                className="h-10 text-sm"
+                className="h-10 min-w-0 text-sm"
               />
             </div>
-          </div>
+            </div>
+          </fieldset>
+
+          <fieldset className="mt-3 min-w-0">
+            <legend className="mb-2 text-xs font-medium text-foreground">预计发货日期筛选</legend>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="grid min-w-0 gap-1">
+                <Label htmlFor="mobile-planned-ship-from" className="text-xs text-muted-foreground">开始日期</Label>
+                <Input
+                  id="mobile-planned-ship-from"
+                  aria-label="预计发货开始日期"
+                  type="date"
+                  value={quickShipDate || plannedShipFrom}
+                  max={quickShipDate ? undefined : plannedShipTo || undefined}
+                  onChange={(event) => changePlannedShipFrom(event.target.value)}
+                  className="h-10 min-w-0 text-sm"
+                />
+              </div>
+              <div className="grid min-w-0 gap-1">
+                <Label htmlFor="mobile-planned-ship-to" className="text-xs text-muted-foreground">结束日期</Label>
+                <Input
+                  id="mobile-planned-ship-to"
+                  aria-label="预计发货结束日期"
+                  type="date"
+                  value={quickShipDate || plannedShipTo}
+                  min={quickShipDate ? undefined : plannedShipFrom || undefined}
+                  onChange={(event) => changePlannedShipTo(event.target.value)}
+                  className="h-10 min-w-0 text-sm"
+                />
+              </div>
+            </div>
+          </fieldset>
 
           <OrderWholesaleFilter value={wholesaleFilter} onChange={setWholesaleFilter} className="mt-3" />
 
-          {hasMobileFilter && (
+          {hasOrderFilter && (
             <button
               type="button"
-              onClick={() => {
-                setStatusFilter("all");
-                setWholesaleFilter("all");
-                setDateFrom("");
-                setDateTo("");
-                setTodayShipOnly(false);
-                setPendingTrackingOnly(false);
-                setMyActiveOnly(false);
-                setMobileSearch("");
-              }}
+              onClick={clearOrderFilters}
               className="mt-3 h-9 text-sm font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
             >
               清除筛选
@@ -8155,7 +8249,7 @@ export function OrdersView({
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2 ml-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
             type="button"
             size="sm"
@@ -8171,7 +8265,6 @@ export function OrdersView({
                 setStatusFilter("active");
                 setDateFrom("");
                 setDateTo("");
-                setTodayShipOnly(false);
                 setPendingTrackingOnly(false);
               }
             }}
@@ -8191,8 +8284,10 @@ export function OrdersView({
               待认领收款{pendingPaymentClaimCount > 0 ? ` ${pendingPaymentClaimCount}` : ""}
             </Button>
           )}
-          <span className="text-xs text-muted-foreground shrink-0">日期</span>
+          <div className="flex items-center gap-2" role="group" aria-label="下单日期筛选">
+          <span className="text-xs text-muted-foreground shrink-0">下单日期筛选</span>
           <Input
+            aria-label="下单开始日期"
             type="date"
             value={dateFrom}
             max={dateFromMax}
@@ -8201,6 +8296,7 @@ export function OrdersView({
           />
           <span className="text-xs text-muted-foreground">—</span>
           <Input
+            aria-label="下单结束日期"
             type="date"
             value={dateTo}
             min={dateFrom || undefined}
@@ -8208,28 +8304,54 @@ export function OrdersView({
             onChange={(e) => changeDateTo(e.target.value)}
             className="h-7 w-34 text-xs"
           />
+          </div>
+          <div className="flex items-center gap-2" role="group" aria-label="预计发货日期筛选">
+            <span className="shrink-0 text-xs text-muted-foreground">预计发货日期筛选</span>
+            <Input
+              aria-label="预计发货开始日期"
+              type="date"
+              value={quickShipDate || plannedShipFrom}
+              max={quickShipDate ? undefined : plannedShipTo || undefined}
+              onChange={(event) => changePlannedShipFrom(event.target.value)}
+              className="h-7 w-34 text-xs"
+            />
+            <span className="text-xs text-muted-foreground">—</span>
+            <Input
+              aria-label="预计发货结束日期"
+              type="date"
+              value={quickShipDate || plannedShipTo}
+              min={quickShipDate ? undefined : plannedShipFrom || undefined}
+              onChange={(event) => changePlannedShipTo(event.target.value)}
+              className="h-7 w-34 text-xs"
+            />
+          </div>
           <Button
             type="button"
             size="sm"
             variant={todayShipOnly ? "default" : "outline"}
+            aria-pressed={todayShipOnly}
             className={todayShipOnly
               ? "h-7 bg-orange-600 hover:bg-orange-700 text-white"
               : "h-7 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
             }
-            onClick={() => {
-              const next = !todayShipOnly;
-              setTodayShipOnly(next);
-              if (next) {
-                setPendingTrackingOnly(false);
-                setMyActiveOnly(false);
-                setStatusFilter("all");
-                setDateFrom("");
-                setDateTo("");
-              }
-            }}
+            onClick={() => toggleShipPlanQuickFilter("today")}
           >
             <Truck className="size-3.5 mr-1" />
             筛选今日发货计划{todayShipCount > 0 ? ` ${todayShipCount}` : ""}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={tomorrowShipOnly ? "default" : "outline"}
+            aria-pressed={tomorrowShipOnly}
+            className={tomorrowShipOnly
+              ? "h-7 bg-orange-600 hover:bg-orange-700 text-white"
+              : "h-7 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+            }
+            onClick={() => toggleShipPlanQuickFilter("tomorrow")}
+          >
+            <Truck className="size-3.5 mr-1" />
+            筛选明日发货计划{tomorrowShipCount > 0 ? ` ${tomorrowShipCount}` : ""}
           </Button>
           <Button
             type="button"
@@ -8243,7 +8365,6 @@ export function OrdersView({
               const next = !pendingTrackingOnly;
               setPendingTrackingOnly(next);
               if (next) {
-                setTodayShipOnly(false);
                 setMyActiveOnly(false);
                 setStatusFilter("all");
                 setDateFrom("");
@@ -8251,6 +8372,10 @@ export function OrdersView({
                 setSelectedOrderIds(new Set(
                   orderList
                     .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
+                    .filter((order) => matchesPlannedShipmentRange(order, {
+                      from: quickShipDate || plannedShipFrom,
+                      to: quickShipDate || plannedShipTo,
+                    }))
                     .map((order) => order.id)
                 ));
               }
@@ -8259,9 +8384,10 @@ export function OrdersView({
             <Truck className="size-3.5 mr-1" />
             筛选出库发货订单{pendingTrackingCount > 0 ? ` ${pendingTrackingCount}` : ""}
           </Button>
-          {hasDateFilter && (
+          {hasOrderFilter && (
             <button
-              onClick={() => { setDateFrom(""); setDateTo(""); setTodayShipOnly(false); setPendingTrackingOnly(false); setMyActiveOnly(false); }}
+              type="button"
+              onClick={clearOrderFilters}
               className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
             >
               清除
@@ -8299,7 +8425,10 @@ export function OrdersView({
 
 	      <div className="hidden md:block">
 	      <DataTable
+	        key={orderTableFilterKey}
 	        data={filteredOrders}
+        searchValue={mobileSearch}
+        onSearchChange={setMobileSearch}
         searchKeys={["searchText"] as (keyof OrderListRow)[]}
         searchPlaceholder="搜索鱼码、订单号、客户、商品、来源..."
         searchRank={orderSearchRank}
@@ -8375,15 +8504,15 @@ export function OrdersView({
             key: "plannedShipDate",
             title: "预计发货",
             render: (r) => {
-              if (r.status === "completed") return <span className="text-muted-foreground">—</span>;
-              const todayItems = r.items.filter((item) =>
-                effectiveItemPlannedShipDate(r, item) === today || item.plannedShipDate === today
+              const activeItems = r.items.filter((item) => !item.inventoryRemovedAt);
+              const todayItems = r.status === "completed" || r.status === "cancelled" ? [] : activeItems.filter((item) =>
+                (effectiveItemPlannedShipDate(r, item) || item.plannedShipDate) === today
               );
               if (todayItems.length > 0) {
                 return <span className="text-orange-600 font-medium">今日 {today} · {todayItems.length}件</span>;
               }
-              const nextDate = r.items
-                .map((item) => effectiveItemPlannedShipDate(r, item) || item.plannedShipDate)
+              const nextDate = r.plannedShipDate || activeItems
+                .map((item) => item.plannedShipDate)
                 .filter(Boolean)
                 .sort()[0];
               if (!nextDate) return <span className="text-muted-foreground">—</span>;
