@@ -288,6 +288,16 @@ export function InventoryAdjustmentDialog() {
     [hiddenStockIds, state.stock, workSiteId],
   );
   const visibleStockById = useMemo(() => new Map(visibleStock.map((item) => [item.id, item])), [visibleStock]);
+  const outboundStockForTank = useMemo(() => {
+    const completedIds = new Set(state.orders.filter((order) => order.status === "completed").map((order) => order.id));
+    const shipmentByStockId = new Map(state.shipments
+      .filter((shipment) => ["outbound", "shipped"].includes(shipment.status) && !completedIds.has(shipment.orderId))
+      .flatMap((shipment) => (shipment.itemStockIds ?? []).map((id) => [normalizeInventoryId(id), shipment] as const)));
+    return state.stock.filter((item) =>
+      item.subTankId === selectedSubTankId && !item.lost &&
+      (!workSiteId || matchesSite(item, workSiteId)) && shipmentByStockId.has(normalizeInventoryId(item.id))
+    ).map((item) => ({ item, shipment: shipmentByStockId.get(normalizeInventoryId(item.id))! }));
+  }, [selectedSubTankId, state.orders, state.shipments, state.stock, workSiteId]);
   const pendingOrderCountByStockId = useMemo(() => {
     const counts = new Map<string, number>();
     state.orders.filter((order) => ["pending", "confirmed"].includes(order.status)).forEach((order) => {
@@ -918,7 +928,7 @@ export function InventoryAdjustmentDialog() {
                     draftState === "error" ? "自动保存失败，请手动保存" : "尚未形成草稿"}
               </span>
             </div>
-            <DialogDescription>直接对照当前在缸库存选择减少个体，新增库存按入库信息登记。</DialogDescription>
+            <DialogDescription>直接对照当前在缸库存选择减少个体。补录前先核对已出库鱼是否仍在缸内或已经回缸，避免同一条鱼重复登记。</DialogDescription>
           </DialogHeader>
 
           {draft && (
@@ -974,6 +984,20 @@ export function InventoryAdjustmentDialog() {
               </aside>
 
               <main className="min-h-0 overflow-y-auto">
+                {mode !== "review" && outboundStockForTank.length > 0 && (
+                  <details className="m-3 rounded-md border bg-muted/20 p-3 text-sm">
+                    <summary className="cursor-pointer font-medium">该缸有 {outboundStockForTank.length} 条已出库鱼待核对（不计入在缸数量）</summary>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">若这些鱼实际仍在缸内或已回缸，请先让订单负责人核对并取消出库，再盘库；已经补录的，在取消出库时选择对应补录记录合并。</p>
+                    <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto">
+                      {outboundStockForTank.map(({ item, shipment }) => (
+                        <li key={item.id} className="border-t pt-2 text-xs leading-5">
+                          <span className="font-medium">{productById.get(item.productId)?.name ?? "商品"} · {item.code || `ID ${item.id}`}</span>
+                          <span className="block text-muted-foreground">{batchById.get(item.batchId)?.batchNo ?? "批次未显示"} · {state.orders.find((order) => order.id === shipment.orderId)?.orderNo ?? "请订单负责人核对"} · {shipment.status === "outbound" ? "已出库待发货" : "运输中"}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 {mode !== "review" && (
                   <div className="border-b p-3 xl:hidden">
                     <Label className="mb-1.5 block text-xs">当前缸位</Label>

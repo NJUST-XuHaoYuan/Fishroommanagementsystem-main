@@ -279,6 +279,7 @@ import {
   stockTransferId,
 } from "./stock-transfer-rules.mjs";
 import { planStockTransferDispatch, applyStockTransferDispatch, restoreCancelledTransferDispatch } from "./stock-transfer-dispatch.mjs";
+import { shipmentCancellationReview, applyShipmentCancellationReturns } from "./shipment-cancellation.mjs";
 import { recentStockTransferItems } from "./stock-transfer-history.mjs";
 import {
   sanitizeBioRecordTransferForVisibleSites,
@@ -812,6 +813,8 @@ function stateWithInventoryProjection(state = {}, stock = state?.stock, override
       inheritProjection: trustedInventoryProjectionStates.has(state),
     }),
   };
+  // Full cancellation snapshots are an append-only server audit, never a client state collection.
+  delete next.shipmentCancellationAudits;
   trustedInventoryProjectionStates.add(next);
   return next;
 }
@@ -2382,6 +2385,7 @@ function sanitizeStateForResponse(data = {}, req) {
   delete next.newCustomerEvidenceAttachments;
   delete next.retiredPersonnelUsernames;
   delete next.inventoryAdjustmentDrafts;
+  delete next.shipmentCancellationAudits;
   delete next._personnelPrivateAttachmentEncryptionKid;
   if (!canViewPersonnelOperationLogs(req?.auth?.account)) delete next.operationLogs;
   next.sites = getSitesFromState(next);
@@ -4243,6 +4247,12 @@ function preserveServerOwnedTankTransfer(item = {}, existing = null) {
 function applyStockMutationToState(state = {}, change = {}, operator = "system", options = {}) {
   const stock = Array.isArray(state.stock) ? state.stock : [];
   const operationLogs = Array.isArray(state.operationLogs) ? state.operationLogs : [];
+  const mergedStockIds = new Set((Array.isArray(state.shipmentCancellationAudits) ? state.shipmentCancellationAudits : [])
+    .flatMap((audit) => Array.isArray(audit?.items) ? audit.items : [])
+    .map((item) => String(item?.duplicateStockItemId ?? "").trim()).filter(Boolean));
+  if ((Array.isArray(change?.upsert) ? change.upsert : []).some((item) => mergedStockIds.has(String(item?.id ?? "").trim()))) {
+    throw httpError(409, "这条补录记录已经核对合并，不能重新创建，请刷新库存后重试", "STOCK_MERGED_RECORD_RETIRED");
+  }
   const pricingExistingById = new Map(stock.map((item) => [String(item?.id ?? "").trim(), item]));
   const pricingProductById = new Map((Array.isArray(state.products) ? state.products : []).map((item) => [String(item?.id ?? "").trim(), item]));
   // A reviewed restoration can clear an inventory-only loss/sold flag. Actual
@@ -6564,14 +6574,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
   for (const [shipmentId, currentShipment] of currentShipmentsById.entries()) {
     if (nextShipmentsById.has(shipmentId)) continue;
     if (currentShipment.transferDispatch) throw httpError(409, "在途直接出库必须通过取消出库专用入口撤销，以恢复移缸在途状态");
-    requireOrderPermissionForAuth(req, "update");
-    if (!["outbound", "shipped"].includes(String(currentShipment.status ?? ""))) {
-      throw new Error("只能取消已出库或运输中的发货单");
-    }
-    const relatedOrder = nextOrdersById.get(String(currentShipment.orderId ?? ""));
-    if (relatedOrder?.status === "completed" || relatedOrder?.status === "cancelled") {
-      throw new Error("已完成或已取消订单不能取消发货");
-    }
+    throw httpError(409, "取消出库必须通过专用入口逐条核对回缸和盘库补录，不能直接删除发货单", "SHIPMENT_CANCEL_REVIEW_REQUIRED");
   }
 
   if (changed.has("stock")) {
@@ -13813,6 +13816,10 @@ async function handleApi(req, res, url) {
       if ((state.shipments ?? []).some((shipment) => String(shipment.orderId) === orderId && shipment.transferDispatch)) {
         throw httpError(409, "订单包含在途直接出库记录，请先取消出库；已签收的发货记录不能删除");
       }
+      if (order.status === "completed" || (state.shipments ?? []).some((shipment) =>
+        String(shipment.orderId) === orderId && shipment.status !== "preparing")) {
+        throw httpError(409, "订单已有出库记录，请先通过取消出库核对实物回缸后再删除；已完成或已签收订单不能删除", "SHIPMENT_CANCEL_REVIEW_REQUIRED");
+      }
 
       const nextOrders = orders.filter((item) => String(item?.id ?? "") !== orderId);
       const nextShipments = (Array.isArray(state.shipments) ? state.shipments : [])
@@ -14472,6 +14479,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/shipments/cancel-preview" && req.method === "GET") {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "orders", "update");
+      const { shipment, order } = resolveAuthorizedLockedShipmentTarget(req, state, url.searchParams.get("shipmentId"));
+      const preview = shipmentCancellationReview(state, shipment, order, {
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), reviewer: authenticatedOperator(req),
+      });
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, ...preview });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error?.statusCode || 400, { ok: false,
+        ...(error?.code ? { code: error.code } : {}), error: error.message || "取消出库核对信息加载失败" });
+    } finally { client.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/shipments/cancel" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -14481,7 +14510,7 @@ async function handleApi(req, res, url) {
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
       refreshLockedOrderMutationAuth(req, state);
-      requireOrderPermissionForAuth(req, "update");
+      requireModulePermissionForAuth(req, "orders", "update");
 
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
@@ -14492,9 +14521,15 @@ async function handleApi(req, res, url) {
 
       if (order.status === "completed") throw new Error("已完成订单不能取消发货");
 
-      const transferRestoration = restoreCancelledTransferDispatch(state, shipment, {
-        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), operator,
-        now: new Date().toISOString(), date: nowDatetimeInChina(), createId: () => uid("bio"),
+      const cancelledAt = new Date().toISOString();
+      const cancellationOptions = {
+        visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), reviewer: operator, operator,
+        now: cancelledAt, date: nowDatetimeInChina(), createId: () => uid("bio"),
+      };
+      const cancellation = applyShipmentCancellationReturns(state, shipment, order, body, cancellationOptions);
+      const transferRestoration = restoreCancelledTransferDispatch({ ...state,
+        stock: cancellation.stock, bioRecords: cancellation.bioRecords }, shipment, {
+        ...cancellationOptions,
       });
 
       const nextShipments = shipments.filter((item) => String(item?.id ?? "") !== shipmentId);
@@ -14507,20 +14542,53 @@ async function handleApi(req, res, url) {
         return { ...item, status: remainingActiveShipments.length > 0 ? "shipped" : "pending" };
       });
       const nextStock = setStockSoldForOrders({ ...state, stock: transferRestoration.stock, shipments: nextShipments }, nextOrders, state);
+      const mergedBatchIds = new Set(cancellation.auditItems.filter((item) => item.duplicateBefore)
+        .map((item) => String(item.duplicateBefore.batchId)));
+      const nextBatches = (Array.isArray(state.batches) ? state.batches : []).map((batch) =>
+        mergedBatchIds.has(String(batch.id)) ? {
+          ...batch,
+          stockedCount: nextStock.filter((item) => String(item.batchId) === String(batch.id)).length,
+          lossCount: nextStock.filter((item) => String(item.batchId) === String(batch.id) && item.lost).length,
+        } : batch);
       const operationLog = {
         id: uid("log"),
         time: new Date().toISOString(),
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `订单「${order.orderNo}」取消出库/发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品${shipment.transferDispatch ? "，直接出库的鱼已恢复移缸在途（未入缸）" : ""}`,
+        detail: `订单「${order.orderNo}」取消出库/发货 ${Array.isArray(shipment.itemStockIds) ? shipment.itemStockIds.length : 0} 条商品，已逐条核对实物去向${cancellation.mergedCount ? `，合并重复补录 ${cancellation.mergedCount} 条` : ""}${shipment.transferDispatch ? "，直接出库的鱼已恢复移缸在途（未入缸）" : ""}`,
+      };
+      const cancellationAudit = {
+        id: uid("shipment-cancel-audit"), shipmentId, orderId: String(order.id), orderNo: order.orderNo,
+        siteId: shipment.siteId || order.siteId, cancelledAt, cancelledBy: operator,
+        cancelledByName: authenticatedOperatorName(req), confirmedPhysicalReturn: true,
+        shipmentBefore: shipment, orderBefore: order,
+        orderAfter: nextOrders.find((item) => String(item.id) === String(order.id)),
+        items: [
+          ...cancellation.auditItems.map((item) => ({ ...item,
+            after: nextStock.find((stockItem) => String(stockItem.id) === item.stockItemId) })),
+          ...(shipment.transferDispatch?.items ?? []).map((item) => ({
+            stockItemId: String(item.stockItemId), restoreTransfer: true,
+            originalBefore: (state.stock ?? []).find((stockItem) => String(stockItem.id) === String(item.stockItemId)),
+            after: nextStock.find((stockItem) => String(stockItem.id) === String(item.stockItemId)),
+          })),
+        ],
       };
       const nextState = {
         ...state,
         orders: nextOrders,
         shipments: nextShipments,
         stock: nextStock,
+        batches: nextBatches,
         bioRecords: transferRestoration.bioRecords,
+        stockStatusHistory: [
+          ...cancellation.stockStatusHistory,
+          ...stockStatusChanges({ before: state.stock, after: nextStock.filter((item) =>
+            cancellation.auditItems.some((entry) => entry.stockItemId === String(item.id))),
+          account: req.auth.account, source: "shipment_cancel_merge", changedAt: cancelledAt }),
+        ],
+        ...(cancellation.publicCatalogPolicy ? { publicCatalogPolicy: cancellation.publicCatalogPolicy } : {}),
+        shipmentCancellationAudits: [...(Array.isArray(state.shipmentCancellationAudits) ? state.shipmentCancellationAudits : []), cancellationAudit],
         operationLogs: pushOperationLog(state.operationLogs, operationLog),
       };
       await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
@@ -14531,6 +14599,12 @@ async function handleApi(req, res, url) {
         orders: visibleNextState.orders,
         shipments: visibleNextState.shipments,
         stock: visibleNextState.stock,
+        batches: visibleNextState.batches,
+        bioRecords: visibleNextState.bioRecords,
+        ...(cancellation.publicCatalogPolicy ? { publicCatalogPolicy: req.auth.account.accessRole === "admin"
+          ? cancellation.publicCatalogPolicy
+          : { ...cancellation.publicCatalogPolicy, hiddenStockIds: cancellation.publicCatalogPolicy.hiddenStockIds.filter((id) =>
+            visibleNextState.stock.some((item) => String(item.id) === String(id))) } } : {}),
         inventoryProjection: visibleNextState.inventoryProjection,
         operationLog,
       });

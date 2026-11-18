@@ -1860,8 +1860,8 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                         <div className="flex flex-wrap items-center gap-2">
                           {ev.type === "stock_in" && <PackageCheck className="size-3.5 text-sky-600" />}
                           {ev.type === "record" && ev.sourceType === "dailyLog" && <ClipboardList className="size-3.5 text-blue-600" />}
-                          {ev.type === "record" && stockTransferRecordLabel(ev.sourceType) && <ArrowRightLeft className="size-3.5 text-emerald-600" />}
-                          {ev.type === "record" && ev.sourceType !== "dailyLog" && !stockTransferRecordLabel(ev.sourceType) && <Camera className="size-3.5 text-emerald-600" />}
+                          {ev.type === "record" && (stockTransferRecordLabel(ev.sourceType) || ev.sourceType === "shipmentCancellation") && <ArrowRightLeft className="size-3.5 text-emerald-600" />}
+                          {ev.type === "record" && ev.sourceType !== "dailyLog" && ev.sourceType !== "shipmentCancellation" && !stockTransferRecordLabel(ev.sourceType) && <Camera className="size-3.5 text-emerald-600" />}
                           {ev.type === "sold" && <ShoppingBag className="size-3.5 text-yellow-600" />}
                           {ev.type === "shipment" && <Truck className="size-3.5 text-violet-600" />}
                           <span className={`text-xs ${
@@ -1879,7 +1879,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                                   ? "物流"
                                   : ev.sourceType === "dailyLog"
                                     ? "缸组养护"
-                                    : stockTransferRecordLabel(ev.sourceType) || "观察/治疗记录"}
+                                    : ev.sourceType === "shipmentCancellation" ? "取消出库回缸核对" : stockTransferRecordLabel(ev.sourceType) || "观察/治疗记录"}
                           </span>
                         </div>
                         <span className="text-xs tabular-nums text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
@@ -1929,7 +1929,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                       {ev.type === "record" && (
                         <>
                           {ev.text && <p className="text-foreground">{ev.text}</p>}
-                          {stockTransferRecordLabel(ev.sourceType) && <p className="mt-1 text-xs text-muted-foreground">系统留存记录，不可修改或删除{ev.operator ? `；操作员：${ev.operator}` : ""}</p>}
+                          {(stockTransferRecordLabel(ev.sourceType) || ev.sourceType === "shipmentCancellation") && <p className="mt-1 text-xs text-muted-foreground">系统留存记录，不可修改或删除{ev.operator ? `；操作员：${ev.operator}` : ""}</p>}
                           {ev.sourceType === "dailyLog" && (
                             <p className="mt-1 text-xs text-blue-700">
                               来自养护日志
@@ -1994,7 +1994,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                               ))}
                             </div>
                           )}
-                          {ev.sourceType !== "dailyLog" && !stockTransferRecordLabel(ev.sourceType) && (permission.canUpdate || permission.canDelete) && (
+                          {ev.sourceType !== "dailyLog" && ev.sourceType !== "shipmentCancellation" && !stockTransferRecordLabel(ev.sourceType) && (permission.canUpdate || permission.canDelete) && (
                             editingRecordId === ev.id ? (
                               <div className="mt-3 grid gap-3 border-t pt-3">
                                 <div className="grid gap-1.5">

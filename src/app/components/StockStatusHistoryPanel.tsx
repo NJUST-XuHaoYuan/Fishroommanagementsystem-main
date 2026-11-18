@@ -28,6 +28,7 @@ const statusLabels: Record<string, string> = { healthy: "正常", feeding: "开�
 const sourceLabels: Record<string, string> = {
   bio_details: "单只修改", batch_status: "批量修改", stock_mutation: "库存修改", stock_approval: "审批生效",
   order_return_item: "订单退掉鱼只", order_update: "订单移除鱼只", order_delete: "取消订单", order_cancel: "取消订单",
+  shipment_cancel_merge: "取消出库核对合并",
 };
 
 export function statusHistoryTime(value: string) {

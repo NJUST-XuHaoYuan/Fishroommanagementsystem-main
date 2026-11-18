@@ -87,7 +87,8 @@ test("cancel restores original transit rather than source tank inventory; stale 
   const s = await setup(t); ok(await s.issue()); const original = fish(await s.readPersistedState());
   const out = await s.write("/api/shipments/outbound", await s.outboundBody()); ok(out);
   bad(await s.write("/api/shipments/cancel", { shipmentId: out.body.shipment.id }, "pricing-editor"), 403);
-  ok(await s.write("/api/shipments/cancel", { shipmentId: out.body.shipment.id }, "dual-editor"));
+  const cancellationPreview = await s.request(`/api/shipments/cancel-preview?shipmentId=${out.body.shipment.id}`, { token: s.tokens["dual-editor"] }); ok(cancellationPreview);
+  ok(await s.write("/api/shipments/cancel", { shipmentId: out.body.shipment.id, reviewToken: cancellationPreview.body.reviewToken, confirmedPhysicalReturn: true, returnItems: [] }, "dual-editor"));
   const state = await s.readPersistedState(); assert.deepEqual(fish(state), original);
   assert.equal(state.bioRecords.filter((r) => r.sourceType === "stockTransferDispatchCancelled").length, 1);
   assert.equal((await s.recent()).body.items.length, 0);

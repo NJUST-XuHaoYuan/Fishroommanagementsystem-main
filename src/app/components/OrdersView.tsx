@@ -96,6 +96,7 @@ import {
   SHIPPING_FEE_MODE_OPTIONS,
 } from "../utils/orderFees";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
+import { ShipmentCancelDialog } from "./ShipmentCancelDialog";
 import {
   actualShippingFeePayload,
   canApplyActualShippingFeeResponse,
@@ -315,6 +316,9 @@ function applyOrderApiResult(
     order?: Store["orders"][number];
     shipment?: Store["shipments"][number];
     stock?: Store["stock"];
+    batches?: Store["batches"];
+    bioRecords?: Store["bioRecords"];
+    publicCatalogPolicy?: Store["publicCatalogPolicy"];
     inventoryProjection?: Store["inventoryProjection"];
     operationLog?: Store["operationLogs"][number];
   },
@@ -337,6 +341,9 @@ function applyOrderApiResult(
       orders: retainNewerOwnerAssignments(current.orders, retainNewerWholesaleOrderTags(current.orders, mergeApiRecord(orders, result.order))),
       shipments: mergeApiRecord(shipments, result.shipment),
       stock: Array.isArray(result.stock) ? result.stock : current.stock,
+      batches: Array.isArray(result.batches) ? result.batches : current.batches,
+      bioRecords: Array.isArray(result.bioRecords) ? result.bioRecords : current.bioRecords,
+      publicCatalogPolicy: result.publicCatalogPolicy ?? current.publicCatalogPolicy,
       inventoryProjection: result.inventoryProjection ?? current.inventoryProjection,
       operationLogs: mergeOperationLog(current, result.operationLog),
     };
@@ -4401,6 +4408,9 @@ function OrderDetailDialog({
     };
   }, [open]);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
+  const [cancelShipmentTarget, setCancelShipmentTarget] = useState<Shipment | null>(null);
+  const cancelShipmentContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  useEffect(() => { setCancelShipmentTarget(null); }, [cancelShipmentContextKey]);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
   const shipmentFeeRequestSequence = useRef(0);
   const shipmentListRef = useRef(state.shipments);
@@ -4454,6 +4464,7 @@ function OrderDetailDialog({
       setEditForm(null);
       setShipDialogOpen(false);
       setShipmentAction(null);
+      setCancelShipmentTarget(null);
       setShipmentConfirmSaving(false);
       setDamageShipment(null);
       setReturnItem(null);
@@ -4983,26 +4994,15 @@ function OrderDetailDialog({
     }
   };
 
-  const cancelShipment = async (shipment: Shipment) => {
+  const cancelShipment = (shipment: Shipment) => {
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (shipmentConfirmSaving) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
-    if (!confirmWrite("取消发货", "将取消这条出库/发货记录，商品会回到待发货状态；订单和商品不会被删除。" +
-      (shipment.transferDispatch ? "其中在途直接出库的鱼会恢复移缸在途，不会自动回到原缸。" : ""))) return;
     shipmentFeeRequestSequence.current += 1;
-    setShipmentConfirmSaving(true);
-    try {
-      const result = await postOrderApi("shipments/cancel", { shipmentId: shipment.id });
-      applyOrderApiResult(setState, result);
-      setShipmentAction(null);
-      toast.success(shipment.transferDispatch ? "已取消出库/发货，在途直接出库的鱼已恢复移缸在途" : "已取消出库/发货，商品已回到待发货状态");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
-    } finally {
-      setShipmentConfirmSaving(false);
-    }
+    setShipmentAction(null);
+    setCancelShipmentTarget(shipment);
   };
 
   const reportShipmentDamage = async (shipment: Shipment, result: DamageResult) => {
@@ -5727,6 +5727,18 @@ function OrderDetailDialog({
         onConfirmShipment={confirmOutboundShipment}
         onSaveActualShippingFee={saveShipmentActualShippingFee}
       />
+
+      {cancelShipmentTarget && <ShipmentCancelDialog
+        key={`${cancelShipmentContextKey}:${cancelShipmentTarget.id}`}
+        shipmentId={cancelShipmentTarget.id}
+        viewer={state.user}
+        canUpdate={permission.canUpdate}
+        onClose={() => setCancelShipmentTarget(null)}
+        onApplied={(result, session) => {
+          applyOrderApiResult(setState, result, { session, requireExistingShipmentId: cancelShipmentTarget.id });
+          toast.success("已取消出库，并按核对结果处理库存");
+        }}
+      />}
 
       <ReportDamageDialog
         shipment={damageShipment}

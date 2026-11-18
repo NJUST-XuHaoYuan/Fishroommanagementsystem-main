@@ -17,6 +17,7 @@ const SYSTEM_BIO_RECORD_SOURCE_TYPES = new Set([
   "stockTransferReceived",
   "stockTransferDispatched",
   "stockTransferDispatchCancelled",
+  "shipmentCancellation",
 ]);
 
 export function isSystemBioRecord(record) {
