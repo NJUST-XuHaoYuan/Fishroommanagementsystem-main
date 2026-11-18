@@ -242,7 +242,7 @@ test("all order sources ship without proof as automatic credit and legacy verifi
   const s = await setup(t); const out = await s.request("/api/shipments/outbound", { orderId: "proof-order", selectedItemIds: ["proof-fish"], shipMethod: "express", carrier: "顺丰", shipDate: "2026-11-19" }); ok(out);
   assert.equal(out.body.shipment.paymentEvidenceSnapshot.creditAmount, 1000);
   for (const path of ["/api/orders/credit-sale/request", "/api/orders/credit-sale/confirm"]) {
-    const legacy = await s.request(path, { orderId: "proof-order" }, "pricing-admin"); assert.equal(legacy.response.status, 409); 
+    const legacy = await s.request(path, { orderId: "proof-order" }, "pricing-admin"); assert.equal(legacy.response.status, 409);
   }
 });
 
