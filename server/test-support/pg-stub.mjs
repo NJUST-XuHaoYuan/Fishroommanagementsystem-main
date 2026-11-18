@@ -21,6 +21,8 @@ if (persistWrites && typeof process.send === "function") process.on("message", (
 const settlements = Array.isArray(fixture.platformSettlements)
   ? fixture.platformSettlements
   : [];
+let paymentStatements = structuredClone(fixture.paymentStatements ?? []);
+let statementImportBatches = structuredClone(fixture.statementImportBatches ?? []);
 
 function result(rows = [], rowCount = rows.length) {
   return { rows, rowCount };
@@ -284,6 +286,41 @@ function aggregatedSettlementRows(sql, values = []) {
 function runQuery(query, values = []) {
   const sql = String(query?.text ?? query ?? "");
 
+  // These two small tables model the real statement import/link transaction in
+  // payment-proof integration tests; they are not a production persistence path.
+  const financeTable = sql.match(/\b(?:FROM|INTO|UPDATE)\s+(finance_payment_statements|finance_statement_import_batches)\b/i)?.[1];
+  if (financeTable) {
+    const table = financeTable.toLowerCase() === "finance_payment_statements" ? paymentStatements : statementImportBatches;
+    const where = sql.split(/\bWHERE\b/i)[1] ?? "";
+    const matches = row => {
+      for (const field of ["id", "state_id", "site_id", "batch_id", "payment_method_id", "file_hash"]) {
+        const match = where.match(new RegExp(`\\b${field}\\s*=\\s*\\$(\\d+)\\b`, "i"));
+        if (match && String(row[field] ?? "") !== String(values[Number(match[1]) - 1] ?? "")) return false;
+      }
+      const sites = where.match(/\bsite_id\s*=\s*ANY\(\$(\d+)::text\[\]\)/i);
+      return !sites || values[Number(sites[1]) - 1].includes(row.site_id);
+    };
+    if (/^\s*SELECT\b/i.test(sql)) {
+      const scoped = table.filter(matches);
+      if (/\bCOUNT\(\*\)/i.test(sql)) return result([{ total: scoped.length, matched: scoped.filter(row => ["matched", "verified"].includes(row.match_status)).length }]);
+      return result(structuredClone(scoped));
+    }
+    if (/^\s*INSERT\b/i.test(sql)) {
+      const columns = sql.match(/\(\s*([\s\S]*?)\)\s*VALUES/i)?.[1].split(",").map(column => column.trim());
+      if (!columns || columns.length !== values.length) throw new Error("Unsupported statement test insert shape");
+      const row = Object.fromEntries(columns.map((column, index) => [column, ["raw_data", "candidate_orders", "totals"].includes(column) ? JSON.parse(values[index]) : values[index]]));
+      row.created_at ??= new Date().toISOString(); row.imported_at ??= row.created_at;
+      table.push(row); return result([], 1);
+    }
+    if (/^\s*UPDATE\b/i.test(sql)) {
+      const assignments = sql.match(/\bSET\s+([\s\S]*?)\s+WHERE/i)?.[1] ?? "";
+      for (const row of table.filter(matches)) for (const match of assignments.matchAll(/\b([a-z_]+)\s*=\s*(\$(\d+)|'([^']*)'|NULL|now\(\))/gi)) {
+        row[match[1]] = match[3] ? values[Number(match[3]) - 1] : match[4] !== undefined ? match[4] : /^NULL$/i.test(match[2]) ? null : new Date().toISOString();
+      }
+      return result([], table.filter(matches).length);
+    }
+  }
+
   if (/^\s*SELECT\s+1\s+FROM\s+app_state\b/i.test(sql)) {
     return result([{ "?column?": 1 }]);
   }
@@ -338,6 +375,8 @@ class TestClient {
     if (/^BEGIN\b/i.test(sql)) { this.inTransaction = true; return result(); }
     if (/^COMMIT\b/i.test(sql)) {
       if (this.workingState) { state = this.workingState; revision = String(Number(revision) + 1); }
+      if (this.workingStatements) paymentStatements = this.workingStatements;
+      if (this.workingStatementBatches) statementImportBatches = this.workingStatementBatches;
       this.finish(); return result();
     }
     if (/^ROLLBACK\b/i.test(sql)) { this.finish(); return result(); }
@@ -346,10 +385,15 @@ class TestClient {
       writeLock = new Promise((resolve) => { this.releaseLock = resolve; });
       await previous;
       this.workingState = structuredClone(state);
+      this.workingStatements = structuredClone(paymentStatements);
+      this.workingStatementBatches = structuredClone(statementImportBatches);
     }
     if (!this.workingState) return runQuery(query, values);
     const persisted = state;
+    const persistedStatements = paymentStatements, persistedBatches = statementImportBatches;
     state = this.workingState;
+    paymentStatements = this.workingStatements;
+    statementImportBatches = this.workingStatementBatches;
     try {
       const previousStatusHistoryCount = (state.stockStatusHistory ?? []).length;
       const response = runQuery(query, values);
@@ -364,10 +408,13 @@ class TestClient {
       }
       return response;
     }
-    finally { this.workingState = state; state = persisted; }
+    finally {
+      this.workingState = state; this.workingStatements = paymentStatements; this.workingStatementBatches = statementImportBatches;
+      state = persisted; paymentStatements = persistedStatements; statementImportBatches = persistedBatches;
+    }
   }
 
-  finish() { this.inTransaction = false; this.workingState = null; this.releaseLock?.(); this.releaseLock = null; }
+  finish() { this.inTransaction = false; this.workingState = null; this.workingStatements = null; this.workingStatementBatches = null; this.releaseLock?.(); this.releaseLock = null; }
   release() { this.finish(); }
 }
 

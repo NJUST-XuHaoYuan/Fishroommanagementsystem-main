@@ -63,13 +63,15 @@ test("direct dispatch requires explicit exact cycle acknowledgement and both ord
   assert.equal(fish(await s.readPersistedState()).tankTransfer.status, "in_transit");
 });
 
-test("payment block leaves the transfer in transit and creates no dispatch event", async (t) => {
+test("unpaid direct dispatch records credit and commits the explicitly acknowledged transit cycle", async (t) => {
   const s = await setup(t, (state) => { Object.assign(state.orders[0], { source: "私域线上", paymentChannel: "cash",
     paymentMethodId: "cash", paymentMethodName: "现金", paymentAccount: "synthetic-account", platformOrderNo: "", douyinOrderNo: "" }); });
   ok(await s.issue()); const out = await s.write("/api/shipments/outbound", await s.outboundBody());
-  bad(out); assert.equal(out.body.code, "CREDIT_SALE_CONFIRMATION_REQUIRED");
-  const state = await s.readPersistedState(); assert.equal(fish(state).tankTransfer.status, "in_transit");
-  assert.equal(state.bioRecords.filter((record) => record.sourceType === "stockTransferDispatched").length, 0);
+  ok(out); assert.equal(out.body.shipment.paymentEvidenceSnapshot.status, "credit_sale");
+  assert.equal(out.body.shipment.paymentEvidenceSnapshot.creditAmount, 188);
+  const state = await s.readPersistedState(); assert.equal(fish(state).tankTransfer.status, "dispatched");
+  assert.equal(state.bioRecords.filter((record) => record.sourceType === "stockTransferDispatched").length, 1);
+  assert.equal(state.orders[0].payments.length, 0, "credit dispatch must not fabricate a collection");
 });
 
 test("outbound races receipt or duplicate outbound: exactly one transition commits", async (t) => {

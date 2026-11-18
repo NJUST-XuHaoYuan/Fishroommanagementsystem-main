@@ -11,10 +11,11 @@ import {
   type NewCustomerEvidenceAttachment,
 } from "../utils/newCustomerEvidence";
 import { Button } from "./ui/button";
+import { deletePaymentEvidence, fetchPaymentEvidence, uploadPaymentEvidence } from "../utils/orderPaymentProof";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 
-function EvidenceImage({ attachment, orderId, onRemove, disabled }: {
-  attachment: NewCustomerEvidenceAttachment; orderId: string; onRemove?: () => void; disabled?: boolean;
+function EvidenceImage({ attachment, orderId, onRemove, disabled, payment = false }: {
+  attachment: NewCustomerEvidenceAttachment; orderId: string; onRemove?: () => void; disabled?: boolean; payment?: boolean;
 }) {
   const [imageUrl, setImageUrl] = useState("");
   const [error, setError] = useState("");
@@ -27,7 +28,7 @@ function EvidenceImage({ attachment, orderId, onRemove, disabled }: {
     let objectUrl = "";
     setImageUrl(""); setError(""); setPreview(false);
     if (!session) { setError("请重新登录后查看凭证。"); return () => controller.abort(); }
-    void fetchNewCustomerEvidence(attachment.id, controller.signal).then(blob => {
+    void (payment ? fetchPaymentEvidence : fetchNewCustomerEvidence)(attachment.id, controller.signal).then(blob => {
       if (controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
       objectUrl = URL.createObjectURL(blob);
       setImageUrl(objectUrl);
@@ -38,7 +39,7 @@ function EvidenceImage({ attachment, orderId, onRemove, disabled }: {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [attachment.id, orderId, attempt]);
+  }, [attachment.id, orderId, attempt, payment]);
 
   return <div className="min-w-0 rounded-md border bg-background p-2">
     <button type="button" disabled={!imageUrl} aria-label={`放大凭证：${attachment.originalName}`} onClick={() => setPreview(true)} className="relative flex aspect-[4/3] min-h-20 w-full items-center justify-center overflow-hidden rounded border bg-muted/30 focus-visible:outline-2 focus-visible:outline-offset-2">
@@ -58,18 +59,19 @@ function EvidenceImage({ attachment, orderId, onRemove, disabled }: {
   </div>;
 }
 
-export function NewCustomerEvidenceGallery({ orderId, attachments, onRemove, disabled = false }: {
-  orderId: string; attachments: NewCustomerEvidenceAttachment[]; onRemove?: (id: string) => void; disabled?: boolean;
+export function NewCustomerEvidenceGallery({ orderId, attachments, onRemove, disabled = false, payment = false }: {
+  orderId: string; attachments: NewCustomerEvidenceAttachment[]; onRemove?: (id: string) => void; disabled?: boolean; payment?: boolean;
 }) {
   if (!attachments.length) return <p className="text-xs leading-5 text-muted-foreground">未上传图片凭证。</p>;
-  return <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3" aria-label="新客审批图片凭证">
-    {attachments.map(attachment => <EvidenceImage key={`${orderId}:${attachment.id}`} orderId={orderId} attachment={attachment} disabled={disabled} onRemove={onRemove ? () => onRemove(attachment.id) : undefined} />)}
+  return <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3" aria-label={payment ? "付款图片凭证" : "新客审批图片凭证"}>
+    {attachments.map(attachment => <EvidenceImage key={`${orderId}:${attachment.id}`} orderId={orderId} attachment={attachment} disabled={disabled} payment={payment} onRemove={onRemove ? () => onRemove(attachment.id) : undefined} />)}
   </div>;
 }
 
-export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = false, onChange, onBusyChange }: {
+export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = false, onChange, onBusyChange, payment = false }: {
   orderId: string; attachments: NewCustomerEvidenceAttachment[]; disabled?: boolean;
   onChange: (attachments: NewCustomerEvidenceAttachment[]) => void; onBusyChange: (busy: boolean) => void;
+  payment?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ name: string; index: number; total: number; percent: number } | null>(null);
@@ -114,7 +116,7 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
         const file = accepted[index];
         setProgress({ name: file.name, index: index + 1, total: accepted.length, percent: 0 });
         try {
-          const attachment = await uploadNewCustomerEvidence(orderId, file, operation.controller.signal, percent => {
+          const attachment = await (payment ? uploadPaymentEvidence : uploadNewCustomerEvidence)(orderId, file, operation.controller.signal, percent => {
             if (operation.current()) setProgress({ name: file.name, index: index + 1, total: accepted.length, percent });
           });
           if (!operation.current()) break;
@@ -134,7 +136,7 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     if (!operation) return;
     setErrors([]);
     try {
-      await deleteNewCustomerEvidence(id, operation.controller.signal);
+      await (payment ? deletePaymentEvidence : deleteNewCustomerEvidence)(id, operation.controller.signal);
       if (!operation.current()) return;
       const next = attachmentsRef.current.filter(attachment => attachment.id !== id);
       attachmentsRef.current = next; onChange(next);
@@ -143,11 +145,11 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     } finally { operation.finish(); }
   };
 
-  return <section className="space-y-2" aria-label="上传新客审批图片凭证" aria-busy={busy}>
-    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">添加微信证明<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
-    <p className="text-xs leading-5 text-muted-foreground">请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
+  return <section className="space-y-2" aria-label={payment ? "上传付款图片凭证" : "上传新客审批图片凭证"} aria-busy={busy}>
+    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">{payment ? "付款凭证" : "添加微信证明"}<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
+    <p className="text-xs leading-5 text-muted-foreground">{payment ? "请上传能看清付款金额、时间和收款账户的截图，由财务核对实际到账。" : "请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。"}最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
     <p className="text-xs leading-5 text-muted-foreground">上传后需提交申请才会绑定；本人本单未提交的图片草稿 24 小时内可恢复，过期后需重新上传。</p>
-    <NewCustomerEvidenceGallery orderId={orderId} attachments={attachments} onRemove={id => void remove(id)} disabled={disabled || busy} />
+    <NewCustomerEvidenceGallery orderId={orderId} attachments={attachments} onRemove={id => void remove(id)} disabled={disabled || busy} payment={payment} />
     <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden" aria-label="选择图片凭证" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onChange={event => {
       const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void upload(files);
     }} />

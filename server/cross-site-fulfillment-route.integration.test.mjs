@@ -59,7 +59,7 @@ test("original-site-only editor cannot change a retained fish now in an unauthor
   const after = await s.readPersistedState(); assert.deepEqual(after.orders, before.orders); assert.deepEqual(after.stock, before.stock);
 });
 
-test("cross-site fulfillment cannot bypass an unpaid private-online order's credit approval gate", async (t) => {
+test("authorized cross-site fulfillment records unpaid private-online value as credit without old approval", async (t) => {
   const fixture = crossSiteFulfillmentFixture();
   Object.assign(fixture.state.orders[0], { source: "私域线上", customerId: "fulfillment-customer", paymentChannel: "cash", shippingAddress: "测试地址" });
   const s = await startMutableRouteServer(fixture); t.after(() => s.stop());
@@ -69,9 +69,11 @@ test("cross-site fulfillment cannot bypass an unpaid private-online order's cred
     orderId: "moved-order", selectedItemIds: ["moved-fish"], shipMethod: "express", carrier: "顺丰", shipDate: "2026-09-28",
     expectedStockLocations: { "moved-fish": { siteId: "jiangyin", subTankId: "tank-j" } },
   } });
-  assert.equal(result.response.status, 409, JSON.stringify(result.body));
-  assert.equal(result.body.code, "CREDIT_SALE_CONFIRMATION_REQUIRED");
+  ok(result);
+  assert.equal(result.body.shipment.paymentEvidenceSnapshot.status, "credit_sale");
+  assert.equal(result.body.shipment.paymentEvidenceSnapshot.creditAmount, 188);
   const after = await s.readPersistedState();
-  assert.deepEqual(after.shipments, before.shipments); assert.deepEqual(after.stock, before.stock);
-  assert.deepEqual(after.orders, before.orders);
+  assert.equal(after.shipments.length, before.shipments.length + 1); assert.deepEqual(after.stock, before.stock);
+  assert.deepEqual(after.orders[0].items, before.orders[0].items);
+  assert.deepEqual(after.orders[0].payments, before.orders[0].payments);
 });

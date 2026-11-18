@@ -9,6 +9,8 @@ import {
 } from "./shipment-completion-rules.mjs";
 import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
 import { closeEndedOrderOwnerAssignments } from "./order-owner-assignment.mjs";
+import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
+import { paymentEvidenceShipmentSnapshot } from "./payment-proof-rules.mjs";
 
 const source = await readFile(new URL("./local-server.mjs", import.meta.url), "utf8");
 
@@ -48,10 +50,8 @@ function createAutomaticTransitions(clock) {
     const date = datePart(value);
     return Boolean(date) && date <= threshold;
   };
-  const shipmentPaymentGateForOrder = (order) => ({
-    canShip: order.paymentGateOpen !== false,
-    outstandingAmount: order.paymentGateOpen === false ? 100 : 0,
-  });
+  const calcAmountDueForOrder = () => 100;
+  const shipmentPaymentGateForOrder = (order) => shipmentPaymentGate(order, calcAmountDueForOrder(order));
   const currentStationNotifications = (state) => Array.isArray(state.notifications) ? state.notifications : [];
   const ensureOrderCreditSaleNotifications = (state) => ({
     notifications: currentStationNotifications(state),
@@ -78,6 +78,8 @@ function createAutomaticTransitions(clock) {
     "countsAsCompletionShipment",
     "shipmentIsResolvedForCompletion",
     "closeEndedOrderOwnerAssignments",
+    "paymentEvidenceShipmentSnapshot",
+    "calcAmountDueForOrder",
     `"use strict";\n${validateFeesSource}\n${validateCompleteSource}\n${automaticTransitionsSource}\nreturn applyAutomaticOrderTransitions;`,
   )(
     todayInChina,
@@ -96,6 +98,8 @@ function createAutomaticTransitions(clock) {
     countsAsCompletionShipment,
     shipmentIsResolvedForCompletion,
     closeEndedOrderOwnerAssignments,
+    paymentEvidenceShipmentSnapshot,
+    calcAmountDueForOrder,
   );
 }
 
@@ -159,7 +163,7 @@ test("pending prepaid and free fees allow auto-delivery but defer auto-completio
   }
 });
 
-test("automatic shipment and completion transitions still honor the payment gate", () => {
+test("automatic shipment records uncovered value as credit and does not require retired approval", () => {
   const clock = { today: "2026-10-23" };
   const applyAutomaticOrderTransitions = createAutomaticTransitions(clock);
   const outboundState = stateWithShipment("prepaid", {
@@ -167,10 +171,11 @@ test("automatic shipment and completion transitions still honor the payment gate
     actualShippingFee: 20,
     paymentGateOpen: false,
   });
-  const blockedShipment = applyAutomaticOrderTransitions(outboundState);
-  assert.equal(blockedShipment.summary.paymentBlockedCount, 1);
-  assert.equal(blockedShipment.summary.autoShippedCount, 0);
-  assert.equal(blockedShipment.state.shipments[0].status, "outbound");
+  const advancedShipment = applyAutomaticOrderTransitions(outboundState);
+  assert.equal(advancedShipment.summary.paymentBlockedCount, 0);
+  assert.equal(advancedShipment.summary.autoShippedCount, 1);
+  assert.equal(advancedShipment.state.shipments[0].status, "shipped");
+  assert.equal(advancedShipment.state.shipments[0].paymentEvidenceSnapshot.creditAmount, 100);
 
   clock.today = "2026-10-27";
   const deliveredState = stateWithShipment("prepaid", {
@@ -179,7 +184,7 @@ test("automatic shipment and completion transitions still honor the payment gate
     paymentGateOpen: false,
   });
   deliveredState.shipments[0].deliveredAt = "2026-10-20T10:00:00";
-  const blockedCompletion = applyAutomaticOrderTransitions(deliveredState);
-  assert.equal(blockedCompletion.summary.autoCompletedCount, 0);
-  assert.equal(blockedCompletion.state.orders[0].status, "shipped");
+  const creditCompletion = applyAutomaticOrderTransitions(deliveredState);
+  assert.equal(creditCompletion.summary.autoCompletedCount, 1);
+  assert.equal(creditCompletion.state.orders[0].status, "completed");
 });

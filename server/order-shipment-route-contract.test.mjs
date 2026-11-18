@@ -14,8 +14,6 @@ function routeBlock(path) {
 
 test("order and shipment mutation routes resolve unique authorized targets after locking state", () => {
   for (const path of [
-    "/api/orders/credit-sale/request",
-    "/api/orders/credit-sale/confirm",
     "/api/orders/payment-claim",
     "/api/orders/payment",
     "/api/orders/refund",
@@ -64,8 +62,6 @@ test("refund, return and delete refresh current account permissions while holdin
 
 test("order and shipment success payloads always build site-filtered collections", () => {
   for (const path of [
-    "/api/orders/credit-sale/request",
-    "/api/orders/credit-sale/confirm",
     "/api/orders/payment-claim",
     "/api/orders/payment",
     "/api/orders/refund",
@@ -81,14 +77,10 @@ test("order and shipment success payloads always build site-filtered collections
     assert.match(routeBlock(path), /siteVisibilityFilteredState\(/, `${path} must filter success collections by account site scope`);
   }
 
-  assert.doesNotMatch(routeBlock("/api/orders/credit-sale/confirm"), /compactResponse|responseMode/);
-
   // Stay inside the response object. A fixed character window can cross the
   // closing `});` and mistake a later persistence object for response data.
   const rawCollectionInSuccessPayload = /sendJson\(req, res, 200,\s*\{(?:(?!\n\s*\}\);)[\s\S])*?\b(?:orders: (?:orders|nextOrders|approved\.nextOrders|nextState\.orders)|shipments: (?:shipments|nextShipments)|stock: nextStock)\b/;
   for (const path of [
-    "/api/orders/credit-sale/request",
-    "/api/orders/credit-sale/confirm",
     "/api/orders/payment-claim",
     "/api/orders/payment",
     "/api/orders/refund",

@@ -2,62 +2,48 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { shipmentPaymentGate, verifiedNetPaymentAmount } from "./shipment-payment-rules.mjs";
 
-test("verified payment gate uses verified net receipts only", () => {
+const proof = (amount, status = "pending", extra = {}) => ({ id: `claim-${amount}`, status, amount, evidenceAttachments: [{ id: "private-evidence" }], ...extra });
+
+test("all sources may ship while only verified net receipts confirm money", () => {
   const payments = [
     { type: "balance", amount: 800, verificationStatus: "verified" },
     { type: "balance", amount: 300, verificationStatus: "pending" },
     { type: "refund", amount: 100, verificationStatus: "verified" },
   ];
   assert.equal(verifiedNetPaymentAmount(payments), 700);
-  assert.deepEqual(shipmentPaymentGate({ source: "私域线上", payments }, 1000), {
-    status: "confirmation_required",
-    amountDue: 1000,
-    verifiedAmount: 700,
-    outstandingAmount: 300,
-    approvedAmount: 0,
-    canShip: false,
-  });
-});
-
-test("fully reconciled non-platform orders may ship", () => {
-  const result = shipmentPaymentGate({
-    source: "线下",
-    payments: [{ type: "balance", amount: 1000, verificationStatus: "verified" }],
-  }, 999.99);
-  assert.equal(result.status, "verified");
-  assert.equal(result.canShip, true);
-});
-
-test("platform orders bypass pre-shipment reconciliation", () => {
-  for (const source of ["平台下单", "闲鱼平台", "微拍堂平台"]) {
-    const result = shipmentPaymentGate({ source, payments: [] }, 1800);
-    assert.equal(result.status, "platform_exempt");
-    assert.equal(result.canShip, true);
+  for (const source of ["私域线上", "平台下单", "闲鱼平台", "微拍堂平台", "线下"]) {
+    const gate = shipmentPaymentGate({ source, payments }, 1000);
+    assert.equal(gate.canShip, true, source); assert.equal(gate.status, "credit_sale");
+    assert.equal(gate.verifiedAmount, 700); assert.equal(gate.creditAmount, 300); assert.equal(gate.pendingProofAmount, 0);
   }
 });
 
-test("offline pickup orders default to credit before reconciliation", () => {
-  const result = shipmentPaymentGate({ source: "线下", payments: [] }, 360);
-  assert.deepEqual(result, {
-    status: "offline_credit",
-    amountDue: 360,
-    verifiedAmount: 0,
-    outstandingAmount: 360,
-    approvedAmount: 360,
-    canShip: true,
-  });
+test("fully reconciled legacy receipts remain paid without uploading historical pictures", () => {
+  const gate = shipmentPaymentGate({ source: "平台下单", payments: [{ type: "balance", amount: 1000 }] }, 1000);
+  assert.equal(gate.status, "verified"); assert.equal(gate.verifiedAmount, 1000); assert.equal(gate.creditAmount, 0);
+  assert.equal(gate.canShip, true);
 });
 
-test("an administrator approval covers only the unreconciled amount", () => {
-  const order = {
-    source: "私域线上",
-    payments: [{ type: "deposit", amount: 200, verificationStatus: "verified" }],
-    creditSaleApproval: {
-      amount: 800,
-      confirmedAt: "2026-08-03T12:00",
-      confirmedBy: "admin-a",
-    },
-  };
-  assert.equal(shipmentPaymentGate(order, 1000).status, "credit_approved");
-  assert.equal(shipmentPaymentGate(order, 1100).status, "confirmation_required");
+test("pending proof covers a declared amount without fabricating confirmed receipts", () => {
+  const gate = shipmentPaymentGate({ source: "私域线上", paymentClaims: [proof(1000)], payments: [] }, 1000);
+  assert.equal(gate.status, "proof_pending"); assert.equal(gate.pendingProofAmount, 1000); assert.equal(gate.verifiedAmount, 0);
+  assert.equal(gate.creditAmount, 0); assert.equal(gate.canShip, true);
+});
+
+test("partial declarations and verified receipts leave only the uncovered difference as credit", () => {
+  const gate = shipmentPaymentGate({ payments: [{ type: "balance", amount: 200, verificationStatus: "verified" }],
+    paymentClaims: [proof(300), proof(400, "rejected"), proof(500, "approved"), proof(900, "pending", { evidenceAttachments: [] })] }, 1000);
+  assert.equal(gate.verifiedAmount, 200); assert.equal(gate.pendingProofAmount, 300); assert.equal(gate.creditAmount, 500);
+  assert.equal(gate.status, "credit_sale");
+});
+
+test("old credit approval cannot mark unpaid value as confirmed or erase credit", () => {
+  const gate = shipmentPaymentGate({ source: "私域线上", payments: [], creditSaleApproval: { amount: 1000, confirmedAt: "2026-11-01T12:00", confirmedBy: "admin" } }, 1000);
+  assert.equal(gate.status, "credit_sale"); assert.equal(gate.creditAmount, 1000); assert.equal(gate.verifiedAmount, 0);
+  assert.equal(gate.approvedAmount, 0); assert.equal(gate.canShip, true);
+});
+
+test("pending coverage is capped to the receivable after verified receipts", () => {
+  const gate = shipmentPaymentGate({ payments: [{ type: "balance", amount: 800, verificationStatus: "verified" }], paymentClaims: [proof(700)] }, 1000);
+  assert.equal(gate.pendingProofAmount, 200); assert.equal(gate.creditAmount, 0);
 });

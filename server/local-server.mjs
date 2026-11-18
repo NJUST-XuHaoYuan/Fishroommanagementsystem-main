@@ -84,6 +84,9 @@ import {
   updateLockedAppState,
 } from "./shipment-actual-shipping-fee-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
+import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
+import { assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
+import { PAYMENT_EVIDENCE_DIRECTORY, isPaymentEvidencePath } from "./payment-evidence.mjs";
 import {
   ensureApprovalNotifications,
   ensureCreditSaleNotifications,
@@ -815,6 +818,8 @@ function stateWithInventoryProjection(state = {}, stock = state?.stock, override
   };
   // Full cancellation snapshots are an append-only server audit, never a client state collection.
   delete next.shipmentCancellationAudits;
+  delete next.paymentEvidenceAttachments;
+  delete next.paymentEvidenceAudits;
   trustedInventoryProjectionStates.add(next);
   return next;
 }
@@ -2383,6 +2388,8 @@ function sanitizeStateForResponse(data = {}, req) {
   delete next.personnelProfileRequests;
   delete next.personnelPrivateAttachments;
   delete next.newCustomerEvidenceAttachments;
+  delete next.paymentEvidenceAttachments;
+  delete next.paymentEvidenceAudits;
   delete next.retiredPersonnelUsernames;
   delete next.inventoryAdjustmentDrafts;
   delete next.shipmentCancellationAudits;
@@ -4968,6 +4975,7 @@ function normalizePaymentRecord(record = {}) {
     recordSource,
     ...(refundMethod ? { refundMethod } : {}),
     recordedBy: String(record.recordedBy ?? "").trim(),
+    ...(record.paymentProofClaimId ? { paymentProofClaimId: String(record.paymentProofClaimId) } : {}),
     verifiedAt: verificationStatus === "verified" ? String(record.verifiedAt ?? "").trim() : "",
     verifiedBy: verificationStatus === "verified" ? String(record.verifiedBy ?? "").trim() : "",
     proof: Array.isArray(record.proof) ? record.proof : [],
@@ -5236,6 +5244,7 @@ function financeMatchingOrderProfiles(state = {}) {
         paymentAccount: String(order?.paymentAccount ?? ""),
         receivable: roundFinance(receivable),
         matchingOutstanding,
+        proofReceipts: linkablePaymentProofPayments(order),
         date: String(order?.date ?? ""),
         createdAt: String(order?.createdAt ?? ""),
         status: String(order?.status ?? ""),
@@ -5275,7 +5284,7 @@ function statementPaymentRecord(statement = {}, order = {}, method = "finance", 
   });
 }
 
-function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", method = "finance", actor = "system") {
+function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", method = "finance", actor = "system", existingPaymentId = "") {
   if (!['income', 'expense'].includes(String(statement?.direction ?? ""))) throw new Error("无法识别账单流水方向");
   const orders = Array.isArray(state.orders) ? state.orders : [];
   const currentOrder = orders.find((order) => String(order?.id ?? "") === String(orderId ?? ""));
@@ -5289,6 +5298,26 @@ function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", met
   const duplicate = orders.some((order) => (Array.isArray(order?.payments) ? order.payments : [])
     .some((payment) => String(payment?.statementId ?? "") === String(statement?.id ?? "")));
   if (duplicate) throw new Error("该账单流水已经关联订单");
+  if (statement.direction === "income") {
+    const proofPaymentIds = new Set(paymentClaims(currentOrder).filter(claim => claim.status === "approved").map(claim => claim.paymentId));
+    const proofReceipts = (currentOrder.payments ?? []).filter(payment => proofPaymentIds.has(payment.id) && !payment.statementId &&
+      Math.abs(Number(payment.amount) - Number(statement.amount)) <= 0.005 && payment.channel === statement.channel && String(payment.account || "").trim() === String(statement.account || "").trim());
+    const exact = proofReceipts.filter(payment => String(payment.externalTransactionNo || "").trim() && String(payment.externalTransactionNo).trim() === String(statement.externalTransactionNo || "").trim());
+    const selected = existingPaymentId ? proofReceipts.find(payment => payment.id === existingPaymentId) : exact.length === 1 ? exact[0] : null;
+    if (existingPaymentId && !selected) throw httpError(409, "选择的已核验收款不存在、已绑定银行流水或金额渠道账户不一致，请重新核对", "PAYMENT_PROOF_STATEMENT_MISMATCH");
+    if (selected) {
+      const payment = { ...selected, statementId: statement.id, matchMethod: method,
+        externalTransactionNo: selected.externalTransactionNo || statement.externalTransactionNo };
+      const nextOrder = { ...currentOrder, payments: currentOrder.payments.map(item => item.id === payment.id ? payment : item) };
+      return { order: nextOrder, payment, state: { ...state, orders: orders.map(order => order.id === nextOrder.id ? nextOrder : order) } };
+    }
+    if (proofReceipts.length) throw httpError(409, "订单已有同金额付款凭证核验收款，请联系财务核对原收款与银行流水，不能再次入账", "PAYMENT_PROOF_STATEMENT_OVERLAP");
+    if (proofPaymentIds.size) {
+      const totals = financePaymentTotals(currentOrder);
+      const remaining = calcAmountDueForOrder(currentOrder, state.shipments) - totals.received + totals.refunded - totals.pendingReceived;
+      if (Number(statement.amount) - remaining > 0.005) throw httpError(409, "该订单已有核验收款，本次关联会超过剩余应收，请先核对付款凭证和银行流水", "PAYMENT_PROOF_STATEMENT_OVERLAP");
+    }
+  }
   if (statement.direction === "expense") {
     const refund = (Array.isArray(currentOrder.payments) ? currentOrder.payments : []).find((payment) =>
       payment?.type === "refund" &&
@@ -5607,6 +5636,7 @@ function buildFinanceOverview(
     }))
   ).sort((left, right) => String(right.time).localeCompare(String(left.time)));
   const orderRowsById = new Map(orderRows.map((order) => [order.id, order]));
+  const statementProfiles = financeMatchingOrderProfiles(state);
   const statements = statementRows.map(paymentStatementFromRow).map((statement) => {
     const matchedOrder = orderRowsById.get(statement.matchedOrderId);
     return {
@@ -5614,7 +5644,7 @@ function buildFinanceOverview(
       matchedOrderNo: matchedOrder?.orderNo ?? "",
       matchedCustomerName: matchedOrder?.customerName ?? "",
       matchedContactPerson: matchedOrder?.contactPerson ?? "",
-      candidates: statement.candidates.map((candidate) => {
+      candidates: (statement.matchStatus === "unmatched" ? matchPaymentStatement(statement, statementProfiles).candidates : statement.candidates).map((candidate) => {
         const order = orderRowsById.get(String(candidate?.orderId ?? ""));
         return {
           ...candidate,
@@ -5911,6 +5941,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
   if (requestedCustomerId && !customerExists) throw new Error("关联客户档案不存在或不唯一，请先核对客户资料");
   const customerId = requestedCustomerId;
   if (currentOrder) assertNewCustomerCustomerUnchanged(currentOrder, { customerId });
+  if (Object.prototype.hasOwnProperty.call(body, "paymentClaims")) assertPaymentClaimsUnchanged(currentOrder, body);
   const platformOrderNo = isPlatformOrder
     ? String(body.platformOrderNo ?? body.douyinOrderNo ?? platformOrderNoForOrder(currentOrder)).trim()
     : "";
@@ -6202,12 +6233,9 @@ function applyAutomaticOrderTransitions(state = {}) {
           return shipment;
         }
         autoShippedCount += 1;
-        return {
-          ...shipment,
-          status: "shipped",
-          shippedAt: shipment.shippedAt || now,
-          shipDate: today,
-        };
+        return paymentEvidenceShipmentSnapshot({
+          ...shipment, status: "shipped", shippedAt: shipment.shippedAt || now, shipDate: today,
+        }, order || {}, order ? calcAmountDueForOrder(order, shipments) : 0, "auto_confirm", now);
       }
     }
     if (status === "shipped") {
@@ -6498,6 +6526,16 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     assertNewCustomerCustomerUnchanged(currentOrder, nextOrder);
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
     assertOrderOwnerAssignmentUnchanged(currentOrder, nextOrder);
+    assertPaymentClaimsUnchanged(currentOrder, nextOrder);
+    if (paymentClaims(currentOrder).some(claim => claim.status === "approved") && stableJson(currentOrder.payments) !== stableJson(nextOrder.payments)) {
+      throw httpError(409, "已关联付款凭证的资金记录必须通过财务专用入口操作，不能通过通用保存修改", "PAYMENT_PROOF_PAYMENT_LOCKED");
+    }
+    for (const claim of paymentClaims(currentOrder).filter(claim => claim.status === "approved")) {
+      const beforePayment = (currentOrder.payments ?? []).find(payment => payment.id === claim.paymentId);
+      const afterPayment = (nextOrder.payments ?? []).find(payment => payment.id === claim.paymentId);
+      if (stableJson(beforePayment) !== stableJson(afterPayment)) throw httpError(409, "已核验付款凭证关联的收款不可通过通用保存修改", "PAYMENT_PROOF_PAYMENT_LOCKED");
+    }
+
     if (currentOrder.status === "completed") throw new Error("已完成订单不能再修改");
     if (currentOrder.status === "cancelled") throw new Error("已取消订单不能再修改");
     if (stableJson(currentOrder.items ?? []) !== stableJson(nextOrder.items ?? [])) {
@@ -6526,6 +6564,10 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    if (stableJson(currentShipment.paymentEvidenceSnapshot) !== stableJson(nextShipment.paymentEvidenceSnapshot) ||
+        stableJson(currentShipment.paymentEvidenceSnapshots) !== stableJson(nextShipment.paymentEvidenceSnapshots)) {
+      throw httpError(409, "发货时的付款凭证和赊销快照为系统留存记录，不能修改", "PAYMENT_EVIDENCE_SNAPSHOT_IMMUTABLE");
+    }
     const relatedOrder = nextOrdersById.get(String(nextShipment.orderId ?? ""));
     assertShipmentInventoryIdentityUnchanged(currentShipment, nextShipment, {
       expectedSiteId: relatedOrder?.siteId,
@@ -8637,6 +8679,15 @@ async function ensureSchema() {
   return schemaReady;
 }
 
+const handlePaymentProofApi = createPaymentProofHandler({
+  pool, stateId, uploadDir, keyring: personnelDataKeyring, readBody, readRawBody, sendJson,
+  refreshAuth: refreshLockedOrderMutationAuth, resolveOrder: resolveAuthorizedLockedOrderTarget,
+  hasPermission: hasModulePermission, requirePermission: requireModulePermissionForAuth,
+  visibleState: siteVisibilityFilteredState, amountDue: calcAmountDueForOrder,
+  commissionMutation: commissionStateForMutation, createId: uid, createLog: createOperationLog,
+  limiter: newCustomerEvidenceLimiter, ffmpegPath: FFMPEG_PATH, ffprobePath: FFPROBE_PATH, nowInChina: nowDatetimeInChina,
+});
+
 async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
@@ -10111,10 +10162,12 @@ async function handleApi(req, res, url) {
         const statementId = uid("statement");
         const statement = { ...record, id: statementId, siteId: scope.requested };
         let matchedPaymentId = "";
+        let matchedVerifiedBy = "";
         if (match.matchedOrderId) {
           const linked = linkStatementToStateOrder(nextState, statement, match.matchedOrderId, "auto", "system");
           nextState = linked.state;
           matchedPaymentId = linked.payment.id;
+          if (isPaymentVerified(linked.payment)) matchedVerifiedBy = linked.payment.verifiedBy || "system";
           matchedCount += 1;
         } else {
           unmatchedCount += 1;
@@ -10141,6 +10194,10 @@ async function handleApi(req, res, url) {
             match.matchedOrderId ? new Date().toISOString() : null,
             match.matchedOrderId ? "system" : "",
           ]
+        );
+        if (matchedVerifiedBy) await client.query(
+          `UPDATE finance_payment_statements SET match_status = 'verified', verified_at = now(), verified_by = $3 WHERE id = $1 AND state_id = $2`,
+          [statementId, stateId, matchedVerifiedBy]
         );
       }
 
@@ -10273,7 +10330,8 @@ async function handleApi(req, res, url) {
           if (!candidateIds.has(orderId)) throw new Error("该流水不是此订单的候选收款，请联系财务处理");
         }
         const method = financeActor ? "finance" : "owner";
-        const linked = linkStatementToStateOrder(state, statement, orderId, method, operator);
+        if (body.existingPaymentId && !financeActor) throw httpError(403, "仅财务可以将账单绑定到已核验的付款凭证收款", "PAYMENT_PROOF_FORBIDDEN");
+        const linked = linkStatementToStateOrder(state, statement, orderId, method, operator, String(body.existingPaymentId || "").trim());
         nextState = linked.state;
         linkedOrder = linked.order;
         await client.query(
@@ -10282,6 +10340,10 @@ async function handleApi(req, res, url) {
                match_method = $5, matched_at = now(), matched_by = $6
            WHERE id = $1 AND state_id = $2`,
           [statement.id, stateId, orderId, linked.payment.id, method, operator]
+        );
+        if (isPaymentVerified(linked.payment)) await client.query(
+          `UPDATE finance_payment_statements SET match_status = 'verified', verified_at = now(), verified_by = $3 WHERE id = $1 AND state_id = $2`,
+          [statement.id, stateId, linked.payment.verifiedBy || operator]
         );
         detail = `流水「${statement.externalTransactionNo || statement.id}」关联订单「${linked.order.orderNo}」，待财务核销`;
       }
@@ -12381,6 +12443,12 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await handlePaymentProofApi(req, res, url)) return;
+  if (["/api/orders/credit-sale/request", "/api/orders/credit-sale/confirm"].includes(url.pathname) && req.method === "POST") {
+    sendJson(req, res, 409, { ok: false, code: "CREDIT_SALE_APPROVAL_RETIRED", error: "赊销审批已停用：所有订单可直接发货，无凭证或未覆盖的金额自动登记赊销；付款凭证由财务核验。" });
+    return;
+  }
+
   if (url.pathname === "/api/orders/credit-sale/request" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -13394,6 +13462,12 @@ async function handleApi(req, res, url) {
 
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       let nextPayments = currentPayments;
+      const requestedPaymentId = String(body.paymentId ?? body.payment?.id ?? "");
+      if (["update", "delete"].includes(action) && paymentClaims(currentOrder).some(claim =>
+        claim.status === "approved" && claim.paymentId === requestedPaymentId)) {
+        throw httpError(409, "该收款已关联核验通过的付款凭证，不能直接修改或删除，请保留原收款并单独登记退款", "PAYMENT_PROOF_PAYMENT_LOCKED");
+      }
+
       let detail = "";
 
       if (action === "add") {
@@ -13417,6 +13491,13 @@ async function handleApi(req, res, url) {
         });
         if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
           throw new Error("资金记录已存在，请刷新后重试");
+        }
+        if (payment.type !== "refund" && paymentClaims(currentOrder).some(claim => claim.status === "approved")) {
+          const committed = currentPayments.reduce((sum, item) => sum + (item.type === "refund"
+            ? isPaymentVerified(item) ? -Number(item.amount || 0) : 0 : Number(item.amount || 0)), 0);
+          if (committed + payment.amount - calcAmountDueForOrder(currentOrder, state.shipments) > 0.005) {
+            throw httpError(409, "订单已有付款凭证核验收款，再次新增会超过应收，请关联原收款核对，避免重复登记", "PAYMENT_PROOF_PAYMENT_OVERLAP");
+          }
         }
         nextPayments = [...currentPayments, payment];
         detail = `订单「${currentOrder.orderNo}」补录${paymentTypeLabel(payment.type)} ¥${payment.amount.toFixed(2)}，待核销`;
@@ -13982,7 +14063,7 @@ async function handleApi(req, res, url) {
         ? 0
         : normalizeOutboundActualShippingFee(body.actualShippingFee, shippingFeeMode);
       const createdAt = nowDatetimeInChina();
-      const shipment = {
+      let shipment = {
         id: shipmentId,
         siteId: normalizeSiteId(order.siteId),
         orderId: order.id,
@@ -14019,6 +14100,7 @@ async function handleApi(req, res, url) {
         });
         return;
       }
+      shipment = paymentEvidenceShipmentSnapshot(shipment, order, calcAmountDueForOrder(order, [...shipments, shipment]), "outbound", createdAt);
       const nextShipments = [...shipments, shipment];
       const nextOrders = orders.map((item) =>
         String(item?.id ?? "") === order.id
@@ -14168,14 +14250,14 @@ async function handleApi(req, res, url) {
 
       const now = nowDatetimeInChina();
       const shipMethod = shipment.shipMethod === "pickup" ? "pickup" : "express";
-      const updatedShipment = {
+      const updatedShipment = paymentEvidenceShipmentSnapshot({
         ...shipment,
         status: shipMethod === "pickup" ? "delivered" : "shipped",
         packingProof,
         shippedAt: now,
         shipDate: todayInChina(),
         actualShippingFee: shipMethod === "pickup" ? 0 : shipment.actualShippingFee,
-      };
+      }, order, calcAmountDueForOrder(order, shipments), "confirm", now);
       const nextShipments = shipments.map((item) =>
         String(item?.id ?? "") === shipmentId ? updatedShipment : item
       );
@@ -16827,6 +16909,8 @@ async function serveUpload(req, res, url) {
   if (
     relative === PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY ||
     relative.startsWith(`${PERSONNEL_PRIVATE_ATTACHMENT_DIRECTORY}/`) ||
+    relative === PAYMENT_EVIDENCE_DIRECTORY ||
+    relative.startsWith(`${PAYMENT_EVIDENCE_DIRECTORY}/`) ||
     relative === NEW_CUSTOMER_EVIDENCE_DIRECTORY ||
     relative.startsWith(`${NEW_CUSTOMER_EVIDENCE_DIRECTORY}/`) ||
     relative === VIDEO_DERIVATIVE_DIRECTORY ||
@@ -16838,6 +16922,7 @@ async function serveUpload(req, res, url) {
   const candidate = normalize(join(uploadDir, relative));
   if (
     isPersonnelPrivateAttachmentPath(uploadDir, candidate) ||
+    isPaymentEvidencePath(uploadDir, candidate) ||
     isNewCustomerEvidencePath(uploadDir, candidate) ||
     isVideoDerivativePath(uploadDir, candidate)
   ) {
@@ -17032,6 +17117,9 @@ server.listen(port, host, () => {
   console.log(`PostgreSQL state table: ${pgConfig.database}.app_state`);
   scheduleAutomaticOrderTransitions();
   // A bounded, dedicated cleanup never touches normal uploads or submitted proof.
-  const evidenceCleanupTimer = setInterval(() => cleanupNewCustomerEvidenceDrafts().catch(() => undefined), 30 * 60 * 1000);
+  const evidenceCleanupTimer = setInterval(() => {
+    void cleanupNewCustomerEvidenceDrafts().catch(() => undefined);
+    void cleanupPaymentEvidenceDrafts({ pool, stateId, uploadDir }).catch(() => undefined);
+  }, 30 * 60 * 1000);
   evidenceCleanupTimer.unref?.();
 });

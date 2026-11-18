@@ -12,6 +12,10 @@ import {
   useStore,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
+import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
+import { PaymentProofQueue } from "./PaymentProofQueue";
+import type { PaymentProofDetail } from "../utils/orderPaymentProof";
 import { uploadOriginalMedia } from "../utils/media";
 import {
   isPlatformOrderSource,
@@ -799,6 +803,7 @@ function OrderFinanceDialog({
 
             <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1.35fr)_minmax(390px,0.65fr)]">
               <div className="min-w-0 lg:overflow-y-auto">
+                <div className="border-b px-4 py-4 sm:px-6"><OrderPaymentProofPanel key={`finance-proof:${order.id}:${state.user?.username}`} orderId={order.id} reviewOnly onApplied={() => onRefresh()} /></div>
                 <section className="border-b px-4 py-4 sm:px-6">
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
@@ -1131,6 +1136,7 @@ function OrderFinanceDialog({
                                   ))}
                                 </div>
                               )}
+                              {payment.paymentProofClaimId && <p className="mt-2 text-xs leading-5 text-muted-foreground">凭证核验收款已锁定；退款请单独登记。图片与核验记录见本单付款凭证区。</p>}
                             </div>
                             <div className="flex shrink-0 items-center gap-1 self-end">
                               {payment.verificationStatus === "pending" && permission.canUpdate && (
@@ -1145,12 +1151,12 @@ function OrderFinanceDialog({
                                   核销
                                 </Button>
                               )}
-                              {permission.canUpdate && payment.recordSource !== "statement" && !payment.statementId && (
+                              {permission.canUpdate && !payment.paymentProofClaimId && payment.recordSource !== "statement" && !payment.statementId && (
                                 <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
                                   <Pencil className="size-3.5" />
                                 </Button>
                               )}
-                              {permission.canDelete && payment.recordSource !== "statement" && !payment.statementId && (
+                              {permission.canDelete && !payment.paymentProofClaimId && payment.recordSource !== "statement" && !payment.statementId && (
                                 <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => deletePayment(payment)} title="删除流水">
                                   <Trash2 className="size-3.5" />
                                 </Button>
@@ -1486,11 +1492,31 @@ function StatementLinkDialog({
   const [search, setSearch] = useState("");
   const [selectedOrderId, setSelectedOrderId] = useState("");
   const [saving, setSaving] = useState(false);
+  const [linkableProofPayments, setLinkableProofPayments] = useState<PaymentRecord[]>([]);
+  const [existingPaymentId, setExistingPaymentId] = useState("");
+  const [proofLoading, setProofLoading] = useState(false);
+  const [proofError, setProofError] = useState("");
   useEffect(() => {
     if (!open) return;
     setSearch("");
     setSelectedOrderId(statement?.candidates[0]?.orderId ?? "");
   }, [open, statement?.id]);
+  useEffect(() => {
+    setExistingPaymentId(""); setLinkableProofPayments([]); setProofError("");
+    if (!open || !selectedOrderId || !statement || statement.direction === "expense") { setProofLoading(false); return; }
+    const controller = new AbortController(); const session = captureNewCustomerSession(); setProofLoading(true);
+    void (async () => { try {
+      const response = await fetch(`/api/orders/payment-proof/detail?orderId=${encodeURIComponent(selectedOrderId)}`, { headers: authJsonHeaders(), signal: controller.signal, cache: "no-store" });
+      const result = await response.json().catch(() => ({}));
+      if (controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
+      if (!response.ok || !result.ok) throw new Error(result.error || "已核验凭证收款加载失败。");
+      const approvedIds = new Set((result.claims || []).filter((claim: PaymentProofDetail["claims"][number]) => claim.status === "approved").map((claim: PaymentProofDetail["claims"][number]) => claim.paymentId));
+      const payments = Array.isArray(result.linkableProofPayments) ? result.linkableProofPayments : orders.find(order => order.id === selectedOrderId)?.payments.filter(payment => approvedIds.has(payment.id)) || [];
+      setLinkableProofPayments(payments.filter((payment: PaymentRecord) => !payment.statementId && payment.type !== "refund" && payment.channel === statement.channel && payment.account === statement.account && Math.abs(payment.amount - statement.amount) < 0.005));
+    } catch (cause) { if (!controller.signal.aborted && isNewCustomerSessionCurrent(session)) setProofError(cause instanceof Error ? cause.message : "加载失败，请重新选择订单重试。"); }
+    finally { if (!controller.signal.aborted && isNewCustomerSessionCurrent(session)) setProofLoading(false); } })();
+    return () => controller.abort();
+  }, [open, selectedOrderId, statement?.id, orders]);
   const candidates = useMemo(() => {
     if (!statement) return [];
     const candidateScores = new Map(statement.candidates.map((candidate) => [candidate.orderId, candidate.score]));
@@ -1508,16 +1534,16 @@ function StatementLinkDialog({
   const link = async () => {
     if (!statement || !selectedOrderId || saving) return;
     const order = orders.find((item) => item.id === selectedOrderId);
-    if (!order || !confirmWrite("关联", `将流水 ${statement.externalTransactionNo || statement.id} 关联到订单 ${order.orderNo}，关联后仍需财务核销。`)) return;
+    if (!order || !confirmWrite("关联", `将流水 ${statement.externalTransactionNo || statement.id} 关联到订单 ${order.orderNo}。${existingPaymentId ? "复用已核验的凭证收款，不会重复增加到账金额。" : "新增待核销流水，关联后仍需财务核销。"}`)) return;
     setSaving(true);
     try {
       await requestJson("/api/finance/statements/link", {
         method: "POST",
-        body: JSON.stringify({ action: "link", statementId: statement.id, orderId: selectedOrderId }),
+        body: JSON.stringify({ action: "link", statementId: statement.id, orderId: selectedOrderId, ...(existingPaymentId ? { existingPaymentId } : {}) }),
       });
       await onLinked();
       onOpenChange(false);
-      toast.success("收款流水已关联，等待财务核销");
+      toast.success(existingPaymentId ? "银行流水已关联原凭证收款，到账金额未重复增加" : "收款流水已关联，等待财务核销");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "收款流水关联失败");
     } finally {
@@ -1550,7 +1576,13 @@ function StatementLinkDialog({
             </div>
           )}
         </div>
-        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button onClick={() => void link()} disabled={!selectedOrderId || saving}>{saving && <Loader2 className="size-4 animate-spin" />}确认关联</Button></DialogFooter>
+        {selectedOrderId && statement?.direction !== "expense" && <div className="space-y-2 rounded-md border p-3 text-sm">
+          {proofLoading ? <p role="status" className="text-muted-foreground">正在核对该订单已确认的凭证收款…</p> : proofError ? <p role="alert" className="text-destructive">{proofError}</p> : linkableProofPayments.length > 0 ? <>
+            <label className="grid gap-1.5">复用已核验的付款凭证收款<select aria-label="复用已核验的付款凭证收款" value={existingPaymentId} disabled={saving} className="fishroom-control min-h-11 w-full rounded-md border bg-background px-3" onChange={event => setExistingPaymentId(event.target.value)}><option value="">请选择对应的原收款，防止重复计收</option>{linkableProofPayments.map(payment => <option key={payment.id} value={payment.id}>{payment.time} · {money(payment.amount)} · {payment.externalTransactionNo || payment.id}</option>)}</select></label>
+            <p className="text-xs leading-5 text-muted-foreground">这笔款可能已凭图片核验到账。选择对应记录后只补关联银行流水，不新增金额；仅同额不能证明是同一笔款，请人工核实。</p>
+          </> : <p className="text-xs text-muted-foreground">未找到同额、同渠道和账户的已核验凭证收款，将按原流程新增待核销记录。</p>}
+        </div>}
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button onClick={() => void link()} disabled={!selectedOrderId || saving || proofLoading || Boolean(proofError) || (linkableProofPayments.length > 0 && !existingPaymentId)}>{saving && <Loader2 className="size-4 animate-spin" />}确认关联</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -2214,6 +2246,8 @@ export function FinanceView() {
       )}
 
       {permission.isAdmin && <CommissionSummarySection key={state.user?.username} refreshKey={data} />}
+
+      {permission.canUpdate && <PaymentProofQueue key={`proof-queue:${state.user?.username}:${activeSiteId}`} siteId={activeSiteId} refreshKey={data} onOpenOrder={(orderId) => { setLedgerMode("orders"); setSelectedOrderId(orderId); }} />}
 
       <section className="order-2 flex flex-col gap-3">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">

@@ -213,6 +213,18 @@ export function matchPaymentStatement(statement = {}, orders = []) {
     if (order?.status === "cancelled") return [];
     if (normalizeText(order?.paymentChannel) !== statementChannel) return [];
     if (normalizeComparable(order?.paymentAccount) !== statementAccount) return [];
+    const proofReceipts = (Array.isArray(order.proofReceipts) ? order.proofReceipts : []).filter(payment =>
+      Math.abs(roundMoney(payment.amount) - roundMoney(statement.amount)) <= 0.005 &&
+      normalizeText(payment.channel) === statementChannel && normalizeComparable(payment.account) === statementAccount);
+    if (proofReceipts.length) {
+      const exactReference = proofReceipts.filter(payment => normalizeText(payment.externalTransactionNo) &&
+        normalizeText(payment.externalTransactionNo) === normalizeText(statement.externalTransactionNo));
+      return [{ orderId: String(order.id ?? ""), orderNo: String(order.orderNo ?? ""),
+        customerName: String(order.customerName ?? ""), contactPerson: String(order.contactPerson ?? ""),
+        receivable: roundMoney(order.receivable), outstanding: 0, score: exactReference.length === 1 ? 160 : 100,
+        reason: "已核验付款凭证对应收款；选择原收款复用关联，不新增到账", exactAmount: true,
+        requiresPaymentSelection: exactReference.length !== 1, existingPaymentOptions: proofReceipts }];
+    }
     const outstanding = roundMoney(order?.matchingOutstanding ?? order?.balance ?? order?.receivable);
     if (outstanding <= 0.005) return [];
     const receivable = roundMoney(order?.receivable);
@@ -252,7 +264,7 @@ export function matchPaymentStatement(statement = {}, orders = []) {
   const top = candidates[0];
   const second = candidates[1];
   const unambiguous = Boolean(
-    top && top.exactAmount && top.score >= 75 && (!second || top.score - second.score >= 20)
+    top && !top.requiresPaymentSelection && top.exactAmount && top.score >= 75 && (!second || top.score - second.score >= 20)
   );
   return {
     matchedOrderId: unambiguous ? top.orderId : "",

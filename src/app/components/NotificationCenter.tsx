@@ -8,7 +8,6 @@ import {
   ExternalLink,
   FilterX,
   FileUser,
-  HandCoins,
   Inbox,
   Loader2,
   MapPin,
@@ -30,6 +29,7 @@ import {
   type StockPriceMode,
 } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
+import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
 import {
   createLatestRequestCoordinator,
   projectStockChangeItems,
@@ -264,6 +264,8 @@ function formatNotificationTime(value?: string): string {
 }
 
 function notificationResultLabel(notification: StationNotification): string {
+  if (notification.type === "credit_sale_confirmation") return "旧赊销审批已停用";
+  if (notification.type === "payment_proof" && notification.status === "pending") return "凭证待核验";
   if (notification.type === "order_owner_assignment") {
     if (notification.status === "pending") return "待负责人确认";
     return ({ accepted: "已确认接手", rejected: "已拒绝接手", cancelled: "已撤回或失效" } as Record<string, string>)[notification.resolution || ""] || "已处理";
@@ -305,7 +307,8 @@ function notificationTypeLabel(notification: StationNotification): string {
     }[notification.approvalAction ?? ""] ?? "库存审批";
   }
   if (notification.type === "approval_result") return "审批结果";
-  if (notification.type === "credit_sale_confirmation") return "赊销确认";
+  if (notification.type === "credit_sale_confirmation") return "历史赊销确认";
+  if (notification.type === "payment_proof") return "付款凭证核验";
   if (notification.type === "personnel_profile_approval") return "人员资料审批";
   if (notification.type === "new_customer_approval") return "新客首单审批";
   if (notification.type === "order_owner_assignment") return "负责人转交确认";
@@ -570,9 +573,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
   const [endDate, setEndDate] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [senderFilter, setSenderFilter] = useState("all");
-  const [selected, setSelected] = useState<StationNotification | null>(null);
-  const [creditNote, setCreditNote] = useState("");
-  const [confirming, setConfirming] = useState(false);
+  const [proofNotification, setProofNotification] = useState<StationNotification | null>(null);
+  useEffect(() => { setProofNotification(null); }, [state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
   const [selectedApproval, setSelectedApproval] = useState<StationNotification | null>(null);
   const [approvalDecision, setApprovalDecision] = useState<"approve" | "reject" | null>(null);
   const [approvalNote, setApprovalNote] = useState("");
@@ -775,61 +777,6 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
     setSelectedNewCustomerApproval(null);
     notifyNotificationRefresh();
     await loadNotifications(true);
-  };
-
-  const startCreditConfirmation = (notification: StationNotification) => {
-    setCreditNote("");
-    setSelected(notification);
-  };
-
-  const confirmCreditSale = async () => {
-    if (!selected?.orderId || confirming) return;
-    setConfirming(true);
-    try {
-      const response = await fetch("/api/orders/credit-sale/confirm", {
-        method: "POST",
-        headers: authJsonHeaders(),
-        body: JSON.stringify({
-          orderId: selected.orderId,
-          note: creditNote.trim(),
-          responseMode: "compact",
-        }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) throw new Error(result.error || "确认赊销失败");
-      setState((current) => ({
-        ...current,
-        orders: Array.isArray(result.orders)
-          ? result.orders
-          : result.order
-            ? mergeEntityChanges<Order>(current.orders, [result.order])
-            : current.orders,
-        operationLogs: result.operationLog
-          ? [result.operationLog, ...(current.operationLogs ?? [])]
-              .filter((log, index, all) => all.findIndex((item) => item.id === log.id) === index)
-              .slice(0, 10000)
-          : current.operationLogs,
-      }));
-      setSelected(null);
-      setCreditNote("");
-      if (!applyNotificationPayload(result)) {
-        notifyNotificationRefresh();
-        void loadNotifications(true);
-      }
-      toast.success(
-        result.alreadyVerified
-          ? "财务已经核销，无需确认赊销"
-          : result.alreadyAllowed
-            ? result.allowance === "offline_credit"
-              ? "线下自提默认赊销，可以直接出库"
-              : "平台订单无需确认赊销"
-            : "赊销已确认，可以继续发货"
-      );
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "确认赊销失败");
-    } finally {
-      setConfirming(false);
-    }
   };
 
   const loadStockApprovalDetails = async (notification: StationNotification, force = false) => {
@@ -1356,7 +1303,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <Check className="size-3.5" />标为已读
                         </Button>
                       )}
-                      {notification.orderId && (
+                      {notification.orderId && notification.type !== "payment_proof" && (
                         <Button variant="outline" size="sm" onClick={() => openOrder(notification)}>
                           <ExternalLink className="size-3.5" />查看订单
                         </Button>
@@ -1386,11 +1333,8 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                           <UserRound className="size-4" aria-hidden="true" />{pending && notification.notificationRole === "assignee" ? "确认负责人" : "查看转交申请"}
                         </Button>
                       )}
-                      {pending && notification.type === "credit_sale_confirmation" && notification.canApprove === true && (
-                        <Button size="sm" onClick={() => startCreditConfirmation(notification)}>
-                          <HandCoins className="size-3.5" />同意赊销
-                        </Button>
-                      )}
+                      {notification.type === "credit_sale_confirmation" && <p className="text-xs text-muted-foreground">旧赊销审批已停用。未被到账或付款凭证覆盖的金额，发货时自动记录赊销。</p>}
+                      {notification.type === "payment_proof" && notification.orderId && <Button type="button" className="min-h-11" variant={pending ? "default" : "outline"} onClick={() => { setProofNotification(notification); void markRead(notification); }}><FileUser className="size-4" />{pending && notification.notificationRole === "approver" ? "查看凭证并核验" : "查看付款凭证"}</Button>}
                       {pending && notification.type === "stock_approval" && notification.canApprove === true && (
                         <>
                           <Button
@@ -1434,37 +1378,15 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
         </div>
       </div>
 
-      <Dialog open={!!selected} onOpenChange={(nextOpen) => {
-        if (!nextOpen && !confirming) setSelected(null);
-      }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>审批赊销 · {selected?.orderNo}</DialogTitle>
-            <DialogDescription className="sr-only">
-              核对订单未核销金额并填写赊销审批说明。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
-            同意后，该订单可在尚有 ¥{Number(selected?.requiredOutstandingAmount ?? 0).toFixed(2)} 未核销的情况下发货。审批人、时间和说明会同步给其他被选审批人。
-          </div>
-          <div className="grid gap-1.5">
-            <label className="text-sm font-medium" htmlFor="credit-sale-note">赊销说明</label>
-            <Textarea
-              id="credit-sale-note"
-              rows={3}
-              maxLength={500}
-              value={creditNote}
-              onChange={(event) => setCreditNote(event.target.value)}
-              placeholder="例如：老客户，约定 8 月 10 日付款"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" disabled={confirming} onClick={() => setSelected(null)}>取消</Button>
-            <Button disabled={confirming} onClick={() => void confirmCreditSale()}>
-              {confirming ? <Loader2 className="size-4 animate-spin" /> : <HandCoins className="size-4" />}
-              {confirming ? "提交中" : "同意赊销"}
-            </Button>
-          </DialogFooter>
+      <Dialog open={!!proofNotification} onOpenChange={nextOpen => { if (!nextOpen) setProofNotification(null); }}>
+        <DialogContent aria-describedby={undefined} className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader><DialogTitle>付款凭证核验 · {proofNotification?.orderNo || "订单"}</DialogTitle></DialogHeader>
+          {proofNotification?.orderId && <OrderPaymentProofPanel key={`notice-proof:${proofNotification.orderId}:${state.user?.username}`} orderId={proofNotification.orderId}
+            onApplied={(result, session) => {
+              setState(current => !isNewCustomerSessionCurrent(session, current.user) ? current : ({ ...current,
+                orders: Array.isArray(result.orders) ? result.orders : result.order ? mergeEntityChanges<Order>(current.orders, [result.order]) : current.orders }));
+              void loadNotifications(true);
+            }} />}
         </DialogContent>
       </Dialog>
 

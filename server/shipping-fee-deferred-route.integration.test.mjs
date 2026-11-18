@@ -100,7 +100,7 @@ for (const mode of ["prepaid", "free"]) {
   });
 }
 
-test("prepaid: later actual fee updates receivable and cannot bypass the payment completion gate", async (t) => {
+test("prepaid: later actual fee updates receivable while credit can finish without fabricating extra receipts", async (t) => {
   const s = await setup(t, "prepaid", {
     source: "私域线上", customerId: "fulfillment-customer", shippingAddress: "测试地址", paymentChannel: "cash",
     payments: [{ id: "paid", type: "balance", amount: 208, time: "2026-10-20T12:00:00+08:00",
@@ -113,10 +113,10 @@ test("prepaid: later actual fee updates receivable and cannot bypass the payment
   ok(await s.request("/api/shipments/actual-shipping-fee", { token: s.admin, body: {
     shipmentId, expectedActualShippingFee: 0, actualShippingFee: 30,
   } }));
-  const blocked = await s.request("/api/orders/complete", { token: s.admin, body: { orderId: "moved-order" } });
-  assert.equal(blocked.response.status, 409, JSON.stringify(blocked.body));
-  assert.equal(blocked.body.code, "CREDIT_SALE_CONFIRMATION_REQUIRED");
-  assert.equal((await s.readPersistedState()).orders[0].status, "shipped");
+  const completed = await s.request("/api/orders/complete", { token: s.admin, body: { orderId: "moved-order" } }); ok(completed);
+  const state = await s.readPersistedState();
+  assert.equal(state.orders[0].status, "completed");
+  assert.equal(state.orders[0].payments.length, 1); assert.equal(state.orders[0].payments[0].amount, 208);
 });
 
 test("free: delayed fee remains seller expense and does not create customer arrears", async (t) => {

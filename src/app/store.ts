@@ -624,6 +624,8 @@ export type PaymentRecord = {
   externalTransactionNo?: string;
   /** 导入收款账单的原始流水记录，用于防止重复认领和核销。 */
   statementId?: string;
+  /** 经财务核验的付款图片申报，原收款记录不可直接改写。 */
+  paymentProofClaimId?: string;
   /** 账单与订单的关联方式。 */
   matchMethod?: "auto" | "owner" | "finance";
   /** 退款流水关联前的原记录，用于解除关联时恢复退款申请。 */
@@ -729,6 +731,8 @@ export type Order = {
   /** 管理员或订单负责人审批的赊销额度；订单金额、渠道或负责人变化后由服务端清除。 */
   creditSaleApproval?: CreditSaleApproval;
   payments: PaymentRecord[];
+  /** 负责人付款图片申报；财务核验通过前不计入已确认到账。 */
+  paymentClaims?: import("./utils/orderPaymentProof").PaymentProofClaim[];
 };
 
 export type ShippingFeeMode = "collect" | "prepaid" | "free";

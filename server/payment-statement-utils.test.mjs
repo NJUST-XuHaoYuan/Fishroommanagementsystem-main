@@ -2,6 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { matchPaymentStatement, parsePaymentStatementCsv } from "./payment-statement-utils.mjs";
 
+test("fully paid proof-backed orders remain discoverable but only a unique transaction reference can auto-reuse the receipt", () => {
+  const statement = { channel: "wechat", account: "已核验账户", amount: 600, direction: "income", occurredAt: "2026-11-18 12:00:00",
+    externalTransactionNo: "BANK-REF-001", notes: "SO-PAID-PROOF 鱼款" };
+  const receipt = { id: "proof-receipt", amount: 600, channel: "wechat", account: "已核验账户", externalTransactionNo: "" };
+  const order = { id: "paid-proof-order", orderNo: "SO-PAID-PROOF", paymentChannel: "wechat", paymentAccount: "已核验账户",
+    receivable: 600, matchingOutstanding: 0, status: "completed", proofReceipts: [receipt] };
+  const manual = matchPaymentStatement(statement, [order]);
+  assert.equal(manual.matchedOrderId, ""); assert.equal(manual.candidates.length, 1);
+  assert.equal(manual.candidates[0].requiresPaymentSelection, true);
+  assert.deepEqual(manual.candidates[0].existingPaymentOptions.map(payment => payment.id), [receipt.id]);
+  const exact = matchPaymentStatement(statement, [{ ...order, proofReceipts: [{ ...receipt, externalTransactionNo: "BANK-REF-001" }] }]);
+  assert.equal(exact.matchedOrderId, order.id); assert.equal(exact.candidates[0].requiresPaymentSelection, false);
+  const ambiguous = matchPaymentStatement(statement, [{ ...order, proofReceipts: [
+    { ...receipt, externalTransactionNo: "BANK-REF-001" }, { ...receipt, id: "another-proof-receipt", externalTransactionNo: "BANK-REF-001" },
+  ] }]);
+  assert.equal(ambiguous.matchedOrderId, ""); assert.equal(ambiguous.candidates[0].requiresPaymentSelection, true);
+});
+
 test("parses common WeChat and bank statement columns", () => {
   const csv = [
     "交易时间,交易单号,收支类型,交易金额,付款方,备注",
