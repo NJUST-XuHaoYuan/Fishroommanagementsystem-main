@@ -35,8 +35,11 @@ test("mixed-location fulfillment preserves order ownership and requires authorit
   assert.equal(result.body.shipment.siteId, "nanjing");
   const after = await s.readPersistedState();
   const { status: _beforeStatus, ...original } = before.orders[0];
-  const { status: _afterStatus, ...retained } = after.orders[0];
+  const { status: _afterStatus, salesAmountSnapshot, ...retained } = after.orders[0];
   assert.deepEqual(retained, original, "transfer fulfillment cannot reparent or reprice the financial order");
+  assert.equal(salesAmountSnapshot.source, "legacy");
+  assert.equal(salesAmountSnapshot.amount, original.items.reduce((sum, item) => sum + item.price, 0) + Number(original.packagingFee || 0) - Number(original.discount || 0));
+  assert.ok(salesAmountSnapshot.capturedAt);
   assert.deepEqual(after.stock, before.stock);
   const projection = await s.request("/api/state/slice?keys=stock,tankGroups,orders,shipments", { token: s.tokens.single }); ok(projection);
   assert.equal(projection.body.data.stock.some((item) => item.id === "moved-fish"), false);

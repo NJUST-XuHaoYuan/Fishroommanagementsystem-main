@@ -125,7 +125,12 @@ import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
 import {
   normalizeDamageReplacementSelection,
   snapshotDamageReplacements,
+  appendShipmentDamageEvent,
 } from "./shipment-damage-utils.mjs";
+import {
+  captureOrderSalesAmount, preserveOrderSalesSnapshots, assertOrderSalesMetadataUnchanged,
+  assertRefundMetadataUnchanged, refundMetadataSnapshot, refundMetadataForOrder,
+} from "./order-sales-snapshots.mjs";
 import {
   countsAsCompletionShipment,
   shipmentIsResolvedForCompletion,
@@ -139,7 +144,7 @@ import {
   shipmentPatchRequiresAssignmentValidation,
 } from "./shipment-inventory-integrity.mjs";
 import {
-  buildDashboardFinanceSeries,
+  buildDashboardSalesMetrics,
   buildDashboardFocusDetail,
   buildDashboardFocusOptions,
   buildDashboardLossSeries,
@@ -2115,7 +2120,7 @@ function buildDashboardSummary(state = {}, options = {}) {
     isValidSalesOrder: isValidDashboardSalesOrder,
     isOfflinePickupOrder: isOfflinePickupDashboardOrder,
   };
-  const dailyFinanceData = buildDashboardFinanceSeries({ ...financeOptions, dates: dailyDates });
+  const { dailyFinanceData, salesMetricWarnings } = buildDashboardSalesMetrics({ ...financeOptions, dates: dailyDates });
   const dailyLossData = buildDashboardLossSeries({
     dates: dailyDates,
     // Resolve the event site before scoping: a stock item may have moved since
@@ -2162,7 +2167,7 @@ function buildDashboardSummary(state = {}, options = {}) {
       })
     : null;
   const todayFinance = dailyFinanceData.find((point) => point.date === today)
-    ?? buildDashboardFinanceSeries({ ...financeOptions, dates: [today] })[0];
+    ?? buildDashboardSalesMetrics({ ...financeOptions, dates: [today] }).dailyFinanceData[0];
 
   return {
     today,
@@ -2193,6 +2198,7 @@ function buildDashboardSummary(state = {}, options = {}) {
     endDate,
     siteId,
     dailyFinanceData,
+    salesMetricWarnings,
     dailyLossData,
     dailySalespersonData: salesperson.dailySalespersonData,
     salespersonOptions: salesperson.salespersonOptions,
@@ -4974,6 +4980,7 @@ function normalizePaymentRecord(record = {}) {
     verificationStatus,
     recordSource,
     ...(refundMethod ? { refundMethod } : {}),
+    ...(type === "refund" ? refundMetadataSnapshot(record) : {}),
     recordedBy: String(record.recordedBy ?? "").trim(),
     ...(record.paymentProofClaimId ? { paymentProofClaimId: String(record.paymentProofClaimId) } : {}),
     verifiedAt: verificationStatus === "verified" ? String(record.verifiedAt ?? "").trim() : "",
@@ -5811,6 +5818,12 @@ async function loadReconciledCommissions(req, authorize = () => {}, includeFinan
 // Capture both sides of a financial edit in its existing transaction. This
 // makes journal creation independent of whether anyone opens the homepage.
 async function commissionStateForMutation(client, before, after) {
+  const captured = preserveOrderSalesSnapshots(before, after, nowDatetimeInChina());
+  // Routes also return their nextOrder object. Fill the same objects before
+  // persisting so a response cannot immediately become a stale snapshot client.
+  for (let index = 0; index < (after.orders ?? []).length; index += 1) {
+    if (captured.orders[index]?.salesAmountSnapshot) after.orders[index].salesAmountSnapshot = captured.orders[index].salesAmountSnapshot;
+  }
   after = closeEndedOrderOwnerAssignments(before, after);
   const { rows } = await client.query(
     `SELECT data, batch_id, created_at, site_id FROM finance_platform_settlements
@@ -5941,6 +5954,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
   if (requestedCustomerId && !customerExists) throw new Error("关联客户档案不存在或不唯一，请先核对客户资料");
   const customerId = requestedCustomerId;
   if (currentOrder) assertNewCustomerCustomerUnchanged(currentOrder, { customerId });
+  assertOrderSalesMetadataUnchanged(currentOrder, body);
   if (Object.prototype.hasOwnProperty.call(body, "paymentClaims")) assertPaymentClaimsUnchanged(currentOrder, body);
   const platformOrderNo = isPlatformOrder
     ? String(body.platformOrderNo ?? body.douyinOrderNo ?? platformOrderNoForOrder(currentOrder)).trim()
@@ -6527,6 +6541,11 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
     assertOrderOwnerAssignmentUnchanged(currentOrder, nextOrder);
     assertPaymentClaimsUnchanged(currentOrder, nextOrder);
+    assertOrderSalesMetadataUnchanged(currentOrder, nextOrder, { partial: false });
+    const currentPaymentById = new Map((currentOrder.payments ?? []).map(payment => [String(payment.id), payment]));
+    if ((nextOrder.payments ?? []).some(payment => payment.type === "refund" && currentPaymentById.get(String(payment.id))?.type !== "refund")) {
+      throw httpError(409, "新退款必须通过退款或资金记录专用入口登记，不能通过通用保存新增", "ORDER_REFUND_SNAPSHOT_REQUIRED");
+    }
     if (paymentClaims(currentOrder).some(claim => claim.status === "approved") && stableJson(currentOrder.payments) !== stableJson(nextOrder.payments)) {
       throw httpError(409, "已关联付款凭证的资金记录必须通过财务专用入口操作，不能通过通用保存修改", "PAYMENT_PROOF_PAYMENT_LOCKED");
     }
@@ -6564,6 +6583,11 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    for (const key of ["damageEvents", "damageReplacements", "damageAmount", "damageRefundAmount", "damagedAt"]) {
+      if (stableJson(currentShipment[key]) !== stableJson(nextShipment[key])) {
+        throw httpError(409, "发货报损和补发业务快照只能通过专用入口登记", "SHIPMENT_DAMAGE_SNAPSHOT_IMMUTABLE");
+      }
+    }
     if (stableJson(currentShipment.paymentEvidenceSnapshot) !== stableJson(nextShipment.paymentEvidenceSnapshot) ||
         stableJson(currentShipment.paymentEvidenceSnapshots) !== stableJson(nextShipment.paymentEvidenceSnapshots)) {
       throw httpError(409, "发货时的付款凭证和赊销快照为系统留存记录，不能修改", "PAYMENT_EVIDENCE_SNAPSHOT_IMMUTABLE");
@@ -13154,7 +13178,7 @@ async function handleApi(req, res, url) {
         status: "pending",
         payments: [],
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
-      const order = ownerPlan.order;
+      const order = captureOrderSalesAmount(ownerPlan.order, nowDatetimeInChina(), "created");
       const nextOrders = [...(Array.isArray(state.orders) ? state.orders : []), order];
       const nextStock = setStockSoldForOrders(state, nextOrders);
       const operationLog = {
@@ -13238,7 +13262,7 @@ async function handleApi(req, res, url) {
         ...currentOrder,
         ...nextOrderInput,
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
-      let nextOrder = ownerPlan.order;
+      let nextOrder = { ...ownerPlan.order, salesAmountSnapshot: captureOrderSalesAmount(currentOrder, nowDatetimeInChina()).salesAmountSnapshot };
       let nextNotifications = ownerAssignmentNotifications(currentStationNotifications(state), nextOrder, { now: new Date().toISOString(), actor: req.auth.account, createId: () => uid("notice") });
       let creditApprovalCleared = false;
       const creditTermsChanged = creditApprovalSensitiveSnapshot(currentOrder) !== creditApprovalSensitiveSnapshot(nextOrder);
@@ -13471,6 +13495,7 @@ async function handleApi(req, res, url) {
       let detail = "";
 
       if (action === "add") {
+        assertRefundMetadataUnchanged({}, body.payment ?? {}, { partial: true });
         const incomingPayment = normalizePaymentRecord({
           ...(body.payment ?? {}),
           verificationStatus: "pending",
@@ -13488,6 +13513,7 @@ async function handleApi(req, res, url) {
         const payment = normalizePaymentRecord({
           ...incomingPayment,
           ...paymentMethodSnapshot,
+          ...(incomingPayment.type === "refund" ? refundMetadataForOrder(currentOrder, state.shipments, { time: incomingPayment.time }) : {}),
         });
         if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
           throw new Error("资金记录已存在，请刷新后重试");
@@ -13507,6 +13533,10 @@ async function handleApi(req, res, url) {
         if (!currentPayment) {
           throw new Error("资金记录不存在，请刷新后重试");
         }
+        assertRefundMetadataUnchanged(currentPayment, body.payment ?? {}, { partial: true });
+        if (currentPayment.refundStage && body.payment?.type && body.payment.type !== currentPayment.type) {
+          throw httpError(409, "已登记退款的业务类型不能改写，请保留原退款记录", "ORDER_SALES_SNAPSHOT_IMMUTABLE");
+        }
         if (currentPayment?.recordSource === "statement" || currentPayment?.statementId) {
           throw new Error("账单导入的资金记录不能手工修改，请先解除流水关联");
         }
@@ -13523,6 +13553,8 @@ async function handleApi(req, res, url) {
         const payment = normalizePaymentRecord({
           ...incomingPayment,
           ...paymentMethodSnapshot,
+          ...(incomingPayment.type === "refund" && currentPayment.type !== "refund"
+            ? refundMetadataForOrder(currentOrder, state.shipments, { time: incomingPayment.time }) : {}),
         });
         nextPayments = currentPayments.map((item) => String(item?.id ?? "") === payment.id ? payment : item);
         detail = `订单「${currentOrder.orderNo}」修改${paymentTypeLabel(payment.type)}记录 ¥${payment.amount.toFixed(2)}`;
@@ -13655,12 +13687,13 @@ async function handleApi(req, res, url) {
         recordedBy: operator,
         proof: body.proof,
         notes: body.notes,
+        ...refundMetadataForOrder(currentOrder, state.shipments, { time: body.time || nowDatetimeInChina() }),
       });
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
         throw new Error("退款记录已存在，请刷新后重试");
       }
-      const nextOrder = { ...currentOrder, payments: [...currentPayments, payment] };
+      const nextOrder = { ...captureOrderSalesAmount(currentOrder, nowDatetimeInChina()), payments: [...currentPayments, payment] };
       const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
       const refundPath = payment.refundMethod === "platform" ? "平台退款冲减" : "账户退款出账";
       const operationLog = createOperationLog(
@@ -13743,6 +13776,9 @@ async function handleApi(req, res, url) {
           recordSource: "order",
           refundMethod: refundMethodForChannel(channel),
           recordedBy: operator,
+          ...refundMetadataForOrder(currentOrder, state.shipments, {
+            time: body.refund.time || nowDatetimeInChina(), stage: "before_shipment", stockItemIds: [stockItemId],
+          }),
         });
         if (refundRecord.type !== "refund") throw new Error("退商品只能写入退款记录");
         if (refundRecord.amount <= 0.005) refundRecord = null;
@@ -13756,7 +13792,7 @@ async function handleApi(req, res, url) {
       }
 
       const nextOrder = {
-        ...currentOrder,
+        ...captureOrderSalesAmount(currentOrder, nowDatetimeInChina()),
         items: currentItems.filter((item) => String(item?.stockItemId ?? "") !== stockItemId),
         payments: refundRecord
           ? [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), refundRecord]
@@ -14426,7 +14462,7 @@ async function handleApi(req, res, url) {
         damagedAt: nowDatetimeInChina(),
         notes: String(body.notes ?? shipment.notes ?? ""),
       };
-      let nextOrder = order;
+      let nextOrder = captureOrderSalesAmount(order, nowDatetimeInChina());
       let nextStock = Array.isArray(state.stock) ? state.stock : [];
 
       if (resolution === "refund") {
@@ -14454,9 +14490,12 @@ async function handleApi(req, res, url) {
           damageRefundAmount: refundAmount,
           damageProof: Array.isArray(body.proof) ? body.proof.map((item) => String(item ?? "")).filter(Boolean) : [],
         };
-        nextOrder = { ...order, status: "damaged" };
+        nextOrder = { ...nextOrder, status: "damaged" };
       } else {
         const replacements = normalizeDamageReplacementSelection(body.replacements, shippedItemIds);
+        if (replacements.some(replacement => !orderItems.some(item => String(item?.stockItemId ?? "") === replacement.originalStockItemId))) {
+          throw new Error("原鱼已办理补发或不在当前订单中，请刷新后重试，不能重复补发");
+        }
         const replacementMap = new Map(replacements.map((item) => [
           item.originalStockItemId,
           item.replacementStockItemId,
@@ -14482,6 +14521,9 @@ async function handleApi(req, res, url) {
           products: state.products,
           tankGroups: state.tankGroups,
         });
+        if (damageReplacements.some(item => item.replacementSalePrice == null || !Number.isFinite(Number(item.replacementSalePrice)) || Number(item.replacementSalePrice) < 0)) {
+          throw new Error("补发鱼缺少有效售价，请先核对商品或单鱼定价");
+        }
         nextShipment = {
           ...nextShipment,
           damageItemStockIds: [...replacementMap.keys()],
@@ -14497,7 +14539,7 @@ async function handleApi(req, res, url) {
             : stockItem
         );
         nextOrder = {
-          ...order,
+          ...nextOrder,
           status: "shipped",
           items: orderItems.map((orderItem) => {
             const replacementStockItemId = replacementMap.get(String(orderItem?.stockItemId ?? ""));
@@ -14513,6 +14555,13 @@ async function handleApi(req, res, url) {
         };
       }
 
+      const eventReplacements = resolution === "reship" ? nextShipment.damageReplacements : [];
+      nextShipment.damageEvents = appendShipmentDamageEvent(shipment, {
+        id: uid("damage-event"), time: nextShipment.damagedAt, resolution,
+        replacements: eventReplacements,
+        ...(resolution === "reship" ? { replacementSaleAmount: Number(eventReplacements
+          .reduce((sum, item) => sum + Number(item.replacementSalePrice), 0).toFixed(2)) } : {}),
+      });
       validateShipmentPatchTransition(shipment, nextShipment);
       const nextShipments = shipments.map((item) => String(item?.id ?? "") === shipmentId ? nextShipment : item);
       const nextOrders = orders.map((item) => String(item?.id ?? "") === String(order.id ?? "") ? nextOrder : item);

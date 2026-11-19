@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildDashboardFinanceSeries,
+  buildDashboardSalesMetrics,
   buildDashboardFocusDetail,
   buildDashboardFocusOptions,
   buildDashboardLossSeries,
@@ -13,27 +14,23 @@ function dates(count) {
   return Array.from({ length: count }, (_, index) => `2026-${String(Math.floor(index / 28) + 1).padStart(2, "0")}-${String(index % 28 + 1).padStart(2, "0")}`);
 }
 
-test("finance aggregation scans each order once regardless of chart range", () => {
+test("finance compatibility series uses original snapshots and registered receipts, without finance callbacks", () => {
   const chartDates = dates(730);
-  let amountCalls = 0;
-  let verificationCalls = 0;
   const orders = [
-    { id: "o1", date: chartDates[0], source: "私域线上", payments: [{ type: "balance", amount: 20, time: chartDates[0] }] },
-    { id: "o2", date: chartDates[729], source: "线下", payments: [{ type: "balance", amount: 30, time: chartDates[729] }] },
+    { id: "o1", date: chartDates[0], salesAmountSnapshot: { source: "created", amount: 50 }, payments: [{ type: "balance", amount: 20, time: chartDates[0], verificationStatus: "pending" }] },
+    { id: "o2", date: chartDates[729], salesAmountSnapshot: { source: "created", amount: 70 }, paymentClaims: [{ id: "c1", status: "pending", amount: 30, time: chartDates[729] }] },
   ];
-  const series = buildDashboardFinanceSeries({
-    dates: chartDates,
-    orders,
-    shipments: [],
-    amountForOrder: () => { amountCalls += 1; return 50; },
-    isPaymentVerified: () => { verificationCalls += 1; return true; },
-    isValidSalesOrder: () => true,
-  });
+  const options = { dates: chartDates, orders, shipments: [],
+    amountForOrder: () => { throw new Error("must not calculate financial receivable"); },
+    isPaymentVerified: () => { throw new Error("must not require finance verification"); },
+    isValidSalesOrder: () => false };
+  const series = buildDashboardFinanceSeries(options);
   assert.equal(series.length, 730);
-  assert.equal(amountCalls, orders.length);
-  assert.equal(verificationCalls, 2);
   assert.equal(series[0].received, 20);
   assert.equal(series[729].received, 30);
+  assert.equal(series[0].orderAmount, 50);
+  assert.equal(series[729].orderAmount, 70);
+  assert.deepEqual(series, buildDashboardSalesMetrics(options).dailyFinanceData);
 });
 
 test("salesperson aggregation computes each valid order amount once", () => {

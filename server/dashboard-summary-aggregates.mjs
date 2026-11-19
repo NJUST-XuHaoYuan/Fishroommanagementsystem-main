@@ -1,10 +1,5 @@
-import {
-  dashboardDatePart,
-  isUnshippedOrderRefund,
-  shipmentDamageAmount,
-  shipmentDamagedAt,
-  unshippedRefundRecordedAt,
-} from "./dashboard-sales-metrics.mjs";
+import { dashboardDatePart, buildDashboardSalesMetrics } from "./dashboard-sales-metrics.mjs";
+export { buildDashboardSalesMetrics } from "./dashboard-sales-metrics.mjs";
 import { lossPricingSnapshot } from "./stock-loss-price.mjs";
 import { isStockInTransfer } from "./stock-transfer-rules.mjs";
 
@@ -64,82 +59,9 @@ export function indexShipmentsByOrder(shipments = []) {
   return byOrderId;
 }
 
-/**
- * Builds every daily finance bucket in one pass over orders/payments and one
- * pass over shipments. The date count therefore does not multiply full-array
- * scans when a user selects a longer chart range.
- */
-export function buildDashboardFinanceSeries({
-  dates = [],
-  orders = [],
-  shipments = [],
-  shipmentsByOrderId = indexShipmentsByOrder(shipments),
-  isPaymentVerified = () => false,
-  amountForOrder = () => 0,
-  isPlatformOrderSource = () => false,
-  isValidSalesOrder = () => true,
-  isOfflinePickupOrder = () => false,
-} = {}) {
-  const dateSet = new Set(array(dates));
-  const buckets = new Map(array(dates).map((date) => [date, {
-    received: 0,
-    unshippedRefund: 0,
-    shippedDamage: 0,
-    orderAmount: 0,
-    platformAmount: 0,
-    offlinePickupAmount: 0,
-    privateDomainAmount: 0,
-  }]));
-  const orderById = new Map();
-
-  for (const order of array(orders)) {
-    const orderId = String(order?.id ?? "");
-    if (orderId) orderById.set(orderId, order);
-    const orderShipments = shipmentsByOrderId.get(orderId) ?? [];
-    const salesDate = compactDate(order?.date);
-    if (dateSet.has(salesDate) && isValidSalesOrder(order)) {
-      const bucket = buckets.get(salesDate);
-      const amount = Math.max(0, Number(amountForOrder(order, orderShipments) || 0));
-      bucket.orderAmount += amount;
-      if (isPlatformOrderSource(order?.source)) bucket.platformAmount += amount;
-      if (isOfflinePickupOrder(order, orderShipments)) bucket.offlinePickupAmount += amount;
-      if (String(order?.source ?? "").trim() === "私域线上") bucket.privateDomainAmount += amount;
-    }
-
-    for (const payment of array(order?.payments)) {
-      const paymentDate = compactDate(payment?.time);
-      if (dateSet.has(paymentDate) && isPaymentVerified(payment) && payment?.type !== "refund") {
-        buckets.get(paymentDate).received += Number(payment?.amount || 0);
-      }
-      const refundDate = compactDate(unshippedRefundRecordedAt(payment));
-      if (dateSet.has(refundDate) && isUnshippedOrderRefund(payment, orderShipments)) {
-        buckets.get(refundDate).unshippedRefund += Number(payment?.amount || 0);
-      }
-    }
-  }
-
-  for (const shipment of array(shipments)) {
-    const order = orderById.get(String(shipment?.orderId ?? "")) ?? {};
-    const damagedDate = compactDate(shipmentDamagedAt(shipment, order));
-    if (!dateSet.has(damagedDate)) continue;
-    buckets.get(damagedDate).shippedDamage += shipmentDamageAmount(shipment, order);
-  }
-
-  return array(dates).map((date) => {
-    const bucket = buckets.get(date);
-    return {
-      date,
-      label: date.slice(5).replace("-", "/"),
-      received: money(bucket.received),
-      refunded: money(bucket.unshippedRefund),
-      unshippedRefund: money(bucket.unshippedRefund),
-      shippedDamage: money(bucket.shippedDamage),
-      orderAmount: money(bucket.orderAmount),
-      platformAmount: money(bucket.platformAmount),
-      offlinePickupAmount: money(bucket.offlinePickupAmount),
-      privateDomainAmount: money(bucket.privateDomainAmount),
-    };
-  });
+/** The compatibility array API and the summary API use the same registration-based metrics. */
+export function buildDashboardFinanceSeries(options = {}) {
+  return buildDashboardSalesMetrics(options).dailyFinanceData;
 }
 
 function normalizeSalespersonName(value) {

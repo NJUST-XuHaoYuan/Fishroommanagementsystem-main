@@ -80,7 +80,10 @@ test("completed refunds preserve all order/stock/shipment states and remain pend
     notes: "测试退款", operator: "forged", verificationStatus: "verified", verifiedAt: "1900" }); ok(response);
   const after = await s.readPersistedState(); const oldOrder = before.orders.find((item) => item.id === "COMPLETED");
   const order = after.orders.find((item) => item.id === "COMPLETED");
-  assert.deepEqual({ ...order, payments: [] }, oldOrder);
+  const { salesAmountSnapshot, ...retainedOrder } = order;
+  assert.deepEqual({ ...retainedOrder, payments: [] }, oldOrder);
+  assert.equal(salesAmountSnapshot.source, "legacy"); assert.equal(salesAmountSnapshot.amount, 123.45);
+  assert.deepEqual(response.body.order.salesAmountSnapshot, salesAmountSnapshot);
   assert.equal(order.payments.length, 1); assert.equal(order.payments[0].verificationStatus, "pending");
   assert.equal(order.payments[0].recordedBy, "pricing-editor"); assert.equal(order.payments[0].type, "refund");
   assert.equal(order.payments[0].recordSource, "order"); assert.equal(order.payments[0].refundMethod, "platform");

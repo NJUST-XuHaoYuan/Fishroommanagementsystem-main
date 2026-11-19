@@ -12,7 +12,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { buildStockPriceBaselines, isStockSpecialPrice, stockSalePrice } from "../utils/stockPricing";
 import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderSources";
 import { getBillableShippingFee } from "../utils/orderFees";
-import { dashboardOrderAdjustmentTotals } from "../../../server/dashboard-sales-metrics.mjs";
+import { buildDashboardSalesMetrics } from "../../../server/dashboard-sales-metrics.mjs";
 import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-fish-value.mjs";
 import { resolveDashboardDateRange } from "../../../server/dashboard-date-range.mjs";
 import { DashboardDateFilter, DashboardSalespersonFilter, type DashboardDateRange } from "./DashboardFilters";
@@ -85,12 +85,21 @@ type DailyFinancePoint = {
 
 type DailyFinanceMetricKey = "received" | "unshippedRefund" | "shippedDamage" | "orderAmount";
 
-const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string }> = [
-  { key: "received", label: "实际收款", color: "#10b981" },
-  { key: "unshippedRefund", label: "退单金额", color: "#f43f5e" },
-  { key: "shippedDamage", label: "报损金额", color: "#f59e0b" },
-  { key: "orderAmount", label: "订单金额", color: "#0ea5e9" },
+const FINANCE_SERIES: Array<{ key: DailyFinanceMetricKey; label: string; color: string; hint: string }> = [
+  { key: "orderAmount", label: "订单金额", color: "#0ea5e9", hint: "下单成交额，退款另列" },
+  { key: "received", label: "实收金额", color: "#10b981", hint: "按订单登记，含待核验收款" },
+  { key: "unshippedRefund", label: "退款金额", color: "#f43f5e", hint: "发货前登记的实际退款" },
+  { key: "shippedDamage", label: "报损与补发金额", color: "#f59e0b", hint: "发货后实际退款＋补发鱼售价" },
 ];
+
+type SalesMetricWarnings = {
+  legacyOrderAmountCount?: number;
+  possibleDuplicateReceiptCount?: number;
+  estimatedRefundStageCount?: number;
+  missingReplacementPriceCount?: number;
+  unmatchedRefundCount?: number;
+  details?: Record<string, Array<{ orderId?: string; orderNo?: string }>>;
+};
 
 type DailyLossDetail = {
   id: string;
@@ -187,6 +196,7 @@ type DashboardSummary = {
   startDate?: string;
   endDate?: string;
   dailyFinanceData: DailyFinancePoint[];
+  salesMetricWarnings?: SalesMetricWarnings;
   dailyLossData?: DailyLossPoint[];
   dailySalespersonData?: DailySalespersonPoint[];
   salespersonOptions?: Array<{ name: string; orderCount: number; amount: number }>;
@@ -1149,17 +1159,16 @@ function AdminDashboard() {
   let inTankNormal = inTankFishStock.filter((s) => !s.sold && s.status !== "sick").length;
   let tankGroupCount = dashboardTankGroups.length;
   let subTankCount = dashboardTankGroups.reduce((n, g) => n + (g.subTanks?.length ?? 0), 0);
-  const todayPayments = dashboardOrders.flatMap((order) =>
-    (order.payments ?? []).filter((payment) =>
-      isPaymentVerified(payment) && String(payment.time ?? "").slice(0, 10) === today
-    )
-  );
-  let todayReceived = todayPayments
-    .filter((payment) => payment.type !== "refund")
-    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-  const todayAdjustments = dashboardOrderAdjustmentTotals(dashboardOrders, dashboardShipments, today);
-  let todayUnshippedRefund = todayAdjustments.unshippedRefund;
-  let todayShippedDamage = todayAdjustments.shippedDamage;
+  const localSalesMetrics = buildDashboardSalesMetrics({
+    dates: financeDates, orders: dashboardOrders, shipments: dashboardShipments,
+    isPlatformOrderSource, isOfflinePickupOrder,
+  });
+  const localTodaySales = buildDashboardSalesMetrics({
+    dates: [today], orders: dashboardOrders, shipments: dashboardShipments,
+  }).dailyFinanceData[0];
+  let todayReceived = Number(localTodaySales?.received || 0);
+  let todayUnshippedRefund = Number(localTodaySales?.unshippedRefund || 0);
+  let todayShippedDamage = Number(localTodaySales?.shippedDamage || 0);
   let todayShippedOut = dashboardShipments
     .filter((shipment) => shipment.shipDate === today && shipment.status !== "preparing")
     .reduce((sum, shipment) => sum + (shipment.itemStockIds?.length ?? 0), 0);
@@ -1170,44 +1179,15 @@ function AdminDashboard() {
     .reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.price, 0), 0);
   let pendingShipments = dashboardShipments.filter((s) => s.status === "preparing" || s.status === "outbound" || s.status === "shipped").length;
 
-  let dailyFinanceData = financeDates.map((date) => {
-    const adjustments = dashboardOrderAdjustmentTotals(dashboardOrders, dashboardShipments, date);
-    const payments = dashboardOrders.flatMap((order) =>
-      (order.payments ?? []).filter((payment) =>
-        isPaymentVerified(payment) && String(payment.time ?? "").slice(0, 10) === date
-      )
-    );
-    const ordersForDate = dashboardOrders.filter((order) =>
-      isValidSalesOrder(order) && String(order.date ?? "").slice(0, 10) === date
-    );
-    const salesRows = ordersForDate.map((order) => {
-      const orderShipments = orderShipmentsFor(order, dashboardShipments);
-      return {
-        order,
-        orderShipments,
-        amount: calcOrderDealAmount(order, orderShipments),
-      };
-    });
-    return {
-      date,
-      label: shortDateLabel(date),
-      received: payments
-        .filter((payment) => payment.type !== "refund")
-        .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
-      unshippedRefund: adjustments.unshippedRefund,
-      shippedDamage: adjustments.shippedDamage,
-      orderAmount: salesRows.reduce((sum, row) => sum + row.amount, 0),
-      platformAmount: salesRows
-        .filter((row) => isPlatformOrderSource(row.order.source))
-        .reduce((sum, row) => sum + row.amount, 0),
-      offlinePickupAmount: salesRows
-        .filter((row) => isOfflinePickupOrder(row.order, row.orderShipments))
-        .reduce((sum, row) => sum + row.amount, 0),
-      privateDomainAmount: salesRows
-        .filter((row) => String(row.order.source ?? "").trim() === "私域线上")
-        .reduce((sum, row) => sum + row.amount, 0),
-    };
-  });
+  let dailyFinanceData: DailyFinancePoint[] = localSalesMetrics.dailyFinanceData;
+  const salesWarnings: SalesMetricWarnings = summary?.salesMetricWarnings ?? localSalesMetrics.salesMetricWarnings;
+  const salesWarningRows = [
+    { key: "legacyOrderAmount", count: salesWarnings?.legacyOrderAmountCount, text: "笔历史订单缺少下单金额快照，订单金额按现存资料估算，可能不含已移除商品" },
+    { key: "possibleDuplicateReceipt", count: salesWarnings?.possibleDuplicateReceiptCount, text: "笔收款可能重复登记，请核对付款凭证与资金记录的关联；当前未擅自合并" },
+    { key: "estimatedRefundStage", count: salesWarnings?.estimatedRefundStageCount, text: "笔历史退款按整单发货时间判断阶段，部分发货订单需核对" },
+    { key: "missingReplacementPrice", count: salesWarnings?.missingReplacementPriceCount, text: "次历史补发缺少当时售价，未计入补发金额" },
+    { key: "unmatchedRefund", count: salesWarnings?.unmatchedRefundCount, text: "笔退款未找到足额的已登记收款，请核对历史收款资料" },
+  ].filter((row) => Number(row.count || 0) > 0);
   const dailyDates = dailyFinanceData.map((point) => point.date);
   const stockById = new Map(dashboardStock.map((item) => [item.id, item]));
   const explicitLossIds = new Set(dashboardLossRecords.map((record) => record.stockItemId));
@@ -1982,9 +1962,9 @@ function AdminDashboard() {
   };
 
   const cards = [
-    { label: "今日收款金额", value: formatMoney(todayReceived), icon: Banknote },
-    { label: "今日退单金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw },
-    { label: "今日报损金额", value: formatMoney(todayShippedDamage), icon: CircleAlert },
+    { label: "今日实收金额", value: formatMoney(todayReceived), icon: Banknote },
+    { label: "今日退款金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw },
+    { label: "今日报损与补发金额", value: formatMoney(todayShippedDamage), icon: CircleAlert },
     { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck },
     {
       label: "库存健康鱼总价值",
@@ -2328,9 +2308,26 @@ function AdminDashboard() {
                   {item.label}
                 </div>
                 <div className="mt-1 font-mono text-sm font-semibold text-slate-900">{formatMoney(item.value)}</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.hint}</p>
               </div>
             ))}
           </div>
+          <details className="mb-4 text-xs leading-5 text-muted-foreground">
+            <summary className="w-fit cursor-pointer rounded-sm font-medium text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">统计口径与日期</summary>
+            <p className="mt-2">订单金额按下单日计，含商品成交价、包装费和下单时约定的寄付运费，扣除折扣；退款、报损不冲减原成交额。实收与退款按订单登记的业务日期计，补发按登记补发的日期计。</p>
+            <p className="mt-1">实收不需要等待财务核验，已驳回的付款申报不计入；已关联的凭证与资金记录只计一次。退款只统计实际退款登记，报损时调减应收不算退款。补发按补发鱼当时的售价计，不计原鱼售价。</p>
+          </details>
+          {salesWarningRows.length > 0 && (
+            <details className="mb-4 rounded-lg border px-3 py-2 text-xs leading-5">
+              <summary className="cursor-pointer font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2">本范围有历史资料或收款登记待核对，部分金额为参考值</summary>
+              <ul className="mt-2 space-y-2 text-muted-foreground">
+                {salesWarningRows.map((row) => {
+                  const orderNos = [...new Set((salesWarnings.details?.[row.key] ?? []).map((item) => item.orderNo || item.orderId).filter(Boolean))];
+                  return <li key={row.key}>{row.count} {row.text}。{orderNos.length > 0 && <span className="block break-all">相关订单：{orderNos.join("、")}{Number(row.count) > 20 ? "等" : ""}</span>}</li>;
+                })}
+              </ul>
+            </details>
+          )}
           <div
             className="relative h-72"
             onMouseLeave={() => setHoveredFinanceIndex(null)}

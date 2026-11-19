@@ -638,6 +638,11 @@ export type PaymentRecord = {
   verificationStatus?: PaymentVerificationStatus;
   recordSource?: PaymentRecordSource;
   refundMethod?: RefundMethod;
+  /** 初次退款登记时的业务阶段和时间，财务核销及流水关联不改写。 */
+  refundStage?: "before_shipment" | "after_shipment";
+  refundOccurredAt?: string;
+  refundShipmentId?: string;
+  refundItems?: { stockItemId: string; productId: string; fishCode: string; salePrice: number }[];
   recordedBy?: string;
   verifiedAt?: string;
   verifiedBy?: string;
@@ -682,6 +687,8 @@ export type Order = {
   siteId?: string;
   orderNo: string;
   createdAt?: string;
+  /** 下单原成交金额；旧单首次变更前留存当前原值，后续退款单列。 */
+  salesAmountSnapshot?: { amount: number; capturedAt: string; source: "created" | "legacy" };
   customerId: string;
   date: string;
   source?: OrderSource | string;
@@ -750,6 +757,8 @@ export type ShipmentDamageReplacement = {
   replacementProductName?: string;
   originalTankName?: string;
   replacementTankName?: string;
+  /** 补发时补发鱼的有效售价，不随商品后续调价变化。 */
+  replacementSalePrice?: number;
 };
 
 export type Shipment = {
@@ -774,6 +783,15 @@ export type Shipment = {
   damagedAt?: string;
   /** 报损补发时的原鱼与补发鱼对应关系及业务快照。 */
   damageReplacements?: ShipmentDamageReplacement[];
+  /** 逐次报损/补发事件；历史缺少售价的事件不补造金额。 */
+  damageEvents?: {
+    id: string;
+    time: string;
+    resolution: "refund" | "reship";
+    replacements: ShipmentDamageReplacement[];
+    replacementSaleAmount?: number;
+    legacy?: boolean;
+  }[];
   /** 物流报损退款实际涉及的鱼，可小于本发货单商品数。 */
   damageItemStockIds?: string[];
   /** 报损业务金额快照：退款为应收调减额，补发为原商品售价。 */

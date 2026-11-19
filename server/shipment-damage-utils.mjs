@@ -1,3 +1,5 @@
+import { resolveStockPriceMode } from "./stock-pricing.mjs";
+
 function cleanText(value) {
   return String(value ?? "").trim();
 }
@@ -54,6 +56,11 @@ export function snapshotDamageReplacements({ replacements, stock, products, tank
     const replacementStock = stockById.get(replacementStockItemId);
     const originalProductId = cleanText(originalStock?.productId);
     const replacementProductId = cleanText(replacementStock?.productId);
+    // A product-following fish may still carry a historical basePrice cache.
+    const replacementProduct = productById.get(replacementProductId);
+    const rawPrice = resolveStockPriceMode(replacementStock) === "manual"
+      ? replacementStock?.basePrice : replacementProduct?.defaultPrice;
+    const replacementSalePrice = Number(rawPrice);
 
     return {
       originalStockItemId,
@@ -66,6 +73,20 @@ export function snapshotDamageReplacements({ replacements, stock, products, tank
       replacementProductName: cleanText(productById.get(replacementProductId)?.name),
       originalTankName: tankNameById(tankGroups, originalStock?.subTankId),
       replacementTankName: tankNameById(tankGroups, replacementStock?.subTankId),
+      ...(rawPrice != null && cleanText(rawPrice) !== "" && Number.isFinite(replacementSalePrice) && replacementSalePrice >= 0
+        ? { replacementSalePrice: Number(replacementSalePrice.toFixed(2)) } : {}),
     };
   });
+}
+
+/** Preserve old business facts without pretending an old replacement price is known. */
+export function appendShipmentDamageEvent(shipment = {}, event = {}) {
+  const previous = Array.isArray(shipment.damageEvents) ? shipment.damageEvents : [];
+  const legacy = previous.length === 0 && shipment.status === "damaged"
+    ? [{ id: `damage-legacy-${cleanText(shipment.id)}`, time: cleanText(shipment.damagedAt || shipment.deliveredAt || shipment.shippedAt || shipment.shipDate || shipment.createdAt),
+        resolution: shipment.damageResolution, legacy: true,
+        replacements: (Array.isArray(shipment.damageReplacements) ? shipment.damageReplacements : []).map(item => ({ ...item })),
+      }]
+    : [];
+  return [...previous, ...legacy, event];
 }
