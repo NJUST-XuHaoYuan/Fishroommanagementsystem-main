@@ -58,14 +58,24 @@ export function fulfillmentCorrectionBlocksProgress(shipment = {}) {
     correction.receiptStatus !== "received" || !text(correction.actualDeliveredAt)));
 }
 
-export function assertFulfillmentCorrectionAllowsProgress(shipment = {}) {
-  if (fulfillmentCorrectionBlocksProgress(shipment)) fail(409, "FULFILLMENT_CORRECTION_UNCERTAIN", "实际发货或签收信息尚未核实，请管理员先在履约记录更正中核对，不能按历史流程状态继续推进");
+export function assertFulfillmentCorrectionAllowsProgress(shipment = {}, target = "complete") {
+  const correction = shipment.fulfillmentCorrection;
+  const blocked = target === "shipped"
+    ? Boolean(correction && (correction.shippingTimeStatus !== "known" || !text(correction.actualShippedAt)))
+    : fulfillmentCorrectionBlocksProgress(shipment);
+  if (blocked) fail(409, "FULFILLMENT_CORRECTION_UNCERTAIN", target === "shipped"
+    ? "实际发货时间尚未核实，请管理员先在履约记录更正中核对后再确认发货"
+    : "实际发货或签收信息尚未核实，请管理员先在履约记录更正中核对，不能按历史流程状态继续推进");
 }
 
 export function assertFulfillmentCorrectionUnchanged(previous = {}, next = {}) {
   if (canonical(previous.fulfillmentCorrection ?? null) !== canonical(next.fulfillmentCorrection ?? null) ||
       canonical(previous.fulfillmentCorrectionHistory ?? []) !== canonical(next.fulfillmentCorrectionHistory ?? [])) {
     fail(409, "FULFILLMENT_CORRECTION_IMMUTABLE", "履约核对信息和更正历史只能由管理员通过专用入口保存");
+  }
+  if (previous.fulfillmentCorrection && ["createdAt", "outboundDate", "shipDate", "shippedAt", "deliveredAt"].some(field =>
+    canonical(previous[field]) !== canonical(next[field]))) {
+    fail(409, "FULFILLMENT_CORRECTION_IMMUTABLE", "已核对发货单的原登记日期属于历史证据，不能通过普通保存改写");
   }
 }
 

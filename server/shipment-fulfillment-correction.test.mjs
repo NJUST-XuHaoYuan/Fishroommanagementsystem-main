@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyShipmentFulfillmentCorrection, shipmentFulfillmentCorrectionDetail, fulfillmentCorrectionBlocksProgress,
-  assertFulfillmentCorrectionUnchanged } from "./shipment-fulfillment-correction.mjs";
+  assertFulfillmentCorrectionUnchanged, assertFulfillmentCorrectionAllowsProgress } from "./shipment-fulfillment-correction.mjs";
 
 const actor = { username: "codex-maintenance", name: "系统维护（管理员本次授权）", accessRole: "admin" };
 const now = "2026-11-20T12:00:00+08:00";
@@ -49,6 +49,16 @@ test("known dates normalize China time while received without a verified receipt
   assert.deepEqual(uncertainReceiptDate.shipment.fulfillmentCorrectionHistory[1].from, known.shipment.fulfillmentCorrection);
 });
 
+test("a known actual shipment can be manually confirmed before receipt while delivery and completion remain guarded", () => {
+  for (const receiptStatus of ["not_received", "unknown"]) {
+    const shipment = { fulfillmentCorrection: { shippingTimeStatus: "known", actualShippedAt: "2026-11-19T12:00:00", receiptStatus } };
+    assert.doesNotThrow(() => assertFulfillmentCorrectionAllowsProgress(shipment, "shipped"));
+    for (const target of ["delivered", "complete", undefined]) assert.throws(() => assertFulfillmentCorrectionAllowsProgress(shipment, target), error => error.code === "FULFILLMENT_CORRECTION_UNCERTAIN");
+    assert.equal(fulfillmentCorrectionBlocksProgress(shipment), true, "automatic timers remain conservative");
+  }
+  assert.throws(() => assertFulfillmentCorrectionAllowsProgress({ fulfillmentCorrection: { shippingTimeStatus: "unknown", receiptStatus: "unknown" } }, "shipped"), error => error.code === "FULFILLMENT_CORRECTION_UNCERTAIN");
+});
+
 test("invalid, future, pre-order, reversed and fabricated unknown dates are rejected without modifying state", () => {
   const state = fixture(); const original = structuredClone(state);
   const changes = [{ reason: " " }, { reason: "a".repeat(2001) }, { shippingTimeStatus: "none" }, { receiptStatus: "yes" },
@@ -70,4 +80,8 @@ test("unique targets, administrator identity, valid site and compare-and-swap ba
   const first = applyShipmentFulfillmentCorrection(state, body, actor, { now });
   assert.throws(() => applyShipmentFulfillmentCorrection(first.state, body, actor, { now }), error => error.code === "FULFILLMENT_CORRECTION_CONFLICT");
   assert.throws(() => assertFulfillmentCorrectionUnchanged(first.shipment, { ...first.shipment, fulfillmentCorrectionHistory: [] }), error => error.code === "FULFILLMENT_CORRECTION_IMMUTABLE");
+  for (const field of ["createdAt", "outboundDate", "shipDate", "shippedAt", "deliveredAt"]) {
+    assert.throws(() => assertFulfillmentCorrectionUnchanged(first.shipment, { ...first.shipment, [field]: "2026-11-19T12:34:56" }),
+      error => error.code === "FULFILLMENT_CORRECTION_IMMUTABLE");
+  }
 });

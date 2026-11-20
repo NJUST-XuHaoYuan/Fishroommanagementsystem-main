@@ -153,3 +153,30 @@ test("exported shipment actual-fee cells distinguish pending from recorded amoun
     URL.revokeObjectURL = savedRevokeObjectURL;
   }
 });
+
+test("corrected shipment status preserves the action entry while retaining pending evidence labels", () => {
+  const verified = { version: 1, shippingTimeStatus: "known", actualShippedAt: "2026-11-19T10:00:00", receiptStatus: "received", actualDeliveredAt: "2026-11-20T10:00:00", reason: "核对", updatedAt: "2026-11-20T11:00:00", operator: "admin" };
+  for (const correction of [verified, { ...verified, shippingTimeStatus: "unknown", actualShippedAt: undefined, receiptStatus: "unknown", actualDeliveredAt: undefined }]) {
+    const shipment = { id: "sh1", status: "shipped", fulfillmentCorrection: correction };
+    const interactive = renderToStaticMarkup(createElement(orders.ShipmentStatusBadge, { shipment, onClick() {} }));
+    assert.match(interactive, /^<button type="button"/);
+    assert.match(interactive, /查看履约记录和发货操作/);
+    assert.match(interactive, correction === verified ? /履约已核实/ : /履约待核实/);
+    const readOnly = renderToStaticMarkup(createElement(orders.ShipmentStatusBadge, { shipment }));
+    assert.match(readOnly, /^<span/);
+    assert.doesNotMatch(readOnly, /<button/);
+  }
+});
+
+test("shipment and receipt actions consult their own evidence rather than blocking every corrected record", async () => {
+  const source = await readFile(new URL("./OrdersView.tsx", import.meta.url), "utf8");
+  const dialog = source.slice(source.indexOf("function ShipmentActionDialog("), source.indexOf("function ReportDamageDialog("));
+  assert.match(dialog, /onClick=\{confirmShipment\} disabled=\{actionLocked \|\| !editableOrder \|\| Boolean\(shipmentFulfillmentState\(shipment\)\?\.shippingTimePending\)\}/);
+  assert.match(dialog, /onClick=\{\(\) => onDelivered\(shipment\)\}[\s\S]*?disabled=\{actionLocked \|\| Boolean\(shipmentFulfillmentState\(shipment\)\?\.pending\)\}/);
+  const deliver = source.slice(source.indexOf("const markShipmentDelivered ="), source.indexOf("const saveShipmentActualShippingFee ="));
+  assert.match(deliver, /if \(shipmentFulfillmentState\(shipment\)\?\.pending\) return toast\.error/);
+  assert.doesNotMatch(deliver, /if \(shipment\.fulfillmentCorrection\)/);
+  const confirm = source.slice(source.indexOf("const confirmOutboundShipment ="), source.indexOf("const cancelShipment ="));
+  assert.match(confirm, /if \(shipmentFulfillmentState\(shipment\)\?\.shippingTimePending\) return toast\.error/);
+  assert.doesNotMatch(confirm, /if \(shipmentFulfillmentState\(shipment\)\?\.pending\)/);
+});

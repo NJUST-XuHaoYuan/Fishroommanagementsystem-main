@@ -112,10 +112,11 @@ export function fulfillmentCorrectionPayload(preview: FulfillmentCorrectionPrevi
 export function shipmentFulfillmentState(shipment: { fulfillmentCorrection?: FulfillmentCorrection }) {
   const correction = shipment.fulfillmentCorrection;
   if (!correction) return null;
-  const needsVerification = correction.shippingTimeStatus !== "known" || !text(correction.actualShippedAt) ||
+  const shippingTimePending = correction.shippingTimeStatus !== "known" || !text(correction.actualShippedAt);
+  const needsVerification = shippingTimePending ||
     correction.receiptStatus === "unknown" || (correction.receiptStatus === "received" && !text(correction.actualDeliveredAt));
   return {
-    correction, needsVerification,
+    correction, needsVerification, shippingTimePending,
     receiptLabel: correction.receiptStatus === "received" ? text(correction.actualDeliveredAt) ? "已收到" : "已收到，签收日期待核实"
       : correction.receiptStatus === "not_received" ? "尚未收到" : "无法核实",
     label: needsVerification ? "履约待核实" : correction.receiptStatus === "not_received" ? "实际尚未收到" : "履约已核实",

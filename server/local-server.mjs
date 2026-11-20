@@ -6494,7 +6494,7 @@ function validateOrderStatusForPatch(req, currentOrder = {}, nextOrder = {}, nex
 function validateShipmentPatchTransition(currentShipment = {}, nextShipment = {}) {
   const from = String(currentShipment.status ?? "");
   const to = String(nextShipment.status ?? "");
-  if (currentShipment.fulfillmentCorrection && from !== to && ["shipped", "delivered"].includes(to)) assertFulfillmentCorrectionAllowsProgress(currentShipment);
+  if (currentShipment.fulfillmentCorrection && from !== to && ["shipped", "delivered"].includes(to)) assertFulfillmentCorrectionAllowsProgress(currentShipment, to);
   const shipMethod = String(nextShipment.shipMethod ?? currentShipment.shipMethod ?? "express");
   const proof = Array.isArray(nextShipment.packingProof) ? nextShipment.packingProof : [];
   const allowed = new Set([
@@ -14285,7 +14285,7 @@ async function handleApi(req, res, url) {
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
       const shipmentId = String(shipment.id ?? "");
       assertStockIdsNotInTransfer(state, shipment.itemStockIds, "发货单包含移缸在途的鱼，不能确认发货");
-      assertFulfillmentCorrectionAllowsProgress(shipment);
+      assertFulfillmentCorrectionAllowsProgress(shipment, "shipped");
       if (shipment.status !== "outbound") throw new Error("只有已出库的发货单可以确认发货");
 
       if (order.status === "completed") throw new Error("已完成订单不能再确认发货");

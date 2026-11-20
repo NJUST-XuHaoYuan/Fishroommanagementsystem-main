@@ -88,3 +88,25 @@ test("local updates reject removed or superseded shipment corrections", () => {
   assert.equal(fulfillmentCorrectionCanApply({ id: "sh1", fulfillmentCorrection: correction({ version: 3 }) }, result), false);
   assert.equal(fulfillmentCorrectionCanApply({ id: "sh1", fulfillmentCorrection: correction({ version: 1 }) }, result), true);
 });
+
+test("known shipment time allows shipment confirmation independently of receipt verification", () => {
+  for (const receiptStatus of ["not_received", "unknown"]) {
+    const result = shipmentFulfillmentState({ fulfillmentCorrection: correction({ receiptStatus, actualDeliveredAt: undefined }) });
+    assert.equal(result.shippingTimePending, false, receiptStatus);
+    assert.equal(result.pending, true, "receipt and completion must remain blocked");
+  }
+  const unknownShip = shipmentFulfillmentState({ fulfillmentCorrection: correction({ shippingTimeStatus: "unknown", actualShippedAt: undefined }) });
+  assert.equal(unknownShip.shippingTimePending, true);
+  assert.equal(unknownShip.pending, true);
+  const malformedKnown = shipmentFulfillmentState({ fulfillmentCorrection: correction({ shippingTimeStatus: "known", actualShippedAt: "" }) });
+  assert.equal(malformedKnown.shippingTimePending, true);
+  assert.equal(malformedKnown.pending, true);
+});
+
+test("complete verified correction no longer blocks ordinary receipt workflow", () => {
+  const result = shipmentFulfillmentState({ fulfillmentCorrection: correction({}) });
+  assert.equal(result.shippingTimePending, false);
+  assert.equal(result.needsVerification, false);
+  assert.equal(result.pending, false);
+  assert.equal(result.label, "履约已核实");
+});

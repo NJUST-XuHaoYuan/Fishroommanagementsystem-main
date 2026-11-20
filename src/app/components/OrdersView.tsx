@@ -1303,7 +1303,7 @@ function LostItemOverlay({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function ShipmentStatusBadge({
+export function ShipmentStatusBadge({
   shipment,
   onClick,
 }: {
@@ -1311,9 +1311,13 @@ function ShipmentStatusBadge({
   onClick?: () => void;
 }) {
   const corrected = shipmentFulfillmentState(shipment);
-  if (corrected) return <span className={`ml-auto inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${corrected.pending ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
-    {corrected.pending ? <AlertTriangle className="size-3" aria-hidden="true" /> : <CheckCircle className="size-3" aria-hidden="true" />}{corrected.label}
-  </span>;
+  if (corrected) {
+    const className = `ml-auto inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${corrected.pending ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`;
+    const content = <>{corrected.pending ? <AlertTriangle className="size-3" aria-hidden="true" /> : <CheckCircle className="size-3" aria-hidden="true" />}{corrected.label}</>;
+    return onClick
+      ? <button type="button" onClick={onClick} title="查看履约记录和发货操作" className={`${className} min-h-11 cursor-pointer hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}>{content}</button>
+      : <span className={className}>{content}</span>;
+  }
   if (shipment.status === "delivered") {
     return (
       <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
@@ -2278,6 +2282,7 @@ function ShipmentActionDialog({
 
   if (shipment.status === "outbound") {
     const confirmShipment = () => {
+      if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正履约记录”中核对。");
       if (packingProof.length < 2) {
         toast.error("请至少上传 2 张打包凭证：捞鱼照片和封箱前照片");
         return;
@@ -2305,6 +2310,7 @@ function ShipmentActionDialog({
               <div><span className="text-muted-foreground">出库日期：</span>{shipment.outboundDate || shipment.shipDate}</div>
               <div><span className="text-muted-foreground">商品数：</span>{(shipment.itemStockIds ?? []).length} 条</div>
             </div>
+            {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用“更正履约记录”；已核实发货时间后可继续确认发货。</p></>}
 
             <div className="grid gap-2">
               <Label>打包凭证<span className="text-red-500 ml-0.5">*</span></Label>
@@ -2332,7 +2338,7 @@ function ShipmentActionDialog({
               <RotateCcw className="size-4 mr-1" />
               取消出库
             </Button>
-            <Button className="min-h-11" onClick={confirmShipment} disabled={actionLocked || !editableOrder}>
+            <Button className="min-h-11" onClick={confirmShipment} disabled={actionLocked || !editableOrder || Boolean(shipmentFulfillmentState(shipment)?.shippingTimePending)}>
               <Truck className="size-4 mr-1" />
               {saving ? "保存中..." : "确认发货"}
             </Button>
@@ -2364,14 +2370,14 @@ function ShipmentActionDialog({
           <div><span className="text-muted-foreground">原登记发货时间：</span>{formatShipmentCreatedAt(shipment.shippedAt)}</div>
           <div><span className="text-muted-foreground">原登记发货日期：</span>{shipment.shipDate}</div>
         </div>
-        {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">此单已有履约核对结果；如需更正收货情况，请由管理员使用订单详情中的“更正履约记录”。</p></>}
+        {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用订单详情中的“更正履约记录”；实际履约信息全部核实后可继续确认收货。</p></>}
         {actualShippingFeeFields}
         {shipment.status === "shipped" && editableOrder && <div className="grid grid-cols-3 gap-3">
           <Button
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
-            disabled={actionLocked || Boolean(shipment.fulfillmentCorrection)}
+            disabled={actionLocked || Boolean(shipmentFulfillmentState(shipment)?.pending)}
           >
             <CheckCircle className="size-4" />
             确认收货
@@ -4819,7 +4825,7 @@ function OrderDetailDialog({
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能修改签收状态");
-    if (shipment.fulfillmentCorrection) return toast.error("此单已有履约更正记录，请由管理员在“更正履约记录”中核对实际收货情况。");
+    if (shipmentFulfillmentState(shipment)?.pending) return toast.error("此单实际履约信息尚未核实，请由管理员在“更正履约记录”中核对后再确认收货。");
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     shipmentFeeRequestSequence.current += 1;
     try {
@@ -4869,6 +4875,7 @@ function OrderDetailDialog({
     if (shipmentConfirmSaving) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能再确认发货");
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
+    if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正履约记录”中核对。");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
     shipmentFeeRequestSequence.current += 1;

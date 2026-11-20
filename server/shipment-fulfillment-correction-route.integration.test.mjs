@@ -65,6 +65,18 @@ test("parallel and stale edits commit one version and ordinary saves cannot forg
   assert.deepEqual(await s.readPersistedState(), before);
 });
 
+test("generic writes cannot alter any original timestamp of an unfinished corrected shipment", async t => {
+  const s = await setup(t, { shipmentStatus: "shipped", orderStatus: "shipped" }); ok(await s.save(await s.draft()));
+  const before = await s.readPersistedState();
+  for (const field of ["createdAt", "outboundDate", "shipDate", "shippedAt", "deliveredAt"]) {
+    const forged = { ...before.shipments[0], [field]: "2026-11-19T12:34:56" };
+    const result = await s.request("/api/state/patch", { token: s.tokens.admin,
+      body: { patch: { shipments: [forged] }, basePatch: { shipments: before.shipments } } });
+    assert.equal(result.response.status, 409, `${field}: ${JSON.stringify(result.body)}`);
+    assert.deepEqual(await s.readPersistedState(), before, field);
+  }
+});
+
 test("unknown actual facts block ordinary confirmation, receipt and completion without changing existing workflow status", async t => {
   for (const shipmentStatus of ["outbound", "shipped", "delivered"]) {
     const s = await setup(t, { shipmentStatus, orderStatus: shipmentStatus === "delivered" ? "completed" : "shipped" }); ok(await s.save(await s.draft()));
@@ -75,6 +87,27 @@ test("unknown actual facts block ordinary confirmation, receipt and completion w
       assert.equal(result.body.code, "FULFILLMENT_CORRECTION_UNCERTAIN");
     }
     assert.deepEqual(await s.readPersistedState(), before);
+  }
+});
+
+test("known actual shipment with unconfirmed receipt may be manually confirmed without inventing receipt facts or overwriting original dates", async t => {
+  for (const receiptStatus of ["not_received", "unknown"]) {
+    const s = await setup(t, { shipmentStatus: "outbound", orderStatus: "shipped", customize: state => { delete state.commissionLedgerV1; } });
+    ok(await s.save(await s.draft({ shippingTimeStatus: "known", actualShippedAt: "2026-11-18T11:00:00", receiptStatus })));
+    const before = await s.readPersistedState();
+    const confirmed = await s.request("/api/shipments/confirm", { token: s.tokens.admin, body: { shipmentId: "correction-shipment", packingProof: ["one", "two"] } }); ok(confirmed);
+    const after = await s.readPersistedState(); const shipment = after.shipments[0];
+    assert.equal(shipment.status, "shipped");
+    for (const field of ["shipDate", "shippedAt", "deliveredAt", "outboundDate", "createdAt"]) assert.equal(shipment[field], before.shipments[0][field], field);
+    assert.deepEqual(shipment.fulfillmentCorrection, before.shipments[0].fulfillmentCorrection);
+    assert.deepEqual(shipment.fulfillmentCorrectionHistory, before.shipments[0].fulfillmentCorrectionHistory);
+    assert.equal(shipment.fulfillmentCorrection.actualDeliveredAt, undefined);
+    assert.deepEqual(after.stock, before.stock); assert.deepEqual(after.orders[0].items, before.orders[0].items); assert.deepEqual(after.orders[0].payments, before.orders[0].payments);
+    for (const [route, body] of [["/api/shipments/deliver", { shipmentId: shipment.id }], ["/api/orders/complete", { orderId: "proof-order" }]]) {
+      const result = await s.request(route, { token: s.tokens.admin, body }); assert.equal(result.response.status, 409, JSON.stringify(result.body));
+      assert.equal(result.body.code, "FULFILLMENT_CORRECTION_UNCERTAIN");
+    }
+    assert.deepEqual(await s.readPersistedState(), after);
   }
 });
 
