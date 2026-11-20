@@ -445,7 +445,13 @@ export function buildReadonlyOrderDetail(state, order, feeBreakdownForOrder, opt
     batchFishCount: new Set(array(shipment.itemStockIds).map(id).filter(isBatchFish)).size,
     createdAt: date(shipment.createdAt), outboundDate: date(shipment.outboundDate), shipDate: date(shipment.shipDate), shippedAt: date(shipment.shippedAt),
     deliveredAt: date(shipment.deliveredAt), damagedAt: date(shipment.damagedAt), actualShippingFee: itemPrice(shipment.actualShippingFee),
-    damageResolution: text(shipment.damageResolution), damageRefundAmount: itemPrice(shipment.damageRefundAmount) }))
+    damageResolution: text(shipment.damageResolution), damageRefundAmount: itemPrice(shipment.damageRefundAmount),
+    ...(shipment.fulfillmentCorrection ? { fulfillmentCorrection: {
+      shippingTimeStatus: text(shipment.fulfillmentCorrection.shippingTimeStatus), actualShippedAt: date(shipment.fulfillmentCorrection.actualShippedAt),
+      receiptStatus: text(shipment.fulfillmentCorrection.receiptStatus), actualDeliveredAt: date(shipment.fulfillmentCorrection.actualDeliveredAt),
+      reason: text(shipment.fulfillmentCorrection.reason), updatedAt: date(shipment.fulfillmentCorrection.updatedAt),
+      operatorName: text(shipment.fulfillmentCorrection.operatorName || shipment.fulfillmentCorrection.operator),
+    } } : {}) }))
     .sort((a, b) => compareHistoryDate(a.createdAt || a.outboundDate || a.shipDate, b.createdAt || b.outboundDate || b.shipDate) || a.id.localeCompare(b.id));
   return { id: id(order.id), orderNo: text(order.orderNo), siteId: orderSiteId, siteName: text(options.siteName), date: date(order.date),
       status: text(order.status), statusLabel: orderStatus[order.status] || text(order.status), customerName: text(customer?.name) || text(order.customerName), source: text(order.source),
@@ -498,9 +504,19 @@ export function buildPurchaseBatchFishHistory(state, options) {
       add({ ...common, id: `shipment:${shipment.id}:outbound`, date: date(shipment.outboundDate || shipment.createdAt), title: "出库", photos: safeMedia(shipment.packingProof) });
     }
     if (["shipped", "delivered", "damaged"].includes(shipment.status)) {
-      add({ ...common, id: `shipment:${shipment.id}:shipped`, date: date(shipment.shippedAt || shipment.shipDate), title: shipment.shipMethod === "pickup" ? "自提交付" : "发货" });
+      add({ ...common, id: `shipment:${shipment.id}:shipped`, date: date(shipment.shippedAt || shipment.shipDate), title: shipment.fulfillmentCorrection ? "原发货登记（另有履约更正）" : shipment.shipMethod === "pickup" ? "自提交付" : "发货" });
     }
-    if (shipment.status === "delivered") add({ ...common, id: `shipment:${shipment.id}:delivered`, date: date(shipment.deliveredAt), title: "签收" });
+    if (shipment.status === "delivered") add({ ...common, id: `shipment:${shipment.id}:delivered`, date: date(shipment.deliveredAt), title: shipment.fulfillmentCorrection ? "原签收登记（另有履约更正）" : "签收" });
+    const correction = shipment.fulfillmentCorrection;
+    if (correction) {
+      const shippingKnown = correction.shippingTimeStatus === "known" && Boolean(correction.actualShippedAt);
+      const receipt = correction.receiptStatus === "received"
+        ? correction.actualDeliveredAt ? `已收到，实际签收时间：${date(correction.actualDeliveredAt)}` : "已收到，签收日期待核实"
+        : correction.receiptStatus === "not_received" ? "尚未收到" : "签收情况待核实";
+      add({ ...common, id: `shipment:${shipment.id}:fulfillment-correction`, date: date(correction.updatedAt), title: "履约记录更正",
+        operator: text(correction.operatorName || correction.operator),
+        text: `本条时间为更正登记时间。${shippingKnown ? `实际发货时间：${date(correction.actualShippedAt)}` : "实际发货时间待核实"}；${receipt}。原因：${text(correction.reason)}` });
+    }
     if (shipment.status === "damaged") add({ ...common, id: `shipment:${shipment.id}:damaged`, date: date(shipment.damagedAt), title: "物流报损", text: shipment.damageResolution === "reship" ? "报损后补发" : shipment.damageResolution === "refund" ? "报损后退款；整单或多鱼退款金额不作为本鱼单价" : "物流报损", photos: safeMedia(shipment.damageProof) });
   }
   for (const loss of evidence.losses) {

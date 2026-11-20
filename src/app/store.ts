@@ -761,6 +761,28 @@ export type ShipmentDamageReplacement = {
   replacementSalePrice?: number;
 };
 
+export type ShipmentFulfillmentCorrection = {
+  version: number;
+  shippingTimeStatus: "known" | "unknown";
+  actualShippedAt?: string;
+  receiptStatus: "received" | "not_received" | "unknown";
+  actualDeliveredAt?: string;
+  reason: string;
+  updatedAt: string;
+  operator: string;
+  operatorName: string;
+};
+
+export type ShipmentFulfillmentCorrectionHistory = {
+  id: string;
+  time: string;
+  from: ShipmentFulfillmentCorrection | null;
+  to: ShipmentFulfillmentCorrection;
+  operator: string;
+  operatorName: string;
+  reason: string;
+};
+
 export type Shipment = {
   id: string;
   siteId?: string;
@@ -770,6 +792,9 @@ export type Shipment = {
   outboundDate?: string;
   shippedAt?: string;
   deliveredAt?: string;
+  /** 实际履约核对独立保存，历史流程状态及原登记日期保留。 */
+  fulfillmentCorrection?: ShipmentFulfillmentCorrection;
+  fulfillmentCorrectionHistory?: ShipmentFulfillmentCorrectionHistory[];
   shipDate: string;
   carrier: string;
   trackingNo: string;

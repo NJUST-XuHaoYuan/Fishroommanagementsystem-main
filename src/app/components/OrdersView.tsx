@@ -99,6 +99,8 @@ import {
 } from "../utils/orderFees";
 import { ShipmentProofDialog, shipmentPackingProofs } from "./ShipmentProofDialog";
 import { ShipmentCancelDialog } from "./ShipmentCancelDialog";
+import { ShipmentFulfillmentCorrectionDialog, ShipmentFulfillmentRecord } from "./ShipmentFulfillmentCorrectionDialog";
+import { fulfillmentCorrectionCanApply, shipmentFulfillmentState } from "../utils/shipmentFulfillmentCorrection";
 import {
   actualShippingFeePayload,
   canApplyActualShippingFeeResponse,
@@ -302,13 +304,13 @@ function applyOrderApiResult(
   },
   options: {
     requireExistingShipmentId?: string;
-    shouldApply?: () => boolean;
+    shouldApply?: (current: Store) => boolean;
     session?: NewCustomerSession;
   } = {}
 ) {
   setState((current) => {
     if (options.session && !isNewCustomerSessionCurrent(options.session, current.user)) return current;
-    if (options.shouldApply && !options.shouldApply()) return current;
+    if (options.shouldApply && !options.shouldApply(current)) return current;
     if (options.requireExistingShipmentId && !current.shipments.some(
       (shipment) => shipment.id === options.requireExistingShipmentId
     )) return current;
@@ -430,6 +432,12 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
   const orderShipments = shipments.filter((shipment) => shipment.orderId === order.id);
   const hasDamagedShipment = orderShipments.some((shipment) => shipment.status === "damaged");
   const tags: OrderStatusTag[] = [];
+  const correctedStates = orderShipments.map(shipmentFulfillmentState).filter(state => state?.pending);
+  const fulfillmentPending = correctedStates.length > 0;
+  if (fulfillmentPending) tags.push({
+    label: correctedStates.some(state => state?.needsVerification) ? "履约待核实" : "实际尚未收到",
+    className: ORDER_STATUS_TAG_STYLE.pendingShip,
+  });
 
   if (order.status === "cancelled") {
     tags.push({ label: "已取消", className: ORDER_STATUS_TAG_STYLE.cancelled });
@@ -437,7 +445,7 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
   }
 
   if (order.status === "completed") {
-    tags.push({ label: "已完成", className: ORDER_STATUS_TAG_STYLE.completed });
+    tags.push({ label: fulfillmentPending ? "原登记已完成" : "已完成", className: fulfillmentPending ? ORDER_STATUS_TAG_STYLE.cancelled : ORDER_STATUS_TAG_STYLE.completed });
     return tags;
   }
 
@@ -501,7 +509,7 @@ function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStat
       className: ORDER_STATUS_TAG_STYLE.receiving,
     });
   }
-  if (allResolved && !hasUnshippedItems) {
+  if (allResolved && !hasUnshippedItems && !fulfillmentPending) {
     tags.push({
       label: isPickupOrderSource(order.source) ? "已自提" : "已签收",
       className: ORDER_STATUS_TAG_STYLE.delivered,
@@ -1211,6 +1219,12 @@ export function exportOrdersExcel(orders: Order[], state: Store) {
       index + 1,
       SHIP_METHOD_LABEL[shipment.shipMethod ?? "express"],
       shipment.shipDate,
+      shipment.shippedAt || "",
+      shipment.deliveredAt || "",
+      shipmentFulfillmentState(shipment)?.label || "未更正",
+      shipment.fulfillmentCorrection?.shippingTimeStatus === "known" ? shipment.fulfillmentCorrection.actualShippedAt || "" : shipment.fulfillmentCorrection ? "无法核实" : "",
+      shipmentFulfillmentState(shipment)?.receiptLabel || "",
+      shipment.fulfillmentCorrection?.actualDeliveredAt || "",
       shipment.carrier || "—",
       shipment.trackingNo || "—",
       SHIPMENT_STATUS_LABEL[shipment.status],
@@ -1238,7 +1252,7 @@ export function exportOrdersExcel(orders: Order[], state: Store) {
       <body>
         ${table("订单汇总", ["序号", "订单号", "状态", "来源", "平台订单编号", "客户", "手机", "收货地址", "下单日期", "预计发货", "订单负责人", "商品数", "发货单数", "商品小计", "运费方式", "计费运费", "包装费", "订单优惠", "包邮折扣", "订单应收", "备注"], orderRows)}
         ${table("商品明细", ["订单号", "客户", "序号", "编号", "库存ID", "商品", "尺寸", "产地", "缸位", "批次", "供应商", "入库日期", "计划发货", "状态", "发货状态", "所属发货单", "售价", "备注"], productRows)}
-        ${table("发货信息", ["订单号", "客户", "发货单", "方式", "发货日期", "承运方", "运单号", "状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
+        ${table("发货信息", ["订单号", "客户", "发货单", "方式", "原登记发货日期", "原登记发货时间", "原登记签收时间", "履约核对状态", "实际发货时间", "实际收货情况", "实际签收时间", "承运方", "运单号", "原登记状态", "报损处理", "实际运费", "商品数", "商品", "备注"], shipmentRows)}
       </body>
     </html>`;
   const blob = new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8" });
@@ -1296,6 +1310,10 @@ function ShipmentStatusBadge({
   shipment: Shipment;
   onClick?: () => void;
 }) {
+  const corrected = shipmentFulfillmentState(shipment);
+  if (corrected) return <span className={`ml-auto inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${corrected.pending ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+    {corrected.pending ? <AlertTriangle className="size-3" aria-hidden="true" /> : <CheckCircle className="size-3" aria-hidden="true" />}{corrected.label}
+  </span>;
   if (shipment.status === "delivered") {
     return (
       <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
@@ -2343,16 +2361,17 @@ function ShipmentActionDialog({
             <div><span className="text-muted-foreground">运单号：</span>{shipment.trackingNo}</div>
           )}
           <div><span className="text-muted-foreground">出库操作时间：</span>{formatShipmentCreatedAt(shipment.createdAt)}</div>
-          <div><span className="text-muted-foreground">发货操作时间：</span>{formatShipmentCreatedAt(shipment.shippedAt || shipment.createdAt)}</div>
-          <div><span className="text-muted-foreground">发货日期：</span>{shipment.shipDate}</div>
+          <div><span className="text-muted-foreground">原登记发货时间：</span>{formatShipmentCreatedAt(shipment.shippedAt)}</div>
+          <div><span className="text-muted-foreground">原登记发货日期：</span>{shipment.shipDate}</div>
         </div>
+        {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">此单已有履约核对结果；如需更正收货情况，请由管理员使用订单详情中的“更正履约记录”。</p></>}
         {actualShippingFeeFields}
         {shipment.status === "shipped" && editableOrder && <div className="grid grid-cols-3 gap-3">
           <Button
             variant="outline"
             className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
             onClick={() => onDelivered(shipment)}
-            disabled={actionLocked}
+            disabled={actionLocked || Boolean(shipment.fulfillmentCorrection)}
           >
             <CheckCircle className="size-4" />
             确认收货
@@ -4004,7 +4023,7 @@ function StockPickerBioDialog({
 // ─── ItemsWithShipments ───────────────────────────────────────────────────────
 
 function ItemsWithShipments({
-  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onReturnItem, canReturnItem,
+  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onCorrectFulfillment, onReturnItem, canReturnItem,
 }: {
   order: Order;
   orderShipments: Shipment[];
@@ -4013,6 +4032,7 @@ function ItemsWithShipments({
   getStockItem: (id: string) => StockItem | undefined;
   subTankName: (id: string) => string;
   onShipmentAction?: (shipment: Shipment) => void;
+  onCorrectFulfillment?: (shipment: Shipment) => void;
   onReturnItem?: (item: OrderItem) => void;
   canReturnItem?: boolean;
 }) {
@@ -4131,7 +4151,8 @@ function ItemsWithShipments({
         const shItems = order.items.filter((i) => (sh.itemStockIds ?? []).includes(i.stockItemId));
         const packingProofs = shipmentPackingProofs(sh);
         const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
-        const shipmentHeaderTone = sh.status === "delivered"
+        const fulfillment = shipmentFulfillmentState(sh);
+        const shipmentHeaderTone = fulfillment?.pending ? "bg-amber-50/60 text-amber-900" : sh.status === "delivered"
           ? "bg-emerald-50/60 text-emerald-800"
           : sh.status === "damaged"
             ? "bg-red-50/60 text-red-800"
@@ -4149,7 +4170,7 @@ function ItemsWithShipments({
                 {sh.status === "outbound" ? "出库单" : "发货单"} {si + 1}：
                 {sh.shipMethod === "pickup" ? "上门自取" : `${sh.carrier || "快递"}`}
                 {sh.trackingNo ? ` · ${sh.trackingNo}` : ""}
-                {" · "}{sh.status === "outbound" ? (sh.outboundDate || sh.shipDate) : sh.shipDate}
+                {" · "}{sh.status === "outbound" ? `登记出库：${sh.outboundDate || sh.shipDate}` : `原登记发货：${formatShipmentCreatedAt(sh.shippedAt || sh.shipDate)}`}
               </span>
               <ShipmentStatusBadge
                 shipment={sh}
@@ -4182,7 +4203,11 @@ function ItemsWithShipments({
                   凭证 {packingProofs.length} 张
                 </Button>
               )}
+              {onCorrectFulfillment && sh.status !== "preparing" && <Button type="button" size="sm" variant="outline" className="min-h-11 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white" onClick={() => onCorrectFulfillment(sh)}>
+                <Clock className="size-3.5" aria-hidden="true" />更正履约记录
+              </Button>}
             </div>
+            <ShipmentFulfillmentRecord shipment={sh} />
             {damageReplacements.length > 0 && (
               <div className="border-t border-sky-100 bg-sky-50/40 px-4 py-3">
                 <div className="mb-2 text-xs font-semibold text-sky-800">补发对应关系（{damageReplacements.length} 条）</div>
@@ -4375,8 +4400,10 @@ function OrderDetailDialog({
   }, [open]);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
   const [cancelShipmentTarget, setCancelShipmentTarget] = useState<Shipment | null>(null);
+  const [fulfillmentCorrectionTarget, setFulfillmentCorrectionTarget] = useState<Shipment | null>(null);
   const cancelShipmentContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
   useEffect(() => { setCancelShipmentTarget(null); }, [cancelShipmentContextKey]);
+  useEffect(() => { setFulfillmentCorrectionTarget(null); }, [cancelShipmentContextKey, open]);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
   const shipmentFeeRequestSequence = useRef(0);
   const shipmentListRef = useRef(state.shipments);
@@ -4792,6 +4819,7 @@ function OrderDetailDialog({
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能修改签收状态");
+    if (shipment.fulfillmentCorrection) return toast.error("此单已有履约更正记录，请由管理员在“更正履约记录”中核对实际收货情况。");
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     shipmentFeeRequestSequence.current += 1;
     try {
@@ -5331,6 +5359,7 @@ function OrderDetailDialog({
                     getStockItem={getAccessibleStockItem}
                     subTankName={subTankName}
                     onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? setShipmentAction : undefined}
+                    onCorrectFulfillment={state.user?.role === "admin" ? setFulfillmentCorrectionTarget : undefined}
                     onReturnItem={openReturnItem}
                     canReturnItem={canReturnOrderItem}
                   />
@@ -5592,6 +5621,20 @@ function OrderDetailDialog({
         onApplied={(result, session) => {
           applyOrderApiResult(setState, result, { session, requireExistingShipmentId: cancelShipmentTarget.id });
           toast.success("已取消出库，并按核对结果处理库存");
+        }}
+      />}
+
+      {fulfillmentCorrectionTarget && state.user?.role === "admin" && <ShipmentFulfillmentCorrectionDialog
+        key={`${cancelShipmentContextKey}:${fulfillmentCorrectionTarget.id}`}
+        shipmentId={fulfillmentCorrectionTarget.id}
+        viewer={state.user}
+        onClose={() => setFulfillmentCorrectionTarget(null)}
+        onApplied={(result, session) => {
+          applyOrderApiResult(setState, { shipment: result.shipment, operationLog: result.operationLog }, {
+            session, requireExistingShipmentId: fulfillmentCorrectionTarget.id,
+            shouldApply: current => fulfillmentCorrectionCanApply(current.shipments.find(shipment => shipment.id === result.shipment.id), result.shipment),
+          });
+          toast.success("履约更正已保存，原登记记录已保留");
         }}
       />}
 

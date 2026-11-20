@@ -170,3 +170,42 @@ test("adjustment compatibility API shares the new refund and replacement rules",
   const shipments = [{ orderId: "o1", damageEvents: [{ id: "d1", time: date, resolution: "reship", replacementSaleAmount: 30 }] }];
   assert.deepEqual(dashboardOrderAdjustmentTotals(orders, shipments, date), { unshippedRefund: 12, shippedDamage: 48 });
 });
+
+
+test("later fulfillment corrections warn without changing registered refund dates, amounts or stages", () => {
+  const orders = [order({ payments: [receipt("p", 200),
+    refund("before", 30, { refundStage: "before_shipment", refundOccurredAt: `${date}T10:00:00`, time: "2026-11-22" }),
+    refund("after", 40, { refundStage: "after_shipment" }),
+  ] })];
+  const shipment = { orderId: "o1", status: "delivered", shippedAt: "2026-11-18T10:00:00", deliveredAt: date };
+  const original = metrics(orders, [shipment]);
+  assert.equal(original.salesMetricWarnings.correctedFulfillmentRefundCount, 0);
+  assert.deepEqual(original.salesMetricWarnings.details.correctedFulfillmentRefund, []);
+  for (const fulfillmentCorrection of [
+    { shippingTimeStatus: "unknown", receiptStatus: "unknown" },
+    { shippingTimeStatus: "known", actualShippedAt: "2026-11-20T10:00:00", receiptStatus: "received", actualDeliveredAt: "2026-11-21T10:00:00" },
+  ]) {
+    const corrected = metrics(orders, [{ ...shipment, fulfillmentCorrection }]);
+    assert.deepEqual(corrected.dailyFinanceData, original.dailyFinanceData);
+    assert.equal(corrected.dailyFinanceData[0].unshippedRefund, 30);
+    assert.equal(corrected.dailyFinanceData[0].shippedDamage, 40);
+    assert.equal(corrected.salesMetricWarnings.estimatedRefundStageCount, original.salesMetricWarnings.estimatedRefundStageCount);
+    assert.equal(corrected.salesMetricWarnings.correctedFulfillmentRefundCount, 2);
+    assert.deepEqual(corrected.salesMetricWarnings.details.correctedFulfillmentRefund, [{ orderId: "o1", orderNo: "SO-1" }]);
+  }
+});
+
+test("corrected-fulfillment refund warning is scoped to refund business date and owning order", () => {
+  const orders = [order({ payments: [refund("r1", 30, { refundStage: "before_shipment", refundOccurredAt: "2026-11-18T10:00:00" }),
+    refund("r2", 40, { refundStage: "after_shipment" })] }),
+    order({ id: "uncorrected", orderNo: "SO-OTHER", payments: [refund("r3", 50, { refundStage: "before_shipment" })] })];
+  const shipments = [{ orderId: "o1", status: "delivered", shippedAt: "2026-11-17", fulfillmentCorrection: { shippingTimeStatus: "unknown", receiptStatus: "unknown" } }];
+  const selected = metrics(orders, shipments);
+  assert.equal(selected.salesMetricWarnings.correctedFulfillmentRefundCount, 1);
+  assert.deepEqual(selected.salesMetricWarnings.details.correctedFulfillmentRefund, [{ orderId: "o1", orderNo: "SO-1" }]);
+  assert.equal(metrics(orders, shipments, ["2026-11-18"]).salesMetricWarnings.correctedFulfillmentRefundCount, 1);
+  assert.equal(metrics(orders, shipments, ["2026-11-20"]).salesMetricWarnings.correctedFulfillmentRefundCount, 0);
+  assert.deepEqual(metrics(orders, shipments, ["2026-11-20"]).salesMetricWarnings.details.correctedFulfillmentRefund, []);
+  const noRefund = metrics([order({ payments: [receipt("p", 200)] })], shipments);
+  assert.equal(noRefund.salesMetricWarnings.correctedFulfillmentRefundCount, 0);
+});

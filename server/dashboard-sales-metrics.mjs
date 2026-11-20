@@ -188,8 +188,8 @@ export function shipmentDamageAmount(shipment = {}, order = {}) {
 function warningCollector() {
   const warnings = {
     legacyOrderAmountCount: 0, possibleDuplicateReceiptCount: 0, estimatedRefundStageCount: 0,
-    missingReplacementPriceCount: 0, unmatchedRefundCount: 0,
-    details: { legacyOrderAmount: [], possibleDuplicateReceipt: [], estimatedRefundStage: [], missingReplacementPrice: [], unmatchedRefund: [] },
+    missingReplacementPriceCount: 0, unmatchedRefundCount: 0, correctedFulfillmentRefundCount: 0,
+    details: { legacyOrderAmount: [], possibleDuplicateReceipt: [], estimatedRefundStage: [], missingReplacementPrice: [], unmatchedRefund: [], correctedFulfillmentRefund: [] },
   };
   const seen = new Map();
   return { warnings, add(kind, count, order) {
@@ -223,6 +223,7 @@ export function buildDashboardSalesMetrics({
     const orderId = text(order?.id);
     orderById.set(orderId, order);
     const orderShipments = indexedShipments.get(orderId) ?? [];
+    const hasCorrectedFulfillment = orderShipments.some(shipment => Boolean(shipment?.fulfillmentCorrection));
     const salesBucket = buckets.get(dashboardDatePart(order?.date));
     if (salesBucket) {
       const sale = dashboardOrderSaleAmount(order);
@@ -253,6 +254,8 @@ export function buildDashboardSalesMetrics({
       if (bucket) {
         bucket[event.stage === "before_shipment" ? "unshippedRefund" : "shippedDamage"] += event.amount;
         if (event.estimated) add("estimatedRefundStage", 1, order);
+        // A later logistics correction must not silently rewrite a registered cash report.
+        if (hasCorrectedFulfillment) add("correctedFulfillmentRefund", 1, order);
         if (event.amount - available > 0.005) add("unmatchedRefund", 1, order);
       }
       available -= event.amount;

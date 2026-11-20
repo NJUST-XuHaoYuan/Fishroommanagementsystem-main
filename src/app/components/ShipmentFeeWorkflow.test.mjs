@@ -120,21 +120,30 @@ test("exported shipment actual-fee cells distinguish pending from recorded amoun
     orders.exportOrdersExcel(orderRows, { customers: [], products: [], stock: [], batches: [], tankGroups: [], shipments });
     assert.ok(exportedBlob instanceof Blob);
     const html = await exportedBlob.text();
-    const shippingTable = html.match(/<table>\s*<tr><td class="section" colspan="13">发货信息<\/td><\/tr>[\s\S]*?<\/table>/)?.[0];
+    const shippingTableMatch = html.match(/<table>\s*<tr><td class="section" colspan="(\d+)">发货信息<\/td><\/tr>[\s\S]*?<\/table>/);
+    const shippingTable = shippingTableMatch?.[0];
     assert.ok(shippingTable, "inspect the real 发货信息 table, not the order totals table");
+    const headers = [...shippingTable.matchAll(/<th class="text">([\s\S]*?)<\/th>/g)].map(match => match[1]);
+    assert.equal(headers.length, Number(shippingTableMatch[1]), "section span must match the exported header count");
+    assert.equal(headers.filter(header => header === "实际运费").length, 1, "identify exactly one actual-fee column by its header");
+    const actualFeeColumn = headers.indexOf("实际运费");
+    for (const header of ["原登记发货日期", "原登记发货时间", "原登记签收时间", "履约核对状态", "实际发货时间", "实际收货情况", "实际签收时间"]) {
+      assert.ok(headers.includes(header), `retain the separate fulfillment evidence column: ${header}`);
+    }
     const cellsByOrder = new Map([...shippingTable.matchAll(/<tr>((?:<td class="text">[\s\S]*?<\/td>)+)<\/tr>/g)].map((match) => {
       const cells = [...match[1].matchAll(/<td class="text">([\s\S]*?)<\/td>/g)].map((cell) => cell[1]);
+      assert.equal(cells.length, headers.length, `every shipment row must align with its headers: ${cells[0]}`);
       return [cells[0], cells];
     }));
     assert.equal(cellsByOrder.size, orderRows.length);
     for (const order of orderRows) {
       const shipment = shipments.find((item) => item.orderId === order.id);
       const expectedPending = order.shippingFeeMode !== "collect" && shipment.shipMethod !== "pickup" && !(shipment.actualShippingFee > 0);
-      const actualFeeCell = cellsByOrder.get(order.orderNo)[9];
+      const actualFeeCell = cellsByOrder.get(order.orderNo)[actualFeeColumn];
       if (expectedPending) assert.equal(actualFeeCell, "待补运费", order.orderNo);
       else {
         assert.notEqual(actualFeeCell, "待补运费", order.orderNo);
-        assert.match(actualFeeCell, shipment.actualShippingFee > 0 ? /23\.45/ : /0\.00/, order.orderNo);
+        assert.equal(actualFeeCell, shipment.actualShippingFee > 0 ? "¥23.45" : "¥0.00", order.orderNo);
       }
     }
   } finally {

@@ -96,6 +96,7 @@ type SalesMetricWarnings = {
   legacyOrderAmountCount?: number;
   possibleDuplicateReceiptCount?: number;
   estimatedRefundStageCount?: number;
+  correctedFulfillmentRefundCount?: number;
   missingReplacementPriceCount?: number;
   unmatchedRefundCount?: number;
   details?: Record<string, Array<{ orderId?: string; orderNo?: string }>>;
@@ -1185,6 +1186,7 @@ function AdminDashboard() {
     { key: "legacyOrderAmount", count: salesWarnings?.legacyOrderAmountCount, text: "笔历史订单缺少下单金额快照，订单金额按现存资料估算，可能不含已移除商品" },
     { key: "possibleDuplicateReceipt", count: salesWarnings?.possibleDuplicateReceiptCount, text: "笔收款可能重复登记，请核对付款凭证与资金记录的关联；当前未擅自合并" },
     { key: "estimatedRefundStage", count: salesWarnings?.estimatedRefundStageCount, text: "笔历史退款按整单发货时间判断阶段，部分发货订单需核对" },
+    { key: "correctedFulfillmentRefund", count: salesWarnings?.correctedFulfillmentRefundCount, text: "笔退款关联的履约记录已更正，仍按原登记阶段归类，请核对" },
     { key: "missingReplacementPrice", count: salesWarnings?.missingReplacementPriceCount, text: "次历史补发缺少当时售价，未计入补发金额" },
     { key: "unmatchedRefund", count: salesWarnings?.unmatchedRefundCount, text: "笔退款未找到足额的已登记收款，请核对历史收款资料" },
   ].filter((row) => Number(row.count || 0) > 0);
@@ -1965,7 +1967,7 @@ function AdminDashboard() {
     { label: "今日实收金额", value: formatMoney(todayReceived), icon: Banknote },
     { label: "今日退款金额", value: formatMoney(todayUnshippedRefund), icon: RotateCcw },
     { label: "今日报损与补发金额", value: formatMoney(todayShippedDamage), icon: CircleAlert },
-    { label: "今日发货出库", value: `${todayShippedOut} 条`, icon: Truck },
+    { label: "今日出库登记", value: `${todayShippedOut} 条`, icon: Truck },
     {
       label: "库存健康鱼总价值",
       value: healthyFishStockMetrics ? formatMoney(healthyFishStockMetrics.value) : "暂不可用",

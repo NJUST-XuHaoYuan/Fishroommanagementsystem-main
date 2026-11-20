@@ -132,6 +132,11 @@ import {
   assertRefundMetadataUnchanged, refundMetadataSnapshot, refundMetadataForOrder,
 } from "./order-sales-snapshots.mjs";
 import {
+  shipmentFulfillmentCorrectionDetail, applyShipmentFulfillmentCorrection,
+  fulfillmentCorrectionBlocksProgress, assertFulfillmentCorrectionAllowsProgress,
+  assertFulfillmentCorrectionUnchanged,
+} from "./shipment-fulfillment-correction.mjs";
+import {
   countsAsCompletionShipment,
   shipmentIsResolvedForCompletion,
 } from "./shipment-completion-rules.mjs";
@@ -6191,6 +6196,9 @@ function validateOrderCanComplete(order = {}, shipments = []) {
   const activeShipments = shipments.filter((shipment) =>
     String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
   );
+  for (const shipment of activeShipments) {
+    if (shipment.fulfillmentCorrection) assertFulfillmentCorrectionAllowsProgress(shipment);
+  }
   const shippedIds = new Set(activeShipments.flatMap((shipment) =>
     Array.isArray(shipment?.itemStockIds) ? shipment.itemStockIds.map((id) => String(id)) : []
   ));
@@ -6224,9 +6232,10 @@ function applyAutomaticOrderTransitions(state = {}) {
   let nextNotifications = currentStationNotifications(state);
 
   const nextShipments = shipments.map((shipment) => {
+    if (shipment.fulfillmentCorrection && fulfillmentCorrectionBlocksProgress(shipment)) return shipment;
     const status = String(shipment?.status ?? "");
     if (status === "outbound") {
-      const outboundDate = datePart(shipment.outboundDate || shipment.createdAt || shipment.shipDate);
+      const outboundDate = datePart(shipment.fulfillmentCorrection?.actualShippedAt || shipment.outboundDate || shipment.createdAt || shipment.shipDate);
       if (isDateOnOrBefore(outboundDate, outboundThreshold)) {
         const order = orders.find((item) => String(item?.id ?? "") === String(shipment?.orderId ?? ""));
         const gate = order ? shipmentPaymentGateForOrder(order, shipments) : null;
@@ -6248,12 +6257,13 @@ function applyAutomaticOrderTransitions(state = {}) {
         }
         autoShippedCount += 1;
         return paymentEvidenceShipmentSnapshot({
-          ...shipment, status: "shipped", shippedAt: shipment.shippedAt || now, shipDate: today,
+          ...shipment, status: "shipped", shippedAt: shipment.shippedAt || now,
+          shipDate: shipment.fulfillmentCorrection ? shipment.shipDate || today : today,
         }, order || {}, order ? calcAmountDueForOrder(order, shipments) : 0, "auto_confirm", now);
       }
     }
     if (status === "shipped") {
-      const shippedDate = datePart(shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt);
+      const shippedDate = datePart(shipment.fulfillmentCorrection?.actualShippedAt || shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt);
       if (isDateOnOrBefore(shippedDate, shippedThreshold)) {
         autoDeliveredCount += 1;
         return {
@@ -6272,11 +6282,12 @@ function applyAutomaticOrderTransitions(state = {}) {
     const orderShipments = nextShipments.filter((shipment) =>
       String(shipment?.orderId ?? "") === String(order.id ?? "") && countsAsCompletionShipment(shipment)
     );
+    if (orderShipments.some(shipment => shipment.fulfillmentCorrection && fulfillmentCorrectionBlocksProgress(shipment))) return order;
     if (orderShipments.length === 0) return order;
     const deliveredShipments = orderShipments.filter(shipmentIsResolvedForCompletion);
     if (deliveredShipments.length !== orderShipments.length) return order;
     const latestDeliveredDate = deliveredShipments
-      .map((shipment) => datePart(shipment.deliveredAt || shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt))
+      .map((shipment) => datePart(shipment.fulfillmentCorrection?.actualDeliveredAt || shipment.deliveredAt || shipment.shippedAt || shipment.shipDate || shipment.outboundDate || shipment.createdAt))
       .filter(Boolean)
       .sort()
       .at(-1);
@@ -6483,6 +6494,7 @@ function validateOrderStatusForPatch(req, currentOrder = {}, nextOrder = {}, nex
 function validateShipmentPatchTransition(currentShipment = {}, nextShipment = {}) {
   const from = String(currentShipment.status ?? "");
   const to = String(nextShipment.status ?? "");
+  if (currentShipment.fulfillmentCorrection && from !== to && ["shipped", "delivered"].includes(to)) assertFulfillmentCorrectionAllowsProgress(currentShipment);
   const shipMethod = String(nextShipment.shipMethod ?? currentShipment.shipMethod ?? "express");
   const proof = Array.isArray(nextShipment.packingProof) ? nextShipment.packingProof : [];
   const allowed = new Set([
@@ -6583,6 +6595,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    assertFulfillmentCorrectionUnchanged(currentShipment, nextShipment);
     for (const key of ["damageEvents", "damageReplacements", "damageAmount", "damageRefundAmount", "damagedAt"]) {
       if (stableJson(currentShipment[key]) !== stableJson(nextShipment[key])) {
         throw httpError(409, "发货报损和补发业务快照只能通过专用入口登记", "SHIPMENT_DAMAGE_SNAPSHOT_IMMUTABLE");
@@ -8794,6 +8807,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/dashboard-summary" || url.pathname === "/api/dashboard-focus" || url.pathname === "/api/stock/loss-price" ||
+      url.pathname === "/api/shipments/fulfillment-correction" ||
       url.pathname === "/api/batches/detail" || url.pathname === "/api/batches/fish-history" || url.pathname === "/api/batches/order-detail" ||
       url.pathname === "/api/orders/new-customer/linked-detail" || url.pathname === "/api/public-catalog/stock-options" ||
       url.pathname === "/api/stock/status-history" || url.pathname === "/api/orders/wholesale-tag" || url.pathname.startsWith("/api/orders/owner-assignment") || url.pathname.startsWith("/api/orders/new-customer/evidence")) {
@@ -13853,6 +13867,9 @@ async function handleApi(req, res, url) {
       const requestedOrderId = String(body.orderId ?? "").trim();
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
       const orderId = String(currentOrder.id ?? "");
+      for (const shipment of (state.shipments ?? []).filter(item => String(item.orderId) === orderId)) {
+        if (shipment.fulfillmentCorrection) assertFulfillmentCorrectionAllowsProgress(shipment);
+      }
       if (currentOrder.status === "completed") {
         await client.query("ROLLBACK");
         const visibleState = siteVisibilityFilteredState(state, req.auth?.account);
@@ -14268,6 +14285,7 @@ async function handleApi(req, res, url) {
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
       const shipmentId = String(shipment.id ?? "");
       assertStockIdsNotInTransfer(state, shipment.itemStockIds, "发货单包含移缸在途的鱼，不能确认发货");
+      assertFulfillmentCorrectionAllowsProgress(shipment);
       if (shipment.status !== "outbound") throw new Error("只有已出库的发货单可以确认发货");
 
       if (order.status === "completed") throw new Error("已完成订单不能再确认发货");
@@ -14290,8 +14308,8 @@ async function handleApi(req, res, url) {
         ...shipment,
         status: shipMethod === "pickup" ? "delivered" : "shipped",
         packingProof,
-        shippedAt: now,
-        shipDate: todayInChina(),
+        shippedAt: shipment.fulfillmentCorrection ? shipment.shippedAt || now : now,
+        shipDate: shipment.fulfillmentCorrection ? shipment.shipDate || todayInChina() : todayInChina(),
         actualShippingFee: shipMethod === "pickup" ? 0 : shipment.actualShippingFee,
       }, order, calcAmountDueForOrder(order, shipments), "confirm", now);
       const nextShipments = shipments.map((item) =>
@@ -14364,6 +14382,7 @@ async function handleApi(req, res, url) {
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
       const shipmentId = String(shipment.id ?? "");
       assertStockIdsNotInTransfer(state, shipment.itemStockIds, "发货单包含移缸在途的鱼，不能确认签收");
+      assertFulfillmentCorrectionAllowsProgress(shipment);
       if (order.status === "completed") throw new Error("已完成订单不能再确认签收");
       if (order.status === "cancelled") throw new Error("已取消订单不能再确认签收");
       if (shipment.status === "delivered") {
@@ -14607,6 +14626,38 @@ async function handleApi(req, res, url) {
     } finally {
       client.release();
     }
+    return;
+  }
+
+  if (url.pathname === "/api/shipments/fulfillment-correction" && ["GET", "POST"].includes(req.method)) {
+    const client = await pool.connect();
+    try {
+      const body = req.method === "POST" ? JSON.parse(await readBody(req) || "{}") : null;
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      const actor = refreshLockedMutationAuth(req, state, { code: "FULFILLMENT_CORRECTION_ACCOUNT_CHANGED" });
+      if (actor.accessRole !== "admin") throw httpError(403, "仅管理员可以更正履约核对记录", "FULFILLMENT_CORRECTION_ADMIN_REQUIRED");
+      const shipmentId = body?.shipmentId ?? url.searchParams.get("shipmentId");
+      resolveAuthorizedLockedShipmentTarget(req, state, shipmentId);
+      if (req.method === "GET") {
+        const detail = shipmentFulfillmentCorrectionDetail(state, shipmentId, actor);
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, ...detail });
+      } else {
+        const result = applyShipmentFulfillmentCorrection(state, body, actor, { now: new Date(), createId: uid });
+        // Deliberately bypass financial/commission mutations and state normalizers.
+        await client.query(`UPDATE app_state SET data = jsonb_set(jsonb_set(data,
+          '{shipments}', $2::jsonb, true), '{operationLogs}', $3::jsonb, true), updated_at = now() WHERE id = $1`,
+        [stateId, JSON.stringify(result.state.shipments), JSON.stringify(result.state.operationLogs)]);
+        await client.query("COMMIT");
+        const visible = siteVisibilityFilteredState(result.state, actor);
+        sendJson(req, res, 200, { ok: true, shipment: result.shipment, shipments: visible.shipments, operationLog: result.operationLog });
+      }
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error?.statusCode || 400, { ok: false, ...(error?.code ? { code: error.code } : {}), error: error.message || "履约核对记录保存失败" });
+    } finally { client.release(); }
     return;
   }
 

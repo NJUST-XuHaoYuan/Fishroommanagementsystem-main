@@ -52,6 +52,7 @@ type OrderShipment = {
   actualShippingFee: number | null;
   damageResolution: string;
   damageRefundAmount: number | null;
+  fulfillmentCorrection?: { shippingTimeStatus: string; actualShippedAt?: string; receiptStatus: string; actualDeliveredAt?: string; reason?: string; updatedAt?: string; operatorName?: string };
 };
 type OrderTotals = {
   itemSubtotal: number | null;
@@ -217,8 +218,13 @@ function ShipmentRecords({ shipments, batchContext = true }: { shipments: OrderS
           {shipment.shipMethod !== "pickup" && <Field label="物流单号" value={shipment.trackingNo} />}
           <Field label="创建时间" value={batchRecordDate(shipment.createdAt)} />
           <Field label="出库时间" value={batchRecordDate(shipment.outboundDate)} />
-          <Field label={shipment.shippedAt ? "实际发货时间" : "登记发货日期"} value={batchRecordDate(shipment.shippedAt || shipment.shipDate)} />
-          <Field label="签收时间" value={batchRecordDate(shipment.deliveredAt)} />
+          <Field label={shipment.fulfillmentCorrection ? "原登记发货时间" : shipment.shippedAt ? "实际发货时间" : "登记发货日期"} value={batchRecordDate(shipment.shippedAt || shipment.shipDate)} />
+          <Field label={shipment.fulfillmentCorrection ? "原登记签收时间" : "签收时间"} value={batchRecordDate(shipment.deliveredAt)} />
+          {shipment.fulfillmentCorrection && <>
+            <Field label="核对后实际发货时间" value={shipment.fulfillmentCorrection.shippingTimeStatus === "known" ? batchRecordDate(shipment.fulfillmentCorrection.actualShippedAt) : "待核实"} />
+            <Field label="核对后签收情况" value={shipment.fulfillmentCorrection.receiptStatus === "received" ? shipment.fulfillmentCorrection.actualDeliveredAt ? `已收到 · ${batchRecordDate(shipment.fulfillmentCorrection.actualDeliveredAt)}` : "已收到，签收日期待核实" : shipment.fulfillmentCorrection.receiptStatus === "not_received" ? "尚未收到" : "待核实"} />
+            <Field label="更正原因" value={shipment.fulfillmentCorrection.reason} />
+          </>}
           <Field label="实际运费" value={batchOrderMoney(shipment.actualShippingFee)} />
           {!!shipment.damagedAt && <Field label="物流报损时间" value={batchRecordDate(shipment.damagedAt)} />}
           {!!shipment.damageResolution && <Field label="报损处理" value={shipment.damageResolution === "refund" ? "退款" : shipment.damageResolution === "reship" ? "补发" : "未记录"} />}
