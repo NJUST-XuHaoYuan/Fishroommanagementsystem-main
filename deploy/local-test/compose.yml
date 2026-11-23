@@ -22,7 +22,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    networks: [local-test]
+    networks: [local-test, local-test-web]
     restart: unless-stopped
 
   backend:
@@ -107,3 +107,6 @@ networks:
   local-test:
     name: fishroom-local-test-network
     internal: true
+
+  local-test-web:
+    name: fishroom-local-test-web
