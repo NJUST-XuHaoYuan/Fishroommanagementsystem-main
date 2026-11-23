@@ -1,0 +1,109 @@
+name: fishroom-local-test
+
+services:
+  frontend:
+    image: fishroom-local-test-frontend:${RELEASE_REVISION:?RELEASE_REVISION must identify this local build}
+    container_name: fishroom-local-test-frontend
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/local-test/frontend.Dockerfile
+      args:
+        BASE_IMAGE: ${LOCAL_TEST_FRONTEND_BASE_IMAGE:-fishroom-frontend:6097405bff30}
+        LOCAL_TEST_RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must identify this local build}
+        LOCAL_TEST_RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set}
+        LOCAL_TEST_BASE_REVISION: ${BASE_REVISION:-906eafc}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 80
+      BACKEND_URL: http://backend:8787
+    ports:
+      - "127.0.0.1:${LOCAL_TEST_PORT:-8787}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [local-test]
+    restart: unless-stopped
+
+  backend:
+    image: fishroom-local-test-backend:${RELEASE_REVISION:?RELEASE_REVISION must identify this local build}
+    container_name: fishroom-local-test-backend
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/local-test/backend.Dockerfile
+      args:
+        BASE_IMAGE: ${LOCAL_TEST_BACKEND_BASE_IMAGE:-fishroom-backend:6097405bff30}
+        LOCAL_TEST_RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION must identify this local build}
+        LOCAL_TEST_RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT must be set}
+        LOCAL_TEST_BASE_REVISION: ${BASE_REVISION:-906eafc}
+    env_file:
+      - ${LOCAL_TEST_ENV_FILE:?LOCAL_TEST_ENV_FILE must be an absolute private runtime.env path}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      NODE_ENV: production
+      PGHOST: database
+      PGPORT: 5432
+      PGDATABASE: fishroom_test
+      PGUSER: fishroom_test
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the private env file}
+      DATABASE_URL: ""
+      UPLOAD_DIR: /app/uploads
+      LOCAL_TEST_CREDENTIALS_PATH: /run/local-test/login.json
+      FISHROOM_DISABLE_BACKGROUND_TASKS: "true"
+      ALLOW_DEFAULT_CREDENTIALS: "false"
+      COS_SECRET_ID: ""
+      COS_SECRET_KEY: ""
+      COS_BUCKET: ""
+      COS_REGION: ""
+      COS_PUBLIC_BASE_URL: ""
+      COS_PREFIX: ""
+      FEISHU_WEBHOOK_URL: ""
+      FEISHU_WEBHOOK_SECRET: ""
+      FEISHU_APP_ID: ""
+      FEISHU_APP_SECRET: ""
+      FEISHU_VERIFICATION_TOKEN: ""
+      FEISHU_DEFAULT_SITE_ID: ""
+      WECHAT_MINIPROGRAM_APP_ID: ""
+      WECHAT_MINIPROGRAM_APP_SECRET: ""
+      WECHAT_MINIPROGRAM_IDENTITY_SECRET: ""
+      AI_API_KEY: ""
+      OPENAI_API_KEY: ""
+      AI_API_BASE_URL: ""
+      OPENAI_BASE_URL: ""
+    volumes:
+      - ${LOCAL_TEST_UPLOADS_DIR:?LOCAL_TEST_UPLOADS_DIR must be a private absolute local directory}:/app/uploads
+      - ${LOCAL_TEST_CREDENTIALS_FILE:?LOCAL_TEST_CREDENTIALS_FILE must be a private absolute login.json path}:/run/local-test/login.json:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [local-test]
+    restart: unless-stopped
+
+  database:
+    image: postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+    container_name: fishroom-local-test-database
+    pull_policy: never
+    environment:
+      POSTGRES_DB: fishroom_test
+      POSTGRES_USER: fishroom_test
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the private env file}
+    volumes:
+      - local-test-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fishroom_test -d fishroom_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [local-test]
+    restart: unless-stopped
+
+volumes:
+  local-test-postgres:
+    name: fishroom-local-test-postgres
+
+networks:
+  local-test:
+    name: fishroom-local-test-network
+    internal: true

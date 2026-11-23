@@ -17215,6 +17215,10 @@ const server = createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`Local Fishroom API/static server: http://${host}:${port}`);
   console.log(`PostgreSQL state table: ${pgConfig.database}.app_state`);
+  if (process.env.FISHROOM_DISABLE_BACKGROUND_TASKS === "true") {
+    console.log("本地测试环境：已关闭订单自动流转和凭证草稿定时清理");
+    return;
+  }
   scheduleAutomaticOrderTransitions();
   // A bounded, dedicated cleanup never touches normal uploads or submitted proof.
   const evidenceCleanupTimer = setInterval(() => {

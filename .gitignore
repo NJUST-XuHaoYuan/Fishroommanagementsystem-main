@@ -31,3 +31,6 @@ wechat-miniprogram/project.private.config.json
 *.zip
 *.tar
 *.tar.gz
+
+# Local test checkout may share installed dependencies through a symlink.
+/node_modules

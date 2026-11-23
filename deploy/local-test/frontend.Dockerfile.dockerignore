@@ -1,0 +1,9 @@
+**
+!dist/
+!dist/**
+!deploy/
+!deploy/frontend-server.mjs
+!deploy/local-test/
+!deploy/local-test/mark-local-test-html.mjs
+!deploy/local-test/frontend.Dockerfile
+!deploy/local-test/frontend.Dockerfile.dockerignore

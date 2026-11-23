@@ -1,0 +1,6 @@
+**
+!server/
+!server/**
+!deploy/
+!deploy/local-test/
+!deploy/local-test/**
