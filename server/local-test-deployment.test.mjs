@@ -42,9 +42,9 @@ test("local Compose isolates names, database and network and exposes only a loop
   for (const role of ["frontend", "backend", "database"]) assert.match(compose, new RegExp(`container_name: fishroom-local-test-${role}`));
   assert.equal((compose.match(/^    ports:/gm) ?? []).length, 1); assert.match(compose, /127\.0\.0\.1:\$\{LOCAL_TEST_PORT:-8787\}:80/);
   assert.match(compose, /name: fishroom-local-test-postgres/); assert.match(compose, /internal: true/);
-  const frontend = compose.split("  frontend:")[1].split("  backend:")[0];
-  const backend = compose.split("  backend:")[1].split("  database:")[0];
-  const database = compose.split("  database:")[1].split("\nvolumes:")[0];
+  const frontend = compose.split(/^  frontend:$/m)[1].split(/^  backend:$/m)[0];
+  const backend = compose.split(/^  backend:$/m)[1].split(/^  database:$/m)[0];
+  const database = compose.split(/^  database:$/m)[1].split(/^volumes:$/m)[0];
   assert.match(frontend, /networks: \[local-test, local-test-web\]/);
   for (const privateService of [backend, database]) { assert.match(privateService, /networks: \[local-test\]/); assert.doesNotMatch(privateService, /local-test-web/); }
   assert.match(compose, /PGHOST: database/); assert.match(compose, /PGDATABASE: fishroom_test/); assert.match(compose, /DATABASE_URL: ""/);
