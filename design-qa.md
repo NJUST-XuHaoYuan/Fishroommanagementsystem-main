@@ -75,3 +75,16 @@ final result: passed
 - Local frontend and backend deployed from 7f59a498de0acb265683143201954095f981ecef. Both healthy; API revision matches. Built frontend asset SHA-256 matches runtime: bbbf07fa5636c309fb1195c2af032521b8d2a534b89c91195579a405ec31ac42. Backend wholesale helper SHA-256 matches runtime: 64eb62379f3be6de55bb7dbca0d117b9262210b93202da2fb84aa4a4d8a6e450.
 - Database container unchanged (c4f5ec96dd2d); pre-update local dump saved privately. Backend remains on internal local-test network, local database fishroom_test, background tasks disabled and cloud integration credentials empty. Restart shortcuts retain the updated frontend/backend override.
 - No production deployment or shared-baseline push. Final amendment result: passed.
+
+
+## 2026-11-25 correction: six parallel order entries
+
+This section supersedes the independent type selector described above. User clarified that wholesale is the sixth peer entry; the other five entries create retail orders.
+
+- First step is now six cards: 抖音、闲鱼、微拍堂、线上私域、线下自提、批发. No ordinary/wholesale toggle remains. Form classification derives from the selected source, so returning and choosing any retail card cannot retain a stale wholesale flag.
+- New wholesale source uses the customer/address/payment/planned-shipment flow. Address entry, edit preservation, detail display and export were checked and aligned with private-channel shipping orders.
+- Server derives new classification from source, rejects conflicting client flags, and changes classification atomically when an editable order crosses into/out of wholesale. Existing historical manual tags retain compatibility. Wholesale-source completed orders accurately state that their type cannot be changed.
+- Verification: 31 backend checks, 17 frontend regression checks and production build passed. Browser verified all five retail forms after wholesale, wholesale address field, desktop 1487 × 1058 and mobile 390 × 844 with no horizontal overflow, no console errors. No business records submitted in the local copy; persisted create/update/rollback tested with isolated fixtures.
+- Local source/image/API revision: 8bf8e47c2f5272f5f4784d07e43368e52782b50a. Frontend built/runtime SHA-256 matches: c41d4da1e5e2ba815759e3968c86a67c3bfa46e59bc31e110ffb0186fbaeff0f. Wholesale backend helper built/runtime SHA-256 matches: 043a6141e359dc07fe92aef415badf6159fac7ab7ed45ac0b23541da8f666f4d. Services healthy, database container unchanged (c4f5ec96dd2d). Production untouched.
+- Evidence: .data/wholesale-six-qa/desktop.png, chooser-detail.png, mobile-chooser.png, mobile-form.png.
+- Final result: passed; no outstanding P0/P1/P2 findings.
