@@ -6551,7 +6551,7 @@ function NewOrderDialog({
             <DialogTitle className="text-lg">新建销售订单</DialogTitle>
             <ol className="mt-2 flex items-center gap-2 text-xs" aria-label="新建订单流程">
               <li className={!source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={!source ? "step" : undefined}>1 选择类型</li>
-              <ChevronRight className="size-3 text-muted-foreground" aria-hidden="true" />
+              <li aria-hidden="true"><ChevronRight className="size-3 text-muted-foreground" /></li>
               <li className={source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={source ? "step" : undefined}>2 填写订单</li>
             </ol>
           </DialogHeader>
@@ -6568,7 +6568,7 @@ function NewOrderDialog({
                       className="group flex min-h-24 items-center gap-3 rounded-lg border bg-card p-4 text-left transition-colors hover:border-primary/60 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><SourceIcon className="size-5" aria-hidden="true" /></span>
                       <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2"><span className="text-base font-semibold">{choice.label}</span><span className="text-xs text-muted-foreground">{choice.value === "批发" ? "批发" : "零售"}</span></span>
+                        <span className="flex items-center gap-2"><span className="text-base font-semibold">{choice.label}</span>{choice.value !== "批发" && <span className="text-xs text-muted-foreground">零售</span>}</span>
                         <span className="mt-1 block text-xs leading-5 text-muted-foreground">{choice.description}</span>
                       </span>
                       <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
@@ -6595,7 +6595,7 @@ function NewOrderDialog({
                     {customerPermission.canCreate && (
                       <button
                         type="button"
-                        className="inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-700 hover:underline"
+                        className="new-order-inline-action relative inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-700 hover:underline"
                         onClick={() => setCustomerDialogOpen(true)}
                       >
                         <Plus className="size-3" />
@@ -6885,7 +6885,7 @@ function NewOrderDialog({
                     <div className="grid gap-1.5">
                       <Label className="text-xs">预计运费（¥）</Label>
                       <Input type="number" min={0} step={0.01} aria-label="预计运费" value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
-                      <p className="text-xs text-muted-foreground">现在未知可留空，发货时必须补充</p>
+                      <p className="text-xs text-muted-foreground">未知可留空；实际运费确定后，在发货记录中补录。</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
@@ -6929,7 +6929,7 @@ function NewOrderDialog({
           )}
 
           <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-card px-4 py-3 sm:px-6">
-            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · 应收 </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">五种零售来源与批发独立选择</span>}
+            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · 应收 </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">下一步可更换订单类型</span>}
             <div className="ml-auto flex shrink-0 items-center gap-2">
               <Button type="button" variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
               {source && <Button type="button" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>}
