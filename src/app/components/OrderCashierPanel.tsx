@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Wallet } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, CheckCircle2, ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { useStore, type Order, type Shipment, type Store } from "../store";
 import { orderCashierEntries, orderCashierTotals, type CashierEntry } from "../utils/orderCashier";
 import type { PaymentProofDetail } from "../utils/orderPaymentProof";
@@ -50,13 +50,11 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
   return <section aria-label="订单收银台" className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0"><h3 className="flex items-center gap-2 text-base font-semibold"><Wallet className="size-4" aria-hidden="true" />收银台</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">按每笔实际收付登记金额、账户和凭证，财务事后核验；完成订单前需核验结清。</p></div>
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" className="min-h-11" disabled={!canRecord} onClick={requestPayment}><ArrowDownLeft className="size-4" />登记收款</Button>
-        {refundAvailable && <Button type="button" variant="outline" className="min-h-11" disabled={refundSaving} onClick={() => freight.toRefund > 0 ? setRefundChoiceOpen(true) : onRefund()}><ArrowUpRight className="size-4" />登记退款</Button>}
-      </div>
     </div>
 
-    <OrderCashierBalanceSummary order={order} shipments={shipments} amountDue={amountDue} netRecorded={totals.netRecorded} />
+    <OrderCashierBalanceSummary order={order} shipments={shipments} amountDue={amountDue} netRecorded={totals.netRecorded}
+      onRecordPayment={canUpdate ? requestPayment : undefined} canRecordPayment={canRecord}
+      onRecordRefund={refundAvailable ? () => freight.toRefund > 0 ? setRefundChoiceOpen(true) : onRefund() : undefined} refundSaving={refundSaving} />
 
     <dl className="grid grid-cols-1 gap-3 border-y py-4 sm:grid-cols-3 sm:gap-6">
       <div><dt className="text-xs text-muted-foreground">已登记收款</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{currency(totals.received)}</dd><p className="mt-1 text-xs text-muted-foreground">财务已确认 {currency(totals.confirmedReceived)}</p></div>
@@ -66,7 +64,7 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
 
     <div className="min-w-0">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">收支记录 <span className="font-normal text-muted-foreground">{entries.length} 笔</span></h4><div className="flex gap-1" role="group" aria-label="收支记录方向">{([["all", "全部"], ["in", "入账"], ["out", "出账"]] as const).map(([value, label]) => <Button key={value} type="button" size="sm" variant={direction === value ? "secondary" : "ghost"} className="min-h-11" aria-pressed={direction === value} onClick={() => { setDirection(value); setSelectedId(""); }}>{label}</Button>)}</div></div>
-      {visibleEntries.length === 0 ? <p className="border-y py-6 text-center text-sm text-muted-foreground">{entries.length ? "暂无此类收支记录" : "尚无收支记录，收到款项后点击“登记收款”。"}</p> : <div className="divide-y border-y">
+      {visibleEntries.length === 0 ? <p className="border-y py-6 text-center text-sm text-muted-foreground">{entries.length ? "暂无此类收支记录" : "尚无收支记录。"}</p> : <div className="divide-y border-y">
         {visibleEntries.map(entry => <div key={entry.id}>
           <button type="button" aria-expanded={selectedId === entry.id} aria-label={`查看${entry.label} ${currency(entry.amount)} ${timeLabel(entry.time)}`} onClick={() => setSelectedId(current => current === entry.id ? "" : entry.id)} className="flex min-h-16 w-full min-w-0 items-start gap-3 rounded-sm px-1 py-3 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <span className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full ${entry.direction === "in" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{entry.direction === "in" ? <ArrowDownLeft className="size-4" /> : <ArrowUpRight className="size-4" />}</span>
@@ -119,26 +117,34 @@ function CashierEntryDetail({ entry, canViewProof }: { entry: CashierEntry; canV
 }
 
 
-export function OrderCashierBalanceSummary({ order, shipments, amountDue, netRecorded }: {
+export function OrderCashierBalanceSummary({ order, shipments, amountDue, netRecorded, onRecordPayment, canRecordPayment = false, onRecordRefund, refundSaving = false }: {
   order: Order; shipments: Shipment[]; amountDue: number; netRecorded: number;
+  onRecordPayment?: () => void; canRecordPayment?: boolean; onRecordRefund?: () => void; refundSaving?: boolean;
 }) {
   const freight = getShippingSettlementSummary(order, shipments, amountDue);
-  const balance = Math.round((amountDue - netRecorded) * 100) / 100;
+  const balance = (Math.round(amountDue * 100) - Math.round(netRecorded * 100)) / 100;
   const goodsAndPackaging = Math.round((amountDue - (freight.enabled ? freight.shippingDue : 0)) * 100) / 100;
   const freightLabel = freight.finalized ? "实际运费" : freight.timing === "before_shipping" ? "预收运费" : "已确定运费";
-  return <section aria-label="订单应收与待收退款" className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3 rounded-md bg-muted/30 p-4">
-    <div className="min-w-0">
-      <p className="text-sm font-medium">当前订单应收 <strong className="ml-2 text-lg tabular-nums">{currency(amountDue)}</strong></p>
+  return <section aria-label="订单应收应付" className="min-w-0 rounded-lg border bg-card p-4 sm:p-5">
+    <div className="flex flex-wrap items-center justify-between gap-4">
+      <div role="status" aria-live="polite" aria-atomic="true" className="min-w-0">
+        {balance === 0 ? <p className="flex items-center gap-2 text-lg font-semibold"><CheckCircle2 className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />无应收应付</p> : <>
+          <p className="text-sm font-medium">{balance > 0 ? "应收金额" : "应付金额（退款）"}</p>
+          <p className={`mt-1 break-all text-3xl font-semibold tabular-nums ${balance > 0 ? "text-amber-800 dark:text-amber-300" : "text-rose-800 dark:text-rose-300"}`}>{currency(Math.abs(balance))}</p>
+        </>}
+      </div>
+      {balance > 0 && onRecordPayment && <Button type="button" className="min-h-11" disabled={!canRecordPayment} onClick={onRecordPayment}><ArrowDownLeft className="size-4" aria-hidden="true" />登记收款</Button>}
+      {balance < 0 && onRecordRefund && <Button type="button" className="min-h-11" disabled={refundSaving} onClick={onRecordRefund}><ArrowUpRight className="size-4" aria-hidden="true" />登记退款</Button>}
+    </div>
+    <div className="mt-4 min-w-0 border-t pt-3">
+      <p className="text-sm">订单应收合计 <strong className="ml-2 font-semibold tabular-nums">{currency(amountDue)}</strong></p>
       {freight.enabled && <>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">商品及包装（优惠调整后）{currency(goodsAndPackaging)} + {freightLabel} {currency(freight.shippingDue)}</p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">{freight.timing === "before_shipping"
           ? "预收运费已合并到订单应收，统一登记收款；全部发货并补录实际运费后，多退少补。"
           : "运费随发货逐笔计入订单应收，全部发货并补录后确认最终金额，统一补收或退差。"}</p>
       </>}
-    </div>
-    <div className="min-w-0 text-sm">
-      <p className="font-medium">{balance > 0 ? "待收金额" : balance < 0 ? "应退金额" : "已登记收齐"}{balance !== 0 && <strong className="ml-2 text-lg tabular-nums">{currency(Math.abs(balance))}</strong>}</p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">按已登记收退款计算，包含待核验款项；到账仍需财务核验，不影响登记退款。</p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">余额按已登记收退款计算，包含待核验款项；财务核验进度见下方记录。</p>
     </div>
   </section>;
 }

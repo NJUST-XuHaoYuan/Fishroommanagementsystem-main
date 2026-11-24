@@ -34,8 +34,8 @@ test("126 pending receipt minus 110 final due exposes and prefills exactly 16 fr
   assert.equal(freight.toRefund, 16); assert.equal(freight.actualFee, 34);
   assert.equal(shared.shippingRefundDraftAmount(freight), "16");
   const html = renderToStaticMarkup(createElement(cashier.OrderCashierBalanceSummary, { order, shipments, amountDue: 110, netRecorded: cash.netRecorded }));
-  assert.match(html, /应退金额/); assert.match(html, /¥16\.00/);
-  assert.match(html, /不影响登记退款/);
+  assert.match(html, /应付金额（退款）/); assert.match(html, /¥16\.00/);
+  assert.match(html, /财务核验进度见下方记录/);
 });
 
 test("pending refund consumes the difference and cannot be offered twice", () => {
@@ -45,7 +45,7 @@ test("pending refund consumes the difference and cannot be offered twice", () =>
   assert.equal(cash.availableRefund, 110); assert.equal(cash.verifiedRefunded, 0);
   assert.equal(freight.toRefund, 0); assert.equal(shared.shippingRefundDraftAmount(freight), "");
   const html = renderToStaticMarkup(createElement(cashier.OrderCashierBalanceSummary, { order: refunded, shipments, amountDue: 110, netRecorded: cash.netRecorded }));
-  assert.match(html, /已登记收齐/); assert.doesNotMatch(html, /应退金额/);
+  assert.match(html, /无应收应付/); assert.doesNotMatch(html, /应付金额（退款）/);
 });
 
 test("rejected and orphan approved claims cannot create a refundable balance", () => {
