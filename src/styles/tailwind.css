@@ -62,6 +62,16 @@ body {
     min-height: 2.5rem;
   }
 
+  /* Keep compact selection controls inside their larger clickable labels. */
+  .fishroom-content .orders-management [data-slot="switch"],
+  .fishroom-content .orders-management [data-slot="checkbox"] {
+    min-height: 0;
+  }
+
+  .fishroom-content .orders-management .orders-mobile-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
   [data-slot="dialog-content"],
   [data-slot="alert-dialog-content"] {
     left: 0 !important;
