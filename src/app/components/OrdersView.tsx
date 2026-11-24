@@ -3285,8 +3285,6 @@ function StockPickerBioDialog({
     setEditingRecordId(null);
     setEditingRecordTime("");
     setActionMode("detail");
-    setTargetGroupId("");
-    setTargetSubTankId("");
     setMoveNotes("");
     setLossDate(today);
     setLossReason("");
