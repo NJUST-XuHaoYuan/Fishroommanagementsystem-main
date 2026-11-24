@@ -127,5 +127,4 @@ test("refund submission locks duplicates, reuses draft id, scopes response to vi
   assert.match(dialog, /role="alert"/);
   assert.match(dialog, /disabled=\{busy\}/);
   assert.match(dialog, /onUploadingChange=\{setProofUploading\}/);
-  assert.match(source, /<OrderRefundAction[^]*?<div className="flex-1" \/>/);
 });

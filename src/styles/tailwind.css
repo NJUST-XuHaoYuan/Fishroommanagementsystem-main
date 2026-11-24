@@ -123,3 +123,39 @@ body {
     inset: -14px 0;
   }
 }
+
+/* Order type colors identify the source; the five retail sources stay peers of wholesale. */
+.new-order-source-card {
+  background: var(--order-source-bg);
+  border-color: var(--order-source-border);
+  color: var(--order-source-ink);
+}
+.new-order-source-card:hover,
+.new-order-source-card[aria-pressed="true"] {
+  border-color: var(--order-source-ink);
+  background: var(--order-source-hover);
+}
+.new-order-source-icon { background: var(--order-source-icon); }
+.new-order-source-card[data-source="平台下单"] {
+  --order-source-bg: #18181b; --order-source-hover: #27272a; --order-source-border: #3f3f46; --order-source-ink: #fafafa; --order-source-icon: #3f3f46;
+}
+.new-order-source-card[data-source="闲鱼平台"] {
+  --order-source-bg: #fff8db; --order-source-hover: #fff1b2; --order-source-border: #e5c35f; --order-source-ink: #713f12; --order-source-icon: #fde68a;
+}
+.new-order-source-card[data-source="微拍堂平台"] {
+  --order-source-bg: #fff1f2; --order-source-hover: #ffe4e6; --order-source-border: #f2a8b1; --order-source-ink: #9f1239; --order-source-icon: #fecdd3;
+}
+.new-order-source-card[data-source="私域线上"] {
+  --order-source-bg: #ecfdf5; --order-source-hover: #d1fae5; --order-source-border: #7dcfb3; --order-source-ink: #065f46; --order-source-icon: #a7f3d0;
+}
+.new-order-source-card[data-source="线下"] {
+  --order-source-bg: #eff8ff; --order-source-hover: #dff1ff; --order-source-border: #8cc4e9; --order-source-ink: #075985; --order-source-icon: #bae6fd;
+}
+.new-order-source-card[data-source="批发"] {
+  --order-source-bg: #f4f1ff; --order-source-hover: #e9e3ff; --order-source-border: #b7a6e2; --order-source-ink: #5b21b6; --order-source-icon: #ddd6fe;
+}
+.new-order-step:disabled { cursor: default; opacity: 1; }
+@media (max-width: 639px) {
+  .new-order-dialog .new-order-step { min-width: 0; padding-inline: 0; }
+  .new-order-stepper { justify-content: space-between; }
+}

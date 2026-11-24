@@ -691,6 +691,8 @@ export type Order = {
   siteId?: string;
   orderNo: string;
   createdAt?: string;
+  /** 分步下单、独立收银流程；历史订单未设置。 */
+  orderFormSchemaVersion?: 4;
   /** 下单原成交金额；旧单首次变更前留存当前原值，后续退款单列。 */
   salesAmountSnapshot?: { amount: number; capturedAt: string; source: "created" | "legacy" };
   customerId: string;
@@ -711,6 +713,8 @@ export type Order = {
   paymentReference?: string;
   shippingAddress?: string;
   plannedShipDate?: string;
+  /** 下单时计划使用的快递公司，出库时仍可调整。 */
+  plannedCarrier?: string;
   /** Stable personnel reference for the order owner. `contactPerson` remains the saved display-name snapshot. */
   contactPersonnelId?: string;
   contactPerson?: string;

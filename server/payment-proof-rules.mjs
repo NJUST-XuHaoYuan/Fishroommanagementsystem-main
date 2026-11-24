@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { usesOrderCashier, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
 import { hasShippingSettlement, shippingSettlementSummary, allocateShippingProof, paymentShippingAmount } from "./shipping-settlement.mjs";
-import { isPaymentVerified, configuredPaymentMethods, resolvePaymentMethodSnapshot, verifiedPaymentTotals } from "./payment-utils.mjs";
+import { isPaymentVerified, resolvePaymentMethodSnapshot, verifiedPaymentTotals } from "./payment-utils.mjs";
 import { creditSaleOrderOwner } from "./credit-sale-approval-rules.mjs";
 import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
 import { normalizePaymentEvidenceIds, resolveEvidenceForSubmission, paymentEvidenceMetadata } from "./payment-evidence.mjs";
@@ -59,7 +60,7 @@ export function paymentProofReviewToken(order) {
 
 export function paymentProofDetail(state, order, account, amountDue, canReview) {
   return { orderId: order.id, claims: paymentClaims(order), canSubmit: canSubmitPaymentProof(state, order, account), canReview,
-    paymentMethods: configuredPaymentMethods(state.systemSettings).filter(method => method.channel === order.paymentChannel),
+    paymentMethods: orderCashierPaymentMethods(state.systemSettings, order),
     eligiblePayments: canReview ? eligiblePaymentProofPayments(order) : [],
     receiptCandidates: canSubmitPaymentProof(state, order, account) ? eligiblePaymentProofPayments(order)
       .map(payment => Object.fromEntries(["id", "type", "amount", "shippingAmount", "channel", "account"].map(key => [key, payment[key]]))) : [],
@@ -93,8 +94,10 @@ export function planPaymentProofSubmission(state, order, account, body, { amount
     if (total - amountDue > 0.005) fail("申报付款金额累计不能超过当前订单应收，请核对已有申报", "PAYMENT_PROOF_OVERPAID");
     if (body.purpose === "shipping_fee" || Number(body.shippingAmount || 0) !== 0) fail("历史订单请使用原收款流程", "PAYMENT_PROOF_LEGACY_PURPOSE", 400);
   }
-  const method = resolvePaymentMethodSnapshot(state.systemSettings, { paymentMethodId: body.paymentMethodId, channel: order.paymentChannel }, {});
-  if (method.channel !== order.paymentChannel || method.account !== order.paymentAccount) fail("付款方式或收款账户与订单不一致，请核对订单", "PAYMENT_PROOF_METHOD");
+  const method = usesOrderCashier(order)
+    ? resolveOrderCashierMethod(state.systemSettings, order, { paymentMethodId: body.paymentMethodId })
+    : resolvePaymentMethodSnapshot(state.systemSettings, { paymentMethodId: body.paymentMethodId, channel: order.paymentChannel }, {});
+  if (!usesOrderCashier(order) && (method.channel !== order.paymentChannel || method.account !== order.paymentAccount)) fail("付款方式或收款账户与订单不一致，请核对订单", "PAYMENT_PROOF_METHOD");
   const externalTransactionNo = text(body.externalTransactionNo).slice(0, 200);
   if (externalTransactionNo && list(state.orders).some(other => paymentClaims(other).some(claim => claim.status !== "rejected" && claim.id !== existing?.id &&
     text(claim.externalTransactionNo) === externalTransactionNo && claim.channel === method.channel && claim.account === method.account))) fail("该支付流水号已在付款凭证中登记，请核对", "PAYMENT_PROOF_DUPLICATE");

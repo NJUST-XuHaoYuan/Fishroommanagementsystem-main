@@ -88,6 +88,7 @@ import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
+import { usesOrderCashier, cashierMethodAllowedForOrder, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
 import { hasShippingSettlement, shippingSettlementSummary, planShippingRefund, validateShippingReceipt, validateOrderRefundAllocation, isShippingRefund } from "./shipping-settlement.mjs";
 import {
   ensureApprovalNotifications,
@@ -5281,6 +5282,7 @@ function financeMatchingOrderProfiles(state = {}) {
         contactPerson: String(order?.contactPerson ?? ""),
         paymentChannel: normalizePaymentChannel(order?.paymentChannel),
         paymentAccount: String(order?.paymentAccount ?? ""),
+        ...(usesOrderCashier(order) ? { orderFormSchemaVersion: 4, source: order.source } : {}),
         receivable: roundFinance(receivable),
         matchingOutstanding,
         proofReceipts: linkablePaymentProofPayments(order),
@@ -5291,9 +5293,9 @@ function financeMatchingOrderProfiles(state = {}) {
           payment?.type === "refund" &&
           paymentVerificationStatus(payment) === "pending" &&
           !String(payment?.statementId ?? "").trim() &&
-          normalizePaymentChannel(payment?.channel ?? order?.paymentChannel) === normalizePaymentChannel(order?.paymentChannel) &&
-          String(payment?.account ?? order?.paymentAccount ?? "").trim() === String(order?.paymentAccount ?? "").trim()
-        ).map((payment) => ({ id: String(payment?.id ?? ""), amount: roundFinance(payment?.amount) })),
+          (usesOrderCashier(order) || (normalizePaymentChannel(payment?.channel ?? order?.paymentChannel) === normalizePaymentChannel(order?.paymentChannel) &&
+          String(payment?.account ?? order?.paymentAccount ?? "").trim() === String(order?.paymentAccount ?? "").trim()))
+        ).map((payment) => ({ id: String(payment?.id ?? ""), amount: roundFinance(payment?.amount), channel: payment.channel ?? order.paymentChannel, account: payment.account ?? order.paymentAccount })),
       };
     });
 }
@@ -5330,7 +5332,8 @@ function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", met
   if (!currentOrder) throw new Error("系统订单不存在，请刷新后重试");
   if (currentOrder.status === "cancelled") throw new Error("已取消订单不能认领收款");
   if (isPlatformOrderSource(currentOrder.source)) throw new Error("平台订单应通过平台订单编号对账");
-  if (normalizePaymentChannel(currentOrder.paymentChannel) !== normalizePaymentChannel(statement.channel) ||
+  if (usesOrderCashier(currentOrder) ? !cashierMethodAllowedForOrder(statement, currentOrder) :
+      normalizePaymentChannel(currentOrder.paymentChannel) !== normalizePaymentChannel(statement.channel) ||
       String(currentOrder.paymentAccount ?? "").trim() !== String(statement.account ?? "").trim()) {
     throw new Error("该流水与订单付款渠道或收款账户不一致");
   }
@@ -6005,43 +6008,68 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
     if (duplicateOrder) throw new Error(`${platformOrderNoLabel(source)}已存在：${platformOrderNo}`);
   }
   const sourceChanged = Boolean(currentOrder) && String(currentOrder?.source ?? "").trim() !== source;
-  const requestedPaymentMethodId = String(body.paymentMethodId ?? "").trim();
-  const requestedPaymentChannel = isPlatformOrder
-    ? platformPaymentChannelForOrderSource(source)
-    : normalizePaymentChannel(body.paymentChannel ?? currentOrder?.paymentChannel);
-  if ((body.paymentChannel ?? currentOrder?.paymentChannel) && !requestedPaymentChannel) {
-    throw new Error("请选择有效付款方式");
+  if (currentOrder && body.orderFormSchemaVersion === 4 && !usesOrderCashier(currentOrder)) {
+    throw new Error("历史订单保留原收款流程，不能通过编辑切换版本");
   }
-  if (!requestedPaymentMethodId && !requestedPaymentChannel) throw new Error("请选择付款方式");
-  const currentPaymentMethodId = String(currentOrder?.paymentMethodId ?? "").trim();
-  const currentPaymentMethodName = String(currentOrder?.paymentMethodName ?? "").trim();
-  const currentPaymentChannel = normalizePaymentChannel(currentOrder?.paymentChannel);
-  const currentPaymentAccount = String(currentOrder?.paymentAccount ?? "").trim();
-  const preserveCurrentPayment = Boolean(currentOrder) &&
-    !sourceChanged &&
-    Boolean(currentPaymentChannel) &&
-    Boolean(currentPaymentAccount) &&
-    currentPaymentChannel === requestedPaymentChannel &&
-    (!requestedPaymentMethodId || requestedPaymentMethodId === currentPaymentMethodId);
-  const paymentMethod = preserveCurrentPayment
-    ? null
-    : configuredPaymentMethod(state.systemSettings, requestedPaymentMethodId || requestedPaymentChannel);
-  if (!preserveCurrentPayment && !paymentMethod) {
-    const selectorLabel = requestedPaymentChannel ? paymentChannelLabel(requestedPaymentChannel) : requestedPaymentMethodId;
-    throw new Error(`付款方式「${selectorLabel}」未启用或未配置收款账户，请联系管理员处理`);
+  if (currentOrder && Object.prototype.hasOwnProperty.call(body, "orderFormSchemaVersion") && usesOrderCashier(currentOrder) && body.orderFormSchemaVersion !== 4) {
+    throw new Error("订单收款流程版本不能修改");
   }
-  const paymentChannel = preserveCurrentPayment ? currentPaymentChannel : paymentMethod.channel;
-  if (!paymentMethodAllowedForOrderSource({ channel: paymentChannel }, source)) {
-    throw new Error(isPlatformOrder
-      ? `${orderSourceLabel(source)}订单只能选择${orderSourceLabel(source)}付款方式`
-      : "非平台订单不能选择平台付款方式");
+  const useCashier = currentOrder ? usesOrderCashier(currentOrder) : body.orderFormSchemaVersion === 4;
+  let paymentMethodId, paymentMethodName = "", paymentChannel, paymentAccount = "", paymentReference = "";
+  if (useCashier) {
+    for (const key of ["paymentMethodId", "paymentMethodName", "paymentChannel", "paymentAccount", "paymentReference"]) {
+      if (Object.prototype.hasOwnProperty.call(body, key) && String(body[key] ?? "").trim() !== String(currentOrder?.[key] ?? "").trim()) {
+        throw new Error("请在收银台为每笔收退款选择付款方式，订单资料不登记收款账户");
+      }
+    }
+    if (sourceChanged && ((currentOrder.payments ?? []).length || paymentClaims(currentOrder).some(claim => claim.status !== "rejected") ||
+        (state.shipments ?? []).some(shipment => shipment.orderId === currentOrder.id && shipmentBlocksInventory(shipment)))) {
+      throw new Error("订单已有收款、付款凭证或出库记录，不能再修改订单来源");
+    }
+    paymentMethodId = currentOrder?.paymentMethodId;
+    paymentMethodName = currentOrder?.paymentMethodName || "";
+    paymentChannel = currentOrder?.paymentChannel;
+    paymentAccount = currentOrder?.paymentAccount || "";
+    paymentReference = currentOrder?.paymentReference || "";
+  } else {
+    const requestedPaymentMethodId = String(body.paymentMethodId ?? "").trim();
+    const requestedPaymentChannel = isPlatformOrder
+      ? platformPaymentChannelForOrderSource(source)
+      : normalizePaymentChannel(body.paymentChannel ?? currentOrder?.paymentChannel);
+    if ((body.paymentChannel ?? currentOrder?.paymentChannel) && !requestedPaymentChannel) {
+      throw new Error("请选择有效付款方式");
+    }
+    if (!requestedPaymentMethodId && !requestedPaymentChannel) throw new Error("请选择付款方式");
+    const currentPaymentMethodId = String(currentOrder?.paymentMethodId ?? "").trim();
+    const currentPaymentMethodName = String(currentOrder?.paymentMethodName ?? "").trim();
+    const currentPaymentChannel = normalizePaymentChannel(currentOrder?.paymentChannel);
+    const currentPaymentAccount = String(currentOrder?.paymentAccount ?? "").trim();
+    const preserveCurrentPayment = Boolean(currentOrder) &&
+      !sourceChanged &&
+      Boolean(currentPaymentChannel) &&
+      Boolean(currentPaymentAccount) &&
+      currentPaymentChannel === requestedPaymentChannel &&
+      (!requestedPaymentMethodId || requestedPaymentMethodId === currentPaymentMethodId);
+    const paymentMethod = preserveCurrentPayment
+      ? null
+      : configuredPaymentMethod(state.systemSettings, requestedPaymentMethodId || requestedPaymentChannel);
+    if (!preserveCurrentPayment && !paymentMethod) {
+      const selectorLabel = requestedPaymentChannel ? paymentChannelLabel(requestedPaymentChannel) : requestedPaymentMethodId;
+      throw new Error(`付款方式「${selectorLabel}」未启用或未配置收款账户，请联系管理员处理`);
+    }
+    paymentChannel = preserveCurrentPayment ? currentPaymentChannel : paymentMethod.channel;
+    if (!paymentMethodAllowedForOrderSource({ channel: paymentChannel }, source)) {
+      throw new Error(isPlatformOrder
+        ? `${orderSourceLabel(source)}订单只能选择${orderSourceLabel(source)}付款方式`
+        : "非平台订单不能选择平台付款方式");
+    }
+    paymentMethodId = preserveCurrentPayment ? currentPaymentMethodId : paymentMethod.id;
+    paymentMethodName = preserveCurrentPayment
+      ? currentPaymentMethodName || paymentChannelLabel(currentPaymentChannel)
+      : paymentMethod.name;
+    paymentAccount = preserveCurrentPayment ? currentPaymentAccount : paymentMethod.account;
+    paymentReference = String(currentOrder?.paymentReference ?? "").trim();
   }
-  const paymentMethodId = preserveCurrentPayment ? currentPaymentMethodId : paymentMethod.id;
-  const paymentMethodName = preserveCurrentPayment
-    ? currentPaymentMethodName || paymentChannelLabel(currentPaymentChannel)
-    : paymentMethod.name;
-  const paymentAccount = preserveCurrentPayment ? currentPaymentAccount : paymentMethod.account;
-  const paymentReference = String(currentOrder?.paymentReference ?? "").trim();
   const shippingAddress = ["私域线上", "批发"].includes(source)
     ? String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim()
     : "";
@@ -6050,6 +6078,9 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
     : String(body.plannedShipDate ?? currentOrder?.plannedShipDate ?? "").trim();
   if (!isPickupOrder && !plannedShipDate) throw new Error("请选择预计发货日期");
   if (plannedShipDate && plannedShipDate < date) throw new Error("预计发货日期不能早于下单日期");
+  const requestedCarrier = isPickupOrder ? "" : String(body.plannedCarrier ?? currentOrder?.plannedCarrier ?? "").trim();
+  const plannedCarrier = requestedCarrier
+    ? resolveShippingCarrier(state.systemSettings, requestedCarrier, currentOrder?.plannedCarrier) : undefined;
   const contact = normalizeOrderContactPersonnel(state, body, currentOrder);
   const itemsInput = Array.isArray(body.items) ? body.items : [];
   if (itemsInput.length === 0) throw new Error("请至少添加一条商品");
@@ -6170,6 +6201,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
     paymentReference,
     shippingAddress,
     plannedShipDate: plannedShipDate || undefined,
+    plannedCarrier,
     ...contact,
     items,
     shippingFeeMode,
@@ -6407,6 +6439,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "paymentReference",
   "shippingAddress",
   "plannedShipDate",
+  "plannedCarrier",
   "contactPersonnelId",
   "contactPerson",
   "items",
@@ -6433,6 +6466,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
     paymentReference: String(order.paymentReference ?? "").trim(),
     shippingAddress: String(order.shippingAddress ?? "").trim(),
     plannedShipDate: String(order.plannedShipDate ?? "").trim() || undefined,
+    plannedCarrier: String(order.plannedCarrier ?? "").trim() || undefined,
     contactPersonnelId: String(order.contactPersonnelId ?? "").trim() || undefined,
     contactPerson: String(order.contactPerson ?? "").trim(),
     items: (Array.isArray(order.items) ? order.items : []).map((item) => {
@@ -6639,7 +6673,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     validateOrderStatusForPatch(req, currentOrder, nextOrder, nextShipments);
 
     const paymentAction = paymentChangeAction(currentOrder.payments ?? [], nextOrder.payments ?? []);
-    if (paymentAction && hasShippingSettlement(currentOrder)) throw httpError(409, "新运费流程的资金记录必须通过收款凭证、运费退款或财务专用入口登记", "SHIPPING_SETTLEMENT_PAYMENT_DEDICATED_REQUIRED");
+    if (paymentAction && (hasShippingSettlement(currentOrder) || usesOrderCashier(currentOrder))) throw httpError(409, "新运费流程的资金记录必须通过收款凭证、运费退款或财务专用入口登记", "SHIPPING_SETTLEMENT_PAYMENT_DEDICATED_REQUIRED");
     if (paymentAction) {
       requireModulePermissionForAuth(req, "finance", paymentAction);
     }
@@ -10684,15 +10718,17 @@ async function handleApi(req, res, url) {
         ...currentOrder,
         platformOrderNo: externalOrderNo,
         douyinOrderNo: externalOrderNo,
-        paymentMethodId: preserveDouyinSnapshot
-          ? String(currentOrder.paymentMethodId ?? "").trim() || undefined
-          : configuredDouyinMethod.id,
-        paymentMethodName: preserveDouyinSnapshot
-          ? String(currentOrder.paymentMethodName ?? "").trim() || paymentChannelLabel("douyin")
-          : configuredDouyinMethod.name,
-        paymentChannel: "douyin",
-        paymentAccount: douyinAccount,
-        paymentReference: externalOrderNo,
+        ...(!usesOrderCashier(currentOrder) ? {
+          paymentMethodId: preserveDouyinSnapshot
+            ? String(currentOrder.paymentMethodId ?? "").trim() || undefined
+            : configuredDouyinMethod.id,
+          paymentMethodName: preserveDouyinSnapshot
+            ? String(currentOrder.paymentMethodName ?? "").trim() || paymentChannelLabel("douyin")
+            : configuredDouyinMethod.name,
+          paymentChannel: "douyin",
+          paymentAccount: douyinAccount,
+          paymentReference: externalOrderNo,
+          } : {}),
       };
       const nextOrders = (Array.isArray(state.orders) ? state.orders : []).map((order) =>
         String(order?.id ?? "") === orderId ? nextOrder : order
@@ -13253,6 +13289,7 @@ async function handleApi(req, res, url) {
         orderNo: nextOrderNo(state),
         createdAt: nowDatetimeInChina(),
         ...orderInput,
+        ...(body.orderFormSchemaVersion === 4 ? { orderFormSchemaVersion: 4 } : {}),
         ...(body.shippingSettlementVersion === 1 || orderInput.shippingSettlementTiming ? { shippingSettlementVersion: 1 } : {}),
         status: "pending",
         payments: [],
@@ -13592,12 +13629,14 @@ async function handleApi(req, res, url) {
           verifiedAt: "",
           verifiedBy: "",
         });
-        const paymentMethodSnapshot = resolvePaymentMethodSnapshot(state.systemSettings, incomingPayment, {
-          paymentMethodId: currentOrder.paymentMethodId,
-          paymentMethodName: currentOrder.paymentMethodName,
-          channel: currentOrder.paymentChannel,
-          account: currentOrder.paymentAccount,
-        });
+        const paymentMethodSnapshot = usesOrderCashier(currentOrder)
+          ? resolveOrderCashierMethod(state.systemSettings, currentOrder, incomingPayment)
+          : resolvePaymentMethodSnapshot(state.systemSettings, incomingPayment, {
+            paymentMethodId: currentOrder.paymentMethodId,
+            paymentMethodName: currentOrder.paymentMethodName,
+            channel: currentOrder.paymentChannel,
+            account: currentOrder.paymentAccount,
+          });
         const payment = normalizePaymentRecord({
           ...incomingPayment,
           ...paymentMethodSnapshot,
@@ -13647,7 +13686,9 @@ async function handleApi(req, res, url) {
           verifiedAt: currentPayment?.verifiedAt || "",
           verifiedBy: currentPayment?.verifiedBy || "",
         });
-        const paymentMethodSnapshot = resolvePaymentMethodSnapshot(state.systemSettings, incomingPayment, currentPayment);
+        const paymentMethodSnapshot = usesOrderCashier(currentOrder)
+          ? resolveOrderCashierMethod(state.systemSettings, currentOrder, incomingPayment, currentPayment)
+          : resolvePaymentMethodSnapshot(state.systemSettings, incomingPayment, currentPayment);
         const payment = normalizePaymentRecord({
           ...incomingPayment,
           ...paymentMethodSnapshot,
@@ -13761,7 +13802,7 @@ async function handleApi(req, res, url) {
         ok: true, orderId: order.id,
         shippingSettlement: shippingSettlementDetail(order, state.shipments),
         canRefund: canManageProof && hasShippingSettlement(order) && order.status !== "cancelled",
-        paymentMethods: canManageProof ? configuredPaymentMethods(state.systemSettings).filter(method => method.channel === order.paymentChannel) : [],
+        paymentMethods: canManageProof ? orderCashierPaymentMethods(state.systemSettings, order) : [],
         refunds: (order.payments ?? []).filter(isShippingRefund).map(payment => canReadProof ? payment : { ...payment, proof: [], evidenceAttachments: [] }),
       });
     } catch (error) {
@@ -13818,10 +13859,12 @@ async function handleApi(req, res, url) {
           throw httpError(409, "退款凭证暂不可用，请重新上传后重试", "SHIPPING_REFUND_PROOF_UNAVAILABLE");
         } finally { await handle?.close(); }
       }
-      const method = resolvePaymentMethodSnapshot(state.systemSettings, { paymentMethodId: body.paymentMethodId }, {
-        paymentMethodId: order.paymentMethodId, paymentMethodName: order.paymentMethodName, channel: order.paymentChannel, account: order.paymentAccount,
-      });
-      if (method.channel !== order.paymentChannel) throw httpError(400, "请使用订单对应渠道登记运费退款", "SHIPPING_REFUND_CHANNEL_INVALID");
+      const method = usesOrderCashier(order)
+        ? resolveOrderCashierMethod(state.systemSettings, order, { paymentMethodId: body.paymentMethodId })
+        : resolvePaymentMethodSnapshot(state.systemSettings, { paymentMethodId: body.paymentMethodId }, {
+          paymentMethodId: order.paymentMethodId, paymentMethodName: order.paymentMethodName, channel: order.paymentChannel, account: order.paymentAccount,
+        });
+      if (!usesOrderCashier(order) && method.channel !== order.paymentChannel) throw httpError(400, "请使用订单对应渠道登记运费退款", "SHIPPING_REFUND_CHANNEL_INVALID");
       const now = nowDatetimeInChina();
       if (!body.time || new Date(body.time).getTime() > Date.now() + 60_000) throw httpError(400, "退款时间不能为空或晚于当前时间", "SHIPPING_REFUND_TIME");
       const planned = planShippingRefund(order, state.shipments, body, {
@@ -13866,9 +13909,11 @@ async function handleApi(req, res, url) {
         throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
       }
 
-      const channel = normalizePaymentChannel(currentOrder.paymentChannel);
+      const refundMethod = usesOrderCashier(currentOrder)
+        ? resolveOrderCashierMethod(state.systemSettings, currentOrder, { paymentMethodId: body.paymentMethodId }) : null;
+      const channel = refundMethod?.channel || normalizePaymentChannel(currentOrder.paymentChannel);
       if (!channel) throw new Error("请选择退款渠道");
-      const account = String(currentOrder.paymentAccount ?? "").trim() ||
+      const account = refundMethod?.account || String(currentOrder.paymentAccount ?? "").trim() ||
         configuredPaymentMethod(state.systemSettings, currentOrder.paymentMethodId || channel)?.account || "";
       if (!account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
       const amount = normalizeMoney(body.amount, "Refund amount");
@@ -13879,8 +13924,8 @@ async function handleApi(req, res, url) {
         time: body.time || nowDatetimeInChina(),
         type: "refund",
         amount,
-        paymentMethodId: currentOrder.paymentMethodId,
-        paymentMethodName: currentOrder.paymentMethodName || paymentChannelLabel(channel),
+        paymentMethodId: refundMethod?.paymentMethodId || currentOrder.paymentMethodId,
+        paymentMethodName: refundMethod?.paymentMethodName || currentOrder.paymentMethodName || paymentChannelLabel(channel),
         channel,
         account,
         externalTransactionNo: "",
@@ -13966,14 +14011,16 @@ async function handleApi(req, res, url) {
       let refundRecord = null;
       if (body.refund && typeof body.refund === "object") {
         assertShippingPaymentMetadataUnchanged({}, body.refund, { partial: true });
-        const channel = normalizePaymentChannel(currentOrder.paymentChannel);
-        const account = String(currentOrder.paymentAccount ?? "").trim() ||
+        const refundMethod = usesOrderCashier(currentOrder)
+          ? resolveOrderCashierMethod(state.systemSettings, currentOrder, { paymentMethodId: body.refund.paymentMethodId }) : null;
+        const channel = refundMethod?.channel || normalizePaymentChannel(currentOrder.paymentChannel);
+        const account = refundMethod?.account || String(currentOrder.paymentAccount ?? "").trim() ||
           configuredPaymentMethod(state.systemSettings, currentOrder.paymentMethodId || channel)?.account || "";
         if (!channel || !account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
         refundRecord = normalizePaymentRecord({
           ...body.refund,
-          paymentMethodId: currentOrder.paymentMethodId,
-          paymentMethodName: currentOrder.paymentMethodName || paymentChannelLabel(channel),
+          paymentMethodId: refundMethod?.paymentMethodId || currentOrder.paymentMethodId,
+          paymentMethodName: refundMethod?.paymentMethodName || currentOrder.paymentMethodName || paymentChannelLabel(channel),
           channel,
           account,
           externalTransactionNo: "",

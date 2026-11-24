@@ -97,7 +97,7 @@ export function ShipDialog({
   useEffect(() => {
     if (open && order) {
       setShipDate(todayStr);
-      setCarrier("");
+      setCarrier(!pickupOnly && shippingCarriers.some(item => item.name === order.plannedCarrier) ? order.plannedCarrier! : "");
       setTrackingNo("");
       setNotes("");
       setSelectedIds(new Set(unshippedItems.map((i) => i.stockItemId)));

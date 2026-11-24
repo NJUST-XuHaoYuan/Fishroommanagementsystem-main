@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import Papa from "papaparse";
+import { usesOrderCashier, cashierMethodAllowedForOrder } from "./order-cashier-rules.mjs";
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 
@@ -172,10 +173,13 @@ function matchingReason({ exactOutstanding, exactReceivable, orderNoHit, payerHi
 export function matchPaymentStatement(statement = {}, orders = []) {
   if (statement.direction === "expense") {
     const candidates = (Array.isArray(orders) ? orders : []).flatMap((order) => {
-      if (normalizeText(order?.paymentChannel) !== normalizeText(statement?.channel)) return [];
-      if (normalizeComparable(order?.paymentAccount) !== normalizeComparable(statement?.account)) return [];
+      if (!usesOrderCashier(order) && (normalizeText(order?.paymentChannel) !== normalizeText(statement?.channel) ||
+          normalizeComparable(order?.paymentAccount) !== normalizeComparable(statement?.account))) return [];
+      if (usesOrderCashier(order) && !cashierMethodAllowedForOrder(statement, order)) return [];
       const refund = (Array.isArray(order?.pendingRefunds) ? order.pendingRefunds : [])
-        .find((payment) => Math.abs(Number(payment?.amount ?? 0) - Number(statement.amount ?? 0)) <= 0.01);
+        .find((payment) => Math.abs(Number(payment?.amount ?? 0) - Number(statement.amount ?? 0)) <= 0.01 &&
+          (!usesOrderCashier(order) || (normalizeText(payment.channel) === normalizeText(statement.channel) &&
+            normalizeComparable(payment.account) === normalizeComparable(statement.account))));
       if (!refund) return [];
       return [{
         orderId: String(order.id ?? ""),
@@ -211,8 +215,8 @@ export function matchPaymentStatement(statement = {}, orders = []) {
 
   const candidates = (Array.isArray(orders) ? orders : []).flatMap((order) => {
     if (order?.status === "cancelled") return [];
-    if (normalizeText(order?.paymentChannel) !== statementChannel) return [];
-    if (normalizeComparable(order?.paymentAccount) !== statementAccount) return [];
+    if (!usesOrderCashier(order) && (normalizeText(order?.paymentChannel) !== statementChannel || normalizeComparable(order?.paymentAccount) !== statementAccount)) return [];
+    if (usesOrderCashier(order) && !cashierMethodAllowedForOrder(statement, order)) return [];
     const proofReceipts = (Array.isArray(order.proofReceipts) ? order.proofReceipts : []).filter(payment =>
       Math.abs(roundMoney(payment.amount) - roundMoney(statement.amount)) <= 0.005 &&
       normalizeText(payment.channel) === statementChannel && normalizeComparable(payment.account) === statementAccount);
@@ -258,13 +262,16 @@ export function matchPaymentStatement(statement = {}, orders = []) {
       score: Number(score.toFixed(2)),
       reason: matchingReason({ exactOutstanding, exactReceivable, orderNoHit, payerHit, days }),
       exactAmount: exactOutstanding || exactReceivable,
+      // A cashier order has no account selected at creation. Amount alone must
+      // not associate an otherwise unrelated bank receipt automatically.
+      ...(usesOrderCashier(order) ? { autoMatchAllowed: orderNoHit } : {}),
     }];
   }).sort((left, right) => right.score - left.score || left.orderNo.localeCompare(right.orderNo));
 
   const top = candidates[0];
   const second = candidates[1];
   const unambiguous = Boolean(
-    top && !top.requiresPaymentSelection && top.exactAmount && top.score >= 75 && (!second || top.score - second.score >= 20)
+    top && top.autoMatchAllowed !== false && !top.requiresPaymentSelection && top.exactAmount && top.score >= 75 && (!second || top.score - second.score >= 20)
   );
   return {
     matchedOrderId: unambiguous ? top.orderId : "",

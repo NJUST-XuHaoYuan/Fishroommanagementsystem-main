@@ -4,13 +4,12 @@ import {
   Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, StockTankTransfer, StockTransferListItem, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
-  configuredOrderPackagingFee, ShippingFeeMode, ShippingSettlementTiming,
+  configuredOrderPackagingFee, configuredShippingCarriers, ShippingFeeMode, ShippingSettlementTiming,
 } from "../store";
 import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
 import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
-import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
-import { OrderShippingSettlementPanel } from "./OrderShippingSettlementPanel";
+import { OrderCashierPanel } from "./OrderCashierPanel";
 import { getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel } from "../utils/shippingSettlement";
 import { orderPaymentProofSummary } from "../utils/orderPaymentProof";
 import { Button } from "./ui/button";
@@ -1928,6 +1927,7 @@ function ProofUploader({
 }
 
 type OrderRefundDraft = {
+  paymentMethodId?: string;
   id: string;
   amount: number;
   time: string;
@@ -1952,6 +1952,7 @@ function OrderRefundDialog({
   const [proofUploading, setProofUploading] = useState(false);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<OrderRefundDraft>({
+    paymentMethodId: "",
     id: uid(),
     amount: 0,
     time: nowDatetimeLocal(),
@@ -1962,6 +1963,7 @@ function OrderRefundDialog({
   useEffect(() => {
     if (!open || !order) return;
     setDraft({
+      paymentMethodId: "",
       id: uid(),
       amount: 0,
       time: nowDatetimeLocal(),
@@ -1973,11 +1975,14 @@ function OrderRefundDialog({
   }, [open, order?.id]);
 
   if (!order) return null;
+  const cashierFlow = order.orderFormSchemaVersion === 4;
+  const refundOptions = paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), order.source);
+  const selectedRefundMethod = refundOptions.find(method => method.id === draft.paymentMethodId);
   const sourcePlatformChannel = platformPaymentChannelForOrderSource(order.source);
-  const refundChannel = (sourcePlatformChannel || order.paymentChannel || "") as PaymentChannel | "";
-  const refundMethod = configuredPaymentMethod(state.systemSettings, order.paymentMethodId || refundChannel);
-  const refundAccount = order.paymentAccount || refundMethod?.account || "";
-  const refundMethodName = order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
+  const refundChannel = (cashierFlow ? selectedRefundMethod?.channel || "" : sourcePlatformChannel || order.paymentChannel || "") as PaymentChannel | "";
+  const refundMethod = cashierFlow ? selectedRefundMethod : configuredPaymentMethod(state.systemSettings, order.paymentMethodId || refundChannel);
+  const refundAccount = cashierFlow ? refundMethod?.account || "" : order.paymentAccount || refundMethod?.account || "";
+  const refundMethodName = cashierFlow ? refundMethod?.name || "" : order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
   const platformRefund = isPlatformPaymentChannel(refundChannel);
   const busy = saving || proofUploading;
 
@@ -1986,6 +1991,7 @@ function OrderRefundDialog({
     setError("");
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return setError("请输入有效退款金额");
     if (!draft.time) return setError("请选择退款时间");
+    if (cashierFlow && !selectedRefundMethod) return setError("请选择本笔退款的出账方式和账户");
     if (!refundChannel || !refundAccount) return setError("该订单的付款方式尚未配置收款账户，请联系管理员处理");
     const confirmed = confirmWrite(
       "登记退款",
@@ -2029,9 +2035,10 @@ function OrderRefundDialog({
           </div>
           <div className="grid gap-1.5">
             <Label>退款渠道<span className="ml-0.5 text-red-500">*</span></Label>
-            <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm">
-              {refundMethodName || "未配置"}
-            </div>
+            {cashierFlow ? <Select value={draft.paymentMethodId || ""} onValueChange={paymentMethodId => setDraft(current => ({ ...current, paymentMethodId }))}>
+              <SelectTrigger aria-label="本笔退款方式"><SelectValue placeholder="选择本笔退款方式" /></SelectTrigger>
+              <SelectContent>{refundOptions.map(method => <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)} · {method.account}</SelectItem>)}</SelectContent>
+            </Select> : <div className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm">{refundMethodName || "未配置"}</div>}
           </div>
           <div className="grid gap-1.5">
             <Label>{platformRefund ? "平台账户" : "退款账户"}<span className="ml-0.5 text-red-500">*</span></Label>
@@ -2041,7 +2048,7 @@ function OrderRefundDialog({
           </div>
           <div className={`sm:col-span-2 rounded-md border px-3 py-2 text-sm ${platformRefund ? "border-rose-200 bg-rose-50 text-rose-800" : "border-sky-200 bg-sky-50 text-sky-800"}`}>
             {platformRefund
-              ? "平台退款：冲减抖店待结算资金，不登记为对公账户出账。"
+              ? "平台退款：冲减平台待结算资金，不登记为对公账户出账。"
               : "账户退款：保留原收款入账和本次退款出账两条独立核销记录。"}
           </div>
           <div className="grid gap-1.5 sm:col-span-2">
@@ -4033,7 +4040,7 @@ function StockPickerBioDialog({
 // ─── ItemsWithShipments ───────────────────────────────────────────────────────
 
 function ItemsWithShipments({
-  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onCorrectFulfillment, onReturnItem, canReturnItem,
+  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onCorrectFulfillment, onReturnItem, canReturnItem, flat = false,
 }: {
   order: Order;
   orderShipments: Shipment[];
@@ -4045,6 +4052,7 @@ function ItemsWithShipments({
   onCorrectFulfillment?: (shipment: Shipment) => void;
   onReturnItem?: (item: OrderItem) => void;
   canReturnItem?: boolean;
+  flat?: boolean;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [proofShipment, setProofShipment] = useState<{ shipment: Shipment; number: number } | null>(null);
@@ -4157,6 +4165,7 @@ function ItemsWithShipments({
 
   return (
     <>
+      {flat ? <table className="w-full">{colHeader}<tbody>{order.items.map((item, index) => renderItemRow(item, index))}</tbody></table> : <>
       {orderShipments.map((sh, si) => {
         const shItems = order.items.filter((i) => (sh.itemStockIds ?? []).includes(i.stockItemId));
         const packingProofs = shipmentPackingProofs(sh);
@@ -4302,6 +4311,7 @@ function ItemsWithShipments({
         <div className="px-4 py-6 text-center text-sm text-muted-foreground">暂无商品</div>
       )}
 
+      </>}
       <StockItemDetailDialog
         stockItemId={detailId}
         stockItem={detailId ? getStockItem(detailId) : undefined}
@@ -4360,8 +4370,8 @@ function OrderDetailDialog({
   const getAccessibleStockItem = (id: string) => accessibleStock.find((item) => item.id === id);
 
   const [editMode, setEditMode] = useState(false);
-  const [shippingPaymentRequest, setShippingPaymentRequest] = useState<{ key: number; purpose: "order" | "shipping_fee"; orderId: string }>();
-  useEffect(() => { if (!open) setShippingPaymentRequest(undefined); }, [open]);
+  const [detailTab, setDetailTab] = useState("info");
+  useEffect(() => { setDetailTab("info"); }, [order?.id, open]);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const editSaveLock = useRef(false);
@@ -4529,6 +4539,7 @@ function OrderDetailDialog({
         commissionRate: 0,
       })),
     });
+    setDetailTab("info");
     setEditMode(true);
   };
 
@@ -4544,8 +4555,8 @@ function OrderDetailDialog({
     if (isPlatformOrderSource(editForm.source) && !editForm.platformOrderNo.trim()) {
       return toast.error(`请填写${platformOrderNoLabel(editForm.source)}`);
     }
-    if (!editForm.paymentMethodId || !editPaymentMethod) return toast.error("请选择付款方式");
-    if (!editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
+    if (order.orderFormSchemaVersion !== 4 && (!editForm.paymentMethodId || !editPaymentMethod)) return toast.error("请选择付款方式");
+    if (order.orderFormSchemaVersion !== 4 && !editPaymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
     const selectedContactPersonnel = editContactOptions.find((person) => person.id === editForm.contactPersonnelId);
     if (editForm.ownerSelectionChanged && !selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (displayAmountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
@@ -4563,7 +4574,7 @@ function OrderDetailDialog({
     let pendingOwner = "";
     try {
       const result = await postOrderApi("orders/update", {
-        orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
+        orderFormSchemaVersion: order.orderFormSchemaVersion === 4 ? 4 : 3,
         orderId: order.id,
         customerId: isPlatformOrderSource(editForm.source) ? (order.customerId || editForm.customerId) : editForm.customerId,
         date: editForm.date,
@@ -4573,10 +4584,10 @@ function OrderDetailDialog({
         expectedWholesaleOrderUpdatedAt: editForm.expectedWholesaleOrderUpdatedAt,
         platformOrderNo: isPlatformOrderSource(editForm.source) ? editForm.platformOrderNo.trim() : "",
         douyinOrderNo: editForm.source === "平台下单" ? editForm.platformOrderNo.trim() : "",
-        paymentMethodId: editForm.paymentMethodId === historicalOrderPaymentMethodId(order.id)
-          ? ""
-          : editForm.paymentMethodId,
-        paymentChannel: editPaymentMethod.channel,
+        ...(order.orderFormSchemaVersion === 4 ? {} : {
+          paymentMethodId: editForm.paymentMethodId === historicalOrderPaymentMethodId(order.id) ? "" : editForm.paymentMethodId,
+          paymentChannel: editPaymentMethod?.channel,
+        }),
         shippingAddress: isAddressOrderSource(editForm.source) ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         ...(editForm.ownerSelectionChanged && selectedContactPersonnel ? {
@@ -5012,398 +5023,8 @@ function OrderDetailDialog({
 
 
   if (!order) return null;
-  const refundRecords = (order.payments ?? []).filter((payment) => payment.type === "refund");
-
-  return (
-    <>
-      <Dialog open={open} onOpenChange={(o) => { if (editSaving) return; if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
-        <DialogContent
-          aria-describedby={undefined}
-          className="max-w-none sm:max-w-none flex flex-col p-8"
-          style={{ width: "min(92vw, 1080px)", maxWidth: "min(92vw, 1080px)", height: "90vh" }}
-        >
-          <DialogHeader>
-            <div className="flex items-center gap-3 flex-wrap">
-              <DialogTitle>{order.orderNo}</DialogTitle>
-              <OrderStatusTags order={order} shipments={state.shipments} />
-              {editMode && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">编辑中</span>}
-            </div>
-          </DialogHeader>
-
-          <div className="flex-1 overflow-y-auto flex flex-col gap-5 pr-1">
-
-            {order.ownerAssignment && <OrderOwnerAssignmentPanel
-              orderId={order.id}
-              requestId={order.ownerAssignment.requestId}
-              viewer={state.user}
-              onOrderUpdated={(updated, session) => setState(current => mergeOwnerAssignmentForSession(current, updated, session))}
-            />}
-
-            <OrderWholesaleTag
-              key={order.id}
-              order={order}
-              viewer={state.user}
-              canUpdate={permission.canUpdate}
-              onOrderUpdated={(updatedOrder, session) => setState((current) => mergeWholesaleOrderTagForSession(current, updatedOrder, session))}
-            />
-
-            <OrderAcquisitionTag
-              order={order}
-              onCustomerLinked={(change, session) => setState(current => mergeNewCustomerLink(current, change, session))}
-              onOrderUpdated={(updatedOrder, session) => setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
-                ...current,
-                orders: mergeNewCustomerApproval(current.orders, updatedOrder),
-              }))}
-            />
-
-            {/* ── 基本信息 ── */}
-            {editMode && editForm ? (
-              <div className="rounded-lg border p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-amber-50/50">
-                {!isPlatformOrderSource(editForm.source) && (
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">客户<span className="ml-0.5 text-red-500">*</span></Label>
-                    <CustomerCombobox value={editForm.customerId}
-                      onChange={(id) => setEditForm((f) => f ? { ...f, customerId: id } : f)}
-                      customers={state.customers ?? []} />
-                  </div>
-                )}
-                {isPlatformOrderSource(editForm.source) && (
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">{platformOrderNoLabel(editForm.source)}<span className="ml-0.5 text-red-500">*</span></Label>
-                    <Input
-                      value={editForm.platformOrderNo}
-                      placeholder={`请输入${platformOrderNoLabel(editForm.source)}`}
-                      onChange={(event) => setEditForm((form) => form ? { ...form, platformOrderNo: event.target.value } : form)}
-                      className={!editForm.platformOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
-                    />
-                  </div>
-                )}
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">订单来源<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Select
-                    value={editForm.source}
-                    onValueChange={changeEditSource}
-                  >
-                    <SelectTrigger className={!editForm.source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                      <SelectValue placeholder="请选择来源" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ORDER_SOURCE_OPTIONS.map((source) => (
-                        <SelectItem key={source} value={source}>{orderSourceLabel(source)}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">下单日期</Label>
-                  <Input type="date" value={editForm.date}
-                    max={today}
-                    className={editForm.date > today ? "border-red-500 focus-visible:ring-red-500" : ""}
-                    onChange={(e) => changeEditOrderDate(e.target.value)} />
-                  {editForm.date > today && (
-                    <p className="text-xs text-red-500">下单日期不能晚于今天</p>
-                  )}
-                </div>
-                {!isPickupOrderSource(editForm.source) && (
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                    <Input
-                      type="date"
-                      value={editForm.plannedShipDate}
-                      min={editForm.date}
-                      required
-                      onChange={(e) => changeEditPlannedShipDate(e.target.value)}
-                      className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
-                    />
-                    {!editForm.plannedShipDate && (
-                      <p className="text-xs text-red-500">请选择预计发货日期</p>
-                    )}
-                    {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
-                      <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
-                    )}
-                  </div>
-                )}
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Select
-                    value={editForm.contactPersonnelId}
-                    disabled={editSaving || order.ownerAssignment?.status === "pending"}
-                    onValueChange={(value) => {
-                      const selectedPerson = editContactOptions.find((person) => person.id === value);
-                      setEditForm((form) => form && selectedPerson ? {
-                        ...form,
-                        contactPersonnelId: selectedPerson.id,
-                        contactPerson: selectedPerson.name,
-                        ownerSelectionChanged: true,
-                      } : form);
-                    }}
-                  >
-                    <SelectTrigger className={!editForm.contactPersonnelId ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                      <SelectValue placeholder="请选择订单负责人" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {editContactOptions.map((person) => (
-                        <SelectItem key={person.id} value={person.id}>
-                          {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="break-words text-xs leading-5 text-muted-foreground">{ownerSelectionHint({ creating: false, currentOwnerName: order.contactPerson || "当前负责人", selectedName: editForm.contactPerson, changed: editForm.ownerSelectionChanged && editForm.contactPersonnelId !== editForm.expectedContactPersonnelId, pendingName: order.ownerAssignment?.status === "pending" ? order.ownerAssignment.toName : undefined })}</p>
-                  {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
-                  {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">付款方式<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Select
-                    value={editForm.paymentMethodId}
-                    onValueChange={(value) => {
-                      const selectedMethod = editPaymentOptions.find((method) => method.id === value);
-                      setEditForm((form) => form && selectedMethod ? {
-                        ...form,
-                        paymentMethodId: value,
-                        paymentChannel: selectedMethod.channel,
-                      } : form);
-                    }}
-                  >
-                    <SelectTrigger className={!editForm.paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                      <SelectValue placeholder="请选择付款方式" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {editPaymentOptions.map((method) => (
-                        <SelectItem key={method.id} value={method.id}>
-                          {paymentMethodDisplayLabel(method)}{method.enabled ? "" : "（历史）"}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
-                  <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${editPaymentAccount ? "text-foreground" : "border-red-500 text-red-500"}`}>
-                    {editPaymentAccount || "未配置，请联系管理员"}
-                  </div>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs">创建时间</Label>
-                  <div className="h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm text-muted-foreground">
-                    {formatOrderCreatedAt(order.createdAt)}
-                  </div>
-                </div>
-                {isAddressOrderSource(editForm.source) && (
-                  <div className="grid gap-1.5 col-span-4">
-                    <Label className="text-xs">本单收货地址</Label>
-                    <Input
-                      value={editForm.shippingAddress}
-                      placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
-                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
-                    </p>
-                  </div>
-                )}
-                <div className="grid gap-1.5 col-span-5">
-                  <Label className="text-xs">备注</Label>
-                  <Input value={editForm.notes} placeholder="选填"
-                    onChange={(e) => setEditForm((f) => f ? { ...f, notes: e.target.value } : f)} />
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-lg border p-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm bg-muted/30">
-                {isPlatformOrderSource(order.source) ? (
-                  <div className="col-span-2">
-                    <span className="text-muted-foreground">{platformOrderNoLabel(order.source)}：</span>
-                    <span className="font-medium">{platformOrderNoForOrder(order) || "—"}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div><span className="text-muted-foreground">客户：</span><span className="font-medium">{customer?.name ?? "—"}</span></div>
-                    <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
-                    <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
-                    <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
-                  </>
-                )}
-                <div><span className="text-muted-foreground">订单来源：</span>{orderSourceLabel(order.source) || "—"}</div>
-                <div>
-                  <span className="text-muted-foreground">付款方式：</span>
-                  {order.paymentMethodName || (order.paymentChannel ? paymentChannelLabel(order.paymentChannel) : "未登记")}
-                </div>
-                <div>
-                  <span className="text-muted-foreground">收款账户：</span>
-                  {order.paymentAccount || "未登记"}
-                </div>
-                <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
-                <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
-                {order.status !== "completed" && !isPickupOrderSource(order.source) && (
-                  <div>
-                    <span className="text-muted-foreground">预计发货：</span>
-                    {order.plannedShipDate
-                      ? <span className={order.plannedShipDate === today ? "text-orange-600 font-medium" : ""}>{order.plannedShipDate}</span>
-                      : "—"}
-                  </div>
-                )}
-                <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
-                {isAddressOrderSource(order.source) && displayAddress && (
-                  <div className="col-span-2">
-                    <span className="text-muted-foreground">收货地址：</span>
-                    {displayAddress}
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      {hasOrderAddressOverride ? "本单地址" : "客户默认地址"}
-                    </span>
-                  </div>
-                )}
-                {order.notes && <div className="col-span-2"><span className="text-muted-foreground">备注：</span>{order.notes}</div>}
-              </div>
-            )}
-
-            {!editMode && <OrderShippingSettlementPanel key={`shipping-settlement:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} canUpdate={permission.canUpdate}
-              onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
-              onRecordShippingPayment={() => setShippingPaymentRequest({ key: Date.now(), purpose: "shipping_fee", orderId: order.id })}
-              onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => setShipmentAction(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!) : undefined} />}
-            {!editMode && <OrderPaymentProofPanel key={`proof:${order.id}:${state.user?.username}`} orderId={order.id} openRequest={shippingPaymentRequest?.orderId === order.id ? shippingPaymentRequest : undefined}
-              onApplied={(result, session) => applyOrderApiResult(setState, result, { session })} />}
-
-            {refundRecords.length > 0 && (
-              <div className="rounded-lg border border-rose-100 bg-rose-50/40">
-                <div className="border-b border-rose-100 px-3 py-2 text-xs font-medium text-rose-800">退款记录</div>
-                <div className="divide-y divide-rose-100">
-                  {[...refundRecords].sort((left, right) => String(right.time).localeCompare(String(left.time))).map((payment) => (
-                    <div key={payment.id} className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="font-medium text-rose-700">{payment.refundCategory === "shipping_fee" ? "运费退差额 " : ""}¥{payment.amount.toFixed(2)}</span>
-                        <span>{payment.paymentMethodName || (payment.channel ? paymentChannelLabel(payment.channel) : "渠道未登记")}</span>
-                        <span className="text-xs text-muted-foreground">{payment.refundMethod === "platform" ? "平台冲减" : "账户出账"}</span>
-                        <span className="text-xs text-muted-foreground">{payment.time.replace("T", " ").slice(0, 16)}</span>
-                      </div>
-                      <Badge variant="outline" className={isPaymentVerified(payment) ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}>
-                        {isPaymentVerified(payment) ? "已核销" : "待财务核销"}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* ── Items table ── */}
-            <div className="rounded-lg border flex flex-col">
-              <div className="px-4 py-2 bg-muted/50 text-xs font-medium text-muted-foreground flex items-center justify-between shrink-0 border-b rounded-t-lg">
-                <span>订单商品（{displayItems.length} 条）</span>
-                {editMode && editForm && (
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
-                    <span className="text-slate-600">最低回厂价 ¥{displayMinimumReturnTotal.toFixed(2)}</span>
-                  </div>
-                )}
-              </div>
-
-              {editMode ? (
-                /* Edit mode: flat table, shipped items shown with lock icon */
-                <>
-                  <div className="overflow-y-auto" style={{ maxHeight: "22rem" }}>
-                    <table className="w-full">
-                      <thead className="sticky top-0 z-10 bg-white">
-                        <tr className="border-b">
-                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">商品</th>
-                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
-                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
-                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">最低回厂价</th>
-                          <th className="w-10 px-2 py-2" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {displayItems.map((item, idx) => {
-                          const p = getProduct(item.productId);
-                          const s = getAccessibleStockItem(item.stockItemId);
-                          const isShipped = shippedItemIds.has(item.stockItemId);
-                          const isLost = !!s?.lost;
-                          const minReturnPrice = orderItemMinReturnPrice(item, p);
-                          const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
-                          return (
-                            <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
-                              <td className="px-4 py-2">
-                                <div className="flex items-center gap-2">
-                                  <div className="relative size-8 rounded overflow-hidden border bg-muted shrink-0">
-                                    {p?.imageUrl
-                                      ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
-                                      : <div className="size-full flex items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
-                                    {isLost && <LostItemOverlay compact />}
-                                  </div>
-                                  <div>
-                                    <span className="text-sm">{p?.name ?? "—"}</span>
-                                    {s?.code && (
-                                      <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
-                                        {s.code}
-                                      </span>
-                                    )}
-                                    {isShipped && <span className="ml-2 text-xs text-purple-600 bg-purple-100 px-1 py-0.5 rounded">已出库/发货</span>}
-                                    {isLost && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">已损耗，需退商品</span>}
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途" : s?.tankTransfer?.status === "dispatched"
-                                ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : s ? subTankName(s.subTankId) : "—"}</td>
-                              <td className="px-4 py-2 text-sm text-right">
-                                <Input type="number" min={0} value={item.price}
-                                  onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
-                                  disabled={isLost}
-                                  className="h-7 w-24 text-sm text-right ml-auto" />
-                              </td>
-                              <td className="px-4 py-2 text-sm text-right">
-                                {minReturnPriceExempt ? (
-                                  <div>
-                                    <div className="font-medium text-rose-700">疾病价豁免</div>
-                                    <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
-                                  </div>
-                                ) : `¥${minReturnPrice.toFixed(2)}`}
-                              </td>
-	                              <td className="px-2 py-2">
-	                                {!isShipped && (
-	                                  <button onClick={() => removeEditItem(item.stockItemId)}
-	                                    className="text-muted-foreground hover:text-red-500 transition-colors" title={order.items.some((orderItem) => orderItem.stockItemId === item.stockItemId) ? "退商品" : "移除"}>
-	                                    <X className="size-4" />
-	                                  </button>
-	                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                        {displayItems.length === 0 && (
-                          <tr className="border-t">
-                            <td colSpan={6} className="px-4 py-6 text-center text-sm text-muted-foreground">暂无商品</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="px-4 py-2.5 border-t bg-muted/10 shrink-0 rounded-b-lg">
-                    <button onClick={() => setPickerOpen(true)}
-                      className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium">
-                      <Plus className="size-4" /> 添加商品
-                    </button>
-                  </div>
-                </>
-              ) : (
-                /* View mode: items grouped by shipment */
-                <div className="overflow-y-auto rounded-b-lg" style={{ maxHeight: "28rem" }}>
-                  <ItemsWithShipments
-                    order={order}
-                    orderShipments={orderShipments}
-                    shippedItemIds={shippedItemIds}
-                    getProduct={getProduct}
-                    getStockItem={getAccessibleStockItem}
-                    subTankName={subTankName}
-                    onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? setShipmentAction : undefined}
-                    onCorrectFulfillment={state.user?.role === "admin" ? setFulfillmentCorrectionTarget : undefined}
-                    onReturnItem={openReturnItem}
-                    canReturnItem={canReturnOrderItem}
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* ── 费用 ── */}
-            {editMode && editForm ? (
+  const feeContent = <>
+{editMode && editForm ? (
               <div className="rounded-lg border p-4 bg-amber-50/50">
                 <div className="text-xs font-medium text-muted-foreground mb-3">费用设置</div>
                 {!isPickupOrderSource(editForm.source) && (
@@ -5520,7 +5141,492 @@ function OrderDetailDialog({
                 </div>
               </div>
             )}
-          </div>
+  </>;
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={(o) => { if (editSaving) return; if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
+        <DialogContent
+          aria-describedby={undefined}
+          className="fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-3 overflow-hidden rounded-none border-0 p-4 sm:h-[90dvh] sm:max-h-[90dvh] sm:w-[92vw] sm:max-w-[1080px] sm:rounded-xl sm:border sm:p-6"
+        >
+          <DialogHeader>
+            <div className="flex items-center gap-3 flex-wrap">
+              <DialogTitle>{order.orderNo}</DialogTitle>
+              <OrderStatusTags order={order} shipments={state.shipments} />
+              {editMode && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">编辑中</span>}
+            </div>
+          </DialogHeader>
+
+          <Tabs value={detailTab} onValueChange={setDetailTab} className="flex min-h-0 flex-1 flex-col gap-3">
+            <TabsList aria-label="订单详情栏目" className="grid h-11 w-full shrink-0 grid-cols-3 rounded-lg">
+              <TabsTrigger value="info" className="rounded-md">订单信息</TabsTrigger>
+              <TabsTrigger value="cashier" disabled={editMode} className="rounded-md"><CircleDollarSign className="size-4" />收银台</TabsTrigger>
+              <TabsTrigger value="logistics" disabled={editMode} className="rounded-md"><Truck className="size-4" />物流运输</TabsTrigger>
+            </TabsList>
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <TabsContent value="info" className="m-0 space-y-5">
+            {/* ── 基本信息 ── */}
+            {editMode && editForm ? (
+              <div className="rounded-lg border p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-amber-50/50">
+                {!isPlatformOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">客户<span className="ml-0.5 text-red-500">*</span></Label>
+                    <CustomerCombobox value={editForm.customerId}
+                      onChange={(id) => setEditForm((f) => f ? { ...f, customerId: id } : f)}
+                      customers={state.customers ?? []} />
+                  </div>
+                )}
+                {isPlatformOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">{platformOrderNoLabel(editForm.source)}<span className="ml-0.5 text-red-500">*</span></Label>
+                    <Input
+                      value={editForm.platformOrderNo}
+                      placeholder={`请输入${platformOrderNoLabel(editForm.source)}`}
+                      onChange={(event) => setEditForm((form) => form ? { ...form, platformOrderNo: event.target.value } : form)}
+                      className={!editForm.platformOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    />
+                  </div>
+                )}
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">订单来源<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Select
+                    value={editForm.source}
+                    onValueChange={changeEditSource}
+                  >
+                    <SelectTrigger className={!editForm.source.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                      <SelectValue placeholder="请选择来源" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ORDER_SOURCE_OPTIONS.map((source) => (
+                        <SelectItem key={source} value={source}>{orderSourceLabel(source)}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">下单日期</Label>
+                  <Input type="date" value={editForm.date}
+                    max={today}
+                    className={editForm.date > today ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    onChange={(e) => changeEditOrderDate(e.target.value)} />
+                  {editForm.date > today && (
+                    <p className="text-xs text-red-500">下单日期不能晚于今天</p>
+                  )}
+                </div>
+                {!isPickupOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs">预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                    <Input
+                      type="date"
+                      value={editForm.plannedShipDate}
+                      min={editForm.date}
+                      required
+                      onChange={(e) => changeEditPlannedShipDate(e.target.value)}
+                      className={!editForm.plannedShipDate || editForm.plannedShipDate < editForm.date ? "border-red-500 focus-visible:ring-red-500" : ""}
+                    />
+                    {!editForm.plannedShipDate && (
+                      <p className="text-xs text-red-500">请选择预计发货日期</p>
+                    )}
+                    {editForm.plannedShipDate && editForm.plannedShipDate < editForm.date && (
+                      <p className="text-xs text-red-500">发货日期不能早于下单日期</p>
+                    )}
+                  </div>
+                )}
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Select
+                    value={editForm.contactPersonnelId}
+                    disabled={editSaving || order.ownerAssignment?.status === "pending"}
+                    onValueChange={(value) => {
+                      const selectedPerson = editContactOptions.find((person) => person.id === value);
+                      setEditForm((form) => form && selectedPerson ? {
+                        ...form,
+                        contactPersonnelId: selectedPerson.id,
+                        contactPerson: selectedPerson.name,
+                        ownerSelectionChanged: true,
+                      } : form);
+                    }}
+                  >
+                    <SelectTrigger className={!editForm.contactPersonnelId ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                      <SelectValue placeholder="请选择订单负责人" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {editContactOptions.map((person) => (
+                        <SelectItem key={person.id} value={person.id}>
+                          {person.name}{person.personnelNo ? `（${person.personnelNo}）` : ""}{person.role ? ` · ${person.role}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="break-words text-xs leading-5 text-muted-foreground">{ownerSelectionHint({ creating: false, currentOwnerName: order.contactPerson || "当前负责人", selectedName: editForm.contactPerson, changed: editForm.ownerSelectionChanged && editForm.contactPersonnelId !== editForm.expectedContactPersonnelId, pendingName: order.ownerAssignment?.status === "pending" ? order.ownerAssignment.toName : undefined })}</p>
+                  {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
+                  {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
+                </div>
+                {order.orderFormSchemaVersion !== 4 && <>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">付款方式<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Select
+                    value={editForm.paymentMethodId}
+                    onValueChange={(value) => {
+                      const selectedMethod = editPaymentOptions.find((method) => method.id === value);
+                      setEditForm((form) => form && selectedMethod ? {
+                        ...form,
+                        paymentMethodId: value,
+                        paymentChannel: selectedMethod.channel,
+                      } : form);
+                    }}
+                  >
+                    <SelectTrigger className={!editForm.paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                      <SelectValue placeholder="请选择付款方式" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {editPaymentOptions.map((method) => (
+                        <SelectItem key={method.id} value={method.id}>
+                          {paymentMethodDisplayLabel(method)}{method.enabled ? "" : "（历史）"}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
+                  <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${editPaymentAccount ? "text-foreground" : "border-red-500 text-red-500"}`}>
+                    {editPaymentAccount || "未配置，请联系管理员"}
+                  </div>
+                </div>
+                </>}
+                <div className="grid gap-1.5">
+                  <Label className="text-xs">创建时间</Label>
+                  <div className="h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm text-muted-foreground">
+                    {formatOrderCreatedAt(order.createdAt)}
+                  </div>
+                </div>
+                {isAddressOrderSource(editForm.source) && (
+                  <div className="grid gap-1.5 col-span-4">
+                    <Label className="text-xs">本单收货地址</Label>
+                    <Input
+                      value={editForm.shippingAddress}
+                      placeholder={editDefaultAddress ? `不填则使用：${editDefaultAddress}` : "不填则使用客户默认地址"}
+                      onChange={(e) => setEditForm((f) => f ? { ...f, shippingAddress: e.target.value } : f)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {editDefaultAddress ? `客户默认地址：${editDefaultAddress}` : "该客户暂无默认地址；本单地址可为空。"}
+                    </p>
+                  </div>
+                )}
+                <div className="grid gap-1.5 col-span-5">
+                  <Label className="text-xs">备注</Label>
+                  <Input value={editForm.notes} placeholder="选填"
+                    onChange={(e) => setEditForm((f) => f ? { ...f, notes: e.target.value } : f)} />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border p-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm bg-muted/30">
+                {isPlatformOrderSource(order.source) ? (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">{platformOrderNoLabel(order.source)}：</span>
+                    <span className="font-medium">{platformOrderNoForOrder(order) || "—"}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div><span className="text-muted-foreground">客户：</span><span className="font-medium">{customer?.name ?? "—"}</span></div>
+                    <div><span className="text-muted-foreground">手机：</span>{customer?.phone || "—"}</div>
+                    <div><span className="text-muted-foreground">微信：</span>{customer?.wechat || "—"}</div>
+                    <div><span className="text-muted-foreground">客户来源：</span>{customer?.source || "—"}</div>
+                  </>
+                )}
+                <div><span className="text-muted-foreground">订单来源：</span>{orderSourceLabel(order.source) || "—"}</div>
+                <div><span className="text-muted-foreground">创建时间：</span>{formatOrderCreatedAt(order.createdAt)}</div>
+                <div><span className="text-muted-foreground">下单日期：</span>{order.date}</div>
+                <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
+                {order.notes && <div className="col-span-2"><span className="text-muted-foreground">备注：</span>{order.notes}</div>}
+              </div>
+            )}
+
+            {/* ── Items table ── */}
+            <div className="rounded-lg border flex flex-col">
+              <div className="px-4 py-2 bg-muted/50 text-xs font-medium text-muted-foreground flex items-center justify-between shrink-0 border-b rounded-t-lg">
+                <span>订单商品（{displayItems.length} 条）</span>
+                {editMode && editForm && (
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
+                    <span className="text-slate-600">最低回厂价 ¥{displayMinimumReturnTotal.toFixed(2)}</span>
+                  </div>
+                )}
+              </div>
+
+              {editMode ? (
+                /* Edit mode: flat table, shipped items shown with lock icon */
+                <>
+                  <div className="overflow-y-auto" style={{ maxHeight: "22rem" }}>
+                    <table className="w-full">
+                      <thead className="sticky top-0 z-10 bg-white">
+                        <tr className="border-b">
+                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">商品</th>
+                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">最低回厂价</th>
+                          <th className="w-10 px-2 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {displayItems.map((item, idx) => {
+                          const p = getProduct(item.productId);
+                          const s = getAccessibleStockItem(item.stockItemId);
+                          const isShipped = shippedItemIds.has(item.stockItemId);
+                          const isLost = !!s?.lost;
+                          const minReturnPrice = orderItemMinReturnPrice(item, p);
+                          const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
+                          return (
+                            <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
+                              <td className="px-4 py-2">
+                                <div className="flex items-center gap-2">
+                                  <div className="relative size-8 rounded overflow-hidden border bg-muted shrink-0">
+                                    {p?.imageUrl
+                                      ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
+                                      : <div className="size-full flex items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
+                                    {isLost && <LostItemOverlay compact />}
+                                  </div>
+                                  <div>
+                                    <span className="text-sm">{p?.name ?? "—"}</span>
+                                    {s?.code && (
+                                      <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
+                                        {s.code}
+                                      </span>
+                                    )}
+                                    {isShipped && <span className="ml-2 text-xs text-purple-600 bg-purple-100 px-1 py-0.5 rounded">已出库/发货</span>}
+                                    {isLost && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">已损耗，需退商品</span>}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途" : s?.tankTransfer?.status === "dispatched"
+                                ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : s ? subTankName(s.subTankId) : "—"}</td>
+                              <td className="px-4 py-2 text-sm text-right">
+                                <Input type="number" min={0} value={item.price}
+                                  onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
+                                  disabled={isLost}
+                                  className="h-7 w-24 text-sm text-right ml-auto" />
+                              </td>
+                              <td className="px-4 py-2 text-sm text-right">
+                                {minReturnPriceExempt ? (
+                                  <div>
+                                    <div className="font-medium text-rose-700">疾病价豁免</div>
+                                    <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
+                                  </div>
+                                ) : `¥${minReturnPrice.toFixed(2)}`}
+                              </td>
+	                              <td className="px-2 py-2">
+	                                {!isShipped && (
+	                                  <button onClick={() => removeEditItem(item.stockItemId)}
+	                                    className="text-muted-foreground hover:text-red-500 transition-colors" title={order.items.some((orderItem) => orderItem.stockItemId === item.stockItemId) ? "退商品" : "移除"}>
+	                                    <X className="size-4" />
+	                                  </button>
+	                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {displayItems.length === 0 && (
+                          <tr className="border-t">
+                            <td colSpan={6} className="px-4 py-6 text-center text-sm text-muted-foreground">暂无商品</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="px-4 py-2.5 border-t bg-muted/10 shrink-0 rounded-b-lg">
+                    <button onClick={() => setPickerOpen(true)}
+                      className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium">
+                      <Plus className="size-4" /> 添加商品
+                    </button>
+                  </div>
+                </>
+              ) : (
+                /* View mode: items grouped by shipment */
+                <div className="overflow-y-auto rounded-b-lg" style={{ maxHeight: "28rem" }}>
+                  <ItemsWithShipments
+                    flat
+                    order={order}
+                    orderShipments={orderShipments}
+                    shippedItemIds={shippedItemIds}
+                    getProduct={getProduct}
+                    getStockItem={getAccessibleStockItem}
+                    subTankName={subTankName}
+                    onReturnItem={openReturnItem}
+                    canReturnItem={canReturnOrderItem}
+                  />
+                </div>
+              )}
+            </div>
+
+                {editMode && <div>{feeContent}</div>}
+                {!editMode && <details className="rounded-lg border p-4"><summary className="cursor-pointer text-sm font-medium">订单负责人、批发标记与新客审批</summary><div className="mt-4 space-y-4">
+
+            {order.ownerAssignment && <OrderOwnerAssignmentPanel
+              orderId={order.id}
+              requestId={order.ownerAssignment.requestId}
+              viewer={state.user}
+              onOrderUpdated={(updated, session) => setState(current => mergeOwnerAssignmentForSession(current, updated, session))}
+            />}
+
+            <OrderWholesaleTag
+              key={order.id}
+              order={order}
+              viewer={state.user}
+              canUpdate={permission.canUpdate}
+              onOrderUpdated={(updatedOrder, session) => setState((current) => mergeWholesaleOrderTagForSession(current, updatedOrder, session))}
+            />
+
+            <OrderAcquisitionTag
+              order={order}
+              onCustomerLinked={(change, session) => setState(current => mergeNewCustomerLink(current, change, session))}
+              onOrderUpdated={(updatedOrder, session) => setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
+                ...current,
+                orders: mergeNewCustomerApproval(current.orders, updatedOrder),
+              }))}
+            />
+
+</div></details>}
+              </TabsContent>
+              <TabsContent value="cashier" forceMount hidden={detailTab !== "cashier"} style={detailTab !== "cashier" ? { display: "none" } : undefined} className="m-0 space-y-5">
+                <OrderCashierPanel key={`cashier:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} canUpdate={permission.canUpdate} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
+                  onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
+                  onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); setShipmentAction(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
+                  {!editMode && feeContent}
+                </OrderCashierPanel>
+              </TabsContent>
+              <TabsContent value="logistics" className="m-0 space-y-5">
+
+              <section aria-label="物流安排" className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-3"><h3 className="text-base font-semibold">物流安排</h3><Badge variant="outline">{isPickupOrderSource(order.source) ? "上门自提" : "物流发货"}</Badge></div>
+                <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                  <div><dt className="text-muted-foreground">预计发货日期</dt><dd className="mt-1 font-medium">{isPickupOrderSource(order.source) ? "到店后确认自提" : order.plannedShipDate || "未设置"}</dd></div>
+                  {!isPickupOrderSource(order.source) && <div><dt className="text-muted-foreground">计划承运方</dt><dd className="mt-1 font-medium">{order.plannedCarrier || "出库时选择"}</dd></div>}
+                  {!isPickupOrderSource(order.source) && <div className="sm:col-span-2"><dt className="text-muted-foreground">收货地址</dt><dd className="mt-1 break-words">{displayAddress || (isPlatformOrderSource(order.source) ? "以平台订单收货地址为准" : "未填写")}</dd></div>}
+                </dl>
+                <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">在这里安排出库、上传打包凭证、填写运单、补录实际运费及签收。客户付款和退款在收银台逐笔登记。</p>
+              </section>
+            {/* ── Items table ── */}
+            <div className="rounded-lg border flex flex-col">
+              <div className="px-4 py-2 bg-muted/50 text-xs font-medium text-muted-foreground flex items-center justify-between shrink-0 border-b rounded-t-lg">
+                <span>出库与发货记录（{displayItems.length} 条商品）</span>
+                {editMode && editForm && (
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <span className="text-emerald-600">小计 ¥{displayItemsTotal.toFixed(2)}</span>
+                    <span className="text-slate-600">最低回厂价 ¥{displayMinimumReturnTotal.toFixed(2)}</span>
+                  </div>
+                )}
+              </div>
+
+              {editMode ? (
+                /* Edit mode: flat table, shipped items shown with lock icon */
+                <>
+                  <div className="overflow-y-auto" style={{ maxHeight: "22rem" }}>
+                    <table className="w-full">
+                      <thead className="sticky top-0 z-10 bg-white">
+                        <tr className="border-b">
+                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">商品</th>
+                          <th className="text-left px-4 py-2 text-xs text-muted-foreground">缸位</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">售价</th>
+                          <th className="text-right px-4 py-2 text-xs text-muted-foreground">最低回厂价</th>
+                          <th className="w-10 px-2 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {displayItems.map((item, idx) => {
+                          const p = getProduct(item.productId);
+                          const s = getAccessibleStockItem(item.stockItemId);
+                          const isShipped = shippedItemIds.has(item.stockItemId);
+                          const isLost = !!s?.lost;
+                          const minReturnPrice = orderItemMinReturnPrice(item, p);
+                          const minReturnPriceExempt = isMinimumReturnPriceExempt(item, s);
+                          return (
+                            <tr key={item.stockItemId ?? idx} className={`border-t ${isShipped ? "bg-purple-50/30" : isLost ? "bg-red-50/40" : ""}`}>
+                              <td className="px-4 py-2">
+                                <div className="flex items-center gap-2">
+                                  <div className="relative size-8 rounded overflow-hidden border bg-muted shrink-0">
+                                    {p?.imageUrl
+                                      ? <ImageWithFallback src={p.imageUrl} alt="" className="size-full object-cover" />
+                                      : <div className="size-full flex items-center justify-center"><Fish className="size-3 text-muted-foreground" /></div>}
+                                    {isLost && <LostItemOverlay compact />}
+                                  </div>
+                                  <div>
+                                    <span className="text-sm">{p?.name ?? "—"}</span>
+                                    {s?.code && (
+                                      <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-600">
+                                        {s.code}
+                                      </span>
+                                    )}
+                                    {isShipped && <span className="ml-2 text-xs text-purple-600 bg-purple-100 px-1 py-0.5 rounded">已出库/发货</span>}
+                                    {isLost && <span className="ml-2 text-xs text-red-700 bg-red-100 px-1 py-0.5 rounded">已损耗，需退商品</span>}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-sm text-muted-foreground">{s?.tankTransfer?.status === "in_transit" ? "移缸在途" : s?.tankTransfer?.status === "dispatched"
+                                ? `在途直接出库 · ${s.tankTransfer.dispatchSiteName || s.tankTransfer.dispatchSiteId || "—"}` : s ? subTankName(s.subTankId) : "—"}</td>
+                              <td className="px-4 py-2 text-sm text-right">
+                                <Input type="number" min={0} value={item.price}
+                                  onChange={(e) => setEditItemPrice(item.stockItemId, Number(e.target.value))}
+                                  disabled={isLost}
+                                  className="h-7 w-24 text-sm text-right ml-auto" />
+                              </td>
+                              <td className="px-4 py-2 text-sm text-right">
+                                {minReturnPriceExempt ? (
+                                  <div>
+                                    <div className="font-medium text-rose-700">疾病价豁免</div>
+                                    <div className="text-xs text-muted-foreground">原 ¥{minReturnPrice.toFixed(2)}</div>
+                                  </div>
+                                ) : `¥${minReturnPrice.toFixed(2)}`}
+                              </td>
+	                              <td className="px-2 py-2">
+	                                {!isShipped && (
+	                                  <button onClick={() => removeEditItem(item.stockItemId)}
+	                                    className="text-muted-foreground hover:text-red-500 transition-colors" title={order.items.some((orderItem) => orderItem.stockItemId === item.stockItemId) ? "退商品" : "移除"}>
+	                                    <X className="size-4" />
+	                                  </button>
+	                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {displayItems.length === 0 && (
+                          <tr className="border-t">
+                            <td colSpan={6} className="px-4 py-6 text-center text-sm text-muted-foreground">暂无商品</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="px-4 py-2.5 border-t bg-muted/10 shrink-0 rounded-b-lg">
+                    <button onClick={() => setPickerOpen(true)}
+                      className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium">
+                      <Plus className="size-4" /> 添加商品
+                    </button>
+                  </div>
+                </>
+              ) : (
+                /* View mode: items grouped by shipment */
+                <div className="overflow-y-auto rounded-b-lg" style={{ maxHeight: "28rem" }}>
+                  <ItemsWithShipments
+                    order={order}
+                    orderShipments={orderShipments}
+                    shippedItemIds={shippedItemIds}
+                    getProduct={getProduct}
+                    getStockItem={getAccessibleStockItem}
+                    subTankName={subTankName}
+                    onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? setShipmentAction : undefined}
+                    onCorrectFulfillment={state.user?.role === "admin" ? setFulfillmentCorrectionTarget : undefined}
+                    onReturnItem={openReturnItem}
+                    canReturnItem={canReturnOrderItem}
+                  />
+                </div>
+              )}
+            </div>
+
+              </TabsContent>
+            </div>
+          </Tabs>
 
           <DialogFooter className="flex-wrap gap-2 pt-2 border-t">
             {editMode ? (
@@ -5531,12 +5637,12 @@ function OrderDetailDialog({
               </>
             ) : (
 	              <>
-			                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && order.status !== "damaged" && (
+			                {detailTab === "info" && permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && order.status !== "damaged" && (
 			                  <Button size="sm" variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50" onClick={enterEdit}>
 	                    编辑订单
                   </Button>
                 )}
-	                {permission.canUpdate && unshippedItems.length > 0 && order.status !== "cancelled" && order.status !== "completed" && (
+	                {detailTab === "logistics" && permission.canUpdate && unshippedItems.length > 0 && order.status !== "cancelled" && order.status !== "completed" && (
                   <div className="flex flex-col items-end gap-1">
 	                    {orderTransfersLoading && <p role="status" className="text-xs text-muted-foreground">正在核对本订单的在途鱼…</p>}
                     {orderTransfersError && <div role="alert" className="max-w-72 text-right text-xs text-amber-700">
@@ -5573,7 +5679,7 @@ function OrderDetailDialog({
                     </Button>
                   </div>
                 )}
-                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && activeOrderShipments.length > 0 && (
+                {detailTab === "logistics" && permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && activeOrderShipments.length > 0 && (
                   <div className="flex flex-col items-end gap-1">
                     {!allItemsShipped && (
                       <p className="text-xs text-purple-500">
@@ -5598,7 +5704,7 @@ function OrderDetailDialog({
                   </div>
                 )}
 
-                <OrderRefundAction order={order} hasActuallyShipped={hasActuallyShipped} canUpdate={permission.canUpdate} saving={refundSaving} onOpen={() => setRefundOpen(true)} />
+
 
                 <div className="flex-1" />
                 <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
@@ -6300,8 +6406,8 @@ function StockPickerDialog({
 // ─── NewOrderDialog ───────────────────────────────────────────────────────────
 
 function NewOrderDialog({
-  open, onOpenChange,
-}: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  open, onOpenChange, onCreated,
+}: { open: boolean; onOpenChange: (o: boolean) => void; onCreated?: (orderId: string) => void }) {
   const { state, activeSiteId, setState } = useStore();
   const permission = usePermission("orders");
   const customerPermission = usePermission("customers");
@@ -6315,7 +6421,10 @@ function NewOrderDialog({
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
   const [platformOrderNo, setPlatformOrderNo] = useState("");
-  const [paymentMethodId, setPaymentMethodId] = useState("");
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [stepError, setStepError] = useState("");
+  const [plannedCarrier, setPlannedCarrier] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [shippingAddress, setShippingAddress] = useState("");
   const [plannedShipDate, setPlannedShipDate] = useState("");
   const [contactPersonnelId, setContactPersonnelId] = useState(defaultContactPersonnelId);
@@ -6342,7 +6451,7 @@ function NewOrderDialog({
 
   useEffect(() => {
     if (open) {
-      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
+      setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setStep(1); setStepError(""); setPlannedCarrier(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
       setSelectedItems(new Map());
       setShippingFeeMode("prepaid"); setShippingSettlementTiming("after_shipping"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -6360,27 +6469,33 @@ function NewOrderDialog({
   const platformOrder = isPlatformOrderSource(source);
   const pickupOrder = isPickupOrderSource(source);
   const isWholesaleOrder = source === "批发";
-  const availablePaymentMethods = useMemo(
-    () => paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), source),
-    [source, state.systemSettings]
-  );
-  const paymentMethod = configuredPaymentMethod(state.systemSettings, paymentMethodId);
-  const paymentChannel = paymentMethod?.channel ?? "";
-  const paymentAccount = paymentMethod?.account ?? "";
+  const shippingCarriers = configuredShippingCarriers(state.systemSettings);
   const packagingFee = configuredOrderPackagingFee(state.systemSettings);
 
-  const chooseSource = (nextSource: string) => {
-    setSource(nextSource);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [step]);
+
+  const goToStep = (next: 1 | 2 | 3) => {
+    setStepError("");
     setSubmitAttempted(false);
-    setCustomerId("");
-    setPlatformOrderNo("");
-    const nextPaymentMethods = paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), nextSource);
-    setPaymentMethodId(nextPaymentMethods.length === 1 ? nextPaymentMethods[0].id : "");
-    setShippingAddress("");
-    setPlannedShipDate("");
-    setShippingFeeMode(isPickupOrderSource(nextSource) ? "collect" : "prepaid");
-    setShippingSettlementTiming("after_shipping");
-    setShippingFee(0);
+    setStep(next);
+  };
+
+  const chooseSource = (nextSource: string) => {
+    if (source !== nextSource) {
+      setSource(nextSource);
+      setCustomerId("");
+      setPlatformOrderNo("");
+      setShippingAddress("");
+      setPlannedCarrier("");
+      setShippingFeeMode(isPickupOrderSource(nextSource) ? "collect" : "prepaid");
+      setShippingSettlementTiming("after_shipping");
+      setShippingFee(0);
+    }
+    setStep(2);
+    setStepError("");
+    setSubmitAttempted(false);
   };
 
   const subTankName = (id: string) => {
@@ -6425,7 +6540,6 @@ function NewOrderDialog({
   const belowMinimumReturn = selectedItems.size > 0 && goodsNetTotal <= minimumReturnTotal;
   const shippingDeferred = shippingFeeMode === "prepaid" && !pickupOrder && shippingSettlementTiming === "after_shipping";
   const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder && !shippingDeferred ? shippingFee : 0;
-  const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
   const contactOptions = ownerCandidates.options;
   const selectedContactPersonnel = contactOptions.find((person) => person.id === contactPersonnelId);
@@ -6483,29 +6597,39 @@ function NewOrderDialog({
     setPlannedShipDate(newDate);
   };
 
+  const basicError = () => {
+    if (!source.trim()) return "请选择订单类型";
+    if (!platformOrder && !customerId) return "请选择客户";
+    if (platformOrder && !platformOrderNo.trim()) return `请填写${platformOrderNoLabel(source)}`;
+    if (!date) return "请选择下单日期";
+    if (date > today) return "下单日期不能晚于今天";
+    if (!selectedContactPersonnel) return "请选择订单负责人";
+    if (selectedItems.size === 0) return "请至少添加一条商品";
+    if ([...selectedItems.values()].some(item => !Number.isFinite(item.price) || item.price < 0)) return "请填写有效的商品售价";
+    if (!Number.isFinite(discount) || discount < 0) return "请填写有效的折扣金额";
+    if (amountDue < 0) return "折扣过大，订单应收不能为负数";
+    if (belowMinimumReturn) return `商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`;
+    if ([...selectedItems.keys()].some(id => !state.stock.some(item => item.id === id))) return "已选商品数据已变化，请移除后重新添加";
+    return "";
+  };
+  const continueToShipping = () => {
+    setSubmitAttempted(true);
+    const error = basicError();
+    if (error) { setStepError(error); return; }
+    goToStep(3);
+  };
+
   const save = async () => {
-    if (createLock.current) return;
+    if (createLock.current || step !== 3) return;
     if (!permission.requirePermission("create")) return;
     setSubmitAttempted(true);
-    if (!source.trim()) return toast.error("请选择订单来源");
-    if (!platformOrder && !customerId) return toast.error("请选择客户");
-    if (platformOrder && !platformOrderNo.trim()) return toast.error(`请填写${platformOrderNoLabel(source)}`);
-    if (!paymentMethodId || !paymentMethod) return toast.error("请选择付款方式");
-    if (!paymentAccount) return toast.error("该付款方式未配置收款账户，请联系管理员处理");
-    if (date > today) return toast.error("下单日期不能晚于今天");
-    if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
-    if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
-    if (!pickupOrder && shippingFeeMode === "prepaid" && shippingSettlementTiming === "before_shipping" && normalizedPositiveShippingFee(shippingFee) === null) return toast.error("先结算运费时，请填写大于 0 且最多两位小数的预计运费");
-    if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
-    if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
-    if (amountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
-    if (belowMinimumReturn) return toast.error(`商品折后金额必须高于最低回厂价合计 ¥${minimumReturnTotal.toFixed(2)}`);
-    const missingStockIds = Array.from(selectedItems.keys()).filter((stockItemId) =>
-      !state.stock.some((item) => item.id === stockItemId)
-    );
-    if (missingStockIds.length > 0) {
-      return toast.error("已选商品数据已变化，请移除后重新添加");
-    }
+    const error = basicError();
+    if (error) { setStep(2); setStepError(error); return; }
+    if (!pickupOrder && !shippingCarriers.some(carrier => carrier.name === plannedCarrier)) return setStepError("请选择发货物流");
+    if (!pickupOrder && !plannedShipDate) return setStepError("请选择预计发货日期");
+    if (plannedShipDate && plannedShipDate < date) return setStepError("预计发货日期不能早于下单日期");
+    if (!pickupOrder && shippingFeeMode === "prepaid" && shippingSettlementTiming === "before_shipping" && normalizedPositiveShippingFee(shippingFee) === null) return setStepError("先结算运费时，请填写大于 0 且最多两位小数的预计运费");
+    if (!Number.isFinite(shippingFee) || shippingFee < 0) return setStepError("请填写有效的预计运费");
     const items: OrderItem[] = Array.from(selectedItems.entries()).map(([stockItemId, draft]) => {
       const s = state.stock.find((x) => x.id === stockItemId)!;
       return {
@@ -6520,16 +6644,15 @@ function NewOrderDialog({
         commissionRate: 0,
       };
     });
-    const assignedElsewhere = selectedContactPersonnel.username !== currentUsername;
-    if (!confirmWrite("创建", `将创建${isWholesaleOrder ? "批发" : "销售"}订单，本次应收金额 ¥${amountDue.toFixed(2)}${shippingDeferred ? "（暂不含运费）" : ""}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
     createLock.current = true; setCreating(true);
     let createdOrderNo = "";
+    let createdOrderId = "";
     let pendingOwner = "";
     try {
       const result = await postOrderApi("orders/create", {
-        orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
+        orderFormSchemaVersion: 4,
         shippingSettlementVersion: 1,
         siteId: activeSiteId,
         customerId,
@@ -6538,12 +6661,11 @@ function NewOrderDialog({
         isWholesaleOrder,
         platformOrderNo: platformOrder ? platformOrderNo.trim() : "",
         douyinOrderNo: source === "平台下单" ? platformOrderNo.trim() : "",
-        paymentMethodId,
-        paymentChannel,
+        plannedCarrier: pickupOrder ? "" : plannedCarrier,
         shippingAddress: isAddressOrderSource(source) ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
-        contactPersonnelId: selectedContactPersonnel.id,
-        contactPerson: selectedContactPersonnel.name.trim(),
+        contactPersonnelId: selectedContactPersonnel!.id,
+        contactPerson: selectedContactPersonnel!.name.trim(),
         items,
         shippingFeeMode: pickupOrder ? "collect" : shippingFeeMode,
         shippingFee: pickupOrder || shippingDeferred ? 0 : shippingFee,
@@ -6555,6 +6677,7 @@ function NewOrderDialog({
       if (!isNewCustomerSessionCurrent(session)) return;
       applyOrderApiResult(setState, result, { session: session! });
       createdOrderNo = result.order?.orderNo ?? "";
+      createdOrderId = result.order?.id ?? "";
       pendingOwner = result.order?.ownerAssignment?.status === "pending" ? result.order.ownerAssignment.toName : "";
     } catch (error) {
       if (isNewCustomerSessionCurrent(session)) toast.error(error instanceof Error ? error.message : "创建失败，请重试");
@@ -6563,6 +6686,7 @@ function NewOrderDialog({
       createLock.current = false; setCreating(false);
     }
     onOpenChange(false);
+    if (createdOrderId) onCreated?.(createdOrderId);
     toast.success(`${createdOrderNo ? `订单 ${createdOrderNo} 已创建` : "订单已创建"}${pendingOwner ? `，等待${pendingOwner}确认接手；确认前仍由你负责` : ""}`);
   };
 
@@ -6578,54 +6702,61 @@ function NewOrderDialog({
     })
   ), [selectedItems, state.stock, state.products]);
 
+  const stepLabels = ["选择类型", "基本信息与商品", "发货方式"];
   return (
     <>
       <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next); }}>
-        <DialogContent
-          aria-describedby={undefined}
-          className={`new-order-dialog fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-card p-0 sm:max-h-[90dvh] sm:w-[92vw] sm:rounded-xl sm:border sm:p-0 ${source ? "sm:h-[90dvh] sm:max-w-[1160px]" : "sm:h-auto sm:max-w-[820px]"}`}
-        >
+        <DialogContent aria-describedby={undefined}
+          className={`new-order-dialog fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-card p-0 sm:max-h-[90dvh] sm:w-[92vw] sm:rounded-xl sm:border sm:p-0 ${step === 1 ? "sm:h-auto sm:max-w-[900px]" : "sm:h-[90dvh] sm:max-w-[1160px]"}`}>
           <DialogHeader className="shrink-0 border-b bg-card px-4 py-4 pr-12 text-left sm:px-6 sm:pr-14">
             <DialogTitle className="text-lg">新建销售订单</DialogTitle>
-            <ol className="mt-2 flex items-center gap-2 text-xs" aria-label="新建订单流程">
-              <li className={!source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={!source ? "step" : undefined}>1 选择类型</li>
-              <li aria-hidden="true"><ChevronRight className="size-3 text-muted-foreground" /></li>
-              <li className={source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={source ? "step" : undefined}>2 填写订单</li>
+            <ol className="new-order-stepper mt-3 flex items-center gap-1 sm:gap-3" aria-label="新建订单流程">
+              {stepLabels.map((label, index) => {
+                const number = (index + 1) as 1 | 2 | 3;
+                return <li key={label} className="flex min-w-0 items-center gap-1 sm:gap-3" aria-current={step === number ? "step" : undefined}>
+                  {index > 0 && <ChevronRight className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
+                  <button type="button" disabled={creating || number > step} onClick={() => goToStep(number)} className={`new-order-step inline-flex items-center gap-1.5 rounded-md px-1 py-1 text-xs sm:text-sm ${step === number ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
+                    <span className={`flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] ${step === number ? "bg-foreground text-background" : number < step ? "bg-emerald-100 text-emerald-800" : "bg-muted text-muted-foreground"}`}>{number < step ? <Check className="size-3" aria-hidden="true" /> : number}</span>
+                    <span>{label}</span>
+                  </button>
+                </li>;
+              })}
             </ol>
           </DialogHeader>
 
-          {!source ? (
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-card">
+          {step === 1 ? (
+            <section aria-label="选择订单类型" className="px-4 py-5 sm:px-6 sm:py-6">
               <h3 className="text-base font-semibold">选择订单类型</h3>
-              <p className="mt-1 text-sm text-muted-foreground">选择后，填写对应的客户、商品及履约信息。</p>
+              <p className="mt-1 text-sm text-muted-foreground">先登记客户与商品，再安排发货。收付款在订单创建后处理。</p>
               <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
                   const SourceIcon = choice.icon;
-                  return (
-                    <button key={choice.value} type="button" onClick={() => chooseSource(choice.value)}
-                      className="group flex min-h-24 items-center gap-3 rounded-lg border bg-card p-4 text-left transition-colors hover:border-primary/60 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><SourceIcon className="size-5" aria-hidden="true" /></span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2"><span className="text-base font-semibold">{choice.label}</span>{choice.value !== "批发" && <span className="text-xs text-muted-foreground">零售</span>}</span>
-                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">{choice.description}</span>
-                      </span>
-                      <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
-                    </button>
-                  );
+                  return <button key={choice.value} type="button" onClick={() => chooseSource(choice.value)} aria-pressed={source === choice.value} data-source={choice.value}
+                    className="new-order-source-card group flex min-h-24 items-center gap-3 rounded-lg border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                    <span className="new-order-source-icon flex size-11 shrink-0 items-center justify-center rounded-lg"><SourceIcon className="size-5" aria-hidden="true" /></span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2"><span className="text-base font-semibold">{choice.label}</span>{choice.value !== "批发" && <span className="text-xs opacity-85">零售</span>}</span>
+                      <span className="mt-1 block text-xs leading-5 opacity-90">{choice.description}</span>
+                    </span>
+                    {source === choice.value ? <Check className="size-4 shrink-0" aria-hidden="true" /> : <ChevronRight className="size-4 shrink-0" aria-hidden="true" />}
+                  </button>;
                 })}
               </div>
-            </div>
+            </section>
           ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto bg-card">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2 sm:px-6">
-              <div className="flex items-center gap-2 text-sm"><span className="font-semibold">{orderSourceLabel(source)}</span><span className="text-muted-foreground">· {isWholesaleOrder ? "批发订单" : "零售订单"}</span></div>
-              <Button type="button" variant="ghost" size="sm" disabled={creating} onClick={() => chooseSource("")}>更换类型</Button>
-            </div>
-            <div className="new-order-layout grid items-start gap-6 p-4 sm:p-6">
-              <div className="min-w-0 space-y-6">
-                <section aria-label="客户与履约" className="min-w-0">
-                  <div className="mb-4 flex items-center gap-3"><h3 className="text-base font-semibold">客户与履约</h3><span className="text-xs text-muted-foreground">带 * 的项目为必填</span></div>
-                  <div className="grid grid-cols-1 items-start gap-x-4 gap-y-4 sm:grid-cols-2">
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2 sm:px-6">
+                <div className="flex items-center gap-2 text-sm"><span className="font-semibold">{orderSourceLabel(source)}</span><span className="text-muted-foreground">· {isWholesaleOrder ? "批发订单" : "零售订单"}</span></div>
+                <Button type="button" variant="ghost" size="sm" disabled={creating} onClick={() => goToStep(1)}>更换类型</Button>
+              </div>
+              {stepError && <div role="alert" className="mx-4 mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 sm:mx-6">{stepError}</div>}
+              {step === 2 ? (
+                <div className="new-order-layout grid items-start gap-6 p-4 sm:p-6">
+                  <div className="min-w-0 space-y-6">
+                    <section aria-label="基本信息" className="min-w-0">
+                      <div className="mb-4 flex items-center gap-3"><h3 className="text-base font-semibold">基本信息</h3><span className="text-xs text-muted-foreground">带 * 的项目为必填</span></div>
+                      <div className="grid grid-cols-1 items-start gap-x-4 gap-y-4 sm:grid-cols-2">
               {!platformOrder && (
                 <div className="grid min-w-0 gap-2">
                   <div className="flex items-center justify-between gap-2">
@@ -6694,40 +6825,9 @@ function NewOrderDialog({
                 {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
                 {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
               </div>
-              {!pickupOrder && (
-                <div className="grid min-w-0 gap-2">
-                  <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    type="date" aria-label="预计发货日期"
-                    value={plannedShipDate}
-                    min={date}
-                    required
-                    onChange={(e) => changePlannedShipDate(e.target.value)}
-                    className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
-                  />
-                  {submitAttempted && !plannedShipDate && (
-                    <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
-                  )}
-                  {plannedShipDate && plannedShipDate < date && (
-                    <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
-                  )}
-                </div>
-              )}
-              {isAddressOrderSource(source) && (
-                <div className="grid min-w-0 gap-2 sm:col-span-2">
-                  <Label>本单收货地址</Label>
-                  <Input
-                    aria-label="本单收货地址" value={shippingAddress}
-                    onChange={(e) => setShippingAddress(e.target.value)}
-                    placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
-                  />
-                  <p className="text-xs text-muted-foreground -mt-1">
-                    {selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "选择客户后可自动使用客户默认地址。"}
-                  </p>
-                </div>
-              )}
-                  </div>
-                </section>
+
+                      </div>
+                    </section>
             <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
               <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
                 <div className="min-w-0"><h3 className="text-sm font-semibold">商品明细 <span className="ml-1 font-normal text-muted-foreground">{selectedItems.size} 条</span></h3></div>
@@ -6862,138 +6962,83 @@ function NewOrderDialog({
               </div>
 
             </div>
-<div className="grid min-w-0 gap-2 ">
-                <Label>备注</Label>
-                <Input aria-label="订单备注" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
-              </div>
-              </div>
-              <aside aria-label="收款与费用" className="min-w-0 space-y-5 border-t pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
-                <section className="space-y-4"><h3 className="text-base font-semibold">收款方式</h3>
-              <div className="grid min-w-0 gap-2">
-                <Label>付款方式<span className="text-red-500 ml-0.5">*</span></Label>
-                <Select
-                  value={paymentMethodId}
-                  onValueChange={setPaymentMethodId}
-                >
-                  <SelectTrigger aria-label="付款方式" className={submitAttempted && !paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                    <SelectValue placeholder="请选择付款方式" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availablePaymentMethods.map((method) => (
-                      <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid min-w-0 gap-2">
-                <Label>对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
-                <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${submitAttempted && !paymentAccount ? "border-red-500 text-red-500" : "text-foreground"}`}>
-                  {paymentAccount || (paymentMethodId ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
-                </div>
-              </div>
-                </section>
-                <section className="border-t pt-4">
-              <div className="flex flex-col gap-3">
-                <h3 className="text-sm font-semibold">费用设置</h3>
-                {!pickupOrder && (
-                  <div className="grid grid-cols-3 overflow-hidden rounded-md border">
-                    {SHIPPING_FEE_MODE_OPTIONS.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={`border-r px-2 py-2 text-sm last:border-r-0 ${shippingFeeMode === option.value ? "bg-foreground font-semibold text-background" : "hover:bg-muted/50"}`}
-                        title={option.value === "prepaid" ? "客户向店里支付，结算时间在下方选择。" : option.hint}
-                        onClick={() => {
-                          setShippingFeeMode(option.value);
-                          if (option.value === "collect") setShippingFee(0);
-                        }}
-                      >
-                        {option.value === "prepaid" ? "客户承担" : option.value === "free" ? "商家包邮" : "快递到付"}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {!pickupOrder && (
-                  <p className="text-xs text-muted-foreground">
-                    {shippingFeeMode === "prepaid" ? "客户向店里支付，结算时间在下方选择。" : SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
-                  </p>
-                )}
-                {!pickupOrder && shippingFeeMode === "prepaid" && (
-                  <ShippingSettlementChoice value={shippingSettlementTiming} onChange={(value) => { setShippingSettlementTiming(value); }} />
-                )}
-                <div className="grid grid-cols-2 items-start gap-3">
-                  {!pickupOrder && shippingFeeMode !== "collect" && !shippingDeferred && (
-                    <div className="grid gap-1.5">
-                      <Label className="text-xs">预计运费（¥）</Label>
-                      <Input type="number" min={0} step={0.01} aria-label="预计运费" aria-invalid={submitAttempted && shippingFeeMode === "prepaid" && normalizedPositiveShippingFee(shippingFee) === null} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
-                      <p className="text-xs text-muted-foreground">{shippingFeeMode === "prepaid" ? "计入本次应收；不是已收款，发货后按实际多退少补。" : "仅记录店里承担的费用，不向客户收取。"}</p>
-                    </div>
-                  )}
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">包装费（¥）</Label>
-                    <div className="flex h-8 items-center rounded-md border bg-muted/40 px-3 text-sm">¥{packagingFee.toFixed(2)}</div>
-                    <p className="text-xs text-muted-foreground">后台统一配置，不可修改</p>
-                  </div>
-                  <div className="grid gap-1.5">
-                    <Label className="text-xs">折扣/优惠（¥）</Label>
-                    <Input type="number" min={0} step={0.01} aria-label="折扣优惠" value={discount || ""} onChange={(e) => setDiscount(Number(e.target.value))} placeholder="0"
-                      className={`h-8 text-sm${amountDue < 0 || belowMinimumReturn ? " border-red-500 focus-visible:ring-red-500" : ""}`} />
-                    {amountDue < 0 && <p className="text-xs text-red-500">折扣导致订单应收为负 ¥{Math.abs(amountDue).toFixed(2)}</p>}
-                    {belowMinimumReturn && <p className="text-xs text-red-500">商品折后金额必须高于最低回厂价合计</p>}
-                  </div>
-                </div>
-              </div>
-                </section>
-              <div className="flex flex-col gap-2 border-t pt-4">
-                <div className="text-xs font-medium text-muted-foreground mb-1">应收预览</div>
-                <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
-                {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
-                <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品折后金额</span><span>¥{goodsNetTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between text-sm"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{minimumReturnTotal.toFixed(2)}</span></div>
-                {belowMinimumReturn && (
-                  <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                    商品折后金额必须高于最低回厂价合计。
-                  </div>
-                )}
-                {!pickupOrder && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费承担</span><span>{shippingFeeMode === "prepaid" ? "客户承担" : shippingFeeMode === "free" ? "商家包邮" : "快递到付"}</span></div>}
-                {!pickupOrder && shippingFeeMode !== "collect" && !shippingDeferred && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 预计运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
-                {shippingDeferred && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费</span><span>发货后结算 · 待确定</span></div>}
-                {shippingDiscount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 包邮折扣</span><span>¥{shippingDiscount.toFixed(2)}</span></div>}
-                {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
-                <div className="flex justify-between font-semibold text-base border-t pt-2">
-                  <span>{shippingDeferred ? "本次应收（不含运费）" : "本次应收"}</span>
-                  <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-foreground"}>¥{amountDue.toFixed(2)}</span>
-                </div>
-              </div>
-              </aside>
-            </div>
-          </div>
-          )}
 
+                    <div className="grid min-w-0 gap-2">
+                      <Label htmlFor="new-order-notes">备注</Label>
+                      <Input id="new-order-notes" aria-label="订单备注" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
+                    </div>
+                  </div>
+                  <aside aria-label="商品金额" className="min-w-0 space-y-4 border-t pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+                    <h3 className="text-base font-semibold">商品金额</h3>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
+                    <div className="grid gap-1.5"><Label htmlFor="new-order-discount">折扣 / 优惠（¥）</Label><Input id="new-order-discount" type="number" min={0} step={0.01} aria-label="折扣优惠" value={discount || ""} onChange={event => setDiscount(Number(event.target.value))} placeholder="0" /></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">最低回厂价合计</span><span>¥{minimumReturnTotal.toFixed(2)}</span></div>
+                    {belowMinimumReturn && <p className="text-xs text-red-700">商品折后金额必须高于最低回厂价合计。</p>}
+                    <div className="flex justify-between border-t pt-3 font-semibold"><span>商品成交金额</span><span className="tabular-nums">¥{goodsNetTotal.toFixed(2)}</span></div>
+                    <p className="text-xs leading-5 text-muted-foreground">下一步选择发货方式，确认运费与包装费。实际收付款在订单的“收银台”逐笔登记。</p>
+                  </aside>
+                </div>
+              ) : (
+                <div className="new-order-layout grid items-start gap-6 p-4 sm:p-6">
+                  <div className="min-w-0 space-y-6">
+                    <section aria-label="发货方式" className="space-y-4">
+                      <h3 className="text-base font-semibold">发货方式</h3>
+                      {pickupOrder ? (
+                        <div className="flex items-start gap-3 rounded-lg border border-sky-200 bg-sky-50 p-4 text-sky-950"><MapPin className="mt-0.5 size-5 shrink-0" /><div><p className="font-semibold">客户到店自提</p><p className="mt-1 text-sm">创建后，在“物流运输”中确认实际自提的鱼只和时间。</p></div></div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2 text-sm font-medium"><Truck className="size-4" />物流发货</div>
+                          <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="grid min-w-0 gap-2"><Label>发货物流<span className="ml-0.5 text-red-500">*</span></Label>
+                              <Select value={plannedCarrier} onValueChange={setPlannedCarrier}><SelectTrigger aria-label="发货物流" className={submitAttempted && !plannedCarrier ? "border-red-500" : ""}><SelectValue placeholder="请选择物流公司" /></SelectTrigger><SelectContent>{shippingCarriers.map(carrier => <SelectItem key={carrier.id} value={carrier.name}>{carrier.name}</SelectItem>)}</SelectContent></Select>
+                              {shippingCarriers.length === 0 && <p className="text-xs text-red-700">尚未配置物流公司，请管理员先在“订单与物流设置”中添加。</p>}
+                            </div>
+                            <div className="grid min-w-0 gap-2"><Label>预计发货日期<span className="ml-0.5 text-red-500">*</span></Label><Input type="date" aria-label="预计发货日期" value={plannedShipDate} min={date} onChange={event => changePlannedShipDate(event.target.value)} className={submitAttempted && (!plannedShipDate || plannedShipDate < date) ? "border-red-500" : ""} /></div>
+                          </div>
+                          {isAddressOrderSource(source) && <div className="grid min-w-0 gap-2"><Label htmlFor="new-order-address">本单收货地址</Label><Input id="new-order-address" aria-label="本单收货地址" value={shippingAddress} onChange={event => setShippingAddress(event.target.value)} placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"} /><p className="text-xs text-muted-foreground">{selectedCustomerAddress ? `客户默认地址：${selectedCustomerAddress}` : "可在发货前补充收货地址。"}</p></div>}
+                          {platformOrder && <p className="text-xs text-muted-foreground">收货信息按平台订单填写；物流单号和打包凭证在实际发货时补充。</p>}
+                        </>
+                      )}
+                    </section>
+                    {!pickupOrder && <section aria-label="运费约定" className="space-y-4 border-t pt-5">
+                      <h3 className="text-base font-semibold">运费约定</h3>
+                      <div className="grid grid-cols-3 overflow-hidden rounded-md border" role="group" aria-label="运费承担">
+                        {SHIPPING_FEE_MODE_OPTIONS.map(option => <button key={option.value} type="button" aria-pressed={shippingFeeMode === option.value} onClick={() => { setShippingFeeMode(option.value); if (option.value === "collect") setShippingFee(0); }} className={`border-r px-2 py-2.5 text-sm last:border-r-0 ${shippingFeeMode === option.value ? "bg-foreground font-semibold text-background" : "hover:bg-muted/50"}`}>{option.value === "prepaid" ? "客户承担" : option.value === "free" ? "商家包邮" : "快递到付"}</button>)}
+                      </div>
+                      <p className="text-xs leading-5 text-muted-foreground">{shippingFeeMode === "prepaid" ? "约定向客户收取运费的时间；实际到账在收银台登记。" : shippingFeeMode === "free" ? "由店里承担运费，不计入客户应收。" : "客户直接向物流公司支付运费，店里不代收。"}</p>
+                      {shippingFeeMode === "prepaid" && <ShippingSettlementChoice value={shippingSettlementTiming} onChange={setShippingSettlementTiming} />}
+                      {shippingFeeMode !== "collect" && !shippingDeferred && <div className="grid max-w-xs gap-1.5"><Label htmlFor="new-order-shipping-fee">预计运费（¥）</Label><Input id="new-order-shipping-fee" type="number" min={0} step={0.01} aria-label="预计运费" value={shippingFee || ""} onChange={event => setShippingFee(Number(event.target.value))} placeholder="0" /><p className="text-xs leading-5 text-muted-foreground">{shippingFeeMode === "prepaid" ? "计入订单应收，实际运费确定后多退少补。" : "店里承担的预估费用，可在实际发货后补录。"}</p></div>}
+                    </section>}
+                    <p className="border-t pt-4 text-sm leading-6 text-muted-foreground">创建后可在订单页面进入“收银台”登记收付款，进入“物流运输”处理出库、发货与签收。</p>
+                  </div>
+                  <aside aria-label="订单确认" className="min-w-0 space-y-4 border-t pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+                    <h3 className="text-base font-semibold">订单确认</h3>
+                    <dl className="space-y-2 text-sm"><div className="flex justify-between gap-3"><dt className="text-muted-foreground">{platformOrder ? platformOrderNoLabel(source) : "客户"}</dt><dd className="min-w-0 break-all text-right">{platformOrder ? platformOrderNo : selectedCustomer?.name || "—"}</dd></div><div className="flex justify-between gap-3"><dt className="text-muted-foreground">商品</dt><dd>{selectedItems.size} 条</dd></div><div className="flex justify-between gap-3"><dt className="text-muted-foreground">订单负责人</dt><dd>{contactPerson || "—"}</dd></div></dl>
+                    <div className="space-y-2 border-t pt-4 text-sm">
+                      <div className="flex justify-between"><span className="text-muted-foreground">商品成交金额</span><span>¥{goodsNetTotal.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span className="text-muted-foreground">包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>
+                      {!pickupOrder && <div className="flex justify-between gap-3"><span className="text-muted-foreground">运费</span><span className="text-right">{shippingFeeMode === "free" ? "商家包邮" : shippingFeeMode === "collect" ? "快递到付" : shippingDeferred ? "发货后结算 · 待确定" : `预计 ¥${shippingFee.toFixed(2)}`}</span></div>}
+                      <div className="flex justify-between border-t pt-3 font-semibold"><span>{shippingDeferred ? "订单应收（不含运费）" : "订单应收"}</span><span className="tabular-nums">¥{amountDue.toFixed(2)}</span></div>
+                    </div>
+                    <p className="text-xs leading-5 text-muted-foreground">这里只确认订单金额，尚未登记任何收款。</p>
+                  </aside>
+                </div>
+              )}
+            </>
+          )}
+          </div>
           <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-card px-4 py-3 sm:px-6">
-            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · {shippingDeferred ? "暂不含运费" : "应收"} </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">下一步可更换订单类型</span>}
+            {step > 1 ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · {step === 2 ? "商品成交金额" : shippingDeferred ? "暂不含运费" : "订单应收"} </span><strong className="text-lg tabular-nums">¥{(step === 2 ? goodsNetTotal : amountDue).toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">创建后可登记收付款并安排发货</span>}
             <div className="ml-auto flex shrink-0 items-center gap-2">
-              <Button type="button" variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
-              {source && <Button type="button" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>}
+              <Button type="button" variant="outline" disabled={creating} onClick={() => step === 1 ? onOpenChange(false) : goToStep(step === 3 ? 2 : 1)}>{step === 1 ? "取消" : "上一步"}</Button>
+              {step === 2 && <Button type="button" onClick={continueToShipping}>下一步：发货方式<ChevronRight className="size-4" /></Button>}
+              {step === 3 && <Button type="button" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <Check className="size-4" />}{creating ? "正在创建…" : "完成创建"}</Button>}
             </div>
           </footer>
         </DialogContent>
       </Dialog>
-
-      <StockPickerDialog
-        open={pickerOpen}
-        onOpenChange={setPickerOpen}
-        excludeIds={excludeIds}
-        onAdd={addFromPicker}
-      />
-
-      <CreateCustomerDialog
-        open={customerDialogOpen}
-        onOpenChange={setCustomerDialogOpen}
-        sources={state.customerSources ?? []}
-        onCreate={createCustomer}
-      />
-
+      <StockPickerDialog open={pickerOpen} onOpenChange={setPickerOpen} excludeIds={excludeIds} onAdd={addFromPicker} />
+      <CreateCustomerDialog open={customerDialogOpen} onOpenChange={setCustomerDialogOpen} sources={state.customerSources ?? []} onCreate={createCustomer} />
     </>
   );
 }
@@ -7164,6 +7209,11 @@ export function OrdersView({
 
   const [newOpen, setNewOpen] = useState(false);
   const [viewOrder, setViewOrder] = useState<Order | null>(null);
+  const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
+  useEffect(() => {
+    const created = createdOrderId ? state.orders.find(order => order.id === createdOrderId) : undefined;
+    if (created) { setViewOrder(created); setCreatedOrderId(null); }
+  }, [createdOrderId, state.orders]);
   const [viewCustomerId, setViewCustomerId] = useState<string | null>(null);
   const [deleteOrder, setDeleteOrder] = useState<Order | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
@@ -8046,7 +8096,7 @@ export function OrdersView({
         onRefresh={() => loadPaymentClaims(true)}
       />
 
-      <NewOrderDialog open={newOpen} onOpenChange={setNewOpen} />
+      <NewOrderDialog open={newOpen} onOpenChange={setNewOpen} onCreated={setCreatedOrderId} />
 
       <OrderDetailDialog
         order={syncedViewOrder}
