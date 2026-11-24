@@ -33,7 +33,7 @@ import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "
 import {
   assertOrderAcquisitionTagUnchanged,
 } from "./order-acquisition-tag.mjs";
-import { assertOrderWholesaleTagUnchanged, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
+import { assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 import {
   assertOrderOwnerAssignmentUnchanged, planOrderOwnerAssignment, orderOwnerAssignmentDetail,
   planOrderOwnerAssignmentDecision, ownerAssignmentNotifications, closeEndedOrderOwnerAssignments, assignmentTargetBlockedReason,
@@ -13192,7 +13192,8 @@ async function handleApi(req, res, url) {
         status: "pending",
         payments: [],
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
-      const order = captureOrderSalesAmount(ownerPlan.order, nowDatetimeInChina(), "created");
+      const classifiedOrder = initializeCreatedOrderWholesaleTag(ownerPlan.order, body, req.auth.account);
+      const order = captureOrderSalesAmount(classifiedOrder, nowDatetimeInChina(), "created");
       const nextOrders = [...(Array.isArray(state.orders) ? state.orders : []), order];
       const nextStock = setStockSoldForOrders(state, nextOrders);
       const operationLog = {
@@ -13201,7 +13202,7 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "添加记录",
-        detail: `创建订单「${order.orderNo}」${platformOrderNoForOrder(order) ? `，${platformOrderNoLabel(order.source)} ${platformOrderNoForOrder(order)}` : ""}，商品 ${order.items.length} 条${ownerPlan.requested ? `，申请转交负责人给 ${order.ownerAssignment.toName}，接受前由 ${order.contactPerson} 负责（申请 ${order.ownerAssignment.requestId}）` : ""}`,
+        detail: `创建订单「${order.orderNo}」${order.isWholesaleOrder ? "，批发订单" : ""}${platformOrderNoForOrder(order) ? `，${platformOrderNoLabel(order.source)} ${platformOrderNoForOrder(order)}` : ""}，商品 ${order.items.length} 条${ownerPlan.requested ? `，申请转交负责人给 ${order.ownerAssignment.toName}，接受前由 ${order.contactPerson} 负责（申请 ${order.ownerAssignment.requestId}）` : ""}`,
       };
       const nextState = {
         ...state,

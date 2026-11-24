@@ -20,6 +20,22 @@ export function assertOrderWholesaleTagUnchanged(current = {}, next = {}) {
   }
 }
 
+// Creation chooses the initial classification within the order transaction.
+// Only the boolean is accepted from the form; audit identity and time stay
+// server-owned, and later changes still use the dedicated CAS-protected route.
+export function initializeCreatedOrderWholesaleTag(order, body, account, now = new Date().toISOString()) {
+  if (!Object.prototype.hasOwnProperty.call(body, "isWholesaleOrder")) return order;
+  if (typeof body.isWholesaleOrder !== "boolean") {
+    fail(400, "ORDER_WHOLESALE_TAG_INVALID", "请选择是否标记为批发订单");
+  }
+  if (!body.isWholesaleOrder) return order;
+  return planOrderWholesaleTag(order, {
+    isWholesaleOrder: true,
+    expectedIsWholesaleOrder: false,
+    expectedWholesaleOrderUpdatedAt: "",
+  }, account, now).order;
+}
+
 export function planOrderWholesaleTag(order, body, account, now = new Date().toISOString()) {
   if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.isWholesaleOrder !== "boolean") {
     fail(400, "ORDER_WHOLESALE_TAG_INVALID", "请选择是否标记为批发订单");

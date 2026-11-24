@@ -6281,6 +6281,7 @@ function NewOrderDialog({
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
+  const [isWholesaleOrder, setIsWholesaleOrder] = useState(false);
   const [platformOrderNo, setPlatformOrderNo] = useState("");
   const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
@@ -6309,6 +6310,7 @@ function NewOrderDialog({
   useEffect(() => {
     if (open) {
       setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
+      setIsWholesaleOrder(false);
       setSelectedItems(new Map());
       setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -6483,7 +6485,7 @@ function NewOrderDialog({
       };
     });
     const assignedElsewhere = selectedContactPersonnel.username !== currentUsername;
-    if (!confirmWrite("创建", `将创建销售订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
+    if (!confirmWrite("创建", `将创建${isWholesaleOrder ? "批发" : "销售"}订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
     createLock.current = true; setCreating(true);
@@ -6496,6 +6498,7 @@ function NewOrderDialog({
         customerId,
         date,
         source: source.trim(),
+        isWholesaleOrder,
         platformOrderNo: platformOrder ? platformOrderNo.trim() : "",
         douyinOrderNo: source === "平台下单" ? platformOrderNo.trim() : "",
         paymentMethodId,
@@ -6537,6 +6540,27 @@ function NewOrderDialog({
     })
   ), [selectedItems, state.stock, state.products]);
 
+  const orderTypeChoice = (
+    <div className="flex flex-wrap items-center gap-3" role="group" aria-label="订单类型">
+      <span className="text-sm text-muted-foreground">订单类型</span>
+      <div className="inline-flex gap-1 rounded-lg border bg-muted/30 p-1">
+        {([false, true] as const).map((wholesale) => (
+          <button
+            key={String(wholesale)}
+            type="button"
+            disabled={creating}
+            aria-pressed={isWholesaleOrder === wholesale}
+            onClick={() => setIsWholesaleOrder(wholesale)}
+            className={`inline-flex min-h-10 items-center justify-center gap-1.5 rounded-md px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${isWholesaleOrder === wholesale ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          >
+            {wholesale && <Tag className="size-4" aria-hidden="true" />}
+            {wholesale ? "批发订单" : "普通订单"}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <>
       <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next); }}>
@@ -6552,9 +6576,10 @@ function NewOrderDialog({
             <div className="flex flex-1 flex-col items-center justify-start overflow-y-auto p-4 sm:justify-center sm:p-8">
               <div className="w-full max-w-3xl">
                 <div className="mb-5 text-center">
-                  <div className="text-base font-semibold text-foreground">选择订单来源</div>
-                  <div className="mt-1 text-sm text-muted-foreground">不同来源会自动显示对应的必填信息和履约方式</div>
+                  <div className="text-base font-semibold text-foreground">选择订单类型与来源</div>
+                  <div className="mt-1 text-sm text-muted-foreground">批发可在这里直接选择，来源决定后续必填信息和履约方式</div>
                 </div>
+                <div className="mb-5 flex justify-center">{orderTypeChoice}</div>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
                     const SourceIcon = choice.icon;
@@ -6582,11 +6607,12 @@ function NewOrderDialog({
           <div className="flex-1 overflow-y-auto p-3 sm:p-6">
             <div className="flex flex-col gap-4 sm:gap-5">
 
-            <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5 sm:px-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5 sm:px-4">
               <div className="flex min-w-0 items-center gap-2">
                 <span className="text-xs text-muted-foreground">订单来源</span>
                 <span className="truncate text-sm font-semibold text-foreground">{orderSourceLabel(source)}</span>
               </div>
+              {orderTypeChoice}
               <Button type="button" variant="ghost" size="sm" onClick={() => chooseSource("")}>
                 重新选择
               </Button>
@@ -6954,7 +6980,7 @@ function NewOrderDialog({
           <DialogFooter className="flex-col border-t bg-background px-4 py-3 sm:flex-row sm:px-6">
             <Button variant="outline" className="w-full sm:w-auto" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
             {source && (
-              <Button className="w-full sm:w-auto" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4 mr-1" />}{creating ? "正在创建…" : "创建订单"}</Button>
+              <Button className="w-full sm:w-auto" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4 mr-1" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>
             )}
           </DialogFooter>
         </DialogContent>

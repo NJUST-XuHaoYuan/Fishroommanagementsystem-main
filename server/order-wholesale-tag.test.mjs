@@ -1,10 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ORDER_WHOLESALE_TAG_FIELDS, assertOrderWholesaleTagUnchanged, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
+import { ORDER_WHOLESALE_TAG_FIELDS, assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 
 const account = { username: "editor", name: "订单员工" };
 const now = "2026-11-02T09:00:00.000Z";
 const request = { isWholesaleOrder: true, expectedIsWholesaleOrder: false, expectedWholesaleOrderUpdatedAt: "" };
+
+test("creation accepts an explicit classification and always generates audit metadata on the server", () => {
+  const order = { id: "new-order", source: "私域线上", items: [{ price: 100 }], payments: [] };
+  const forged = { wholesaleOrderUpdatedAt: "1900-01-01", wholesaleOrderUpdatedBy: "admin", wholesaleOrderUpdatedByName: "forged" };
+  assert.equal(initializeCreatedOrderWholesaleTag(order, forged, account, now), order);
+  assert.equal(initializeCreatedOrderWholesaleTag(order, { ...forged, isWholesaleOrder: false }, account, now), order);
+  assert.deepEqual(initializeCreatedOrderWholesaleTag(order, { ...forged, isWholesaleOrder: true }, account, now), {
+    ...order, isWholesaleOrder: true, wholesaleOrderUpdatedAt: now,
+    wholesaleOrderUpdatedBy: "editor", wholesaleOrderUpdatedByName: "订单员工",
+  });
+  for (const value of ["true", "false", 0, 1, null, undefined, {}, []]) {
+    assert.throws(() => initializeCreatedOrderWholesaleTag(order, { isWholesaleOrder: value }, account, now), {
+      statusCode: 400, code: "ORDER_WHOLESALE_TAG_INVALID",
+    });
+  }
+  assert.equal(order.isWholesaleOrder, undefined);
+});
 
 test("wholesale is explicit metadata only and uses the authenticated actor, not supplied audit fields", () => {
   const order = { id: "o1", status: "completed", payments: [{ amount: 30 }], items: [{ price: 100 }], newCustomerApproval: { status: "approved" } };

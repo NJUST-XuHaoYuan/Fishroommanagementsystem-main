@@ -10,6 +10,11 @@ const tag = (order) => Object.fromEntries(ORDER_WHOLESALE_TAG_FIELDS.filter((key
 const business = (order) => Object.fromEntries(Object.entries(order).filter(([key]) => !ORDER_WHOLESALE_TAG_FIELDS.includes(key)));
 const expected = (order) => ({ expectedIsWholesaleOrder: order?.isWholesaleOrder === true,
   expectedWholesaleOrderUpdatedAt: String(order?.wholesaleOrderUpdatedAt ?? "") });
+const createInput = (extra = {}) => ({
+  siteId: "nanjing", source: "平台下单", platformOrderNo: "WHOLESALE-CREATE", date: "2026-11-02",
+  paymentChannel: "douyin", plannedShipDate: "2026-11-05", contactPersonnelId: "pricing-editor",
+  items: [{ stockItemId: "follower", price: 150 }], shippingFeeMode: "collect", ...extra,
+});
 
 function fixture() {
   const data = structuredClone(stockPricingFixture);
@@ -156,7 +161,7 @@ test("generic state patch cannot forge or erase wholesale metadata but stale unr
   assert.deepEqual(tag(await s.readOrder()), tag(marked));
 });
 
-test("ordinary create discards injected wholesale tags and ordinary edits preserve live metadata", async (t) => {
+test("wholesale creation uses server audit metadata and ordinary edits preserve live classification", async (t) => {
   const data = fixture(); delete data.state.commissionLedgerV1;
   const s = await setup(t, data);
   const original = await s.readOrder(); ok(await s.mark(true));
@@ -166,13 +171,74 @@ test("ordinary create discards injected wholesale tags and ordinary edits preser
     ...original, ...forged, isWholesaleOrder: false, orderId: original.id, notes: "normal business edit",
   } }); ok(edit);
   assert.deepEqual(tag(edit.body.order), tag(marked));
-  const created = await s.request("/api/orders/create", { token: s.tokens.editor, body: {
-    siteId: "nanjing", source: "平台下单", platformOrderNo: "WHOLESALE-INJECTED-CREATE", date: "2026-11-02",
-    paymentChannel: "douyin", plannedShipDate: "2026-11-05", contactPersonnelId: "pricing-editor",
-    items: [{ stockItemId: "follower", price: 150 }], shippingFeeMode: "collect", ...forged, isWholesaleOrder: true,
-  } }); ok(created);
-  assert.deepEqual(tag(created.body.order), {});
+  const created = await s.request("/api/orders/create", { token: s.tokens.editor,
+    body: createInput({ ...forged, isWholesaleOrder: true }) }); ok(created);
+  assert.equal(created.body.order.isWholesaleOrder, true);
+  assert.equal(created.body.order.wholesaleOrderUpdatedBy, "pricing-editor");
+  assert.equal(created.body.order.wholesaleOrderUpdatedByName, "价格测试editor");
+  assert.ok(Number.isFinite(Date.parse(created.body.order.wholesaleOrderUpdatedAt)));
+  assert.equal(created.body.order.source, "平台下单");
+  assert.equal(created.body.order.items[0].price, 150);
+  assert.match(created.body.operationLog.detail, /批发订单/);
+  const persisted = await s.readPersistedState();
+  assert.deepEqual(persisted.orders.find((order) => order.id === created.body.order.id), created.body.order);
+  assert.equal(persisted.stock.find((fish) => fish.id === "follower").sold, true);
+  assert.ok(persisted.operationLogs.some((log) => log.id === created.body.operationLog.id));
   assert.deepEqual(tag(await s.readOrder()), tag(marked));
+});
+
+test("absent and false creation choices remain ordinary and ignore forged audit fields", async (t) => {
+  const data = fixture(); delete data.state.commissionLedgerV1;
+  const s = await setup(t, data);
+  for (const [index, choice] of [{}, { isWholesaleOrder: false }].entries()) {
+    const created = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput({
+      ...choice, platformOrderNo: `ORDINARY-CREATE-${index}`,
+      items: [{ stockItemId: index ? "follower-stale" : "follower", price: 150 }],
+      wholesaleOrderUpdatedAt: "forged", wholesaleOrderUpdatedBy: "admin", wholesaleOrderUpdatedByName: "forged",
+    }) }); ok(created);
+    assert.deepEqual(tag(created.body.order), {});
+    assert.doesNotMatch(created.body.operationLog.detail, /批发订单/);
+    assert.deepEqual(await s.readOrder(created.body.order.id), created.body.order);
+  }
+});
+
+test("invalid creation booleans roll back the complete order, inventory and audit transaction", async (t) => {
+  const data = fixture(); delete data.state.commissionLedgerV1;
+  const s = await setup(t, data); const before = await s.readPersistedState();
+  for (const value of ["true", "false", 0, 1, null, {}, []]) {
+    const result = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput({ isWholesaleOrder: value }) });
+    assert.equal(result.response.status, 400, JSON.stringify(result.body));
+    assert.equal(result.body.code, "ORDER_WHOLESALE_TAG_INVALID");
+    assert.deepEqual(await s.readPersistedState(), before);
+  }
+});
+
+test("initial classification requires current create permission and site access, later changes still require update", async (t) => {
+  const data = fixture(); delete data.state.commissionLedgerV1;
+  const editor = data.state.personnel.find((person) => person.username === "pricing-editor");
+  editor.permissions.orders = { create: true, update: false, delete: false };
+  const s = await setup(t, data); const before = await s.readPersistedState();
+  for (const [token, input, status] of [
+    ["", {}, 401], [s.tokens.viewer, {}, 400],
+    [s.tokens.editor, { siteId: "jiangyin", items: [{ stockItemId: "PRIVATE_JY_FOLLOWER", price: 150 }] }, 403],
+  ]) {
+    const denied = await s.request("/api/orders/create", { token, body: createInput({ ...input, isWholesaleOrder: true }) });
+    assert.equal(denied.response.status, status, JSON.stringify(denied.body));
+    assert.deepEqual(await s.readPersistedState(), before);
+  }
+  const created = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput({ isWholesaleOrder: true }) }); ok(created);
+  assert.equal(created.body.order.isWholesaleOrder, true);
+  const afterCreate = await s.readPersistedState();
+  const deniedChange = await s.mark(false, { orderId: created.body.order.id });
+  assert.equal(deniedChange.response.status, 403, JSON.stringify(deniedChange.body));
+  assert.deepEqual(await s.readPersistedState(), afterCreate);
+  await s.patchTestPersonnel(editor.id, { permissions: { ...editor.permissions, orders: { create: false, update: true } } });
+  const afterRevocation = await s.readPersistedState();
+  const deniedCreate = await s.request("/api/orders/create", { token: s.tokens.editor,
+    body: createInput({ isWholesaleOrder: true, platformOrderNo: "REVOKED-CREATE", items: [{ stockItemId: "follower-stale", price: 150 }] }) });
+  assert.equal(deniedCreate.response.status, 400, JSON.stringify(deniedCreate.body));
+  assert.match(deniedCreate.body.error, /没有订单模块的操作权限/);
+  assert.deepEqual(await s.readPersistedState(), afterRevocation);
 });
 
 test("a pending inventory approval preserves a tag added after the request, and retired full-state writes remain blocked", async (t) => {
