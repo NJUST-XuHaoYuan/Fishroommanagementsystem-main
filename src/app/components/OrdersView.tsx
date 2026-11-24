@@ -7185,7 +7185,7 @@ export function OrdersView({
   const [plannedShipFrom, setPlannedShipFrom] = useState("");
   const [plannedShipTo, setPlannedShipTo] = useState("");
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
-  const [myActiveOnly, setMyActiveOnly] = useState(false);
+  const [ownerScope, setOwnerScope] = useState<"mine" | "all">("all");
   const [orderCalendar, setOrderCalendar] = useState(() => beijingOrderCalendar());
   const { today, tomorrow } = orderCalendar;
   const todayShipOnly = shipPlanQuickFilter === "today";
@@ -7237,7 +7237,7 @@ export function OrdersView({
     setPlannedShipFrom("");
     setPlannedShipTo("");
     setPendingTrackingOnly(false);
-    setMyActiveOnly(false);
+    setOwnerScope("all");
     setMobileSearch("");
     setMobilePage(1);
   };
@@ -7437,12 +7437,12 @@ export function OrdersView({
 	      if (pendingTrackingOnly && !hasPendingTrackingShipmentOrder(o, state.shipments)) return false;
 	      if (statusFilter === "active" && !isActiveOrder(o)) return false;
       if (statusFilter === "completed" && o.status !== "completed") return false;
-      if (myActiveOnly && (!isActiveOrder(o) || !isCurrentUserContactOrder(o))) return false;
+      if (ownerScope === "mine" && !isCurrentUserContactOrder(o)) return false;
       if (dateFrom && o.date < dateFrom) return false;
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
+	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, ownerScope, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const matchingOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7451,7 +7451,7 @@ export function OrdersView({
   useEffect(() => {
     setMobilePage(1);
     setSelectedOrderIds(new Set());
-  }, [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly]);
+  }, [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope]);
 
   const mobileTotalPages = Math.max(1, Math.ceil(matchingOrders.length / MOBILE_ORDER_PAGE_SIZE));
   const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
@@ -7543,11 +7543,7 @@ export function OrdersView({
     toast.success("订单已删除");
   };
 
-  const orderTableFilterKey = [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly].join("|");
-  const myActiveOrderCount = useMemo(
-    () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
-    [orderList, isCurrentUserContactOrder]
-  );
+  const orderTableFilterKey = [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope].join("|");
   const todayShipCount = useMemo(
     () => orderList.filter((order) => matchesPlannedShipmentRange(order, { from: today, to: today })).length,
     [orderList, today]
@@ -7722,18 +7718,12 @@ export function OrdersView({
   return (
     <div className="orders-management flex flex-col gap-4">
       <OrdersToolbar
+        scope={ownerScope}
+        onScopeChange={setOwnerScope}
         status={statusFilter}
-        onStatusChange={(value) => {
-          setStatusFilter(value);
-          if (value !== "active") setMyActiveOnly(false);
-        }}
+        onStatusChange={setStatusFilter}
         search={mobileSearch}
         onSearchChange={setMobileSearch}
-        myActiveOnly={myActiveOnly}
-        onMyActiveChange={(value) => {
-          setMyActiveOnly(value);
-          if (value) setStatusFilter("active");
-        }}
         dateFrom={dateFrom}
         dateTo={dateTo}
         onDateFromChange={changeDateFrom}
@@ -7756,7 +7746,6 @@ export function OrdersView({
         todayCount={todayShipCount}
         tomorrowCount={tomorrowShipCount}
         pendingCount={pendingTrackingCount}
-        myCount={myActiveOrderCount}
         canCreate={permission.canCreate}
         onCreate={() => setNewOpen(true)}
         canClaim={permission.canUpdate}

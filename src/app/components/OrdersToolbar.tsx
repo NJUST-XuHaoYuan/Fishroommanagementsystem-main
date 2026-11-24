@@ -7,12 +7,12 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Switch } from "./ui/switch";
 
 export type OrdersToolbarProps = {
+  scope: "mine" | "all";
+  onScopeChange: (value: OrdersToolbarProps["scope"]) => void;
   status: "all" | "active" | "completed";
   onStatusChange: (value: OrdersToolbarProps["status"]) => void;
   search: string;
   onSearchChange: (value: string) => void;
-  myActiveOnly: boolean;
-  onMyActiveChange: (value: boolean) => void;
   dateFrom: string;
   dateTo: string;
   onDateFromChange: (value: string) => void;
@@ -35,7 +35,6 @@ export type OrdersToolbarProps = {
   todayCount: number;
   tomorrowCount: number;
   pendingCount: number;
-  myCount: number;
   canCreate: boolean;
   onCreate: () => void;
   canClaim: boolean;
@@ -71,8 +70,8 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
   const hasOrderDates = Boolean(props.dateFrom || props.dateTo);
   const hasPlannedDates = Boolean(props.quickShip || props.plannedFrom || props.plannedTo);
   const customPlannedDates = !props.quickShip && hasPlannedDates;
-  const filterCount = [props.myActiveOnly, hasOrderDates, hasPlannedDates, props.wholesale !== "all", props.pendingTrackingOnly].filter(Boolean).length;
-  const hasFilters = filterCount > 0 || props.status !== "all" || Boolean(props.search.trim());
+  const filterCount = [hasOrderDates, hasPlannedDates, props.wholesale !== "all", props.pendingTrackingOnly].filter(Boolean).length;
+  const hasFilters = filterCount > 0 || props.scope !== "all" || props.status !== "all" || Boolean(props.search.trim());
   const dateFromMax = props.dateTo && props.dateTo < props.today ? props.dateTo : props.today;
 
   const openFilters = (focusDates = false) => {
@@ -111,36 +110,47 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
         </div>
       </div>
 
-      <nav className="flex gap-6 border-b" aria-label="订单状态">
-        {([
-          ["all", "全部订单"],
-          ["active", "未完成"],
-          ["completed", "已完成"],
-        ] as const).map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            aria-pressed={props.status === value}
-            title={value === "all" ? "包含已取消订单" : undefined}
-            onClick={() => props.onStatusChange(value)}
-            className={`-mb-px min-h-11 border-b-2 px-1 pb-3 pt-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${props.status === value ? "border-primary font-semibold text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <div className="flex flex-col gap-4">
+        <nav className="flex gap-6 border-b" aria-label="订单范围">
+          {([["mine", "我的"], ["all", "全部"]] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={props.scope === value}
+              title={value === "mine" ? "由我负责的订单" : "当前场地内有权限查看的全部订单"}
+              onClick={() => props.onScopeChange(value)}
+              className={`-mb-px min-h-11 border-b-2 px-3 pb-3 pt-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${props.scope === value ? "border-primary font-semibold text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="订单状态">
+          <span className="mr-1 text-sm text-muted-foreground">状态</span>
+          {([["all", "全部状态"], ["active", "未完成"], ["completed", "已完成"]] as const).map(([value, label]) => (
+            <Button
+              key={value}
+              type="button"
+              size="sm"
+              variant={props.status === value ? "default" : "outline"}
+              className="h-9 px-3"
+              aria-pressed={props.status === value}
+              title={value === "all" ? "包含已取消订单" : undefined}
+              onClick={() => props.onStatusChange(value)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+      </div>
 
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-3">
-        <div className="relative w-full min-w-0 md:w-auto md:min-w-64 md:flex-1">
+        <div className="relative min-w-0 flex-1 md:min-w-64">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
           <Input value={props.search} onChange={event => props.onSearchChange(event.target.value)} placeholder="搜索订单号、客户、鱼码或商品" aria-label="搜索订单" className="fishroom-control h-10 pl-9 pr-9" />
           {props.search && <button type="button" aria-label="清除搜索关键词" onClick={() => props.onSearchChange("")} className="absolute right-1 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><X className="size-4" aria-hidden="true" /></button>}
         </div>
-        <label className="flex min-h-10 cursor-pointer items-center gap-2 whitespace-nowrap text-sm" title={`当前场地由我负责的未完成订单 ${props.myCount} 单`}>
-          <Switch checked={props.myActiveOnly} onCheckedChange={props.onMyActiveChange} aria-label="我的未完成订单" />
-          我的未完成
-        </label>
-        <Button type="button" variant="outline" className="ml-auto h-10 gap-2 px-3 md:ml-0" onClick={() => openFilters()} aria-expanded={filterOpen} aria-label={filterCount ? `筛选，已选 ${filterCount} 个条件` : "筛选"}>
+        <Button type="button" variant="outline" className="h-10 gap-2 px-3" onClick={() => openFilters()} aria-expanded={filterOpen} aria-label={filterCount ? `筛选，已选 ${filterCount} 个条件` : "筛选"}>
           <SlidersHorizontal className="size-4" aria-hidden="true" />
           筛选 {filterCount > 0 && <span className="flex size-5 items-center justify-center rounded bg-primary text-xs text-primary-foreground">{filterCount}</span>}
         </Button>
@@ -153,7 +163,6 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t pt-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="mr-1 text-sm text-muted-foreground" aria-live="polite">共 <strong className="font-medium tabular-nums text-foreground">{props.resultCount.toLocaleString("zh-CN")}</strong> 个订单</span>
-          {props.myActiveOnly && <FilterChip onRemove={() => props.onMyActiveChange(false)}>我的未完成</FilterChip>}
           {hasOrderDates && <FilterChip onRemove={props.onClearOrderDates}>{`下单：${dateRangeLabel(props.dateFrom, props.dateTo)}`}</FilterChip>}
           {hasPlannedDates && <FilterChip onRemove={props.onClearPlannedDates}>{`预计发货：${props.quickShip === "today" ? "今天" : props.quickShip === "tomorrow" ? "明天" : dateRangeLabel(props.plannedFrom, props.plannedTo)}`}</FilterChip>}
           {props.wholesale !== "all" && <FilterChip onRemove={() => props.onWholesaleChange("all")}>{props.wholesale === "wholesale" ? "批发订单" : "未标记批发"}</FilterChip>}
@@ -175,15 +184,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
           </SheetHeader>
           <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
             <fieldset className="space-y-3">
-              <legend className="text-sm font-semibold">负责人</legend>
-              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border p-3">
-                <span className="text-sm">我的未完成订单<span className="mt-1 block text-xs text-muted-foreground">只看由我负责且尚未完成的订单</span></span>
-                <Switch checked={props.myActiveOnly} onCheckedChange={props.onMyActiveChange} aria-label="筛选我的未完成订单" />
-              </label>
-            </fieldset>
-
-            <fieldset className="space-y-3 border-t pt-5">
-              <legend className="pt-5 text-sm font-semibold">下单日期筛选</legend>
+              <legend className="text-sm font-semibold">下单日期筛选</legend>
               <div className="grid grid-cols-2 gap-3">
                 <label className="min-w-0 space-y-1.5 text-xs text-muted-foreground">开始日期<Input type="date" value={props.dateFrom} max={dateFromMax} onChange={event => props.onDateFromChange(event.target.value)} aria-label="下单开始日期" className="mt-1.5 h-10 min-w-0 w-full text-sm" /></label>
                 <label className="min-w-0 space-y-1.5 text-xs text-muted-foreground">结束日期<Input type="date" value={props.dateTo} min={props.dateFrom || undefined} max={props.today} onChange={event => props.onDateToChange(event.target.value)} aria-label="下单结束日期" className="mt-1.5 h-10 min-w-0 w-full text-sm" /></label>
