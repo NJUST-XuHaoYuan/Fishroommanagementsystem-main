@@ -62,3 +62,16 @@ Backend and database containers retained; backend API version remains its existi
 - [P3] Existing detailed status tags and mobile card information remain relatively dense. Revisit only after user feedback on this local version.
 
 final result: passed
+
+
+## 2026-11-25 amendment: wholesale choice during creation
+
+- User requested wholesale selection directly at the first new-order step. Added an independent ordinary/wholesale type selector above the existing source cards and in the subsequent form summary.
+- Choosing a source or returning to the source screen preserves classification; closing and reopening resets to ordinary. The submit label and confirmation reflect wholesale.
+- The create route saves the initial wholesale flag, server-generated operator/time, stock reservation and operation log in one transaction. Subsequent flag changes retain the existing update permission and concurrency protection.
+- 16 backend helper/integration checks and 16 existing frontend wholesale/fish-detail regression checks passed. Frontend production build passed (existing large-bundle warning remains).
+- Real local browser checks: 1487 × 1058 desktop; 390 × 844 mobile. Wholesale state is visibly selected; source/back navigation and reopen reset verified; mobile scrollWidth equals innerWidth (390). No console errors. No business records were submitted in the local data copy; persistence/rollback were verified in isolated route fixtures.
+- Captures: .data/wholesale-create-qa/desktop-wholesale.png, mobile-wholesale.png, mobile-form.png, chooser-detail.png.
+- Local frontend and backend deployed from 7f59a498de0acb265683143201954095f981ecef. Both healthy; API revision matches. Built frontend asset SHA-256 matches runtime: bbbf07fa5636c309fb1195c2af032521b8d2a534b89c91195579a405ec31ac42. Backend wholesale helper SHA-256 matches runtime: 64eb62379f3be6de55bb7dbca0d117b9262210b93202da2fb84aa4a4d8a6e450.
+- Database container unchanged (c4f5ec96dd2d); pre-update local dump saved privately. Backend remains on internal local-test network, local database fishroom_test, background tasks disabled and cloud integration credentials empty. Restart shortcuts retain the updated frontend/backend override.
+- No production deployment or shared-baseline push. Final amendment result: passed.
