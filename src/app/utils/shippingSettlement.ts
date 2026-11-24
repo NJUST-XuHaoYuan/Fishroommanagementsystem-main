@@ -8,11 +8,12 @@ export type ShippingSettlementSummary = {
   shippingDue: number; goodsDue: number; paymentShippingReceived: number; recordedShippingReceived: number;
   verifiedShippingReceived: number; pendingProofShipping: number; pendingShipping: number;
   shippingRefunded: number; verifiedShippingRefunded: number; pendingRefundAmount: number;
+  finalAmountDue: number; verifiedOrderReceived: number; registeredOrderRefunded: number; orderRefundableAmount: number;
   toCollect: number; toRefund: number; status: ShippingSettlementStatus; version?: string;
 };
 
-export function getShippingSettlementSummary(order: Order, shipments: Shipment[] = []): ShippingSettlementSummary {
-  return shippingSettlementSummary(order, shipments) as ShippingSettlementSummary;
+export function getShippingSettlementSummary(order: Order, shipments: Shipment[] = [], finalAmountDue?: number): ShippingSettlementSummary {
+  return shippingSettlementSummary(order, shipments, finalAmountDue) as ShippingSettlementSummary;
 }
 export function allocatePaymentProofShipping(order: Order, shipments: Shipment[], amount: number, purpose: "order" | "shipping_fee" = "order", excludeClaimId = "") {
   return allocateShippingProof(order, shipments, amount, purpose, excludeClaimId) as { purpose: "order" | "shipping_fee"; shippingAmount: number; goodsAmount: number };

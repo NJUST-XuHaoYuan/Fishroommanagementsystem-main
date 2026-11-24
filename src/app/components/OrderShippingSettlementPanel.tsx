@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownLeft, ArrowUpRight, Check, RefreshCw } from "lucide-react";
+import { Check, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { useStore, type Order, type PaymentRecord, type Shipment, type Store } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
@@ -22,13 +22,13 @@ type RefundDraft = { id: string; amount: string; time: string; paymentMethodId: 
 const blankRefund = (): RefundDraft => ({ id: `shipping-refund-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`, amount: "", time: initialTime(), paymentMethodId: "", notes: "", attachments: [] });
 
 type Applied = { order?: Order; orders?: Order[]; operationLog?: Store["operationLogs"][number] };
-export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onApplied, onRecordShippingPayment, onRecordActualFee }: {
+export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onApplied, onRecordActualFee, refundOpenRequest, amountDue }: {
   order: Order; shipments: Shipment[]; canUpdate: boolean;
   onApplied?: (result: Applied, session: NewCustomerSession) => void | Promise<void>;
-  onRecordShippingPayment: () => void; onRecordActualFee?: () => void;
+  onRecordActualFee?: () => void; refundOpenRequest?: number; amountDue?: number;
 }) {
   const { state } = useStore();
-  const fallback = getShippingSettlementSummary(order, shipments);
+  const fallback = getShippingSettlementSummary(order, shipments, amountDue);
   const [detail, setDetail] = useState<SettlementDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -37,6 +37,8 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const lock = useRef(false);
+  const refundFormRef = useRef<HTMLDivElement>(null);
+  const handledRefundRequest = useRef<number>();
   const alive = useRef(true);
   const requestSequence = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
@@ -44,7 +46,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
   const viewer = useRef(state.user); viewer.current = state.user;
   const detailSession = useRef<NewCustomerSession | null>(null);
   const identity = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
-  const dataKey = JSON.stringify([order.id, order.status, order.shippingFee, order.shippingSettlementTiming, order.items, order.payments, order.paymentClaims,
+  const dataKey = JSON.stringify([order.id, order.status, order.shippingFee, order.shippingSettlementTiming, amountDue, order.items, order.payments, order.paymentClaims,
     shipments.filter(shipment => shipment.orderId === order.id).map(shipment => [shipment.id, shipment.status, shipment.actualShippingFee, shipment.actualShippingFeeRecordedAt])]);
   const onBusyChange = useCallback((value: boolean) => setUploading(value), []);
 
@@ -72,10 +74,20 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
     alive.current = true; void load();
     return () => { alive.current = false; ++requestSequence.current; controllerRef.current?.abort(); };
   }, [load]);
-  useEffect(() => { setRefundOpen(false); setDraft(blankRefund()); setDetail(null); }, [order.id, identity]);
+  useEffect(() => { setRefundOpen(false); setDraft(blankRefund()); setDetail(null); handledRefundRequest.current = undefined; }, [order.id, identity]);
 
   const summary = detail?.shippingSettlement || fallback;
   const actionAllowed = canUpdate && detail?.canRefund && order.status !== "cancelled" && !loading && !saving && !uploading;
+  useEffect(() => {
+    if (!refundOpenRequest || handledRefundRequest.current === refundOpenRequest || loading || saving || uploading) return;
+    handledRefundRequest.current = refundOpenRequest;
+    if (!actionAllowed || summary.toRefund <= 0) { setError("当前没有可登记的运费差额退款，请刷新后核对。"); return; }
+    if (refundOpen) { refundFormRef.current?.scrollIntoView({ behavior: "auto", block: "start" }); return; }
+    setDraft({ ...blankRefund(), amount: String(summary.toRefund), paymentMethodId: "" });
+    setRefundOpen(true); setError("");
+  }, [refundOpenRequest, loading, saving, uploading, actionAllowed, summary.toRefund, refundOpen]);
+  useEffect(() => { if (refundOpen) refundFormRef.current?.scrollIntoView({ behavior: "auto", block: "start" }); }, [refundOpen]);
+
   const submitRefund = async () => {
     if (lock.current || !actionAllowed || !detail) return;
     const amount = Number(draft.amount);
@@ -107,31 +119,27 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
   if (!fallback.enabled) return null;
   return <section aria-label="运费结算" aria-busy={loading || saving || uploading} className="min-w-0 space-y-3 rounded-lg border bg-card p-3 sm:p-4">
     <div className="flex flex-wrap items-start justify-between gap-2">
-      <div><h3 className="text-sm font-semibold sm:text-base">运费结算</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{summary.timing === "before_shipping" ? "先结算运费，按实际金额多退少补。" : "发货后结算运费，实际金额确定后再收。"}</p></div>
+      <div><h3 className="text-sm font-semibold sm:text-base">运费核对与退差</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{summary.timing === "before_shipping" ? "预收运费已包含在订单应收中，实际费用确定后调整整单应收，多退少补。" : "实际运费确定后计入订单应收，通过上方登记收款统一补收。"}</p></div>
       <div className="flex items-center gap-2"><Badge variant="outline">{shippingSettlementStatusLabel(summary.status)}</Badge><Button type="button" variant="ghost" className="min-h-11" aria-label="刷新运费结算" disabled={loading || saving || uploading} onClick={() => void load()}><RefreshCw className="size-4" /></Button></div>
     </div>
     <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
-      {summary.timing === "before_shipping" && <div><dt className="text-xs text-muted-foreground">预计运费</dt><dd className="mt-1 font-medium tabular-nums">{currency(summary.estimatedFee)}</dd></div>}
+      {summary.timing === "before_shipping" && <div><dt className="text-xs text-muted-foreground">创建时预收运费</dt><dd className="mt-1 font-medium tabular-nums">{currency(summary.estimatedFee)}</dd></div>}
       <div><dt className="text-xs text-muted-foreground">{summary.finalized ? "实际运费合计" : "已确定实际运费"}</dt><dd className="mt-1 font-medium tabular-nums">{summary.actualFee > 0 || summary.finalized ? currency(summary.actualFee) : "待确定"}</dd></div>
-      <div><dt className="text-xs text-muted-foreground">本单运费应收</dt><dd className="mt-1 font-medium tabular-nums">{summary.timing === "after_shipping" && !summary.finalized && summary.shippingDue === 0 ? "待确定" : currency(summary.shippingDue)}</dd></div>
-      <div><dt className="text-xs text-muted-foreground">已登记运费收款</dt><dd className="mt-1 font-medium tabular-nums">{currency(summary.recordedShippingReceived)}</dd></div>
-      <div><dt className="text-xs text-muted-foreground">已核验运费收款</dt><dd className="mt-1 font-medium tabular-nums">{currency(summary.verifiedShippingReceived)}</dd></div>
-      <div><dt className="text-xs text-muted-foreground">已登记运费退款</dt><dd className="mt-1 font-medium tabular-nums">{currency(summary.shippingRefunded)}</dd></div>
+      <div><dt className="text-xs text-muted-foreground">计入订单应收的运费</dt><dd className="mt-1 font-medium tabular-nums">{summary.timing === "after_shipping" && !summary.finalized && summary.shippingDue === 0 ? "待确定" : currency(summary.shippingDue)}</dd></div>
     </dl>
     {!summary.finalized && <p className="text-xs leading-5 text-muted-foreground">{summary.pendingShipmentCount > 0 ? `还有 ${summary.pendingShipmentCount} 笔发货的实际运费未补录。` : "尚未完成全部商品发货，运费还未最终确定。"}分批发货逐笔累计，运费待确定不影响出库和签收。</p>}
     {summary.pendingShipping > 0 && <p className="text-xs leading-5 text-muted-foreground">运费收款 {currency(summary.pendingShipping)} 待财务核验，已从待收金额中扣除，请勿重复收款。</p>}
     {summary.pendingRefundAmount > 0 && <p className="text-xs leading-5 text-muted-foreground">运费退款 {currency(summary.pendingRefundAmount)} 已登记，待财务核对出账，请勿重复退款。</p>}
     <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
-      <div className="text-sm font-medium">{summary.toRefund > 0 ? `待退运费差额 ${currency(summary.toRefund)}` : summary.toCollect > 0 ? `${summary.timing === "before_shipping" && summary.recordedShippingReceived > 0 ? "待补收运费" : "待收运费"} ${currency(summary.toCollect)}` : summary.finalized ? summary.status === "settled" ? "运费已结清" : "等待财务核验" : "实际运费待确定"}</div>
+      <div className="text-sm font-medium">{summary.toRefund > 0 ? `待退运费差额 ${currency(summary.toRefund)}` : summary.toCollect > 0 ? "待收运费已包含在整单待收金额中" : summary.finalized ? summary.status === "settled" ? "运费已结清" : "等待财务核验" : "实际运费待确定"}</div>
       <div className="flex flex-wrap gap-2">
         {onRecordActualFee && !summary.finalized && <Button type="button" variant="outline" className="min-h-11" disabled={!canUpdate || saving || uploading} onClick={onRecordActualFee}>补录实际运费</Button>}
-        {summary.toCollect > 0 && <Button type="button" variant="outline" className="min-h-11" disabled={!actionAllowed} onClick={onRecordShippingPayment}><ArrowDownLeft className="size-4" />登记运费收款</Button>}
-        {summary.toRefund > 0 && !refundOpen && <Button type="button" variant="outline" className="min-h-11" disabled={!actionAllowed} onClick={() => { setDraft({ ...blankRefund(), amount: String(summary.toRefund), paymentMethodId: detail?.paymentMethods[0]?.id || "" }); setRefundOpen(true); setError(""); }}><ArrowUpRight className="size-4" />退运费差额</Button>}
+        {summary.toRefund > 0 && !refundOpen && <span className="text-xs text-muted-foreground">请从上方“登记退款”选择退运费差额</span>}
       </div>
     </div>
     {loading && <p role="status" className="text-xs text-muted-foreground">正在核对最新运费记录…</p>}
-    {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
-    {refundOpen && <div className="space-y-4 border-t pt-4">
+    {error && !refundOpen && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
+    {refundOpen && <div ref={refundFormRef} className="space-y-4 border-t pt-4">
       <div><h4 className="text-sm font-semibold">登记已退运费差额</h4><p className="mt-1 text-xs leading-5 text-muted-foreground">先向客户完成退款，再登记金额和凭证。这里不会自动转账，也不影响鱼只、订单商品或提成。</p></div>
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         <label className="grid min-w-0 gap-1.5 text-sm">退款金额（元）<Input aria-label="运费退款金额" type="number" min="0.01" max={summary.toRefund} step="0.01" className="min-h-11" disabled={saving || uploading} value={draft.amount} onChange={event => setDraft(current => ({ ...current, amount: event.target.value }))} /></label>
@@ -140,6 +148,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
         <label className="grid min-w-0 gap-1.5 text-sm sm:col-span-2">备注（选填）<Textarea aria-label="运费退款备注" rows={2} disabled={saving || uploading} value={draft.notes} onChange={event => setDraft(current => ({ ...current, notes: event.target.value }))} placeholder="例如：实际运费低于预收金额，退还差额" /></label>
       </div>
       <NewCustomerEvidenceUploader key={`${order.id}:${draft.id}`} payment refund orderId={order.id} attachments={draft.attachments} disabled={saving} onBusyChange={onBusyChange} onChange={attachments => setDraft(current => ({ ...current, attachments }))} />
+      {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="min-h-11" disabled={saving || uploading} onClick={() => setRefundOpen(false)}>取消填写</Button><Button type="button" className="min-h-11" disabled={!actionAllowed} onClick={() => void submitRefund()}><Check className="size-4" />{saving ? "登记中…" : "登记已退款"}</Button></div>
     </div>}
     {!!detail?.refunds?.length && <div className="space-y-3 border-t pt-3"><h4 className="text-sm font-medium">运费退款记录</h4>{detail.refunds.map(refund => <article key={refund.id} className="space-y-2">

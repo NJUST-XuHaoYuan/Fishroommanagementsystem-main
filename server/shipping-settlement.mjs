@@ -28,7 +28,17 @@ function registeredCash(order, excludeClaimId = "") {
   return { payments, pending };
 }
 
-export function shippingSettlementSummary(order = {}, shipments = []) {
+// Same damage adjustment as the final order receivable. Legacy damage records
+// without an explicit amount use verified non-freight refunds as their value.
+function damageReceivableAdjustment(order, shipments) {
+  const related = list(shipments).filter(shipment => text(shipment.orderId) === text(order.id) && shipment.status === "damaged" && shipment.damageResolution === "refund");
+  const explicit = related.reduce((sum, shipment) => sum + Number(shipment.damageRefundAmount ?? 0), 0);
+  if (explicit > 0.005) return money(explicit);
+  return related.some(shipment => shipment.damageRefundAmount == null)
+    ? money(list(order.payments).filter(payment => payment.type === "refund" && !isShippingRefund(payment) && verified(payment)).reduce((sum, payment) => sum + Number(payment.amount ?? 0), 0)) : 0;
+}
+
+export function shippingSettlementSummary(order = {}, shipments = [], finalAmountDue) {
   const enabled = hasShippingSettlement(order);
   const customerPaysShipping = !["collect", "free"].includes(order.shippingFeeMode) && !["线下", "线下自提"].includes(text(order.source));
   const active = list(shipments).filter(shipment => text(shipment.orderId) === text(order.id) && activeStatuses.has(shipment.status));
@@ -56,12 +66,22 @@ export function shippingSettlementSummary(order = {}, shipments = []) {
   const pendingRefundAmount = positive(shippingRefunded - verifiedShippingRefunded);
   const pendingShipping = money(pendingProofShipping + paymentShippingReceived - verifiedShippingReceived);
   const toCollect = order.status === "cancelled" ? 0 : positive(shippingDue - recordedShippingReceived + shippingRefunded);
-  const toRefund = finalized && order.status !== "cancelled" ? positive(verifiedShippingReceived - shippingRefunded - shippingDue) : 0;
+  const calculatedFinalAmountDue = money(list(order.items).reduce((sum, item) => sum + Number(item.price || 0), 0) - positive(order.discount) + positive(order.packagingFee) + shippingDue - damageReceivableAdjustment(order, shipments));
+  const finalReceivable = finalAmountDue === undefined ? calculatedFinalAmountDue : Number(finalAmountDue);
+  const verifiedOrderReceived = money(receipts.filter(verified).reduce((sum, payment) => sum + positive(payment.amount), 0));
+  const registeredOrderRefunded = money(refunds.reduce((sum, payment) => sum + positive(payment.amount), 0));
+  // Every registered refund reserves cash immediately, including ordinary
+  // merchandise refunds which intentionally retain their original category.
+  const orderRefundableAmount = [finalReceivable, verifiedOrderReceived, registeredOrderRefunded].every(Number.isFinite) && finalReceivable >= 0
+    ? positive(verifiedOrderReceived - registeredOrderRefunded - finalReceivable) : 0;
+  const toRefund = finalized && order.status !== "cancelled"
+    ? Math.min(positive(verifiedShippingReceived - shippingRefunded - shippingDue), orderRefundableAmount) : 0;
   const status = !customerPaysShipping || order.status === "cancelled" ? "not_applicable" : !enabled ? "legacy" : toRefund > 0 ? "to_refund" :
     toCollect > 0 ? "to_collect" : pendingShipping > 0 || pendingRefundAmount > 0 ? "proof_pending" : !finalized ? "pending_fee" : "settled";
   return { enabled, timing: enabled ? order.shippingSettlementTiming : null, customerPaysShipping, estimatedFee, actualFee, pendingShipmentCount,
     finalized, shippingDue, goodsDue, paymentShippingReceived, recordedShippingReceived, verifiedShippingReceived, pendingProofShipping,
-    pendingShipping, shippingRefunded, verifiedShippingRefunded, pendingRefundAmount, toCollect, toRefund, status };
+    pendingShipping, shippingRefunded, verifiedShippingRefunded, pendingRefundAmount, finalAmountDue: finalReceivable,
+    verifiedOrderReceived, registeredOrderRefunded, orderRefundableAmount, toCollect, toRefund, status };
 }
 
 export function allocateShippingProof(order = {}, shipments = [], amount = 0, purpose = "order", excludeClaimId = "") {
@@ -78,8 +98,8 @@ export function allocateShippingProof(order = {}, shipments = [], amount = 0, pu
   return { purpose: "order", shippingAmount: money(paid - goodsAmount), goodsAmount };
 }
 
-export function planShippingRefund(order, shipments, body, { now, account, createId, methodSnapshot = {} }) {
-  const summary = shippingSettlementSummary(order, shipments);
+export function planShippingRefund(order, shipments, body, { now, account, createId, methodSnapshot = {}, finalAmountDue }) {
+  const summary = shippingSettlementSummary(order, shipments, finalAmountDue);
   if (!summary.enabled || order.status === "cancelled") fail("当前订单不支持运费差额退款", "SHIPPING_REFUND_UNAVAILABLE");
   if (!summary.finalized) fail("请先完成全部商品出库并确认各发货单实际运费，再退还运费差额", "SHIPPING_REFUND_NOT_FINAL");
   const amount = Number(body.amount);

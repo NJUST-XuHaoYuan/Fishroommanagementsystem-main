@@ -1929,6 +1929,7 @@ function ProofUploader({
 }
 
 type OrderRefundDraft = {
+  expectedVersion?: string;
   paymentMethodId?: string;
   id: string;
   amount: number;
@@ -1953,6 +1954,27 @@ function OrderRefundDialog({
   const { state } = useStore();
   const [proofUploading, setProofUploading] = useState(false);
   const [error, setError] = useState("");
+  const [refundSnapshot, setRefundSnapshot] = useState<{ context: string; version: string } | null>(null);
+  const [refundSnapshotError, setRefundSnapshotError] = useState("");
+  const needsRefundSnapshot = !!order && getShippingSettlementSummary(order, state.shipments).enabled;
+  const refundSnapshotContext = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const currentRefundSnapshot = refundSnapshot?.context === refundSnapshotContext ? refundSnapshot : null;
+  useEffect(() => {
+    setRefundSnapshot(null); setRefundSnapshotError("");
+    if (!open || !order || !needsRefundSnapshot) return;
+    const controller = new AbortController();
+    const session = captureNewCustomerSession();
+    const requestedOrderId = order.id;
+    void fetch(`/api/orders/shipping-settlement?orderId=${encodeURIComponent(requestedOrderId)}`, { headers: authJsonHeaders(), cache: "no-store", signal: controller.signal })
+      .then(async response => {
+        const result = await response.json();
+        if (controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
+        if (!response.ok || !result.ok || result.orderId !== requestedOrderId || !result.shippingSettlement?.version)
+          throw new Error(result.error || "退款余额加载失败，请关闭后重新打开。");
+        setRefundSnapshot({ context: refundSnapshotContext, version: result.shippingSettlement.version });
+      }).catch(cause => { if (!controller.signal.aborted && isNewCustomerSessionCurrent(session)) setRefundSnapshotError(cause instanceof Error ? cause.message : "退款余额加载失败，请关闭后重新打开。"); });
+    return () => controller.abort();
+  }, [open, refundSnapshotContext, needsRefundSnapshot]);
   const [draft, setDraft] = useState<OrderRefundDraft>({
     paymentMethodId: "",
     id: uid(),
@@ -1986,12 +2008,13 @@ function OrderRefundDialog({
   const refundAccount = cashierFlow ? refundMethod?.account || "" : order.paymentAccount || refundMethod?.account || "";
   const refundMethodName = cashierFlow ? refundMethod?.name || "" : order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
   const platformRefund = isPlatformPaymentChannel(refundChannel);
+  const snapshotLoading = needsRefundSnapshot && !currentRefundSnapshot && !refundSnapshotError;
   const busy = saving || proofUploading;
   const refundableAmount = Math.max(0, Math.round((order.payments ?? []).reduce((total, payment) =>
     total + (payment.type === "refund" ? -Number(payment.amount || 0) : isPaymentVerified(payment) ? Number(payment.amount || 0) : 0), 0) * 100) / 100);
 
   const submit = async () => {
-    if (busy) return;
+    if (busy || (needsRefundSnapshot && !currentRefundSnapshot)) return;
     setError("");
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return setError("请输入有效退款金额");
     if (draft.amount > refundableAmount + 0.005) return setError(`本单最多可登记退款 ¥${refundableAmount.toFixed(2)}；待核验收款需先由财务确认。`);
@@ -2006,7 +2029,7 @@ function OrderRefundDialog({
     );
     if (!confirmed) return;
     try {
-      if (await onConfirm({ ...draft, notes: draft.notes.trim() })) onOpenChange(false);
+      if (await onConfirm({ ...draft, ...(currentRefundSnapshot ? { expectedVersion: currentRefundSnapshot.version } : {}), notes: draft.notes.trim() })) onOpenChange(false);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "退款登记失败，请重试");
     }
@@ -2073,10 +2096,12 @@ function OrderRefundDialog({
           </div>
         </fieldset>
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {refundSnapshotError && <p role="alert" className="text-sm text-destructive">{refundSnapshotError}</p>}
+        {snapshotLoading && <p role="status" className="text-sm text-muted-foreground">正在核对最新收退款余额…</p>}
         {proofUploading && <p role="status" className="text-sm text-muted-foreground">凭证上传中，请等待上传完成后登记退款。</p>}
         <DialogFooter>
           <Button type="button" className="min-h-11" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>取消</Button>
-          <Button type="button" className="min-h-11" onClick={() => void submit()} disabled={busy}>{saving ? "保存中..." : "登记退款"}</Button>
+          <Button type="button" className="min-h-11" onClick={() => void submit()} disabled={busy || (needsRefundSnapshot && !currentRefundSnapshot)}>{saving ? "保存中..." : "登记退款"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -5523,7 +5548,7 @@ function OrderDetailDialog({
 </div></details>}
               </TabsContent>
               <TabsContent value="cashier" forceMount hidden={detailTab !== "cashier"} style={detailTab !== "cashier" ? { display: "none" } : undefined} className="m-0 space-y-5">
-                <OrderCashierPanel key={`cashier:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} canUpdate={permission.canUpdate} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
+                <OrderCashierPanel key={`cashier:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} amountDue={amountDue} canUpdate={permission.canUpdate} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
                   onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
                   onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); setShipmentAction(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
                   {!editMode && feeContent}

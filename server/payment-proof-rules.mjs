@@ -65,7 +65,7 @@ export function paymentProofDetail(state, order, account, amountDue, canReview) 
     receiptCandidates: canSubmitPaymentProof(state, order, account) ? eligiblePaymentProofPayments(order)
       .map(payment => Object.fromEntries(["id", "type", "amount", "shippingAmount", "channel", "account"].map(key => [key, payment[key]]))) : [],
     linkableProofPayments: canReview ? linkablePaymentProofPayments(order) : [],
-    summary: paymentProofSummary(order, amountDue), shippingSettlement: shippingSettlementSummary(order, state.shipments), reviewToken: paymentProofReviewToken(order) };
+    summary: paymentProofSummary(order, amountDue), shippingSettlement: shippingSettlementSummary(order, state.shipments, amountDue), reviewToken: paymentProofReviewToken(order) };
 }
 
 export function planPaymentProofSubmission(state, order, account, body, { amountDue, now, createId }) {

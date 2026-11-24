@@ -5031,7 +5031,7 @@ function nextOrderNo(state = {}) {
 function shippingSettlementDetail(order = {}, shipments = []) {
   const related = (Array.isArray(shipments) ? shipments : []).filter(item => String(item?.orderId) === String(order.id));
   const version = createHash("sha256").update(stableJson({ order, shipments: related })).digest("hex");
-  return { ...shippingSettlementSummary(order, related), version };
+  return { ...shippingSettlementSummary(order, related, calcAmountDueForOrder(order, shipments)), version };
 }
 
 const SHIPPING_PAYMENT_METADATA = ["shippingAmount", "refundCategory", "evidenceAttachments"];
@@ -13871,6 +13871,7 @@ async function handleApi(req, res, url) {
       if (!body.time || new Date(body.time).getTime() > Date.now() + 60_000) throw httpError(400, "退款时间不能为空或晚于当前时间", "SHIPPING_REFUND_TIME");
       const planned = planShippingRefund(order, state.shipments, body, {
         now, account: req.auth.account, createId: () => paymentId,
+        finalAmountDue: calcAmountDueForOrder(order, state.shipments),
         methodSnapshot: { ...method, refundMethod: refundMethodForChannel(method.channel) },
       });
       planned.payment.evidenceAttachments = evidence.map(paymentEvidenceMetadata);
@@ -13912,6 +13913,9 @@ async function handleApi(req, res, url) {
       const paymentId = String(body.id || uid("pay"));
       if (currentPayments.some(payment => String(payment?.id ?? "") === paymentId)) {
         throw new Error("退款记录已存在，请刷新后重试");
+      }
+      if (body.expectedVersion != null && body.expectedVersion !== shippingSettlementDetail(currentOrder, state.shipments).version) {
+        throw httpError(409, "订单收款、退款或运费已变化，请刷新核对后再登记退款", "SHIPPING_SETTLEMENT_CONFLICT");
       }
 
       const refundMethod = usesOrderCashier(currentOrder)

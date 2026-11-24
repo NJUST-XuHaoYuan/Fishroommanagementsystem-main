@@ -167,3 +167,73 @@ test("pending proof reserves freight collection and later bank import waits for 
   assert.equal((await s.readPersistedState()).orders[0].payments.length, 0);
   assert.equal((await s.detail()).shippingSettlement.recordedShippingReceived, 50);
 });
+
+for (const status of ["pending", "verified"]) {
+  test(`${status} ordinary actual refund exhausts the whole-order overpayment and blocks a second freight refund`, async t => {
+    const s = await setup(t, state => { state.orders[0].payments = [receipt()]; state.shipments = [shipment(40)]; });
+    const initial = await s.readPersistedState();
+    const ordinary = await s.request("/api/orders/refund", { orderId: "proof-order", id: "ordinary-difference", amount: 10, time: NOW }); ok(ordinary);
+    assert.equal(ordinary.body.order.payments.at(-1).shippingAmount, 0, "do not silently change ordinary refund classification");
+    if (status === "verified") ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "verify", paymentId: "ordinary-difference" }, "finance-reviewer"));
+    const evidence = await s.upload(); const detail = (await s.detail()).shippingSettlement;
+    assert.equal(detail.finalAmountDue, 1040); assert.equal(detail.registeredOrderRefunded, 10);
+    assert.equal(detail.orderRefundableAmount, 0); assert.equal(detail.toRefund, 0);
+    const beforeDenied = await s.readPersistedState();
+    const result = await s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "duplicate-difference", expectedVersion: detail.version,
+      amount: 10, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [evidence.id] });
+    assert.equal(result.response.status, 409); assert.equal(result.body.code, "SHIPPING_REFUND_EXCEEDS_AVAILABLE");
+    const after = await s.readPersistedState(); assert.deepEqual(after, beforeDenied);
+    assert.deepEqual(after.stock, initial.stock); assert.deepEqual(after.shipments, initial.shipments);
+    assert.equal(after.orders[0].payments.length, 2);
+  });
+}
+
+test("ordinary pending refund partially reserves the excess and freight can only return the remaining balance", async t => {
+  const s = await setup(t, state => { state.orders[0].payments = [receipt()]; state.shipments = [shipment(40)]; });
+  ok(await s.request("/api/orders/refund", { orderId: "proof-order", id: "ordinary-partial", amount: 4, time: NOW }));
+  const evidence = await s.upload(); const detail = (await s.detail()).shippingSettlement; assert.equal(detail.toRefund, 6);
+  const body = { orderId: "proof-order", id: "remaining-freight", expectedVersion: detail.version, amount: 6, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [evidence.id] };
+  const over = await s.request("/api/orders/shipping-refund", { ...body, amount: 6.01 }); assert.equal(over.response.status, 409);
+  const saved = await s.request("/api/orders/shipping-refund", body); ok(saved); assert.equal(saved.body.shippingSettlement.toRefund, 0);
+  const order = (await s.readPersistedState()).orders[0]; assert.equal(order.payments.filter(p => p.type === "refund").reduce((sum,p) => sum + p.amount, 0), 10);
+});
+
+test("authoritative final receivable includes discount packaging and damage while ordinary goods refunds remain ordinary", async t => {
+  const s = await setup(t, state => {
+    Object.assign(state.orders[0], { discount: 50, packagingFee: 15, payments: [receipt(1015, 50)] });
+    state.shipments = [{ ...shipment(40), status: "damaged", damageResolution: "refund", damageRefundAmount: 100 }];
+  });
+  ok(await s.request("/api/orders/refund", { orderId: "proof-order", id: "damaged-goods-refund", amount: 100, time: NOW }));
+  const evidence = await s.upload(); const detail = (await s.detail()).shippingSettlement;
+  assert.equal(detail.finalAmountDue, 905); assert.equal(detail.orderRefundableAmount, 10); assert.equal(detail.toRefund, 10);
+  const saved = await s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "freight-after-goods", expectedVersion: detail.version,
+    amount: 10, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [evidence.id] }); ok(saved);
+  const order = (await s.readPersistedState()).orders[0]; assert.equal(order.payments[1].shippingAmount, 0);
+  assert.equal(order.payments[1].refundCategory, undefined); assert.equal(order.payments[2].refundCategory, "shipping_fee");
+});
+
+test("ordinary goods refund beyond overpayment remains allowed and a later unified receipt can settle the resulting shortage", async t => {
+  const s = await setup(t, state => { state.orders[0].payments = [receipt()]; state.shipments = [shipment(40)]; });
+  ok(await s.request("/api/orders/refund", { orderId: "proof-order", id: "normal-goods-refund", amount: 100, time: NOW }));
+  ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "verify", paymentId: "normal-goods-refund" }, "finance-reviewer"));
+  assert.equal((await s.detail()).shippingSettlement.toRefund, 0);
+  ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "add", payment: { id: "unified-remainder", type: "balance", amount: 90, time: NOW, paymentMethodId: "pm-wechat" } }, "finance-reviewer"));
+  ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "verify", paymentId: "unified-remainder" }, "finance-reviewer"));
+  ok(await s.request("/api/orders/complete", { orderId: "proof-order" }));
+  assert.equal((await s.detail()).shippingSettlement.toRefund, 0);
+});
+
+for (const first of ["ordinary", "freight"]) {
+  test(`concurrent ${first}-first refunds using one reviewed version can commit only one route`, async t => {
+    const s = await setup(t, state => { state.orders[0].payments = [receipt()]; state.shipments = [shipment(40)]; });
+    const evidence = await s.upload(); const detail = (await s.detail()).shippingSettlement;
+    const ordinary = () => s.request("/api/orders/refund", { orderId: "proof-order", id: "concurrent-ordinary", expectedVersion: detail.version, amount: 10, time: NOW });
+    const freight = () => s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "concurrent-freight", expectedVersion: detail.version,
+      amount: 10, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [evidence.id] });
+    const results = await Promise.all(first === "ordinary" ? [ordinary(), freight()] : [freight(), ordinary()]);
+    assert.deepEqual(results.map(r => r.response.status).sort(), [200, 409]);
+    assert.equal(results.find(r => r.response.status === 409).body.code, "SHIPPING_SETTLEMENT_CONFLICT");
+    const order = (await s.readPersistedState()).orders[0]; assert.equal(order.payments.filter(p => p.type === "refund").length, 1);
+    assert.equal((await s.detail()).shippingSettlement.toRefund, 0);
+  });
+}

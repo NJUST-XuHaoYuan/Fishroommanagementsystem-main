@@ -109,3 +109,35 @@ test('cancelled orders do not re-open freight collection after refunds',()=>{
  const o=order({status:'cancelled',payments:[receipt('p',1050,50),{id:'r',type:'refund',amount:1050,shippingAmount:50}]});
  const summary=shippingSettlementSummary(o,[shipment()]);assert.equal(summary.toCollect,0);assert.equal(summary.status,'not_applicable');
 });
+
+test('ordinary refunds reserve the whole-order excess without being reclassified as freight',()=>{
+ for(const verificationStatus of ['pending','verified']){
+  const ordinary={id:'ordinary',type:'refund',amount:10,shippingAmount:0,verificationStatus};
+  const o=order({payments:[receipt('p',1050,50),ordinary]});
+  const summary=shippingSettlementSummary(o,[shipment()]);
+  assert.equal(summary.finalAmountDue,1040);assert.equal(summary.registeredOrderRefunded,10);
+  assert.equal(summary.shippingRefunded,0);assert.equal(summary.orderRefundableAmount,0);assert.equal(summary.toRefund,0);
+  assert.throws(()=>planShippingRefund(o,[shipment()],{amount:10,time:now},{now,account:{username:'owner'},createId:()=> 'again'}),error=>error.code==='SHIPPING_REFUND_EXCEEDS_AVAILABLE');
+  assert.equal(ordinary.shippingAmount,0);
+ }
+});
+
+test('freight refund cap is the smaller of freight excess and all verified money remaining above final due',()=>{
+ const o=order({payments:[receipt('p',1050,50),{id:'ordinary',type:'refund',amount:4,shippingAmount:0,verificationStatus:'pending'}]});
+ assert.equal(shippingSettlementSummary(o,[shipment()]).toRefund,6);
+ assert.equal(shippingSettlementSummary(o,[shipment()],1044).toRefund,2);
+ assert.equal(shippingSettlementSummary(o,[shipment()],NaN).toRefund,0);
+ const onlyFreight=order({payments:[receipt('shipping-only',50,50)]});
+ assert.equal(shippingSettlementSummary(onlyFreight,[shipment()]).toRefund,0);
+});
+
+test('final refund cap includes discount packaging and explicit or legacy damage adjustments',()=>{
+ const ordinary={id:'goods-refund',type:'refund',amount:100,shippingAmount:0,verificationStatus:'verified'};
+ const o=order({discount:50,packagingFee:15,payments:[receipt('p',1015,50),ordinary]});
+ for(const ship of [shipment({status:'damaged',damageResolution:'refund',damageRefundAmount:100}),shipment({status:'damaged',damageResolution:'refund'})]){
+  const summary=shippingSettlementSummary(o,[ship]);assert.equal(summary.finalAmountDue,905);
+  assert.equal(summary.orderRefundableAmount,10);assert.equal(summary.toRefund,10);
+ }
+ const unchangedFreight=shippingSettlementSummary(o,[shipment({status:'damaged',damageResolution:'refund',damageRefundAmount:100,actualShippingFee:50})]);
+ assert.equal(unchangedFreight.toRefund,0,'merchandise damage refunds must not create extra freight refunds');
+});

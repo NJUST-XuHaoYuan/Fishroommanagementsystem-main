@@ -5,18 +5,21 @@ import { orderCashierEntries, orderCashierTotals, type CashierEntry } from "../u
 import type { PaymentProofDetail } from "../utils/orderPaymentProof";
 import type { NewCustomerSession } from "../utils/newCustomerEvidence";
 import { OrderPaymentProofPanel, type PaymentProofOpenRequest } from "./OrderPaymentProofPanel";
+import { getShippingSettlementSummary } from "../utils/shippingSettlement";
 import { OrderShippingSettlementPanel } from "./OrderShippingSettlementPanel";
 import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 
 const currency = (amount: number) => `¥${Number(amount || 0).toFixed(2)}`;
 const timeLabel = (time: string) => String(time || "未登记时间").replace("T", " ").slice(0, 16);
 type Applied = { order?: Order; orders?: Order[]; operationLog?: Store["operationLogs"][number] };
 
-export function OrderCashierPanel({ order, shipments, canUpdate, refundAvailable, refundSaving = false, onRefund, onApplied, onRecordActualFee, children }: {
+export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refundAvailable, refundSaving = false, onRefund, onApplied, onRecordActualFee, children }: {
   order: Order;
   shipments: Shipment[];
+  amountDue: number;
   canUpdate: boolean;
   refundAvailable: boolean;
   refundSaving?: boolean;
@@ -31,24 +34,29 @@ export function OrderCashierPanel({ order, shipments, canUpdate, refundAvailable
   const proofDetail = proofState?.context === contextKey && proofState.detail?.orderId === order.id ? proofState.detail : null;
   const [openRequest, setOpenRequest] = useState<PaymentProofOpenRequest>();
   const [selectedId, setSelectedId] = useState("");
+  const [refundChoiceOpen, setRefundChoiceOpen] = useState(false);
+  const [shippingRefundRequest, setShippingRefundRequest] = useState<number>();
+  const freight = getShippingSettlementSummary(order, shipments, amountDue);
   const [direction, setDirection] = useState<"all" | "in" | "out">("all");
   const onDetailChange = useCallback((detail: PaymentProofDetail | null) => setProofState({ context: contextKey, detail }), [contextKey]);
-  useEffect(() => { setSelectedId(""); setDirection("all"); setProofState(null); setOpenRequest(undefined); }, [contextKey]);
+  useEffect(() => { setSelectedId(""); setDirection("all"); setProofState(null); setOpenRequest(undefined); setRefundChoiceOpen(false); setShippingRefundRequest(undefined); }, [contextKey]);
   const entries = useMemo(() => orderCashierEntries(order, proofDetail?.claims), [order.payments, order.paymentClaims, proofDetail]);
   const totals = useMemo(() => orderCashierTotals(entries), [entries]);
   const selected = entries.find(entry => entry.id === selectedId);
   const visibleEntries = entries.filter(entry => direction === "all" || entry.direction === direction);
   const canRecord = canUpdate && proofDetail?.canSubmit === true;
-  const requestPayment = (purpose: PaymentProofOpenRequest["purpose"]) => setOpenRequest({ key: Date.now(), purpose });
+  const requestPayment = () => setOpenRequest({ key: Date.now(), purpose: "order" });
 
   return <section aria-label="订单收银台" className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0"><h3 className="flex items-center gap-2 text-base font-semibold"><Wallet className="size-4" aria-hidden="true" />收银台</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">按每笔实际收付登记金额、账户和凭证，财务分别核验。</p></div>
       <div className="flex flex-wrap gap-2">
-        <Button type="button" className="min-h-11" disabled={!canRecord} onClick={() => requestPayment("order")}><ArrowDownLeft className="size-4" />登记收款</Button>
-        {refundAvailable && <Button type="button" variant="outline" className="min-h-11" disabled={refundSaving} onClick={onRefund}><ArrowUpRight className="size-4" />登记退款</Button>}
+        <Button type="button" className="min-h-11" disabled={!canRecord} onClick={requestPayment}><ArrowDownLeft className="size-4" />登记收款</Button>
+        {refundAvailable && <Button type="button" variant="outline" className="min-h-11" disabled={refundSaving} onClick={() => freight.toRefund > 0 ? setRefundChoiceOpen(true) : onRefund()}><ArrowUpRight className="size-4" />登记退款</Button>}
       </div>
     </div>
+
+    <OrderCashierBalanceSummary order={order} shipments={shipments} amountDue={amountDue} netRecorded={totals.netRecorded} />
 
     <dl className="grid grid-cols-1 gap-3 border-y py-4 sm:grid-cols-3 sm:gap-6">
       <div><dt className="text-xs text-muted-foreground">已登记收款</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{currency(totals.received)}</dd><p className="mt-1 text-xs text-muted-foreground">财务已确认 {currency(totals.confirmedReceived)}</p></div>
@@ -72,7 +80,19 @@ export function OrderCashierPanel({ order, shipments, canUpdate, refundAvailable
 
     <OrderPaymentProofPanel key={`cashier-proof:${contextKey}`} orderId={order.id} onApplied={onApplied} openRequest={openRequest} presentation="cashier" selectedClaimId={selected?.claim?.id} onDetailChange={onDetailChange} />
 
-    <OrderShippingSettlementPanel key={`cashier-freight:${contextKey}`} order={order} shipments={shipments} canUpdate={canUpdate} onApplied={onApplied} onRecordShippingPayment={() => requestPayment("shipping_fee")} onRecordActualFee={onRecordActualFee} />
+    <OrderShippingSettlementPanel key={`cashier-freight:${contextKey}`} order={order} shipments={shipments} canUpdate={canUpdate} onApplied={onApplied} onRecordActualFee={onRecordActualFee} refundOpenRequest={shippingRefundRequest} amountDue={amountDue} />
+
+    <Dialog open={refundChoiceOpen} onOpenChange={setRefundChoiceOpen}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader><DialogTitle>选择退款类型</DialogTitle><DialogDescription>本单有运费差额可退，请按本次实际退款原因登记。</DialogDescription></DialogHeader>
+        <Button type="button" variant="outline" className="h-auto min-h-[44px] justify-start whitespace-normal py-3 text-left" onClick={() => { setRefundChoiceOpen(false); setShippingRefundRequest(Date.now()); }}>
+          <span><span className="block font-medium">退运费差额 · {currency(freight.toRefund)}</span><span className="mt-1 block text-xs font-normal text-muted-foreground">实际运费低于预收，退还多收的运费。</span></span>
+        </Button>
+        <Button type="button" variant="outline" className="h-auto min-h-[44px] justify-start whitespace-normal py-3 text-left" onClick={() => { setRefundChoiceOpen(false); onRefund(); }}>
+          <span><span className="block font-medium">其他订单退款</span><span className="mt-1 block text-xs font-normal text-muted-foreground">商品退款、售后退款等，按实际金额登记。</span></span>
+        </Button>
+      </DialogContent>
+    </Dialog>
 
     {children && <details className="border-t pt-3"><summary className="cursor-pointer py-1 text-sm font-medium">订单应收明细</summary><div className="mt-3">{children}</div></details>}
   </section>;
@@ -96,4 +116,29 @@ function CashierEntryDetail({ entry, canViewProof }: { entry: CashierEntry; canV
     {entry.claim && <p className="text-muted-foreground">{canViewProof ? "本笔付款凭证与审核详情见下方。" : "付款凭证仅向订单负责人、管理员及有财务核验权限的人员开放。"}</p>}
     {canViewProof && !entry.claim && Boolean(entry.payment?.proof?.length) && <MediaPreviewTrigger items={entry.payment!.proof.map((src, index) => ({ src, type: "image" as const, title: `收支凭证 ${index + 1}` }))} title="收支凭证"><Button type="button" variant="outline" className="min-h-11">预览凭证（{entry.payment!.proof.length}）</Button></MediaPreviewTrigger>}
   </div>;
+}
+
+
+export function OrderCashierBalanceSummary({ order, shipments, amountDue, netRecorded }: {
+  order: Order; shipments: Shipment[]; amountDue: number; netRecorded: number;
+}) {
+  const freight = getShippingSettlementSummary(order, shipments, amountDue);
+  const balance = Math.round((amountDue - netRecorded) * 100) / 100;
+  const goodsAndPackaging = Math.round((amountDue - (freight.enabled ? freight.shippingDue : 0)) * 100) / 100;
+  const freightLabel = freight.finalized ? "实际运费" : freight.timing === "before_shipping" ? "预收运费" : "已确定运费";
+  return <section aria-label="订单应收与待收退款" className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3 rounded-md bg-muted/30 p-4">
+    <div className="min-w-0">
+      <p className="text-sm font-medium">当前订单应收 <strong className="ml-2 text-lg tabular-nums">{currency(amountDue)}</strong></p>
+      {freight.enabled && <>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">商品及包装（优惠调整后）{currency(goodsAndPackaging)} + {freightLabel} {currency(freight.shippingDue)}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{freight.timing === "before_shipping"
+          ? "预收运费已合并到订单应收，统一登记收款；全部发货并补录实际运费后，多退少补。"
+          : "运费随发货逐笔计入订单应收，全部发货并补录后确认最终金额，统一补收或退差。"}</p>
+      </>}
+    </div>
+    <div className="min-w-0 text-sm">
+      <p className="font-medium">{balance > 0 ? "待收金额" : balance < 0 ? "应退金额" : "已登记收齐"}{balance !== 0 && <strong className="ml-2 text-lg tabular-nums">{currency(Math.abs(balance))}</strong>}</p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">按已登记收退款计算，到账仍需财务核验。</p>
+    </div>
+  </section>;
 }
