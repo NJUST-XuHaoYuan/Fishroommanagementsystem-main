@@ -6902,7 +6902,7 @@ function NewOrderDialog({
                         key={option.value}
                         type="button"
                         className={`border-r px-2 py-2 text-sm last:border-r-0 ${shippingFeeMode === option.value ? "bg-foreground font-semibold text-background" : "hover:bg-muted/50"}`}
-                        title={option.hint}
+                        title={option.value === "prepaid" ? "客户向店里支付，结算时间在下方选择。" : option.hint}
                         onClick={() => {
                           setShippingFeeMode(option.value);
                           if (option.value === "collect") setShippingFee(0);
@@ -6915,7 +6915,7 @@ function NewOrderDialog({
                 )}
                 {!pickupOrder && (
                   <p className="text-xs text-muted-foreground">
-                    {SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
+                    {shippingFeeMode === "prepaid" ? "客户向店里支付，结算时间在下方选择。" : SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
                   </p>
                 )}
                 {!pickupOrder && shippingFeeMode === "prepaid" && (
@@ -6955,7 +6955,7 @@ function NewOrderDialog({
                     商品折后金额必须高于最低回厂价合计。
                   </div>
                 )}
-                {!pickupOrder && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(shippingFeeMode)}</span></div>}
+                {!pickupOrder && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费承担</span><span>{shippingFeeMode === "prepaid" ? "客户承担" : shippingFeeMode === "free" ? "商家包邮" : "快递到付"}</span></div>}
                 {!pickupOrder && shippingFeeMode !== "collect" && !shippingDeferred && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 预计运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
                 {shippingDeferred && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费</span><span>发货后结算 · 待确定</span></div>}
                 {shippingDiscount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 包邮折扣</span><span>¥{shippingDiscount.toFixed(2)}</span></div>}
