@@ -136,54 +136,36 @@ const NEW_ORDER_SOURCE_CHOICES = [
     label: "抖音",
     description: "填写抖音订单编号，无需客户和地址",
     icon: Video,
-    activeClass: "border-zinc-900 bg-zinc-950 text-white hover:border-black hover:bg-black",
-    iconClass: "bg-white/10 text-white",
-    descriptionClass: "text-zinc-300",
   },
   {
     value: "闲鱼平台",
     label: "闲鱼",
     description: "填写闲鱼订单编号，无需客户和地址",
     icon: Tag,
-    activeClass: "border-amber-400 bg-amber-50 text-amber-950 hover:border-amber-500 hover:bg-amber-100",
-    iconClass: "bg-amber-200 text-amber-900",
-    descriptionClass: "text-amber-800",
   },
   {
     value: "微拍堂平台",
     label: "微拍堂",
     description: "填写微拍堂订单编号，无需客户和地址",
     icon: Gavel,
-    activeClass: "border-red-400 bg-red-50 text-red-900 hover:border-red-500 hover:bg-red-100",
-    iconClass: "bg-red-200 text-red-800",
-    descriptionClass: "text-red-700",
   },
   {
     value: "私域线上",
     label: "线上私域",
-    description: "选择客户、收货地址并按现有流程发货",
+    description: "关联客户，填写收货地址并安排发货",
     icon: MessageCircle,
-    activeClass: "border-emerald-400 bg-emerald-50 text-emerald-900 hover:border-emerald-500 hover:bg-emerald-100",
-    iconClass: "bg-emerald-200 text-emerald-800",
-    descriptionClass: "text-emerald-700",
   },
   {
     value: "线下",
     label: "线下自提",
-    description: "选择客户并确认自提，无需填写发货信息",
+    description: "关联客户，由客户到店自提",
     icon: MapPin,
-    activeClass: "border-sky-400 bg-sky-50 text-sky-900 hover:border-sky-500 hover:bg-sky-100",
-    iconClass: "bg-sky-200 text-sky-800",
-    descriptionClass: "text-sky-700",
   },
   {
     value: "批发",
     label: "批发",
-    description: "选择客户并添加商品，创建批发订单",
+    description: "关联客户，按批发订单登记商品",
     icon: PackageCheck,
-    activeClass: "border-slate-400 bg-slate-100 text-slate-900 hover:border-slate-500 hover:bg-slate-200",
-    iconClass: "bg-slate-200 text-slate-800",
-    descriptionClass: "text-slate-700",
   },
 ] as const;
 
@@ -6563,61 +6545,51 @@ function NewOrderDialog({
       <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next); }}>
         <DialogContent
           aria-describedby={undefined}
-          className="fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[90vh] sm:w-[min(92vw,1080px)] sm:max-w-[min(92vw,1080px)] sm:rounded-lg sm:border sm:p-0"
+          className={`new-order-dialog fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 bg-card p-0 sm:max-h-[90dvh] sm:w-[92vw] sm:rounded-xl sm:border sm:p-0 ${source ? "sm:h-[90dvh] sm:max-w-[1160px]" : "sm:h-auto sm:max-w-[820px]"}`}
         >
-          <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left sm:px-6">
-            <DialogTitle className="text-base sm:text-lg">新建销售订单</DialogTitle>
+          <DialogHeader className="shrink-0 border-b bg-card px-4 py-4 pr-12 text-left sm:px-6 sm:pr-14">
+            <DialogTitle className="text-lg">新建销售订单</DialogTitle>
+            <ol className="mt-2 flex items-center gap-2 text-xs" aria-label="新建订单流程">
+              <li className={!source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={!source ? "step" : undefined}>1 选择类型</li>
+              <ChevronRight className="size-3 text-muted-foreground" aria-hidden="true" />
+              <li className={source ? "font-medium text-foreground" : "text-muted-foreground"} aria-current={source ? "step" : undefined}>2 填写订单</li>
+            </ol>
           </DialogHeader>
 
           {!source ? (
-            <div className="flex flex-1 flex-col items-center justify-start overflow-y-auto p-4 sm:justify-center sm:p-8">
-              <div className="w-full max-w-3xl">
-                <div className="mb-5 text-center">
-                  <div className="text-base font-semibold text-foreground">选择订单类型</div>
-                  <div className="mt-1 text-sm text-muted-foreground">前五项为零售订单；批发请直接选择「批发」</div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
-                    const SourceIcon = choice.icon;
-                    return (
-                      <button
-                        key={choice.value}
-                        type="button"
-                        className={`flex min-h-36 touch-manipulation flex-col items-start justify-between rounded-lg border bg-background p-4 text-left shadow-sm transition-colors hover:border-slate-400 hover:bg-muted/30 ${choice.activeClass}`}
-                        onClick={() => chooseSource(choice.value)}
-                      >
-                        <span className={`flex size-11 items-center justify-center rounded-lg ${choice.iconClass}`}>
-                          <SourceIcon className="size-5" />
-                        </span>
-                        <span className="mt-5">
-                          <span className="block text-lg font-semibold">{choice.label}</span>
-                          <span className={`mt-1 block text-sm leading-5 ${choice.descriptionClass}`}>{choice.description}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
+              <h3 className="text-base font-semibold">选择订单类型</h3>
+              <p className="mt-1 text-sm text-muted-foreground">选择后，填写对应的客户、商品及履约信息。</p>
+              <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
+                  const SourceIcon = choice.icon;
+                  return (
+                    <button key={choice.value} type="button" onClick={() => chooseSource(choice.value)}
+                      className="group flex min-h-24 items-center gap-3 rounded-lg border bg-card p-4 text-left transition-colors hover:border-primary/60 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground"><SourceIcon className="size-5" aria-hidden="true" /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2"><span className="text-base font-semibold">{choice.label}</span><span className="text-xs text-muted-foreground">{choice.value === "批发" ? "批发" : "零售"}</span></span>
+                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">{choice.description}</span>
+                      </span>
+                      <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6">
-            <div className="flex flex-col gap-4 sm:gap-5">
-
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5 sm:px-4">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="text-xs text-muted-foreground">订单类型</span>
-                <span className="truncate text-sm font-semibold text-foreground">{orderSourceLabel(source)}</span>
-                <Badge variant="outline">{isWholesaleOrder ? "批发订单" : "零售订单"}</Badge>
-              </div>
-              <Button type="button" variant="ghost" size="sm" onClick={() => chooseSource("")}>
-                重新选择
-              </Button>
+          <div className="min-h-0 flex-1 overflow-y-auto bg-card">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2 sm:px-6">
+              <div className="flex items-center gap-2 text-sm"><span className="font-semibold">{orderSourceLabel(source)}</span><span className="text-muted-foreground">· {isWholesaleOrder ? "批发订单" : "零售订单"}</span></div>
+              <Button type="button" variant="ghost" size="sm" disabled={creating} onClick={() => chooseSource("")}>更换类型</Button>
             </div>
-
-            {/* ── 1. Customer + date + notes ── */}
-            <div className="grid grid-cols-1 items-end gap-3 rounded-lg border bg-card p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="new-order-layout grid items-start gap-6 p-4 sm:p-6">
+              <div className="min-w-0 space-y-6">
+                <section aria-label="客户与履约" className="min-w-0">
+                  <div className="mb-4 flex items-center gap-3"><h3 className="text-base font-semibold">客户与履约</h3><span className="text-xs text-muted-foreground">带 * 的项目为必填</span></div>
+                  <div className="grid grid-cols-1 items-start gap-x-4 gap-y-4 sm:grid-cols-2">
               {!platformOrder && (
-                <div className="grid gap-2">
+                <div className="grid min-w-0 gap-2">
                   <div className="flex items-center justify-between gap-2">
                     <Label>客户<span className="text-red-500 ml-0.5">*</span></Label>
                     {customerPermission.canCreate && (
@@ -6635,13 +6607,13 @@ function NewOrderDialog({
                 </div>
               )}
               {platformOrder && (
-                <div className="grid gap-2">
+                <div className="grid min-w-0 gap-2">
                   <Label>{platformOrderNoLabel(source)}<span className="ml-0.5 text-red-500">*</span></Label>
                   <Input
                     value={platformOrderNo}
                     onChange={(event) => setPlatformOrderNo(event.target.value)}
                     placeholder={`请输入${platformOrderNoLabel(source)}`}
-                    autoComplete="off"
+                    autoComplete="off" aria-label={platformOrderNoLabel(source)}
                     className={submitAttempted && !platformOrderNo.trim() ? "border-red-500 focus-visible:ring-red-500" : ""}
                   />
                   {submitAttempted && !platformOrderNo.trim() && (
@@ -6649,10 +6621,10 @@ function NewOrderDialog({
                   )}
                 </div>
               )}
-              <div className="grid gap-2">
+              <div className="grid min-w-0 gap-2">
                 <Label>下单日期</Label>
                 <Input
-                  type="date"
+                  type="date" aria-label="下单日期"
                   value={date}
                   max={today}
                   className={date > today ? "border-red-500 focus-visible:ring-red-500" : ""}
@@ -6662,33 +6634,14 @@ function NewOrderDialog({
                   <p className="text-xs text-red-500 -mt-1">下单日期不能晚于今天</p>
                 )}
               </div>
-              {!pickupOrder && (
-                <div className="grid gap-2">
-                  <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input
-                    type="date"
-                    value={plannedShipDate}
-                    min={date}
-                    required
-                    onChange={(e) => changePlannedShipDate(e.target.value)}
-                    className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
-                  />
-                  {submitAttempted && !plannedShipDate && (
-                    <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
-                  )}
-                  {plannedShipDate && plannedShipDate < date && (
-                    <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
-                  )}
-                </div>
-              )}
-              <div className="grid gap-2">
+              <div className="grid min-w-0 gap-2">
                 <Label>订单负责人<span className="text-red-500 ml-0.5">*</span></Label>
                 <Select
                   value={contactPersonnelId}
                   onValueChange={setContactPersonnelId}
                   disabled={creating}
                 >
-                  <SelectTrigger className={submitAttempted && !selectedContactPersonnel ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                  <SelectTrigger aria-label="订单负责人" className={submitAttempted && !selectedContactPersonnel ? "min-w-0 border-red-500 focus-visible:ring-red-500" : "min-w-0"}>
                     <SelectValue placeholder="请选择订单负责人" />
                   </SelectTrigger>
                   <SelectContent>
@@ -6703,33 +6656,30 @@ function NewOrderDialog({
                 {ownerCandidates.loading && <p role="status" className="text-xs">正在加载可接单人员…</p>}
                 {ownerCandidates.error && <div role="alert" className="text-xs text-destructive">{ownerCandidates.error}<Button type="button" variant="ghost" className="!min-h-[44px]" onClick={ownerCandidates.retry}>重试</Button></div>}
               </div>
-              <div className="grid gap-2">
-                <Label>付款方式<span className="text-red-500 ml-0.5">*</span></Label>
-                <Select
-                  value={paymentMethodId}
-                  onValueChange={setPaymentMethodId}
-                >
-                  <SelectTrigger className={submitAttempted && !paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
-                    <SelectValue placeholder="请选择付款方式" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availablePaymentMethods.map((method) => (
-                      <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-2">
-                <Label>对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
-                <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${submitAttempted && !paymentAccount ? "border-red-500 text-red-500" : "text-foreground"}`}>
-                  {paymentAccount || (paymentMethodId ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
+              {!pickupOrder && (
+                <div className="grid min-w-0 gap-2">
+                  <Label>预计发货日期<span className="text-red-500 ml-0.5">*</span></Label>
+                  <Input
+                    type="date" aria-label="预计发货日期"
+                    value={plannedShipDate}
+                    min={date}
+                    required
+                    onChange={(e) => changePlannedShipDate(e.target.value)}
+                    className={(submitAttempted && !plannedShipDate) || (plannedShipDate && plannedShipDate < date) ? "border-red-500 focus-visible:ring-red-500" : ""}
+                  />
+                  {submitAttempted && !plannedShipDate && (
+                    <p className="text-xs text-red-500 -mt-1">请选择预计发货日期</p>
+                  )}
+                  {plannedShipDate && plannedShipDate < date && (
+                    <p className="text-xs text-red-500 -mt-1">发货日期不能早于下单日期</p>
+                  )}
                 </div>
-              </div>
+              )}
               {isAddressOrderSource(source) && (
-                <div className="grid gap-2 md:col-span-2 xl:col-span-3">
+                <div className="grid min-w-0 gap-2 sm:col-span-2">
                   <Label>本单收货地址</Label>
                   <Input
-                    value={shippingAddress}
+                    aria-label="本单收货地址" value={shippingAddress}
                     onChange={(e) => setShippingAddress(e.target.value)}
                     placeholder={selectedCustomerAddress ? `不填则使用：${selectedCustomerAddress}` : "不填则使用客户默认地址"}
                   />
@@ -6738,30 +6688,21 @@ function NewOrderDialog({
                   </p>
                 </div>
               )}
-              <div className="grid gap-2 md:col-span-2 xl:col-span-4">
-                <Label>备注</Label>
-                <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
-              </div>
-            </div>
-
-            {/* ── 2. Items table ── */}
-            <div className="flex flex-col rounded-lg border bg-card">
-              <div className="flex shrink-0 flex-col gap-1 border-b bg-muted/50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-                <span className="text-sm font-medium">
-                  已添加商品{selectedItems.size > 0 ? `（${selectedItems.size} 条）` : ""}
-                </span>
-                {selectedItems.size > 0 && (
-                  <span className="text-sm text-muted-foreground">
-                    小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)}
-                  </span>
-                )}
+                  </div>
+                </section>
+            <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
+              <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
+                <div className="min-w-0"><h3 className="text-sm font-semibold">商品明细 <span className="ml-1 font-normal text-muted-foreground">{selectedItems.size} 条</span></h3></div>
+                <Button type="button" variant="outline" className="h-9 shrink-0 bg-card" onClick={() => setPickerOpen(true)}><Plus className="size-4" />添加商品</Button>
               </div>
 
               {/* scrollable items list — height capped so the add button is always visible */}
-              <div className="overflow-y-auto" style={{ maxHeight: "22rem" }}>
+              <div className="overflow-auto" style={{ maxHeight: "22rem" }}>
                 {selectedItems.size === 0 ? (
-                  <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-                    暂无商品，点击下方「添加商品」按钮
+                  <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                    <Fish className="size-7 text-muted-foreground" aria-hidden="true" />
+                    <p className="text-sm font-medium">还没有添加商品</p>
+                    <p className="text-xs text-muted-foreground">从库存选择鱼只，再确认每条鱼的成交价。</p>
                   </div>
                 ) : (
                   <>
@@ -6882,26 +6823,40 @@ function NewOrderDialog({
                 )}
               </div>
 
-              {/* Always-visible add button */}
-              <div className="flex shrink-0 flex-col gap-2 rounded-b-lg border-t bg-muted/10 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-                <button
-                  onClick={() => setPickerOpen(true)}
-                  className="flex items-center gap-1.5 text-sm text-sky-600 hover:text-sky-700 font-medium transition-colors"
-                >
-                  <Plus className="size-4" /> 添加商品
-                </button>
-                {selectedItems.size > 0 && (
-                  <span className="text-xs text-muted-foreground">
-                    共 {selectedItems.size} 条 · 小计 ¥{itemsTotal.toFixed(2)} · 最低回厂价 ¥{minimumReturnTotal.toFixed(2)}
-                  </span>
-                )}
-              </div>
             </div>
-
-            {/* ── 3. Fees + settlement ── */}
-            <div className="grid grid-cols-1 gap-4 rounded-lg border bg-card p-3 sm:p-4 lg:grid-cols-2 lg:gap-6">
+<div className="grid min-w-0 gap-2 ">
+                <Label>备注</Label>
+                <Input aria-label="订单备注" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="选填" />
+              </div>
+              </div>
+              <aside aria-label="收款与费用" className="min-w-0 space-y-5 border-t pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+                <section className="space-y-4"><h3 className="text-base font-semibold">收款方式</h3>
+              <div className="grid min-w-0 gap-2">
+                <Label>付款方式<span className="text-red-500 ml-0.5">*</span></Label>
+                <Select
+                  value={paymentMethodId}
+                  onValueChange={setPaymentMethodId}
+                >
+                  <SelectTrigger aria-label="付款方式" className={submitAttempted && !paymentMethodId ? "border-red-500 focus-visible:ring-red-500" : ""}>
+                    <SelectValue placeholder="请选择付款方式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availablePaymentMethods.map((method) => (
+                      <SelectItem key={method.id} value={method.id}>{paymentMethodDisplayLabel(method)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid min-w-0 gap-2">
+                <Label>对应收款账户<span className="text-red-500 ml-0.5">*</span></Label>
+                <div className={`h-10 flex items-center rounded-md border bg-muted/50 px-3 text-sm ${submitAttempted && !paymentAccount ? "border-red-500 text-red-500" : "text-foreground"}`}>
+                  {paymentAccount || (paymentMethodId ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
+                </div>
+              </div>
+                </section>
+                <section className="border-t pt-4">
               <div className="flex flex-col gap-3">
-                <div className="text-xs font-medium text-muted-foreground">费用设置</div>
+                <h3 className="text-sm font-semibold">费用设置</h3>
                 {!pickupOrder && (
                   <div className="grid grid-cols-3 overflow-hidden rounded-md border">
                     {SHIPPING_FEE_MODE_OPTIONS.map((option) => (
@@ -6925,11 +6880,11 @@ function NewOrderDialog({
                     {SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
                   </p>
                 )}
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="grid grid-cols-2 items-start gap-3">
                   {!pickupOrder && shippingFeeMode !== "collect" && (
                     <div className="grid gap-1.5">
                       <Label className="text-xs">预计运费（¥）</Label>
-                      <Input type="number" min={0} step={0.01} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                      <Input type="number" min={0} step={0.01} aria-label="预计运费" value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
                       <p className="text-xs text-muted-foreground">现在未知可留空，发货时必须补充</p>
                     </div>
                   )}
@@ -6940,14 +6895,15 @@ function NewOrderDialog({
                   </div>
                   <div className="grid gap-1.5">
                     <Label className="text-xs">折扣/优惠（¥）</Label>
-                    <Input type="number" min={0} step={0.01} value={discount || ""} onChange={(e) => setDiscount(Number(e.target.value))} placeholder="0"
+                    <Input type="number" min={0} step={0.01} aria-label="折扣优惠" value={discount || ""} onChange={(e) => setDiscount(Number(e.target.value))} placeholder="0"
                       className={`h-8 text-sm${amountDue < 0 || belowMinimumReturn ? " border-red-500 focus-visible:ring-red-500" : ""}`} />
                     {amountDue < 0 && <p className="text-xs text-red-500">折扣导致订单应收为负 ¥{Math.abs(amountDue).toFixed(2)}</p>}
                     {belowMinimumReturn && <p className="text-xs text-red-500">商品折后金额必须高于最低回厂价合计</p>}
                   </div>
                 </div>
               </div>
-              <div className="flex flex-col justify-center gap-2 border-t pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+                </section>
+              <div className="flex flex-col gap-2 border-t pt-4">
                 <div className="text-xs font-medium text-muted-foreground mb-1">应收预览</div>
                 <div className="flex justify-between text-sm"><span className="text-muted-foreground">商品小计</span><span>¥{itemsTotal.toFixed(2)}</span></div>
                 {discount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 折扣</span><span>¥{discount.toFixed(2)}</span></div>}
@@ -6964,21 +6920,21 @@ function NewOrderDialog({
                 {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-semibold text-base border-t pt-2">
                   <span>订单应收</span>
-                  <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-sky-700"}>¥{amountDue.toFixed(2)}</span>
+                  <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-foreground"}>¥{amountDue.toFixed(2)}</span>
                 </div>
               </div>
-            </div>
-
+              </aside>
             </div>
           </div>
           )}
 
-          <DialogFooter className="flex-col border-t bg-background px-4 py-3 sm:flex-row sm:px-6">
-            <Button variant="outline" className="w-full sm:w-auto" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
-            {source && (
-              <Button className="w-full sm:w-auto" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4 mr-1" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>
-            )}
-          </DialogFooter>
+          <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-card px-4 py-3 sm:px-6">
+            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · 应收 </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">五种零售来源与批发独立选择</span>}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <Button type="button" variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
+              {source && <Button type="button" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>}
+            </div>
+          </footer>
         </DialogContent>
       </Dialog>
 

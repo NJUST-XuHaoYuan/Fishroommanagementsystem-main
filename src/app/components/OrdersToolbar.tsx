@@ -99,38 +99,39 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
 
   return (
     <section className="flex min-w-0 flex-col gap-4" aria-label="订单查找与筛选">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">订单管理</h1>
-        <div className="flex flex-wrap items-center gap-2">
-          {props.canClaim && (
-            <Button type="button" variant="outline" onClick={props.onClaim} className="h-10 gap-2 px-3" title="查看并处理待认领收款，不改变订单筛选">
-              <CircleDollarSign className={`size-4 ${props.pendingClaims > 0 ? "text-amber-600" : "text-muted-foreground"}`} aria-hidden="true" />
-              待认领收款
-              {props.pendingClaims > 0 && <span className="font-semibold tabular-nums">{props.pendingClaims}</span>}
-            </Button>
-          )}
-          {props.canCreate && <Button type="button" onClick={props.onCreate} className="h-10 px-4"><Plus className="size-4" aria-hidden="true" />新建订单</Button>}
-        </div>
-      </div>
-
+      <h1 className="sr-only">订单管理</h1>
       <div className="min-w-0">
-        <nav className="relative z-10 -mb-px flex gap-1 px-3 sm:gap-2 sm:px-4" aria-label="订单范围">
-          {([["mine", "我的订单", UserRound], ["all", "全部订单", UsersRound]] as const).map(([value, label, Icon]) => (
-            <button
-              key={value}
-              id={`${scopePanelId}-${value}`}
-              type="button"
-              aria-pressed={props.scope === value}
-              aria-controls={scopePanelId}
-              title={value === "mine" ? "由我负责的订单" : "当前场地内有权限查看的全部订单"}
-              onClick={() => props.onScopeChange(value)}
-              className={`relative flex min-h-12 flex-1 items-center justify-center gap-2 rounded-t-lg border px-4 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:flex-none sm:px-6 sm:text-base ${props.scope === value ? "border-border border-b-card bg-card font-semibold text-foreground before:absolute before:inset-x-4 before:top-0 before:h-0.5 before:rounded-full before:bg-primary" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
-            >
-              <Icon className="size-4" aria-hidden="true" />
-              {label}
-            </button>
-          ))}
-        </nav>
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between lg:gap-3">
+          <nav className="relative z-10 order-2 -mb-px flex gap-1 px-3 sm:gap-2 sm:px-4 lg:order-1" aria-label="订单范围">
+            {([["mine", "我的订单", UserRound], ["all", "全部订单", UsersRound]] as const).map(([value, label, Icon]) => (
+              <button
+                key={value}
+                id={`${scopePanelId}-${value}`}
+                type="button"
+                aria-pressed={props.scope === value}
+                aria-controls={scopePanelId}
+                title={value === "mine" ? "由我负责的订单" : "当前场地内有权限查看的全部订单"}
+                onClick={() => props.onScopeChange(value)}
+                className={`relative flex min-h-12 flex-1 items-center justify-center gap-2 rounded-t-lg border px-4 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:flex-none sm:px-6 sm:text-base ${props.scope === value ? "border-border border-b-card bg-card font-semibold text-foreground before:absolute before:inset-x-4 before:top-0 before:h-0.5 before:rounded-full before:bg-primary" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
+              >
+                <Icon className="size-4" aria-hidden="true" />
+                {label}
+              </button>
+            ))}
+          </nav>
+          {(props.canClaim || props.canCreate) && (
+            <div className="order-1 flex flex-wrap items-center justify-end gap-2 lg:order-2 lg:pb-2" role="group" aria-label="订单操作">
+              {props.canClaim && (
+                <Button type="button" variant="outline" onClick={props.onClaim} className="h-10 gap-2 px-3" title="查看并处理待认领收款，不改变订单筛选">
+                  <CircleDollarSign className={`size-4 ${props.pendingClaims > 0 ? "text-amber-600" : "text-muted-foreground"}`} aria-hidden="true" />
+                  待认领收款
+                  {props.pendingClaims > 0 && <span className="font-semibold tabular-nums">{props.pendingClaims}</span>}
+                </Button>
+              )}
+              {props.canCreate && <Button type="button" onClick={props.onCreate} className="h-10 px-4"><Plus className="size-4" aria-hidden="true" />新建订单</Button>}
+            </div>
+          )}
+        </div>
         <div id={scopePanelId} role="region" aria-labelledby={`${scopePanelId}-${props.scope}`} className="min-w-0 rounded-lg border bg-card px-3 py-3 sm:px-5 sm:py-4">
           <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-b pb-3 sm:mb-4 sm:pb-4" role="group" aria-label="订单状态">
             <span className="text-sm text-muted-foreground">完成状态</span>

@@ -93,3 +93,18 @@ body {
     width: 100%;
   }
 }
+
+/* New order form: keep long owner names inside the form and preserve a single scroll area. */
+.new-order-dialog [data-slot="select-trigger"] {
+  min-width: 0;
+}
+.new-order-dialog [data-slot="select-value"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 1024px) {
+  .new-order-dialog .new-order-layout {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
