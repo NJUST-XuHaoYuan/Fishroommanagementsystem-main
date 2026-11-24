@@ -15,6 +15,11 @@ export function normalizedPositiveShippingFee(value: unknown): number | null {
   return roundedCents / 100;
 }
 
+export function normalizedRecordedShippingFee(value: unknown, allowZero = false): number | null {
+  if (allowZero && value !== "" && value != null && Number(value) === 0) return 0;
+  return normalizedPositiveShippingFee(value);
+}
+
 export function canUseActualShippingFeeApi(
   shipment: { shipMethod?: string },
   shippingFeeMode: string
@@ -44,14 +49,16 @@ export function canApplyActualShippingFeeResponse(
 }
 
 export function actualShippingFeePayload(
-  shipment: { id: string; actualShippingFee?: number },
-  value: unknown
-): { shipmentId: string; actualShippingFee: number; expectedActualShippingFee: number } | null {
-  const actualShippingFee = normalizedPositiveShippingFee(value);
+  shipment: { id: string; actualShippingFee?: number; actualShippingFeeRecordedAt?: string },
+  value: unknown,
+  allowZero = false
+): { shipmentId: string; actualShippingFee: number; expectedActualShippingFee: number; expectedActualShippingFeeRecordedAt?: string } | null {
+  const actualShippingFee = normalizedRecordedShippingFee(value, allowZero);
   if (!shipment.id || actualShippingFee === null) return null;
   return {
     shipmentId: shipment.id,
     actualShippingFee,
     expectedActualShippingFee: roundShippingFee(shipment.actualShippingFee ?? 0) ?? 0,
+    ...(allowZero || shipment.actualShippingFeeRecordedAt ? { expectedActualShippingFeeRecordedAt: shipment.actualShippingFeeRecordedAt || "" } : {}),
   };
 }

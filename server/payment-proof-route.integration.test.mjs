@@ -258,3 +258,30 @@ test("concurrent finance approval commits one payment; current account and owner
   denied(await s.upload());
   denied(await s.detail());
 });
+
+test("new shipping prepayment remains reviewable after cost decrease and freight difference refund preserves goods commission", async t => {
+  const s = await setup(t, state => {
+    Object.assign(state.orders[0], { shippingFeeMode: "prepaid", shippingSettlementTiming: "before_shipping", shippingFee: 50 });
+    state.shipments = [{ id: "freight-shipment", orderId: "proof-order", status: "shipped", shipMethod: "express", itemStockIds: ["proof-fish"], actualShippingFee: 0 }];
+  });
+  ok(await s.submit(1050, { purpose: "order", shippingAmount: 50 }));
+  const claim = pendingClaim(await s.readPersistedState());
+  const fee = await s.request("/api/shipments/actual-shipping-fee", { shipmentId: "freight-shipment", actualShippingFee: 40, expectedActualShippingFee: 0, expectedActualShippingFeeRecordedAt: "" }); ok(fee);
+  ok(await s.review(claim));
+  let state = await s.readPersistedState();
+  assert.equal(state.orders[0].payments[0].shippingAmount, 50);
+  assert.equal(reconcileCommissionLedger(state, [], new Date()).byOrder.get("proof-order").commissionBase, 1000);
+  const detail = await s.request("/api/orders/shipping-settlement?orderId=proof-order"); ok(detail);
+  assert.equal(detail.body.shippingSettlement.toRefund, 10);
+  const uploaded = await s.upload({ image: evidencePng({ width: 12 }) }); ok(uploaded);
+  const refunded = await s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "freight-refund-10", amount: 10,
+    time: "2026-11-18T12:30:00+08:00", paymentMethodId: "pm-wechat", expectedVersion: detail.body.shippingSettlement.version,
+    evidenceIds: [uploaded.body.attachment.id], notes: "合成测试运费退差额" }); ok(refunded);
+  assert.equal(refunded.body.payment.refundCategory, "shipping_fee");
+  assert.equal(refunded.body.shippingSettlement.toRefund, 0);
+  const verify = await s.request("/api/orders/payment", { orderId: "proof-order", action: "verify", paymentId: "freight-refund-10" }, "finance-reviewer"); ok(verify);
+  state = await s.readPersistedState();
+  assert.equal(reconcileCommissionLedger(state, [], new Date()).byOrder.get("proof-order").commissionBase, 1000);
+  denied(await s.request("/api/orders/payment-proof/submit", { orderId: "proof-order", amount: 10, purpose: "shipping_fee", shippingAmount: 10,
+    time: "2026-11-18T12:30:00+08:00", paymentMethodId: "pm-wechat", evidenceIds: [uploaded.body.attachment.id] }));
+});

@@ -145,6 +145,8 @@ type FinanceOrderRow = {
   newCustomerCommissionAmount: number;
   commissionPolicyLabel: string;
   commissionEligible: boolean;
+  commissionReviewRequired?: boolean;
+  commissionReviewMessage?: string;
   items: FinanceOrderItem[];
   payments: FinancePayment[];
 };
@@ -1820,12 +1822,13 @@ function EmptyState({ children }: { children: string }) {
 }
 
 export function OrderCommissionDetails({ order }: {
-  order: Pick<FinanceOrderRow, "commissionEligible" | "commissionPolicyLabel" | "commissionBase" | "personalCommissionAmount" | "newCustomerCommissionAmount">;
+  order: Pick<FinanceOrderRow, "commissionEligible" | "commissionPolicyLabel" | "commissionBase" | "personalCommissionAmount" | "newCustomerCommissionAmount" | "commissionReviewRequired" | "commissionReviewMessage">;
 }) {
   return (
     <section className="border-b px-4 py-4 sm:px-5">
       <h3 className="text-sm font-semibold">订单个人提成 · 累计</h3>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</p>
+      {order.commissionReviewRequired && <p role="status" className="mt-2 text-sm text-amber-700">{order.commissionReviewMessage || "平台退款的商品与运费归属待核对，提成暂未扣减该笔退款。"}</p>}
       {order.commissionEligible ? (
         <>
           <dl className="mt-3 space-y-2 text-sm">
@@ -2390,6 +2393,7 @@ export function FinanceView() {
                           {permission.isAdmin && <td className="px-3 py-2.5 text-right">
                             <div className="whitespace-nowrap font-medium tabular-nums">{order.commissionEligible ? money(order.personalCommissionAmount) : "不参与"}</div>
                             <div className="text-xs text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</div>
+                            {order.commissionReviewRequired && <div className="mt-1 text-xs text-amber-700" title={order.commissionReviewMessage}>平台退款归属待核对</div>}
                           </td>}
                           <td className="px-3 py-2.5 text-muted-foreground">{order.logisticsStatus}</td>
                           <td className="px-3 py-2.5">
@@ -2439,7 +2443,7 @@ export function FinanceView() {
                         <div><div className="text-muted-foreground">订单应收</div><div className="mt-0.5 font-medium">{money(order.receivable)}</div></div>
                         <div><div className="text-muted-foreground">已收</div><div className="mt-0.5 font-medium text-emerald-700">{money(order.received)}</div></div>
                         <div><div className="text-muted-foreground">余额</div><div className="mt-0.5 font-medium">{money(order.balance)}</div></div>
-                        {permission.isAdmin && <div><div className="text-muted-foreground">累计个人提成</div><div className="mt-0.5 font-medium">{order.commissionEligible ? money(order.personalCommissionAmount) : "不参与"}</div></div>}
+                        {permission.isAdmin && <div><div className="text-muted-foreground">累计个人提成</div><div className="mt-0.5 font-medium">{order.commissionEligible ? money(order.personalCommissionAmount) : "不参与"}</div>{order.commissionReviewRequired && <div className="mt-1 text-xs text-amber-700">平台退款归属待核对</div>}</div>}
                       </div>
                       {permission.isAdmin && <p className="mt-2 text-xs text-muted-foreground">{order.commissionPolicyLabel || "提成口径暂不可用"}</p>}
                     </button>

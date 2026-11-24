@@ -18,7 +18,7 @@ export function shipmentHasPendingActualShippingFee(mode = "", shipment = {}) {
   if (!ACTUAL_SHIPPING_FEE_MODES.has(String(mode ?? "").trim())) return false;
   if (String(shipment?.shipMethod ?? "express") === "pickup") return false;
   if (String(shipment?.status ?? "") === "preparing") return false;
-  return Number(shipment?.actualShippingFee ?? 0) <= 0;
+  return Number(shipment?.actualShippingFee ?? 0) <= 0 && !String(shipment?.actualShippingFeeRecordedAt ?? "").trim();
 }
 
 export function shipmentsHavePendingActualShippingFee(mode = "", shipments = []) {

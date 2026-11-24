@@ -28,6 +28,8 @@ export type OrdersToolbarProps = {
   onClearPlannedDates: () => void;
   wholesale: OrderWholesaleFilterValue;
   onWholesaleChange: (value: OrderWholesaleFilterValue) => void;
+  shippingSettlement: string;
+  onShippingSettlementChange: (value: string) => void;
   pendingTrackingOnly: boolean;
   onPendingTrackingChange: (value: boolean) => void;
   onClear: () => void;
@@ -41,6 +43,11 @@ export type OrdersToolbarProps = {
   pendingClaims: number;
   onClaim: () => void;
 };
+
+const SHIPPING_FILTERS = [
+  ["all", "不限"], ["pending_fee", "运费待确定"], ["to_collect", "运费待收"],
+  ["to_refund", "运费待退差额"], ["proof_pending", "运费凭证待核验"], ["settled", "运费已结清"],
+] as const;
 
 function dateRangeLabel(from: string, to: string) {
   if (from && from === to) return from;
@@ -73,7 +80,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
   const hasOrderDates = Boolean(props.dateFrom || props.dateTo);
   const hasPlannedDates = Boolean(props.quickShip || props.plannedFrom || props.plannedTo);
   const customPlannedDates = !props.quickShip && hasPlannedDates;
-  const filterCount = [hasOrderDates, hasPlannedDates, props.wholesale !== "all", props.pendingTrackingOnly].filter(Boolean).length;
+  const filterCount = [hasOrderDates, hasPlannedDates, props.wholesale !== "all", props.pendingTrackingOnly, props.shippingSettlement !== "all"].filter(Boolean).length;
   const hasFilters = filterCount > 0 || props.scope !== "all" || props.status !== "all" || Boolean(props.search.trim());
   const dateFromMax = props.dateTo && props.dateTo < props.today ? props.dateTo : props.today;
 
@@ -180,6 +187,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
           {hasPlannedDates && <FilterChip onRemove={props.onClearPlannedDates}>{`预计发货：${props.quickShip === "today" ? "今天" : props.quickShip === "tomorrow" ? "明天" : dateRangeLabel(props.plannedFrom, props.plannedTo)}`}</FilterChip>}
           {props.wholesale !== "all" && <FilterChip onRemove={() => props.onWholesaleChange("all")}>{props.wholesale === "wholesale" ? "批发订单" : "未标记批发"}</FilterChip>}
           {props.pendingTrackingOnly && <FilterChip onRemove={() => props.onPendingTrackingChange(false)}>已出库待发货</FilterChip>}
+          {props.shippingSettlement !== "all" && <FilterChip onRemove={() => props.onShippingSettlementChange("all")}>{SHIPPING_FILTERS.find(([value]) => value === props.shippingSettlement)?.[1] || "运费待办"}</FilterChip>}
         </div>
         {hasFilters && <Button type="button" variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={props.onClear}>清除全部筛选</Button>}
       </div>
@@ -224,6 +232,14 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
               <div className="flex flex-wrap gap-2" role="group" aria-label="筛选订单批发标记">
                 {([["all", "全部"], ["wholesale", "批发订单"], ["unmarked", "未标记批发"]] as const).map(([value, label]) => <Button key={value} type="button" size="sm" variant={props.wholesale === value ? "default" : "outline"} aria-pressed={props.wholesale === value} onClick={() => props.onWholesaleChange(value)}>{label}</Button>)}
               </div>
+            </fieldset>
+
+            <fieldset className="space-y-3 border-t pt-5">
+              <legend className="pt-5 text-sm font-semibold">运费结算</legend>
+              <div className="flex flex-wrap gap-2" role="group" aria-label="运费结算筛选">
+                {SHIPPING_FILTERS.map(([value, label]) => <Button key={value} type="button" size="sm" variant={props.shippingSettlement === value ? "default" : "outline"} aria-pressed={props.shippingSettlement === value} onClick={() => props.onShippingSettlementChange(value)}>{label}</Button>)}
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">仅筛选使用新运费结算方式的订单。历史订单保留原计费规则。</p>
             </fieldset>
 
             <fieldset className="space-y-3 border-t pt-5">

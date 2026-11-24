@@ -89,3 +89,15 @@ test("builds the dedicated API payload with the current fee as concurrency basel
     }
   );
 });
+
+test("new settlement explicit zero includes the recording revision token without loosening legacy entry", () => {
+  const shipment = { id: "shipment-zero", actualShippingFee: 0 };
+  assert.equal(actualShippingFeePayload(shipment, 0), null);
+  assert.deepEqual(actualShippingFeePayload(shipment, 0, true), {
+    shipmentId: "shipment-zero", actualShippingFee: 0, expectedActualShippingFee: 0, expectedActualShippingFeeRecordedAt: "",
+  });
+  assert.deepEqual(actualShippingFeePayload({ ...shipment, actualShippingFeeRecordedAt: "2026-11-25T10:00:00+08:00" }, 10, true), {
+    shipmentId: "shipment-zero", actualShippingFee: 10, expectedActualShippingFee: 0, expectedActualShippingFeeRecordedAt: "2026-11-25T10:00:00+08:00",
+  });
+  assert.equal(actualShippingFeePayload(shipment, "", true), null);
+});

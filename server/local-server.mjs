@@ -60,6 +60,7 @@ import {
 } from "./payment-statement-utils.mjs";
 import {
   configuredPaymentMethod,
+  configuredPaymentMethods,
   isPaymentVerified,
   normalizePaymentChannel,
   paymentChannelLabel,
@@ -85,8 +86,9 @@ import {
 } from "./shipment-actual-shipping-fee-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
-import { assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
-import { PAYMENT_EVIDENCE_DIRECTORY, isPaymentEvidencePath } from "./payment-evidence.mjs";
+import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
+import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
+import { hasShippingSettlement, shippingSettlementSummary, planShippingRefund, validateShippingReceipt, validateOrderRefundAllocation, isShippingRefund } from "./shipping-settlement.mjs";
 import {
   ensureApprovalNotifications,
   ensureCreditSaleNotifications,
@@ -4988,6 +4990,9 @@ function normalizePaymentRecord(record = {}) {
     ...(type === "refund" ? refundMetadataSnapshot(record) : {}),
     recordedBy: String(record.recordedBy ?? "").trim(),
     ...(record.paymentProofClaimId ? { paymentProofClaimId: String(record.paymentProofClaimId) } : {}),
+    ...(record.shippingAmount != null ? { shippingAmount: normalizeMoney(record.shippingAmount, "Shipping payment amount") } : {}),
+    ...(record.refundCategory === "shipping_fee" ? { refundCategory: "shipping_fee" } : {}),
+    ...(Array.isArray(record.evidenceAttachments) ? { evidenceAttachments: record.evidenceAttachments } : {}),
     verifiedAt: verificationStatus === "verified" ? String(record.verifiedAt ?? "").trim() : "",
     verifiedBy: verificationStatus === "verified" ? String(record.verifiedBy ?? "").trim() : "",
     proof: Array.isArray(record.proof) ? record.proof : [],
@@ -5021,7 +5026,24 @@ function nextOrderNo(state = {}) {
   return `SO-${year}-${String(maxNo + 1).padStart(3, "0")}`;
 }
 
+function shippingSettlementDetail(order = {}, shipments = []) {
+  const related = (Array.isArray(shipments) ? shipments : []).filter(item => String(item?.orderId) === String(order.id));
+  const version = createHash("sha256").update(stableJson({ order, shipments: related })).digest("hex");
+  return { ...shippingSettlementSummary(order, related), version };
+}
+
+const SHIPPING_PAYMENT_METADATA = ["shippingAmount", "refundCategory", "evidenceAttachments"];
+function assertShippingPaymentMetadataUnchanged(before = {}, after = {}, { partial = false } = {}) {
+  for (const key of SHIPPING_PAYMENT_METADATA) {
+    if (partial && !Object.prototype.hasOwnProperty.call(after, key)) continue;
+    if (stableJson(before[key]) !== stableJson(after[key])) {
+      throw httpError(409, "运费款项分配和退款凭证只能通过专用入口登记，不能手工修改", "SHIPPING_PAYMENT_METADATA_IMMUTABLE");
+    }
+  }
+}
+
 function getBillableShippingFeeForOrder(order = {}, shipments = []) {
+  if (hasShippingSettlement(order)) return shippingSettlementSummary(order, shipments).shippingDue;
   const mode = normalizeShippingFeeMode(order?.shippingFeeMode, order?.source);
   if (mode === "collect") return 0;
   const activeShipments = shipments.filter((shipment) =>
@@ -5036,7 +5058,7 @@ function getBillableShippingFeeForOrder(order = {}, shipments = []) {
 
 function calcAmountRefundedForOrder(order = {}) {
   return (Array.isArray(order.payments) ? order.payments : [])
-    .filter((payment) => payment?.type === "refund" && isPaymentVerified(payment))
+    .filter((payment) => payment?.type === "refund" && !isShippingRefund(payment) && isPaymentVerified(payment))
     .reduce((sum, payment) => sum + Number(payment?.amount ?? 0), 0);
 }
 
@@ -5244,8 +5266,13 @@ function financeMatchingOrderProfiles(state = {}) {
     .map((order) => {
       const receivable = order?.status === "cancelled" ? 0 : calcAmountDueForOrder(order, shipments);
       const totals = financePaymentTotals(order);
+      const linkedClaimIds = new Set((order.payments ?? []).map(payment => String(payment.paymentProofClaimId || "")).filter(Boolean));
+      const linkedPaymentIds = new Set((order.payments ?? []).map(payment => String(payment.id || "")).filter(Boolean));
+      const reservedProofs = hasShippingSettlement(order) ? paymentClaims(order).filter(claim => claim.status === "pending" && !linkedClaimIds.has(String(claim.id)) &&
+        !linkedPaymentIds.has(String(claim.paymentId || "")) && !linkedPaymentIds.has(String(claim.matchingPaymentId || "")))
+        .reduce((sum, claim) => sum + Number(claim.amount || 0), 0) : 0;
       const matchingOutstanding = roundFinance(
-        receivable - totals.received + totals.refunded - totals.pendingReceived + totals.pendingRefunded
+        receivable - totals.received + totals.refunded - totals.pendingReceived + totals.pendingRefunded - reservedProofs
       );
       return {
         id: String(order?.id ?? ""),
@@ -5370,6 +5397,10 @@ function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", met
     };
   }
   const payment = statementPaymentRecord(statement, currentOrder, method, actor);
+  if (hasShippingSettlement(currentOrder)) {
+    const allocation = validateShippingReceipt(currentOrder, state.shipments, payment.amount, "order");
+    if (allocation) payment.shippingAmount = allocation.shippingAmount;
+  }
   const nextOrder = {
     ...currentOrder,
     payments: [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), payment],
@@ -6087,9 +6118,30 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
   ) {
     throw new Error("订单已经出库，不能再修改运费方式");
   }
-  const shippingFee = shippingFeeMode === "collect"
-    ? 0
-    : normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
+  const requestedTiming = body.shippingSettlementTiming ?? currentOrder?.shippingSettlementTiming;
+  if (requestedTiming != null && !["before_shipping", "after_shipping"].includes(requestedTiming)) {
+    throw new Error("请选择有效运费结算时间");
+  }
+  if (body.shippingSettlementVersion != null && body.shippingSettlementVersion !== 1) throw new Error("运费结算版本不正确");
+  const settlementVersion = currentOrder
+    ? currentOrder.shippingSettlementVersion === 1 || currentOrder.shippingSettlementTiming ? 1 : undefined
+    : body.shippingSettlementVersion === 1 || requestedTiming ? 1 : undefined;
+  if (currentOrder && !settlementVersion && (requestedTiming || body.shippingSettlementVersion)) {
+    throw new Error("历史订单保留原运费规则，请勿直接切换结算流程");
+  }
+  const shippingSettlementTiming = shippingFeeMode === "prepaid" && !isPickupOrder
+    ? requestedTiming ?? (settlementVersion === 1 ? "after_shipping" : undefined) : undefined;
+  const requestedShippingFee = normalizeMoney(body.shippingFee ?? currentOrder?.shippingFee, "Shipping fee");
+  const shippingFee = shippingFeeMode === "collect" || shippingSettlementTiming === "after_shipping" ? 0 : requestedShippingFee;
+  if (shippingSettlementTiming === "before_shipping" && shippingFee <= 0) throw new Error("先结算运费时，请填写大于 0 的预计运费");
+  if (currentOrder && settlementVersion === 1) {
+    const locked = (currentOrder.payments ?? []).length > 0 || paymentClaims(currentOrder).some(claim => claim.status !== "rejected") ||
+      (state.shipments ?? []).some(shipment => shipment.orderId === currentOrder.id && shipmentBlocksInventory(shipment));
+    if (locked && (shippingSettlementTiming !== currentOrder.shippingSettlementTiming || shippingFeeMode !== normalizeShippingFeeMode(currentOrder.shippingFeeMode, currentOrder.source) ||
+      Math.abs(shippingFee - Number(currentOrder.shippingFee || 0)) > 0.005)) {
+      throw httpError(409, "订单已有收款、付款凭证或出库记录，不能再修改运费承担方式、结算时间或预计运费", "SHIPPING_SETTLEMENT_LOCKED");
+    }
+  }
   const packagingFee = currentOrder
     ? normalizeMoney(currentOrder.packagingFee ?? configuredOrderPackagingFee(state.systemSettings), "Packaging fee")
     : configuredOrderPackagingFee(state.systemSettings);
@@ -6121,6 +6173,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
     ...contact,
     items,
     shippingFeeMode,
+    shippingSettlementTiming,
     shippingFee,
     packagingFee,
     discount,
@@ -6358,6 +6411,7 @@ const ORDER_MUTABLE_FIELD_KEYS = new Set([
   "contactPerson",
   "items",
   "shippingFeeMode",
+  "shippingSettlementTiming",
   "shippingFee",
   "packagingFee",
   "discount",
@@ -6409,6 +6463,7 @@ function orderMutableFieldsComparable(order = {}, state = {}, currentOrder = nul
       };
     }),
     shippingFeeMode: normalizeShippingFeeMode(order.shippingFeeMode, order.source),
+    shippingSettlementTiming: order.shippingSettlementTiming,
     shippingFee: normalizeMoney(order.shippingFee, "Shipping fee"),
     packagingFee: normalizeMoney(order.packagingFee, "Packaging fee"),
     discount: normalizeMoney(order.discount, "Discount"),
@@ -6554,7 +6609,14 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     assertOrderOwnerAssignmentUnchanged(currentOrder, nextOrder);
     assertPaymentClaimsUnchanged(currentOrder, nextOrder);
     assertOrderSalesMetadataUnchanged(currentOrder, nextOrder, { partial: false });
+    if (currentOrder.shippingSettlementTiming !== nextOrder.shippingSettlementTiming) throw httpError(409, "运费结算方式必须通过订单编辑入口修改", "SHIPPING_SETTLEMENT_DEDICATED_REQUIRED");
     const currentPaymentById = new Map((currentOrder.payments ?? []).map(payment => [String(payment.id), payment]));
+    for (const payment of nextOrder.payments ?? []) assertShippingPaymentMetadataUnchanged(currentPaymentById.get(String(payment.id)) || {}, payment);
+    for (const payment of currentOrder.payments ?? []) {
+      if (SHIPPING_PAYMENT_METADATA.some(key => payment[key] != null) && !(nextOrder.payments ?? []).some(item => String(item.id) === String(payment.id))) {
+        throw httpError(409, "运费资金记录不能通过通用保存删除", "SHIPPING_PAYMENT_METADATA_IMMUTABLE");
+      }
+    }
     if ((nextOrder.payments ?? []).some(payment => payment.type === "refund" && currentPaymentById.get(String(payment.id))?.type !== "refund")) {
       throw httpError(409, "新退款必须通过退款或资金记录专用入口登记，不能通过通用保存新增", "ORDER_REFUND_SNAPSHOT_REQUIRED");
     }
@@ -6577,6 +6639,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     validateOrderStatusForPatch(req, currentOrder, nextOrder, nextShipments);
 
     const paymentAction = paymentChangeAction(currentOrder.payments ?? [], nextOrder.payments ?? []);
+    if (paymentAction && hasShippingSettlement(currentOrder)) throw httpError(409, "新运费流程的资金记录必须通过收款凭证、运费退款或财务专用入口登记", "SHIPPING_SETTLEMENT_PAYMENT_DEDICATED_REQUIRED");
     if (paymentAction) {
       requireModulePermissionForAuth(req, "finance", paymentAction);
     }
@@ -6623,7 +6686,8 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
         stock: next.stock,
       });
     }
-    if (actualShippingFeeValuesDiffer(currentShipment.actualShippingFee, nextShipment.actualShippingFee)) {
+    if (actualShippingFeeValuesDiffer(currentShipment.actualShippingFee, nextShipment.actualShippingFee) ||
+        String(currentShipment.actualShippingFeeRecordedAt ?? "") !== String(nextShipment.actualShippingFeeRecordedAt ?? "")) {
       throw new Error("实际运费必须通过补录运费专用接口修改");
     }
     requireOrderPermissionForAuth(req, "update");
@@ -13189,6 +13253,7 @@ async function handleApi(req, res, url) {
         orderNo: nextOrderNo(state),
         createdAt: nowDatetimeInChina(),
         ...orderInput,
+        ...(body.shippingSettlementVersion === 1 || orderInput.shippingSettlementTiming ? { shippingSettlementVersion: 1 } : {}),
         status: "pending",
         payments: [],
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
@@ -13276,6 +13341,7 @@ async function handleApi(req, res, url) {
       const ownerPlan = planOrderOwnerAssignment(state, currentOrder, {
         ...currentOrder,
         ...nextOrderInput,
+        ...(currentOrder.shippingSettlementVersion === 1 || currentOrder.shippingSettlementTiming ? { shippingSettlementVersion: 1 } : {}),
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
       const classifiedOrder = synchronizeUpdatedOrderWholesaleTag(currentOrder, ownerPlan.order, body, req.auth.account);
       let nextOrder = { ...classifiedOrder, salesAmountSnapshot: captureOrderSalesAmount(currentOrder, nowDatetimeInChina()).salesAmountSnapshot };
@@ -13442,6 +13508,10 @@ async function handleApi(req, res, url) {
         notes: String(body.notes ?? "").trim() || "订单负责人登记现金收款",
         proof: [],
       });
+      if (hasShippingSettlement(currentOrder)) {
+        const allocation = validateShippingReceipt(currentOrder, state.shipments, payment.amount, "order");
+        if (allocation) payment.shippingAmount = allocation.shippingAmount;
+      }
       const nextOrder = {
         ...currentOrder,
         payments: [...(Array.isArray(currentOrder.payments) ? currentOrder.payments : []), payment],
@@ -13495,6 +13565,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
       requireModulePermissionForAuth(req, "finance", permissionAction);
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
@@ -13512,6 +13583,7 @@ async function handleApi(req, res, url) {
 
       if (action === "add") {
         assertRefundMetadataUnchanged({}, body.payment ?? {}, { partial: true });
+        assertShippingPaymentMetadataUnchanged({}, body.payment ?? {}, { partial: true });
         const incomingPayment = normalizePaymentRecord({
           ...(body.payment ?? {}),
           verificationStatus: "pending",
@@ -13534,6 +13606,14 @@ async function handleApi(req, res, url) {
         if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
           throw new Error("资金记录已存在，请刷新后重试");
         }
+        if (payment.type === "refund" && hasShippingSettlement(currentOrder)) {
+          const allocation = validateOrderRefundAllocation(currentOrder, payment.amount);
+          if (allocation) payment.shippingAmount = allocation.shippingAmount;
+        }
+        if (payment.type !== "refund" && hasShippingSettlement(currentOrder)) {
+          const allocation = validateShippingReceipt(currentOrder, state.shipments, payment.amount, payment.type === "shipping_fee" ? "shipping_fee" : "order");
+          if (allocation) payment.shippingAmount = allocation.shippingAmount;
+        }
         if (payment.type !== "refund" && paymentClaims(currentOrder).some(claim => claim.status === "approved")) {
           const committed = currentPayments.reduce((sum, item) => sum + (item.type === "refund"
             ? isPaymentVerified(item) ? -Number(item.amount || 0) : 0 : Number(item.amount || 0)), 0);
@@ -13550,6 +13630,8 @@ async function handleApi(req, res, url) {
           throw new Error("资金记录不存在，请刷新后重试");
         }
         assertRefundMetadataUnchanged(currentPayment, body.payment ?? {}, { partial: true });
+        assertShippingPaymentMetadataUnchanged(currentPayment, body.payment ?? {}, { partial: true });
+        if (SHIPPING_PAYMENT_METADATA.some(key => currentPayment[key] != null)) throw httpError(409, "已分配运费的资金记录不能改写，请保留原记录并单独登记差额", "SHIPPING_PAYMENT_METADATA_IMMUTABLE");
         if (currentPayment.refundStage && body.payment?.type && body.payment.type !== currentPayment.type) {
           throw httpError(409, "已登记退款的业务类型不能改写，请保留原退款记录", "ORDER_SALES_SNAPSHOT_IMMUTABLE");
         }
@@ -13591,6 +13673,7 @@ async function handleApi(req, res, url) {
         const paymentId = String(body.paymentId ?? body.payment?.id ?? "");
         const deletingPayment = currentPayments.find((item) => String(item?.id ?? "") === paymentId);
         if (!deletingPayment) throw new Error("资金记录不存在，请刷新后重试");
+        if (SHIPPING_PAYMENT_METADATA.some(key => deletingPayment[key] != null)) throw httpError(409, "已分配运费的资金记录不能删除，请保留原记录并单独登记差额", "SHIPPING_PAYMENT_METADATA_IMMUTABLE");
         if (deletingPayment?.recordSource === "statement" || deletingPayment?.statementId) {
           throw new Error("账单导入的资金记录不能直接删除，请使用解除流水关联");
         }
@@ -13663,6 +13746,109 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/shipping-settlement" && req.method === "GET") {
+    try {
+      const { rows } = await pool.query("SELECT data FROM app_state WHERE id = $1", [stateId]);
+      const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      if (!["orders", "finance"].some(module => ["create", "update", "delete"].some(action => hasModulePermission(req.auth.account, module, action)))) {
+        throw httpError(403, "当前账号没有订单或财务模块的操作权限", "SHIPPING_SETTLEMENT_FORBIDDEN");
+      }
+      const { order } = resolveAuthorizedLockedOrderTarget(req, state, url.searchParams.get("orderId"));
+      const canManageProof = canSubmitPaymentProof(state, order, req.auth.account) && hasModulePermission(req.auth.account, "orders", "update");
+      const canReadProof = canManageProof || hasModulePermission(req.auth.account, "finance", "update");
+      sendJson(req, res, 200, {
+        ok: true, orderId: order.id,
+        shippingSettlement: shippingSettlementDetail(order, state.shipments),
+        canRefund: canManageProof && hasShippingSettlement(order) && order.status !== "cancelled",
+        paymentMethods: canManageProof ? configuredPaymentMethods(state.systemSettings).filter(method => method.channel === order.paymentChannel) : [],
+        refunds: (order.payments ?? []).filter(isShippingRefund).map(payment => canReadProof ? payment : { ...payment, proof: [], evidenceAttachments: [] }),
+      });
+    } catch (error) {
+      sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/orders/shipping-refund" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const allowed = new Set(["orderId", "id", "expectedVersion", "amount", "time", "paymentMethodId", "notes", "evidenceIds"]);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some(key => !allowed.has(key))) {
+        throw httpError(400, "运费退款请求格式不正确", "SHIPPING_REFUND_INVALID_REQUEST");
+      }
+      if (typeof body.time === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(body.time)) body.time += "+08:00";
+      const paymentId = String(body.id ?? "").trim();
+      if (!/^[A-Za-z0-9_-]{8,100}$/.test(paymentId)) throw httpError(400, "缺少有效退款流水编号，请重新操作", "SHIPPING_REFUND_ID_REQUIRED");
+      await client.query("BEGIN");
+      const state = (await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId])).rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "orders", "update");
+      const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      if (!canSubmitPaymentProof(state, order, req.auth.account)) throw httpError(403, "仅当前订单负责人或管理员可以登记运费差额退款", "SHIPPING_REFUND_OWNER_REQUIRED");
+      const allPayments = orders.flatMap(item => (item.payments ?? []).map(payment => ({ orderId: item.id, payment })));
+      const duplicate = allPayments.filter(item => String(item.payment.id) === paymentId);
+      if (duplicate.length) {
+        const existing = duplicate[0].payment;
+        if (duplicate.length !== 1 || duplicate[0].orderId !== order.id || !isShippingRefund(existing) ||
+            Number(existing.amount) !== Number(body.amount) || String(existing.time) !== String(body.time) ||
+            String(existing.notes ?? "") !== String(body.notes ?? "").trim().slice(0, 1000) ||
+            String(existing.paymentMethodId ?? "") !== String(body.paymentMethodId ?? "") ||
+            stableJson((existing.evidenceAttachments ?? []).map(item => item.id).sort()) !== stableJson([...(body.evidenceIds ?? [])].sort())) {
+          throw httpError(409, "退款流水编号已存在且内容不同，请刷新后核对", "SHIPPING_REFUND_ID_CONFLICT");
+        }
+        await client.query("COMMIT");
+        sendJson(req, res, 200, { ok: true, order, payment: existing, shippingSettlement: shippingSettlementDetail(order, state.shipments), idempotent: true });
+        return;
+      }
+      const summary = shippingSettlementDetail(order, state.shipments);
+      if (!body.expectedVersion || body.expectedVersion !== summary.version) throw httpError(409, "运费、收款或退款记录已变化，请刷新核对后重试", "SHIPPING_SETTLEMENT_CONFLICT");
+      if (!Array.isArray(body.evidenceIds) || body.evidenceIds.length === 0) throw httpError(400, "请上传实际退还运费的图片凭证", "SHIPPING_REFUND_PROOF_REQUIRED");
+      const evidence = resolveShippingRefundEvidence(state.paymentEvidenceAttachments, body.evidenceIds, order, req.auth.account);
+      for (const attachment of evidence) {
+        if ((attachment.boundClaimIds ?? []).length) throw httpError(409, "该凭证已用于其他收退款，请上传本次退款凭证", "SHIPPING_REFUND_PROOF_USED");
+        let handle;
+        try {
+          handle = await open(paymentEvidencePath(uploadDir, attachment.id), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          const info = await handle.stat();
+          if (!info.isFile() || info.size > PAYMENT_EVIDENCE_MAX_BYTES * 2) throw new Error("invalid evidence");
+          decryptPaymentEvidence(await handle.readFile(), attachment, personnelDataKeyring);
+        } catch {
+          throw httpError(409, "退款凭证暂不可用，请重新上传后重试", "SHIPPING_REFUND_PROOF_UNAVAILABLE");
+        } finally { await handle?.close(); }
+      }
+      const method = resolvePaymentMethodSnapshot(state.systemSettings, { paymentMethodId: body.paymentMethodId }, {
+        paymentMethodId: order.paymentMethodId, paymentMethodName: order.paymentMethodName, channel: order.paymentChannel, account: order.paymentAccount,
+      });
+      if (method.channel !== order.paymentChannel) throw httpError(400, "请使用订单对应渠道登记运费退款", "SHIPPING_REFUND_CHANNEL_INVALID");
+      const now = nowDatetimeInChina();
+      if (!body.time || new Date(body.time).getTime() > Date.now() + 60_000) throw httpError(400, "退款时间不能为空或晚于当前时间", "SHIPPING_REFUND_TIME");
+      const planned = planShippingRefund(order, state.shipments, body, {
+        now, account: req.auth.account, createId: () => paymentId,
+        methodSnapshot: { ...method, refundMethod: refundMethodForChannel(method.channel) },
+      });
+      planned.payment.evidenceAttachments = evidence.map(paymentEvidenceMetadata);
+      planned.payment.proof = [];
+      const nextOrder = planned.order;
+      const operationLog = createOperationLog(req, "订单管理", "退运费差额", `订单「${order.orderNo || order.id}」登记实际退运费 ¥${planned.payment.amount.toFixed(2)}，待财务核验；不计商品退款或鱼只报损`);
+      const boundIds = new Set(evidence.map(item => item.id));
+      const nextState = { ...state,
+        orders: orders.map(item => item.id === order.id ? nextOrder : item),
+        paymentEvidenceAttachments: (state.paymentEvidenceAttachments ?? []).map(item => boundIds.has(item.id) ? { ...item, boundClaimIds: [`shipping-refund:${paymentId}`] } : item),
+        operationLogs: pushOperationLog(state.operationLogs, operationLog),
+      };
+      await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(await commissionStateForMutation(client, state, nextState))]);
+      await client.query("COMMIT");
+      sendJson(req, res, 200, { ok: true, order: nextOrder, orders: siteVisibilityFilteredState(nextState, req.auth.account).orders,
+        payment: planned.payment, operationLog, shippingSettlement: shippingSettlementDetail(nextOrder, state.shipments) });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error.statusCode || 400, { ok: false, code: error.code, error: error.message || "运费退款登记失败" });
+    } finally { client.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/orders/refund" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -13687,6 +13873,7 @@ async function handleApi(req, res, url) {
       if (!account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
       const amount = normalizeMoney(body.amount, "Refund amount");
       if (amount <= 0) throw new Error("退款金额必须大于 0");
+      const refundAllocation = validateOrderRefundAllocation(currentOrder, amount);
       const payment = normalizePaymentRecord({
         id: body.id || uid("pay"),
         time: body.time || nowDatetimeInChina(),
@@ -13704,6 +13891,7 @@ async function handleApi(req, res, url) {
         proof: body.proof,
         notes: body.notes,
         ...refundMetadataForOrder(currentOrder, state.shipments, { time: body.time || nowDatetimeInChina() }),
+        ...(refundAllocation ? { shippingAmount: refundAllocation.shippingAmount } : {}),
       });
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
@@ -13777,6 +13965,7 @@ async function handleApi(req, res, url) {
 
       let refundRecord = null;
       if (body.refund && typeof body.refund === "object") {
+        assertShippingPaymentMetadataUnchanged({}, body.refund, { partial: true });
         const channel = normalizePaymentChannel(currentOrder.paymentChannel);
         const account = String(currentOrder.paymentAccount ?? "").trim() ||
           configuredPaymentMethod(state.systemSettings, currentOrder.paymentMethodId || channel)?.account || "";
@@ -13798,6 +13987,10 @@ async function handleApi(req, res, url) {
         });
         if (refundRecord.type !== "refund") throw new Error("退商品只能写入退款记录");
         if (refundRecord.amount <= 0.005) refundRecord = null;
+        else {
+          const allocation = validateOrderRefundAllocation(currentOrder, refundRecord.amount);
+          if (allocation) refundRecord.shippingAmount = allocation.shippingAmount;
+        }
       }
       if (refundRecord) {
         requireOrderPermissionForAuth(req, "create");
@@ -14224,6 +14417,7 @@ async function handleApi(req, res, url) {
         throw new ShipmentActualShippingFeeError("请求 JSON 格式不正确");
       }
       const result = await updateLockedAppState(client, stateId, async (state) => {
+        refreshLockedOrderMutationAuth(req, state);
         const planned = planActualShippingFeeUpdate({
           state,
           request: body,

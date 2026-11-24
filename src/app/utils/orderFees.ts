@@ -1,4 +1,5 @@
 import type { Order, Shipment, ShippingFeeMode } from "../store";
+import { shippingSettlementSummary } from "../../../server/shipping-settlement.mjs";
 
 export const SHIPPING_FEE_MODE_OPTIONS: Array<{ value: ShippingFeeMode; label: string; hint: string }> = [
   { value: "collect", label: "到付", hint: "客户向承运方支付，不计订单应收" },
@@ -24,7 +25,7 @@ export function shipmentCountsForFees(shipment: Shipment): boolean {
 export function shipmentHasPendingActualShippingFee(order: Order, shipment: Shipment): boolean {
   const mode = orderShippingFeeMode(order);
   if (mode === "collect" || shipment.shipMethod === "pickup" || !shipmentCountsForFees(shipment)) return false;
-  return Number(shipment.actualShippingFee ?? 0) <= 0;
+  return Number(shipment.actualShippingFee ?? 0) <= 0 && !((order.shippingSettlementTiming || order.shippingSettlementVersion === 1) && shipment.actualShippingFeeRecordedAt);
 }
 
 export function orderHasPendingActualShippingFee(order: Order, shipments: Shipment[]): boolean {
@@ -34,6 +35,7 @@ export function orderHasPendingActualShippingFee(order: Order, shipments: Shipme
 }
 
 export function getBillableShippingFee(order: Order, shipments: Shipment[]): number {
+  if (order.shippingSettlementTiming && orderShippingFeeMode(order) === "prepaid") return shippingSettlementSummary(order, shipments).shippingDue;
   if (orderShippingFeeMode(order) === "collect") return 0;
   const active = shipments.filter((shipment) => shipment.orderId === order.id && shipmentCountsForFees(shipment));
   if (active.length === 0) return Number(order.shippingFee ?? 0);
@@ -44,6 +46,7 @@ export function getBillableShippingFee(order: Order, shipments: Shipment[]): num
 }
 
 export function hasActualShippingFee(order: Order, shipments: Shipment[]): boolean {
+  if (order.shippingSettlementTiming && orderShippingFeeMode(order) === "prepaid") return shippingSettlementSummary(order, shipments).finalized;
   if (orderShippingFeeMode(order) === "collect") return false;
   const active = shipments.filter((shipment) => shipment.orderId === order.id && shipmentCountsForFees(shipment));
   return active.length > 0 && !active.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment));

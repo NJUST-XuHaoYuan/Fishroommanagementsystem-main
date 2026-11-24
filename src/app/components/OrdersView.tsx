@@ -4,11 +4,14 @@ import {
   Customer, CustomerType, MaintenanceSaveResult, Personnel, ShipmentStatus, StockTankTransfer, StockTransferListItem, Store, TankGroup, uid,
   ORDER_SOURCE_OPTIONS, configuredPaymentMethod, configuredPaymentMethods,
   isPersonnelAccountEnabled, isPersonnelResigned, PaymentChannel, PaymentMethodSetting, isPaymentVerified, paymentChannelLabel,
-  configuredOrderPackagingFee, ShippingFeeMode,
+  configuredOrderPackagingFee, ShippingFeeMode, ShippingSettlementTiming,
 } from "../store";
 import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
+import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
+import { OrderShippingSettlementPanel } from "./OrderShippingSettlementPanel";
+import { getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel } from "../utils/shippingSettlement";
 import { orderPaymentProofSummary } from "../utils/orderPaymentProof";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -109,6 +112,7 @@ import {
   canEditShipmentActualShippingFee,
   MAX_ACTUAL_SHIPPING_FEE,
   normalizedPositiveShippingFee,
+  normalizedRecordedShippingFee,
 } from "../utils/shipmentFee";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -408,7 +412,7 @@ const ORDER_STATUS_TAG_STYLE = {
 function getOrderPaymentStatusTag(order: Order, shipments: Shipment[] = []): OrderStatusTag | null {
   if (order.status === "cancelled") return null;
   const summary = orderPaymentProofSummary(order, calcAmountDue(order, shipments));
-  if (summary.amountDue - summary.verifiedAmount <= 0.005) return { label: "已核销", className: ORDER_STATUS_TAG_STYLE.paymentVerified };
+  if (summary.amountDue - summary.verifiedAmount <= 0.005) return { label: order.shippingSettlementTiming && !getShippingSettlementSummary(order, shipments).finalized ? "已登记款已核验" : "已核销", className: ORDER_STATUS_TAG_STYLE.paymentVerified };
   const dispatched = shipments.some(shipment => shipment.orderId === order.id && shipment.status !== "preparing");
   const pending = summary.pendingProofAmount > 0;
   const rejected = order.paymentClaims?.some(claim => claim.status === "rejected");
@@ -418,7 +422,12 @@ function getOrderPaymentStatusTag(order: Order, shipments: Shipment[] = []): Ord
 
 function getAllOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
   const paymentTag = getOrderPaymentStatusTag(order, shipments);
-  return paymentTag ? [...getOrderStatusTags(order, shipments), paymentTag] : getOrderStatusTags(order, shipments);
+  const tags = paymentTag ? [...getOrderStatusTags(order, shipments), paymentTag] : getOrderStatusTags(order, shipments);
+  const freight = getShippingSettlementSummary(order, shipments);
+  if (freight.enabled && order.status !== "cancelled") {
+    tags.push({ label: shippingSettlementStatusLabel(freight.status), className: freight.status === "settled" ? ORDER_STATUS_TAG_STYLE.paymentVerified : ORDER_STATUS_TAG_STYLE.paymentPending });
+  }
+  return tags;
 }
 
 function getOrderStatusTags(order: Order, shipments: Shipment[] = []): OrderStatusTag[] {
@@ -2141,9 +2150,10 @@ function ReturnItemDialog({
 // ─── Shipment Status Actions ─────────────────────────────────────────────────
 
 export function ShipmentActualShippingFeeFields({
-  mode, pending, value, error, saving, disabled, saved, onChange, onSave,
+  mode, pending, value, error, saving, disabled, saved, onChange, onSave, allowZero = false,
 }: {
   mode: ShippingFeeMode;
+  allowZero?: boolean;
   pending: boolean;
   value: number;
   error: string;
@@ -2153,6 +2163,8 @@ export function ShipmentActualShippingFeeFields({
   onChange: (value: number) => void;
   onSave: () => void;
 }) {
+  const [zeroConfirmed, setZeroConfirmed] = useState(false);
+  useEffect(() => setZeroConfirmed(false), [value, pending]);
   return (
     <div className={`grid gap-2 rounded-lg border p-3 ${pending ? "border-amber-200 bg-amber-50/70" : "bg-muted/20"}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2163,19 +2175,20 @@ export function ShipmentActualShippingFeeFields({
         <Input
           id="shipment-actual-shipping-fee"
           className="min-h-11 min-w-0"
-          type="number" inputMode="decimal" min={0.01} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
-          value={value || ""}
+          type="number" inputMode="decimal" min={allowZero ? 0 : 0.01} max={MAX_ACTUAL_SHIPPING_FEE} step={0.01}
+          value={value === 0 && !pending && allowZero ? "0" : value || ""}
           placeholder="费用确定后填写"
           disabled={disabled}
           aria-invalid={Boolean(error)}
           aria-describedby={`shipment-actual-shipping-fee-hint${error ? " shipment-actual-shipping-fee-error" : ""}`}
           onChange={(event) => onChange(Number(event.target.value))}
         />
-        <Button type="button" variant="outline" className="min-h-11 shrink-0" onClick={onSave} disabled={disabled}>
+        <Button type="button" variant="outline" className="min-h-11 shrink-0" onClick={onSave} disabled={disabled || (allowZero && value === 0 && !zeroConfirmed)}>
           {saving && <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
           {saving ? "保存运费中…" : pending ? "保存实际运费" : "更新实际运费"}
         </Button>
       </div>
+      {allowZero && value === 0 && <label className="flex items-center gap-2 text-xs"><Checkbox checked={zeroConfirmed} onCheckedChange={(checked) => setZeroConfirmed(checked === true)} disabled={disabled} />已确认实际运费为 0 元（免运费），不是尚未出账</label>}
       {error && <p id="shipment-actual-shipping-fee-error" role="alert" className="text-xs text-red-600">{error}</p>}
       {saved && <p role="status" className="text-xs text-emerald-700">实际运费已保存</p>}
       <p id="shipment-actual-shipping-fee-hint" className="text-xs leading-relaxed text-muted-foreground">
@@ -2228,9 +2241,9 @@ function ShipmentActionDialog({
   const saveActualShippingFee = async () => {
     if (shippingFeeSaveLock.current || saving || !editableOrder) return false;
     setActualShippingFeeSaved(false);
-    const normalizedFee = normalizedPositiveShippingFee(actualShippingFee);
+    const normalizedFee = normalizedRecordedShippingFee(actualShippingFee, !!(order?.shippingSettlementTiming || order?.shippingSettlementVersion === 1));
     if (normalizedFee === null) {
-      const message = "实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数";
+      const message = `实际运费必须在 ${(order?.shippingSettlementTiming || order?.shippingSettlementVersion === 1) ? "0" : "0.01"} 至 100000 元之间，且最多保留两位小数`;
       setActualShippingFeeError(message);
       toast.error(message);
       return false;
@@ -2265,7 +2278,7 @@ function ShipmentActionDialog({
 
   const actualShippingFeeFields = canEditShipmentActualShippingFee(shipment, shippingFeeMode, order?.status) ? (
     <ShipmentActualShippingFeeFields
-      mode={shippingFeeMode} pending={shippingFeePending} value={actualShippingFee}
+      mode={shippingFeeMode} pending={shippingFeePending} value={actualShippingFee} allowZero={!!(order?.shippingSettlementTiming || order?.shippingSettlementVersion === 1)}
       error={actualShippingFeeError} saving={savingShippingFee} disabled={actionLocked}
       saved={actualShippingFeeSaved}
       onChange={(value) => { setActualShippingFee(value); setActualShippingFeeError(""); setActualShippingFeeSaved(false); }}
@@ -4311,7 +4324,7 @@ function ItemsWithShipments({
 
 type EditForm = {
   customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPersonnelId: string; contactPerson: string; notes: string;
-  shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
+  shippingFeeMode: ShippingFeeMode; shippingSettlementTiming?: ShippingSettlementTiming; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
   expectedSource: string;
   expectedIsWholesaleOrder: boolean;
@@ -4347,6 +4360,8 @@ function OrderDetailDialog({
   const getAccessibleStockItem = (id: string) => accessibleStock.find((item) => item.id === id);
 
   const [editMode, setEditMode] = useState(false);
+  const [shippingPaymentRequest, setShippingPaymentRequest] = useState<{ key: number; purpose: "order" | "shipping_fee"; orderId: string }>();
+  useEffect(() => { if (!open) setShippingPaymentRequest(undefined); }, [open]);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const editSaveLock = useRef(false);
@@ -4495,7 +4510,7 @@ function OrderDetailDialog({
       expectedOwnerAssignmentRequestId: String(order.ownerAssignment?.requestId || ""),
       ownerSelectionChanged: false,
       notes: order.notes ?? "",
-      shippingFeeMode: orderShippingFeeMode(order), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
+      shippingFeeMode: orderShippingFeeMode(order), shippingSettlementTiming: order.shippingSettlementTiming || (order.shippingSettlementVersion === 1 ? "after_shipping" : undefined), shippingFee: order.shippingFee ?? 0, packagingFee: order.packagingFee ?? 0, discount: order.discount ?? 0,
       items: order.items.map((i) => ({
         stockItemId: i.stockItemId,
         productId: i.productId,
@@ -4572,7 +4587,8 @@ function OrderDetailDialog({
         expectedOwnerAssignmentRequestId: editForm.expectedOwnerAssignmentRequestId,
         notes: editForm.notes,
         shippingFeeMode: isPickupOrderSource(editForm.source) ? "collect" : editForm.shippingFeeMode,
-        shippingFee: isPickupOrderSource(editForm.source) ? 0 : editForm.shippingFee,
+        shippingFee: isPickupOrderSource(editForm.source) || (editForm.shippingFeeMode === "prepaid" && editForm.shippingSettlementTiming === "after_shipping") ? 0 : editForm.shippingFee,
+        ...(!isPickupOrderSource(editForm.source) && editForm.shippingFeeMode === "prepaid" && editForm.shippingSettlementTiming ? { shippingSettlementTiming: editForm.shippingSettlementTiming } : {}),
         discount: editForm.discount,
         items: editForm.items.map((item) => ({
           ...item,
@@ -4691,18 +4707,26 @@ function OrderDetailDialog({
   }));
   const displayItemsTotal = displayItemsWithMinimumReturn.reduce((s, i) => s + i.price, 0);
   const displayShippingMode = editMode && editForm ? editForm.shippingFeeMode : orderShippingFeeMode(order);
-  const displayShipping  = displayShippingMode === "collect" ? 0 : (editMode && editForm ? editForm.shippingFee : order?.shippingFee) ?? 0;
+  const displayTiming = editMode && editForm ? editForm.shippingSettlementTiming : order?.shippingSettlementTiming;
+  const displayDeferred = displayShippingMode === "prepaid" && displayTiming === "after_shipping";
+  const displayShipping = displayShippingMode === "collect" || displayDeferred ? 0 : (editMode && editForm ? editForm.shippingFee : order?.shippingFee) ?? 0;
   const displayPackaging = (editMode && editForm ? editForm.packagingFee : order?.packagingFee) ?? 0;
   const displayDiscount  = (editMode && editForm ? editForm.discount     : order?.discount)     ?? 0;
   const displayGoodsNetTotal = orderGoodsNetTotal(displayItemsTotal, displayDiscount);
   const displayMinimumReturnTotal = orderMinimumReturnTotal(displayItemsWithMinimumReturn);
   const displayBelowMinimumReturn = displayItemsWithMinimumReturn.length > 0 && displayGoodsNetTotal <= displayMinimumReturnTotal;
-  const draftCustomerShipping = displayShippingMode === "prepaid" ? displayShipping : 0;
+  const draftFreightSummary = order && displayTiming ? getShippingSettlementSummary({
+    ...order, items: displayItems, discount: displayDiscount, packagingFee: displayPackaging,
+    shippingFeeMode: displayShippingMode, shippingSettlementTiming: displayTiming,
+    shippingFee: editMode && editForm ? editForm.shippingFee : order.shippingFee,
+  }, state.shipments) : null;
+  const draftCustomerShipping = displayShippingMode === "prepaid" ? (draftFreightSummary?.shippingDue ?? displayShipping) : 0;
   const draftShippingDiscount = displayShippingMode === "free" ? displayShipping : 0;
   const draftAmountDue = displayItemsTotal + draftCustomerShipping + displayPackaging - displayDiscount;
 
   const orderShipments = state.shipments.filter((s) => s.orderId === order?.id);
-  const shippingModeLocked = orderShipments.some(countsAsBillableShipment);
+  const shippingTermsHaveReceipts = !!(order?.shippingSettlementTiming || order?.shippingSettlementVersion === 1) && ((order.payments ?? []).length > 0 || (order.paymentClaims ?? []).some((claim) => claim.status !== "rejected"));
+  const shippingModeLocked = orderShipments.some(countsAsBillableShipment) || shippingTermsHaveReceipts;
   const damageRefundOrder = !!order && isDamageRefundOrder(order, state.shipments);
   const amountDue = order ? calcAmountDue(order, state.shipments) : 0;
   const damageRefundAdjustment = order ? calcDamageRefundAdjustment(order, state.shipments) : 0;
@@ -4844,8 +4868,8 @@ function OrderDetailDialog({
     if (!canEditShipmentActualShippingFee(shipment, orderShippingFeeMode(order), order.status)) {
       throw new Error("当前订单或发货状态不允许修改实际运费");
     }
-    const payload = actualShippingFeePayload(shipment, actualShippingFee);
-    if (!payload) throw new Error("实际运费必须在 0.01 至 100000 元之间，且最多保留两位小数");
+    const payload = actualShippingFeePayload(shipment, actualShippingFee, !!(order.shippingSettlementTiming || order.shippingSettlementVersion === 1));
+    if (!payload) throw new Error(`实际运费必须在 ${(order.shippingSettlementTiming || order.shippingSettlementVersion === 1) ? "0" : "0.01"} 至 100000 元之间，且最多保留两位小数`);
     if (!confirmWrite("修改", `将发货单实际运费更新为 ¥${payload.actualShippingFee.toFixed(2)}。`)) return false;
 
     const requestSequence = ++shipmentFeeRequestSequence.current;
@@ -5233,7 +5257,11 @@ function OrderDetailDialog({
               </div>
             )}
 
-            {!editMode && <OrderPaymentProofPanel key={`proof:${order.id}:${state.user?.username}`} orderId={order.id}
+            {!editMode && <OrderShippingSettlementPanel key={`shipping-settlement:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} canUpdate={permission.canUpdate}
+              onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
+              onRecordShippingPayment={() => setShippingPaymentRequest({ key: Date.now(), purpose: "shipping_fee", orderId: order.id })}
+              onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => setShipmentAction(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!) : undefined} />}
+            {!editMode && <OrderPaymentProofPanel key={`proof:${order.id}:${state.user?.username}`} orderId={order.id} openRequest={shippingPaymentRequest?.orderId === order.id ? shippingPaymentRequest : undefined}
               onApplied={(result, session) => applyOrderApiResult(setState, result, { session })} />}
 
             {refundRecords.length > 0 && (
@@ -5243,7 +5271,7 @@ function OrderDetailDialog({
                   {[...refundRecords].sort((left, right) => String(right.time).localeCompare(String(left.time))).map((payment) => (
                     <div key={payment.id} className="flex flex-col gap-1 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <span className="font-medium text-rose-700">¥{payment.amount.toFixed(2)}</span>
+                        <span className="font-medium text-rose-700">{payment.refundCategory === "shipping_fee" ? "运费退差额 " : ""}¥{payment.amount.toFixed(2)}</span>
                         <span>{payment.paymentMethodName || (payment.channel ? paymentChannelLabel(payment.channel) : "渠道未登记")}</span>
                         <span className="text-xs text-muted-foreground">{payment.refundMethod === "platform" ? "平台冲减" : "账户出账"}</span>
                         <span className="text-xs text-muted-foreground">{payment.time.replace("T", " ").slice(0, 16)}</span>
@@ -5398,13 +5426,16 @@ function OrderDetailDialog({
                   </div>
                 )}
                 {shippingModeLocked && !isPickupOrderSource(editForm.source) && (
-                  <p className="mb-3 text-xs text-muted-foreground">订单已经出库，运费方式不可再修改。</p>
+                  <p className="mb-3 text-xs text-muted-foreground">已有出库或收款记录，运费约定不可再修改；实际运费仍可在发货记录中补录。</p>
+                )}
+                {!isPickupOrderSource(editForm.source) && editForm.shippingFeeMode === "prepaid" && editForm.shippingSettlementTiming && (
+                  <div className="mb-4 max-w-md"><ShippingSettlementChoice value={editForm.shippingSettlementTiming} disabled={shippingModeLocked} onChange={(value) => setEditForm((form) => form ? { ...form, shippingSettlementTiming: value, shippingFee: value === "after_shipping" ? 0 : form.shippingFee } : form)} /></div>
                 )}
                 <div className="grid gap-3 mb-4 sm:grid-cols-3">
-                  {!isPickupOrderSource(editForm.source) && editForm.shippingFeeMode !== "collect" && (
+                  {!isPickupOrderSource(editForm.source) && editForm.shippingFeeMode !== "collect" && !displayDeferred && (
                     <div className="grid gap-1.5">
                       <Label className="text-xs">预计运费（¥）</Label>
-                      <Input type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
+                      <Input disabled={!!(order.shippingSettlementTiming || order.shippingSettlementVersion === 1) && shippingModeLocked} type="number" min={0} step={0.01} value={editForm.shippingFee || ""} placeholder="0" className="h-8 text-sm"
                         onChange={(e) => setEditForm((f) => f ? { ...f, shippingFee: Number(e.target.value) } : f)} />
                       <p className="text-xs text-muted-foreground">这里只填写预估金额。实际运费在出库后独立补录；不影响签收，完成订单前需补齐。</p>
                     </div>
@@ -5433,7 +5464,8 @@ function OrderDetailDialog({
                     </div>
                   )}
                   {!isPickupOrderSource(editForm.source) && <div className="flex justify-between"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(displayShippingMode)}</span></div>}
-                  {displayShippingMode !== "collect" && displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 预计运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
+                  {draftFreightSummary?.enabled && <div className="flex justify-between"><span className="text-muted-foreground">{draftFreightSummary.finalized ? "实际运费" : displayDeferred ? "已确定运费" : "预计运费"}</span><span>{displayDeferred && !draftFreightSummary.finalized && draftCustomerShipping === 0 ? "待确定 · 暂不计入" : `¥${draftCustomerShipping.toFixed(2)}`}</span></div>}
+                  {!draftFreightSummary?.enabled && displayShippingMode !== "collect" && displayShipping > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 预计运费</span><span>¥{displayShipping.toFixed(2)}</span></div>}
                   {draftShippingDiscount > 0 && <div className="flex justify-between text-orange-600"><span>− 包邮折扣</span><span>¥{draftShippingDiscount.toFixed(2)}</span></div>}
                   {displayPackaging > 0 && <div className="flex justify-between"><span className="text-muted-foreground">+ 包装费</span><span>¥{displayPackaging.toFixed(2)}</span></div>}
                   <div className="flex justify-between font-semibold text-base border-t pt-2 mt-1">
@@ -5453,7 +5485,7 @@ function OrderDetailDialog({
                   <div className="flex justify-between"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(displayShippingMode)}</span></div>
                 )}
                 {!isPickupOrderSource(order.source) && displayShippingMode !== "collect" && (
-                  <div className="flex justify-between"><span className="text-muted-foreground">订单预计运费</span><span>¥{displayShipping.toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">{displayDeferred ? "运费结算时间" : "订单预计运费"}</span><span>{displayDeferred ? "发货后结算" : `¥${displayShipping.toFixed(2)}`}</span></div>
                 )}
                 {hasActualShipping && (
                   <div className="flex justify-between">
@@ -5467,7 +5499,7 @@ function OrderDetailDialog({
                     <span>{pendingActualShippingFeeCount} 笔待补录</span>
                   </div>
                 )}
-                {Math.abs(shippingAdjustment) > 0.005 && (
+                {!order.shippingSettlementTiming && Math.abs(shippingAdjustment) > 0.005 && (
                   <div className={`flex justify-between ${shippingAdjustment > 0 ? "text-orange-600" : "text-emerald-600"}`}>
                     <span>{shippingAdjustment > 0 ? "运费补收" : "运费应退"}</span>
                     <span>{shippingAdjustment > 0 ? "+" : "−"}¥{Math.abs(shippingAdjustment).toFixed(2)}</span>
@@ -6295,6 +6327,7 @@ function NewOrderDialog({
     minReturnPriceExemptReason?: "sick";
   }>>(new Map());
   const [shippingFeeMode, setShippingFeeMode] = useState<ShippingFeeMode>("prepaid");
+  const [shippingSettlementTiming, setShippingSettlementTiming] = useState<ShippingSettlementTiming>("after_shipping");
   const [shippingFee, setShippingFee] = useState(0);
   const [discount, setDiscount] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -6311,7 +6344,7 @@ function NewOrderDialog({
     if (open) {
       setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
       setSelectedItems(new Map());
-      setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
+      setShippingFeeMode("prepaid"); setShippingSettlementTiming("after_shipping"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
       setCustomerDialogOpen(false);
       setSubmitAttempted(false);
@@ -6346,6 +6379,7 @@ function NewOrderDialog({
     setShippingAddress("");
     setPlannedShipDate("");
     setShippingFeeMode(isPickupOrderSource(nextSource) ? "collect" : "prepaid");
+    setShippingSettlementTiming("after_shipping");
     setShippingFee(0);
   };
 
@@ -6389,7 +6423,8 @@ function NewOrderDialog({
   const minimumReturnTotal = orderMinimumReturnTotal(Array.from(selectedItems.values()));
   const goodsNetTotal = orderGoodsNetTotal(itemsTotal, discount);
   const belowMinimumReturn = selectedItems.size > 0 && goodsNetTotal <= minimumReturnTotal;
-  const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder ? shippingFee : 0;
+  const shippingDeferred = shippingFeeMode === "prepaid" && !pickupOrder && shippingSettlementTiming === "after_shipping";
+  const customerShippingFee = shippingFeeMode === "prepaid" && !pickupOrder && !shippingDeferred ? shippingFee : 0;
   const shippingDiscount = shippingFeeMode === "free" && !pickupOrder ? shippingFee : 0;
   const amountDue = itemsTotal + customerShippingFee + packagingFee - discount;
   const contactOptions = ownerCandidates.options;
@@ -6460,6 +6495,7 @@ function NewOrderDialog({
     if (date > today) return toast.error("下单日期不能晚于今天");
     if (!selectedContactPersonnel) return toast.error("请选择订单负责人");
     if (selectedItems.size === 0) return toast.error("请至少添加一条商品");
+    if (!pickupOrder && shippingFeeMode === "prepaid" && shippingSettlementTiming === "before_shipping" && normalizedPositiveShippingFee(shippingFee) === null) return toast.error("先结算运费时，请填写大于 0 且最多两位小数的预计运费");
     if (!pickupOrder && !plannedShipDate) return toast.error("请选择预计发货日期");
     if (plannedShipDate && plannedShipDate < date) return toast.error("预计发货日期不能早于下单日期");
     if (amountDue < 0) return toast.error("折扣过大，订单应收不能为负数");
@@ -6485,7 +6521,7 @@ function NewOrderDialog({
       };
     });
     const assignedElsewhere = selectedContactPersonnel.username !== currentUsername;
-    if (!confirmWrite("创建", `将创建${isWholesaleOrder ? "批发" : "销售"}订单，应收金额 ¥${amountDue.toFixed(2)}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
+    if (!confirmWrite("创建", `将创建${isWholesaleOrder ? "批发" : "销售"}订单，本次应收金额 ¥${amountDue.toFixed(2)}${shippingDeferred ? "（暂不含运费）" : ""}；创建后可直接出库发货。${assignedElsewhere ? `将通知${selectedContactPersonnel.name}确认接手，确认前仍由你负责。` : ""}`)) return;
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
     createLock.current = true; setCreating(true);
@@ -6494,6 +6530,7 @@ function NewOrderDialog({
     try {
       const result = await postOrderApi("orders/create", {
         orderFormSchemaVersion: ORDER_FORM_SCHEMA_VERSION,
+        shippingSettlementVersion: 1,
         siteId: activeSiteId,
         customerId,
         date,
@@ -6509,7 +6546,8 @@ function NewOrderDialog({
         contactPerson: selectedContactPersonnel.name.trim(),
         items,
         shippingFeeMode: pickupOrder ? "collect" : shippingFeeMode,
-        shippingFee: pickupOrder ? 0 : shippingFee,
+        shippingFee: pickupOrder || shippingDeferred ? 0 : shippingFee,
+        ...(!pickupOrder && shippingFeeMode === "prepaid" ? { shippingSettlementTiming } : {}),
         discount,
         notes,
         operator: state.user?.username ?? "system",
@@ -6870,7 +6908,7 @@ function NewOrderDialog({
                           if (option.value === "collect") setShippingFee(0);
                         }}
                       >
-                        {option.label}
+                        {option.value === "prepaid" ? "客户承担" : option.value === "free" ? "商家包邮" : "快递到付"}
                       </button>
                     ))}
                   </div>
@@ -6880,12 +6918,15 @@ function NewOrderDialog({
                     {SHIPPING_FEE_MODE_OPTIONS.find((option) => option.value === shippingFeeMode)?.hint}
                   </p>
                 )}
+                {!pickupOrder && shippingFeeMode === "prepaid" && (
+                  <ShippingSettlementChoice value={shippingSettlementTiming} onChange={(value) => { setShippingSettlementTiming(value); }} />
+                )}
                 <div className="grid grid-cols-2 items-start gap-3">
-                  {!pickupOrder && shippingFeeMode !== "collect" && (
+                  {!pickupOrder && shippingFeeMode !== "collect" && !shippingDeferred && (
                     <div className="grid gap-1.5">
                       <Label className="text-xs">预计运费（¥）</Label>
-                      <Input type="number" min={0} step={0.01} aria-label="预计运费" value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
-                      <p className="text-xs text-muted-foreground">未知可留空；实际运费确定后，在发货记录中补录。</p>
+                      <Input type="number" min={0} step={0.01} aria-label="预计运费" aria-invalid={submitAttempted && shippingFeeMode === "prepaid" && normalizedPositiveShippingFee(shippingFee) === null} value={shippingFee || ""} onChange={(e) => setShippingFee(Number(e.target.value))} placeholder="0" className="h-8 text-sm" />
+                      <p className="text-xs text-muted-foreground">{shippingFeeMode === "prepaid" ? "计入本次应收；不是已收款，发货后按实际多退少补。" : "仅记录店里承担的费用，不向客户收取。"}</p>
                     </div>
                   )}
                   <div className="grid gap-1.5">
@@ -6915,11 +6956,12 @@ function NewOrderDialog({
                   </div>
                 )}
                 {!pickupOrder && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费方式</span><span>{shippingFeeModeLabel(shippingFeeMode)}</span></div>}
-                {!pickupOrder && shippingFeeMode !== "collect" && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 预计运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
+                {!pickupOrder && shippingFeeMode !== "collect" && !shippingDeferred && shippingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 预计运费</span><span>¥{shippingFee.toFixed(2)}</span></div>}
+                {shippingDeferred && <div className="flex justify-between text-sm"><span className="text-muted-foreground">运费</span><span>发货后结算 · 待确定</span></div>}
                 {shippingDiscount > 0 && <div className="flex justify-between text-sm text-orange-600"><span>− 包邮折扣</span><span>¥{shippingDiscount.toFixed(2)}</span></div>}
                 {packagingFee > 0 && <div className="flex justify-between text-sm"><span className="text-muted-foreground">+ 包装费</span><span>¥{packagingFee.toFixed(2)}</span></div>}
                 <div className="flex justify-between font-semibold text-base border-t pt-2">
-                  <span>订单应收</span>
+                  <span>{shippingDeferred ? "本次应收（不含运费）" : "本次应收"}</span>
                   <span className={amountDue < 0 || belowMinimumReturn ? "text-red-600" : "text-foreground"}>¥{amountDue.toFixed(2)}</span>
                 </div>
               </div>
@@ -6929,7 +6971,7 @@ function NewOrderDialog({
           )}
 
           <footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t bg-card px-4 py-3 sm:px-6">
-            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · 应收 </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">下一步可更换订单类型</span>}
+            {source ? <div className="min-w-0 text-sm"><span className="text-muted-foreground">{selectedItems.size} 条商品 · {shippingDeferred ? "暂不含运费" : "应收"} </span><strong className={`text-lg tabular-nums ${amountDue < 0 || belowMinimumReturn ? "text-destructive" : "text-foreground"}`}>¥{amountDue.toFixed(2)}</strong></div> : <span className="text-xs text-muted-foreground">下一步可更换订单类型</span>}
             <div className="ml-auto flex shrink-0 items-center gap-2">
               <Button type="button" variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
               {source && <Button type="button" disabled={creating} onClick={save}>{creating ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ShoppingCart className="size-4" />}{creating ? "正在创建…" : isWholesaleOrder ? "创建批发订单" : "创建订单"}</Button>}
@@ -7141,6 +7183,7 @@ export function OrdersView({
   const [plannedShipFrom, setPlannedShipFrom] = useState("");
   const [plannedShipTo, setPlannedShipTo] = useState("");
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
+  const [shippingSettlementFilter, setShippingSettlementFilter] = useState("all");
   const [ownerScope, setOwnerScope] = useState<"mine" | "all">("all");
   const [orderCalendar, setOrderCalendar] = useState(() => beijingOrderCalendar());
   const { today, tomorrow } = orderCalendar;
@@ -7193,6 +7236,7 @@ export function OrdersView({
     setPlannedShipFrom("");
     setPlannedShipTo("");
     setPendingTrackingOnly(false);
+    setShippingSettlementFilter("all");
     setOwnerScope("all");
     setMobileSearch("");
     setMobilePage(1);
@@ -7386,6 +7430,7 @@ export function OrdersView({
 	  const filteredOrders = useMemo(() => {
 	    return orderRows.filter((o) => {
 	      if (!matchesWholesaleOrderFilter(o, wholesaleFilter)) return false;
+        if (shippingSettlementFilter !== "all" && (o.status === "cancelled" || shippingSettlementFilterStatus(o, state.shipments) !== shippingSettlementFilter)) return false;
 	      if (!matchesPlannedShipmentRange(o, {
           from: quickShipDate || plannedShipFrom,
           to: quickShipDate || plannedShipTo,
@@ -7398,7 +7443,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, ownerScope, isCurrentUserContactOrder, dateFrom, dateTo]);
+	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, shippingSettlementFilter, ownerScope, isCurrentUserContactOrder, dateFrom, dateTo]);
 
   const matchingOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7407,7 +7452,7 @@ export function OrdersView({
   useEffect(() => {
     setMobilePage(1);
     setSelectedOrderIds(new Set());
-  }, [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope]);
+  }, [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, shippingSettlementFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope]);
 
   const mobileTotalPages = Math.max(1, Math.ceil(matchingOrders.length / MOBILE_ORDER_PAGE_SIZE));
   const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
@@ -7499,7 +7544,7 @@ export function OrdersView({
     toast.success("订单已删除");
   };
 
-  const orderTableFilterKey = [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope].join("|");
+  const orderTableFilterKey = [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, shippingSettlementFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, ownerScope].join("|");
   const todayShipCount = useMemo(
     () => orderList.filter((order) => matchesPlannedShipmentRange(order, { from: today, to: today })).length,
     [orderList, today]
@@ -7695,6 +7740,8 @@ export function OrdersView({
         onClearPlannedDates={() => changeShipPlanQuickFilter("")}
         wholesale={wholesaleFilter}
         onWholesaleChange={setWholesaleFilter}
+        shippingSettlement={shippingSettlementFilter}
+        onShippingSettlementChange={setShippingSettlementFilter}
         pendingTrackingOnly={pendingTrackingOnly}
         onPendingTrackingChange={setPendingTrackingOnly}
         onClear={clearOrderFilters}

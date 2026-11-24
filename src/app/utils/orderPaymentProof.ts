@@ -6,6 +6,7 @@ import { normalizeNewCustomerEvidence, type NewCustomerEvidenceAttachment } from
 export type PaymentProofClaim = {
   id: string; version: number; status: "pending" | "approved" | "rejected";
   amount: number; time: string; paymentMethodId: string; paymentMethodName?: string;
+  purpose?: "order" | "shipping_fee"; shippingAmount?: number; matchingPaymentId?: string;
   channel: PaymentChannel; account: string; externalTransactionNo?: string; notes?: string;
   evidenceAttachments: NewCustomerEvidenceAttachment[]; submittedBy: string; submittedAt: string;
   reviewedBy?: string; reviewedAt?: string; rejectionReason?: string; paymentId?: string;
@@ -16,6 +17,8 @@ export type PaymentProofDetail = {
   paymentMethods: { id: string; name: string; channel: PaymentChannel; account: string }[];
   eligiblePayments: PaymentRecord[]; summary: PaymentProofSummary; reviewToken: string;
   linkableProofPayments?: PaymentRecord[];
+  receiptCandidates?: Pick<PaymentRecord, "id" | "type" | "amount" | "shippingAmount" | "channel" | "account">[];
+  shippingSettlement?: import("./shippingSettlement").ShippingSettlementSummary;
 };
 
 export function orderPaymentProofSummary(order: Pick<Order, "payments" | "paymentClaims">, amountDue: number): PaymentProofSummary {

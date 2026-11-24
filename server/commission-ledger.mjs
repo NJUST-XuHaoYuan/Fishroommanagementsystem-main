@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hasShippingSettlement, shippingSettlementSummary, isShippingRefund, paymentShippingAmount } from "./shipping-settlement.mjs";
 import { normalizeExternalOrderNo, normalizeShippingFeeMode } from "./finance-utils.mjs";
 import { commissionOrderCreatedAtMs, isCommissionEligibleOrder, resolveNewCustomerOrderOwner, NEW_CUSTOMER_COMMISSION_POLICY_EFFECTIVE_DATE } from "./new-customer-approval.mjs";
 import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
@@ -75,7 +76,7 @@ function feeCaps(state, order, diagnostics) {
   // customer receivables keep the same estimated-fee basis while any split
   // shipment is pending. Pickup and collect/free modes remain non-billable.
   const actualKnown = shipments.length > 0 && !shipmentsHavePendingActualShippingFee(mode, shipments);
-  const shipping = mode === "prepaid" ? actualKnown ? shipments.reduce((sum, item) => sum + nonnegative(item.actualShippingFee), 0) : nonnegative(order.shippingFee) : 0;
+  const shipping = hasShippingSettlement(order) ? nonnegative(shippingSettlementSummary(order, state.shipments).shippingDue) : mode === "prepaid" ? actualKnown ? shipments.reduce((sum, item) => sum + nonnegative(item.actualShippingFee), 0) : nonnegative(order.shippingFee) : 0;
   // Damage refunds are cash events below, not a second reduction of merchandise receivable.
   const caps = [goods, shipping, nonnegative(order.packagingFee)];
   if (!Number.isSafeInteger(caps.reduce((sum, value) => sum + value, 0))) {
@@ -122,7 +123,12 @@ function paymentEvents(order, nowMs, diagnostics) {
       diagnose(diagnostics, order, "INVALID_PAYMENT_VERIFICATION_TIME", id); continue;
     }
     if (!text(payment.verifiedAt)) diagnose(diagnostics, order, "LEGACY_PAYMENT_TIME_FALLBACK", id);
-    events.push({ id: `payment:${id}`, type: payment.type === "refund" ? "refund" : payment.type === "shipping_fee" ? "shipping" : "receipt", amount, at, sourceType: "payment" });
+    const explicitShipping = hasShippingSettlement(order) && payment.type !== "refund" && (payment.type === "shipping_fee" || payment.shippingAmount != null)
+      ? payment.type === "shipping_fee" ? amount : cents(payment.shippingAmount) : null;
+    if (explicitShipping != null && (explicitShipping < 0 || explicitShipping > amount)) { diagnose(diagnostics, order, "INVALID_PAYMENT_SHIPPING_ALLOCATION", id); continue; }
+    const freightRefund = payment.type === "refund" && hasShippingSettlement(order) ? nonnegative(paymentShippingAmount(payment)) : isShippingRefund(payment) ? amount : 0;
+    if (freightRefund > 0) events.push({ id: `payment:${id}:freight`, type: "shipping_refund", amount: Math.min(amount, freightRefund), at, sourceType: "payment" });
+    if (amount > freightRefund) events.push({ id: `payment:${id}`, type: payment.type === "refund" ? "refund" : payment.type === "shipping_fee" ? "shipping" : "receipt", amount: amount - freightRefund, at, sourceType: "payment", ...(explicitShipping != null ? { explicitShipping } : {}), ...(payment.type === "refund" && hasShippingSettlement(order) ? { nonShippingRefund: true } : {}) });
   }
   return events;
 }
@@ -168,6 +174,12 @@ function settlementGroups(state, rows, diagnostics) {
 
 function platformEvents(order, rows, nowMs, diagnostics) {
   const events = [];
+  const settlementOrder = hasShippingSettlement(order);
+  const hasClassifiedFreightRefund = settlementOrder && list(order.payments).some(payment => payment.type === "refund" && payment.verificationStatus !== "rejected" && paymentShippingAmount(payment) > 0);
+  const platformRefundEvent = (row, amount, at) => {
+    if (hasClassifiedFreightRefund) diagnose(diagnostics, order, "PLATFORM_FREIGHT_REFUND_CLASSIFICATION_REQUIRED", row.id);
+    return { id: `platform:${row.id}:refund`, type: "refund", amount, at, sourceType: "platform_user_paid", ...(hasClassifiedFreightRefund ? { freightClassificationPending: true } : {}) };
+  };
   for (const row of rows) {
     if (row.verificationStatus === "pending" || row.status === "pending") continue;
     const at = timestamp(row.verifiedAt || row.at);
@@ -180,11 +192,17 @@ function platformEvents(order, rows, nowMs, diagnostics) {
     const refund = Math.abs(cents(row.preSettlementRefund) ?? 0);
     const isRefundRow = /退款|refund/i.test(text(row.settlementType));
     if (paid != null) {
-      if (paid > 0 && !isRefundRow) events.push({ id: `platform:${row.id}:receipt`, type: "receipt", amount: paid, at, sourceType: "platform_user_paid" });
+      if (paid > 0 && !isRefundRow) {
+        // The imported platform bill has its own customer freight field. Never
+        // infer its allocation from a later carrier-cost correction.
+        const freight = settlementOrder && !missing(row.shippingFee) && cents(row.shippingFee) != null
+          ? Math.min(paid, nonnegative(row.shippingFee)) : settlementOrder ? 0 : null;
+        events.push({ id: `platform:${row.id}:receipt`, type: "receipt", amount: paid, at, sourceType: "platform_user_paid", ...(freight != null ? { explicitShipping: freight } : {}) });
+      }
       // A negative user-paid amount is itself the refund; never count its absolute
       // amount and the same pre-settlement refund twice.
       const refundAmount = Math.max(paid < 0 ? -paid : 0, refund);
-      if (refundAmount) events.push({ id: `platform:${row.id}:refund`, type: "refund", amount: refundAmount, at, sourceType: "platform_user_paid" });
+      if (refundAmount) events.push(platformRefundEvent(row, refundAmount, at));
       else if (isRefundRow && paid > 0) diagnose(diagnostics, order, "PLATFORM_REFUND_AMOUNT_AMBIGUOUS", row.id);
     } else {
       const income = cents(row.incomeTotal);
@@ -192,7 +210,11 @@ function platformEvents(order, rows, nowMs, diagnostics) {
       diagnose(diagnostics, order, "PLATFORM_NET_INCOME_FALLBACK", row.id);
       // incomeTotal is already net of preSettlementRefund. Platform expenses and
       // settlementAmount are intentionally not used as customer receipts/refunds.
-      if (income) events.push({ id: `platform:${row.id}:net`, type: income > 0 ? "receipt" : "refund", amount: Math.abs(income), at, sourceType: "platform_net_income" });
+      if (income) {
+        if (income < 0 && hasClassifiedFreightRefund) diagnose(diagnostics, order, "PLATFORM_FREIGHT_REFUND_CLASSIFICATION_REQUIRED", row.id);
+        events.push({ id: `platform:${row.id}:net`, type: income > 0 ? "receipt" : "refund", amount: Math.abs(income), at, sourceType: "platform_net_income",
+          ...(settlementOrder && income > 0 ? { explicitShipping: 0 } : {}), ...(income < 0 && hasClassifiedFreightRefund ? { freightClassificationPending: true } : {}) });
+      }
     }
   }
   return events;
@@ -217,13 +239,18 @@ function desiredOrderTargets(state, order, platformRows, nowMs, diagnostics, rec
   const events = platformRows ? platformEvents(order, platformRows, nowMs, diagnostics) : paymentEvents(order, nowMs, diagnostics);
   if (platformRows && list(order.payments).length) diagnose(diagnostics, order, "PLATFORM_REPLACES_ORDER_PAYMENTS");
   if (approvedAt != null) events.push({ id: `approval:${order.newCustomerApproval.requestId}`, type: "approval", at: approvedAt, sourceType: "new_customer_approval" });
-  const priority = { shipping: 0, receipt: 1, approval: 2, refund: 3 };
+  const priority = { shipping: 0, receipt: 1, approval: 2, refund: 3, shipping_refund: 3 };
   const sequence = (event) => receiptSnapshots[hash([text(order.id), event.id])]?.sequence ?? Number.MAX_SAFE_INTEGER;
   events.sort((a, b) => a.at - b.at || sequence(a) - sequence(b) || priority[a.type] - priority[b.type] || a.id.localeCompare(b.id));
   const lots = [];
   let approved = false;
   let unallocatedRefundCents = 0;
+  let unallocatedShippingRefundCents = 0;
   for (const event of events) {
+    // An imported aggregate refund cannot be guessed to be goods or freight.
+    // Defer new ambiguous refund sources; retain previously booked snapshots
+    // rather than silently reversing an earlier period when a new proof arrives.
+    if (event.freightClassificationPending && !refundSnapshots[hash([text(order.id), event.id])]) continue;
     const before = position(lots, Boolean(owner));
     if (event.type === "approval") {
       approved = true;
@@ -245,7 +272,7 @@ function desiredOrderTargets(state, order, platformRows, nowMs, diagnostics, rec
       const remaining = receiptCaps.map((cap, index) => Math.max(0, cap - current[index]));
       let reallocations = [];
       let parts;
-      if (snapshot?.type === event.type && snapshot.amountCents === event.amount && snapshot.allocationBeforeHash === beforeHash) {
+      if (snapshot?.type === event.type && snapshot.amountCents === event.amount && snapshot.explicitShipping === event.explicitShipping && snapshot.allocationBeforeHash === beforeHash) {
         parts = [...snapshot.parts];
         reallocations = snapshot.reallocations || [];
         for (const reallocation of reallocations) {
@@ -253,6 +280,14 @@ function desiredOrderTargets(state, order, platformRows, nowMs, diagnostics, rec
           if (!lot) throw new Error("Commission receipt reallocation is invalid; manual audit is required");
           lot.parts = [...reallocation.parts];
         }
+      } else if (event.explicitShipping != null) {
+        // New settlement receipts carry a server-validated freight allocation.
+        // An actual carrier-cost change must never reallocate this cash into or
+        // out of merchandise, including an overpaid freight amount awaiting refund.
+        const nonShipping = event.amount - event.explicitShipping;
+        const assigned = Math.min(nonShipping, remaining[0] + remaining[2]);
+        const [goods, packaging] = allocate(assigned, [remaining[0], remaining[2]]);
+        parts = [goods, event.explicitShipping, packaging, nonShipping - assigned];
       } else if (event.type === "shipping") {
         const previousDedicated = lots.filter((lot) => lot.type === "shipping").reduce((sum, lot) => sum + lot.parts[1], 0);
         const assigned = Math.min(event.amount, Math.max(0, receiptCaps[1] - previousDedicated));
@@ -281,21 +316,35 @@ function desiredOrderTargets(state, order, platformRows, nowMs, diagnostics, rec
       }
       receiptSnapshots[receiptKey] = {
         orderId: text(order.id), sourceId: event.id, type: event.type, amountCents: event.amount, caps: [...receiptCaps], parts: [...parts],
-        allocationBeforeHash: beforeHash, reallocations,
+        allocationBeforeHash: beforeHash, reallocations, ...(event.explicitShipping != null ? { explicitShipping: event.explicitShipping } : {}),
         sequence: snapshot?.sequence ?? Object.keys(receiptSnapshots).length + 1,
       };
       const lot = { parts, newCustomer: approved, sourceId: event.id, type: event.type };
       lots.push(lot);
+      if (unallocatedShippingRefundCents > 0) {
+        const offset = Math.min(unallocatedShippingRefundCents, lot.parts[1]);
+        lot.parts[1] -= offset; unallocatedShippingRefundCents -= offset;
+      }
       if (unallocatedRefundCents > 0) {
         // Finance can verify a refund before the corresponding receipt is
         // reconciled. Keep that cash debt instead of dropping it and granting
         // commission on the later receipt as though the refund never happened.
-        let toOffset = Math.min(unallocatedRefundCents, event.amount);
+        let toOffset = Math.min(unallocatedRefundCents, hasShippingSettlement(order) ? lot.parts[0] + lot.parts[2] + lot.parts[3] : event.amount);
         const extra = Math.min(toOffset, lot.parts[3]);
         lot.parts[3] -= extra; toOffset -= extra; unallocatedRefundCents -= extra;
-        const takes = allocate(toOffset, lot.parts.slice(0, 3));
+        const takes = allocate(toOffset, hasShippingSettlement(order) ? [lot.parts[0], 0, lot.parts[2]] : lot.parts.slice(0, 3));
         lot.parts = lot.parts.map((part, index) => part - (takes[index] || 0));
         unallocatedRefundCents -= toOffset;
+      }
+    } else if (event.type === "shipping_refund") {
+      let remaining = event.amount;
+      for (const lot of lots) {
+        const take = Math.min(remaining, lot.parts[1]);
+        lot.parts[1] -= take; remaining -= take;
+      }
+      if (remaining > 0) {
+        unallocatedShippingRefundCents += remaining;
+        diagnose(diagnostics, order, "SHIPPING_REFUND_EXCEEDS_VERIFIED_SHIPPING", event.id);
       }
     } else {
       let remainingRefund = event.amount;
@@ -319,12 +368,12 @@ function desiredOrderTargets(state, order, platformRows, nowMs, diagnostics, rec
         const take = Math.min(remainingRefund, lot.parts[3]);
         lot.parts[3] -= take; remainingRefund -= take;
       }
-      const weights = lots.map((lot) => lot.parts.slice(0, 3).reduce((sum, value) => sum + value, 0));
+      const weights = lots.map((lot) => (event.nonShippingRefund ? [lot.parts[0], 0, lot.parts[2]] : lot.parts.slice(0, 3)).reduce((sum, value) => sum + value, 0));
       const available = weights.reduce((sum, value) => sum + value, 0);
       const assigned = Math.min(remainingRefund, available);
       const takes = allocate(assigned, weights);
       lots.forEach((lot, index) => {
-        const partTakes = allocate(takes[index], lot.parts.slice(0, 3));
+        const partTakes = allocate(takes[index], event.nonShippingRefund ? [lot.parts[0], 0, lot.parts[2]] : lot.parts.slice(0, 3));
         lot.parts = lot.parts.map((part, partIndex) => part - (partTakes[partIndex] || 0));
       });
       if (remainingRefund > available) {
@@ -431,7 +480,7 @@ export function reconcileCommissionLedger(state = {}, platformSettlementRows = [
     const total = totals.get(text(order.id)) || empty();
     const eligible = isCommissionEligibleOrder(order, nowMs);
     const hasNewCustomer = acquisitionOrders.has(text(order.id));
-    return [text(order.id), { commissionBase: money(total.baseCents), personalCommissionAmount: money(total.regularPersonalCents + total.newCustomerCents), teamCommissionAmount: money(total.teamPoolCents), newCustomerCommissionAmount: money(total.newCustomerCents), commissionAmount: money(total.regularPersonalCents + total.newCustomerCents), commissionPolicyLabel: !eligible ? "政策生效前或创建时间待核对，不计提" : hasNewCustomer ? "新客个人 5%（替代普通提成）" : "普通个人 0.2% + 团队公共池 0.3%", commissionEligible: eligible }];
+    return [text(order.id), { commissionBase: money(total.baseCents), personalCommissionAmount: money(total.regularPersonalCents + total.newCustomerCents), teamCommissionAmount: money(total.teamPoolCents), newCustomerCommissionAmount: money(total.newCustomerCents), commissionAmount: money(total.regularPersonalCents + total.newCustomerCents), commissionPolicyLabel: !eligible ? "政策生效前或创建时间待核对，不计提" : hasNewCustomer ? "新客个人 5%（替代普通提成）" : "普通个人 0.2% + 团队公共池 0.3%", commissionEligible: eligible, commissionReviewRequired: diagnostics.some(item => item.orderId === text(order.id) && item.code === "PLATFORM_FREIGHT_REFUND_CLASSIFICATION_REQUIRED"), commissionReviewMessage: diagnostics.some(item => item.orderId === text(order.id) && item.code === "PLATFORM_FREIGHT_REFUND_CLASSIFICATION_REQUIRED") ? "平台汇总退款未区分货款与运费，新增退款暂不调整商品提成，请财务核对分类" : "" }];
   }));
   return { ledger, changed, byOrder, diagnostics };
 }

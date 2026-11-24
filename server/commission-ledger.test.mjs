@@ -394,3 +394,40 @@ test("malformed private ledger fails closed instead of silently resetting histor
   assert.throws(() => reconcileCommissionLedger({ ...fixture(), commissionLedgerV1: { version: 2 } }), /manual audit/);
   assert.throws(() => monthlyCommissionSummary({}, [], "2026-13"), /Invalid commission month/);
 });
+
+test("explicit deferred freight never dilutes goods commission before or after fee reconciliation", () => {
+  const state = fixture({ shippingSettlementTiming: "after_shipping", shippingFee: 0, items: [{ stockItemId: "f", price: 1000 }], payments: [paid("goods", 1000, OCT, "balance", { shippingAmount: 0 })] });
+  assert.equal(reconcile(state, OCT).byOrder.get("o1").commissionBase, 1000);
+  state.shipments = [{ id: "s", orderId: "o1", status: "shipped", itemStockIds: ["f"], actualShippingFee: 60 }];
+  state.orders[0].payments.push(paid("freight", 60, NOV, "shipping_fee", { shippingAmount: 60 }));
+  state.commissionLedgerV1 = invalidateCommissionAllocations(state.commissionLedgerV1, ["o1"]);
+  assert.equal(reconcile(state).byOrder.get("o1").commissionBase, 1000);
+});
+
+test("freight excess refund and normal mixed refund change only their merchandise portions", () => {
+  const state = fixture({ shippingSettlementTiming: "before_shipping", shippingFee: 50, items: [{ stockItemId: "f", price: 1000 }], payments: [paid("mixed", 1050, OCT, "balance", { shippingAmount: 50 })] });
+  state.shipments = [{ id: "s", orderId: "o1", status: "delivered", itemStockIds: ["f"], actualShippingFee: 40 }];
+  assert.equal(reconcile(state, OCT).byOrder.get("o1").commissionBase, 1000);
+  state.orders[0].payments.push(paid("freight-refund", 10, NOV, "refund", { shippingAmount: 10, refundCategory: "shipping_fee" }));
+  assert.equal(reconcile(state, NOV).byOrder.get("o1").commissionBase, 1000);
+  state.orders[0].payments.push(paid("mixed-refund", 1040, NOW, "refund", { shippingAmount: 40 }));
+  assert.equal(reconcile(state).byOrder.get("o1").commissionBase, 0);
+});
+
+test("a goods refund verified before cash cannot be erased by a freight-only receipt", () => {
+  const state = fixture({ shippingSettlementTiming: "after_shipping", items: [{ stockItemId: "f", price: 1000 }], payments: [paid("refund", 100, OCT, "refund", { shippingAmount: 0 }), paid("freight", 60, NOV, "shipping_fee", { shippingAmount: 60 }), paid("goods", 1000, NOW, "balance", { shippingAmount: 0 })] });
+  state.shipments = [{ id: "s", orderId: "o1", status: "shipped", itemStockIds: ["f"], actualShippingFee: 60 }];
+  assert.equal(reconcile(state).byOrder.get("o1").commissionBase, 900);
+});
+
+test("new platform bills use their explicit customer freight and hold ambiguous goods/freight refunds for review", () => {
+  const state = fixture({ source: "平台下单", douyinOrderNo: "123", shippingSettlementTiming: "before_shipping", shippingFee: 50,
+    items: [{ stockItemId: "f", price: 1000 }], payments: [paid("freight-refund", 10, NOV, "refund", { refundCategory: "shipping_fee", shippingAmount: 10 })] });
+  state.shipments = [{ orderId: "o1", status: "shipped", itemStockIds: ["f"], actualShippingFee: 40 }];
+  const rows = [platformRow({ userPaid: 1050, shippingFee: 50, preSettlementRefund: 10 })];
+  const result = reconcile(state, NOW, rows);
+  assert.equal(result.byOrder.get("o1").commissionBase, 1000);
+  assert.equal(result.byOrder.get("o1").commissionReviewRequired, true);
+  assert.match(result.byOrder.get("o1").commissionReviewMessage, /货款与运费/);
+  assert.ok(result.diagnostics.some(item => item.code === "PLATFORM_FREIGHT_REFUND_CLASSIFICATION_REQUIRED"));
+});

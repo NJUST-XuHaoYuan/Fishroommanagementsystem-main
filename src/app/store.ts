@@ -617,6 +617,10 @@ export type PaymentRecord = {
   time: string;       // ISO datetime "2026-04-22T10:30"
   type: PaymentType;
   amount: number;     // always positive; "refund" type = outflow
+  /** 本笔收款中明确归属于运费的金额，新结算订单由服务端核定。 */
+  shippingAmount?: number;
+  /** 运费退差额独立于商品退款和物流报损。 */
+  refundCategory?: "shipping_fee";
   paymentMethodId?: string;
   paymentMethodName?: string;
   channel?: PaymentChannel;
@@ -715,6 +719,10 @@ export type Order = {
   items: OrderItem[];
   /** 物流订单的运费承担方式；历史订单未设置时按寄付处理。 */
   shippingFeeMode?: ShippingFeeMode;
+  /** 未设置为历史计费规则；新寄付订单明确约定运费结算时点。 */
+  shippingSettlementTiming?: ShippingSettlementTiming;
+  /** 新结算流程标记，切换包邮/到付时保留，历史订单不自动迁移。 */
+  shippingSettlementVersion?: 1;
   shippingFee: number;
   packagingFee: number;
   discount: number;
@@ -743,6 +751,7 @@ export type Order = {
 };
 
 export type ShippingFeeMode = "collect" | "prepaid" | "free";
+export type ShippingSettlementTiming = "before_shipping" | "after_shipping";
 
 export type ShipmentStatus = "preparing" | "outbound" | "shipped" | "delivered" | "damaged";
 
@@ -802,6 +811,8 @@ export type Shipment = {
   notes: string;
   shipMethod?: "express" | "pickup";
   actualShippingFee?: number;
+  /** 明确补录时间；有此标记的 0 元表示已确认免运费，而非待补录。 */
+  actualShippingFeeRecordedAt?: string;
   itemStockIds?: string[]; // stock item IDs included in this shipment
   damageResolution?: "refund" | "reship";
   /** 物流报损的登记时间。 */

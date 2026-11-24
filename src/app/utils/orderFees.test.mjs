@@ -68,3 +68,28 @@ test("delivered and damaged prepaid or free shipments remain pending until the f
     }
   }
 });
+
+test("new after-shipping settlement only bills confirmed shipment costs and accepts explicit zero", () => {
+  const order = { ...prepaidOrder, shippingSettlementTiming: "after_shipping", shippingFee: 0, items: [{ stockItemId: "fish-a" }, { stockItemId: "fish-b" }] };
+  const shipments = [
+    { orderId: order.id, status: "shipped", shipMethod: "express", itemStockIds: ["fish-a"], actualShippingFee: 18 },
+    { orderId: order.id, status: "outbound", shipMethod: "express", itemStockIds: ["fish-b"], actualShippingFee: 0 },
+  ];
+  assert.equal(getBillableShippingFee(order, []), 0);
+  assert.equal(getBillableShippingFee(order, shipments), 18);
+  assert.equal(hasActualShippingFee(order, shipments), false);
+  const recorded = shipments.map((shipment, i) => i ? { ...shipment, actualShippingFeeRecordedAt: "2026-11-25T10:00:00+08:00" } : shipment);
+  assert.equal(orderHasPendingActualShippingFee(order, recorded), false);
+  assert.equal(hasActualShippingFee(order, recorded), true);
+  assert.equal(getBillableShippingFee(order, recorded), 18);
+});
+
+test("new prepayment estimate remains until every fish is issued and costs confirmed", () => {
+  const order = { ...prepaidOrder, shippingSettlementTiming: "before_shipping", shippingFee: 50, items: [{ stockItemId: "fish-a" }, { stockItemId: "fish-b" }] };
+  const first = { orderId: order.id, status: "shipped", shipMethod: "express", itemStockIds: ["fish-a"], actualShippingFee: 20 };
+  assert.equal(getBillableShippingFee(order, [first]), 50);
+  assert.equal(hasActualShippingFee(order, [first]), false);
+  const all = [first, { ...first, itemStockIds: ["fish-b"], actualShippingFee: 15 }];
+  assert.equal(getBillableShippingFee(order, all), 35);
+  assert.equal(shippingFeeAdjustmentForOrder(order, all), -15);
+});

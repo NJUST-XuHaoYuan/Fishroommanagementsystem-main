@@ -6,6 +6,7 @@ const ALLOWED_REQUEST_KEYS = new Set([
   "shipmentId",
   "actualShippingFee",
   "expectedActualShippingFee",
+  "expectedActualShippingFeeRecordedAt",
 ]);
 const ACTUAL_SHIPPING_FEE_MODES = new Set(["prepaid", "free"]);
 const EDITABLE_SHIPMENT_STATUSES = new Set(["outbound", "shipped", "delivered", "damaged"]);
@@ -105,7 +106,9 @@ export function parseActualShippingFeeRequest(value) {
       code: "ACTUAL_SHIPPING_FEE_REVISION_REQUIRED",
     });
   }
-  const actualShippingFee = normalizeActualShippingFee(value.actualShippingFee, { allowZero: false });
+  const hasRecordedAt = Object.prototype.hasOwnProperty.call(value, "expectedActualShippingFeeRecordedAt");
+  if (hasRecordedAt && typeof value.expectedActualShippingFeeRecordedAt !== "string") fail("缺少有效运费记录版本");
+  const actualShippingFee = normalizeActualShippingFee(value.actualShippingFee, { allowZero: hasRecordedAt });
   // The expected value is a concurrency token, not a new value. Legacy releases
   // could persist amounts above the current cap or with sub-cent precision, so
   // accept their cent-rounded representation to let an administrator repair them.
@@ -117,6 +120,7 @@ export function parseActualShippingFeeRequest(value) {
     shipmentId,
     actualShippingFee,
     expectedActualShippingFee: expectedActualShippingFeeCents / 100,
+    ...(hasRecordedAt ? { expectedActualShippingFeeRecordedAt: value.expectedActualShippingFeeRecordedAt } : {}),
   };
 }
 
@@ -125,6 +129,7 @@ export function planActualShippingFeeUpdate({
   request = {},
   hasOrderUpdatePermission = false,
   visibleSiteIds = [],
+  now = new Date().toISOString(),
 } = {}) {
   const parsed = parseActualShippingFeeRequest(request);
   if (!hasOrderUpdatePermission) {
@@ -194,6 +199,11 @@ export function planActualShippingFeeUpdate({
     });
   }
 
+  const newSettlement = order.shippingSettlementVersion === 1 || ["before_shipping", "after_shipping"].includes(order.shippingSettlementTiming);
+  if (!newSettlement && parsed.actualShippingFee === 0) fail("实际运费必须大于 0");
+  if (newSettlement && String(parsed.expectedActualShippingFeeRecordedAt ?? "") !== String(shipment.actualShippingFeeRecordedAt ?? "")) {
+    fail("运费记录已被他人更新，请刷新后重试", { statusCode: 409, code: "ACTUAL_SHIPPING_FEE_CONFLICT" });
+  }
   const currentCents = storedMoneyToCents(shipment.actualShippingFee);
   const expectedCents = Math.round(parsed.expectedActualShippingFee * 100);
   if (currentCents !== expectedCents) {
@@ -206,6 +216,7 @@ export function planActualShippingFeeUpdate({
   const updatedShipment = {
     ...shipment,
     actualShippingFee: parsed.actualShippingFee,
+    ...(newSettlement ? { actualShippingFeeRecordedAt: now } : {}),
   };
   return {
     order,

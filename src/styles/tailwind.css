@@ -109,7 +109,7 @@ body {
   }
 }
 @media (max-width: 639px) {
-  .new-order-dialog input,
+  .new-order-dialog input:not([type="radio"]),
   .new-order-dialog button:not(.new-order-inline-action) {
     min-height: 44px;
     min-width: 44px;

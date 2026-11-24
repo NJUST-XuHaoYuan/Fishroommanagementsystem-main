@@ -1,3 +1,4 @@
+import { isShippingRefund, paymentShippingAmount } from "./shipping-settlement.mjs";
 const ACTUALLY_SHIPPED_STATUSES = new Set(["shipped", "delivered", "damaged"]);
 const array = value => Array.isArray(value) ? value : [];
 const text = value => String(value ?? "").trim();
@@ -62,7 +63,7 @@ export function dashboardRefundStage(payment = {}, orderShipments = []) {
 }
 
 export function isUnshippedOrderRefund(payment = {}, orderShipments = []) {
-  return payment?.type === "refund" && dashboardRefundStage(payment, orderShipments).stage === "before_shipment";
+  return payment?.type === "refund" && !isShippingRefund(payment) && dashboardRefundStage(payment, orderShipments).stage === "before_shipment";
 }
 
 /** Original sale totals are independent of later refunds, returns and freight reconciliation. */
@@ -144,7 +145,7 @@ export function dashboardOrderReceipts(order = {}) {
 export function shipmentDamagedAt(shipment = {}, order = {}) {
   if (text(shipment?.status) !== "damaged") return "";
   const refundTime = array(order?.payments)
-    .filter(payment => payment?.type === "refund" && dashboardRefundStage(payment, [shipment]).stage === "after_shipment")
+    .filter(payment => payment?.type === "refund" && !isShippingRefund(payment) && dashboardRefundStage(payment, [shipment]).stage === "after_shipment")
     .map(unshippedRefundRecordedAt).filter(Boolean).sort()[0];
   return comparableMoment(shipment?.damagedAt) || refundTime || comparableMoment(shipment?.deliveredAt) ||
     comparableMoment(shipment?.shippedAt) || comparableMoment(shipment?.shipDate) || comparableMoment(shipment?.createdAt);
@@ -242,7 +243,7 @@ export function buildDashboardSalesMetrics({
       }
     }
     const refunds = array(order?.payments).filter(payment => payment?.type === "refund" && recordedAmount(payment?.amount) > 0)
-      .map(payment => ({ time: unshippedRefundRecordedAt(payment), amount: money(payment.amount), ...dashboardRefundStage(payment, orderShipments) }));
+      .map(payment => ({ time: unshippedRefundRecordedAt(payment), amount: money(payment.amount), goodsRefundAmount: money(Number(payment.amount) - paymentShippingAmount(payment)), shippingRefund: isShippingRefund(payment), ...dashboardRefundStage(payment, orderShipments) }));
     // Missing old receipt history is a warning, never a reason to erase a registered refund.
     let available = 0;
     const cashEvents = [...receipts.map(receipt => ({ ...receipt, refund: false })), ...refunds.map(refund => ({ ...refund, refund: true }))]
@@ -251,8 +252,8 @@ export function buildDashboardSalesMetrics({
     for (const event of cashEvents) {
       if (!event.refund) { available += event.amount; continue; }
       const bucket = buckets.get(dashboardDatePart(event.time));
-      if (bucket) {
-        bucket[event.stage === "before_shipment" ? "unshippedRefund" : "shippedDamage"] += event.amount;
+      if (bucket && !event.shippingRefund) {
+        bucket[event.stage === "before_shipment" ? "unshippedRefund" : "shippedDamage"] += event.goodsRefundAmount;
         if (event.estimated) add("estimatedRefundStage", 1, order);
         // A later logistics correction must not silently rewrite a registered cash report.
         if (hasCorrectedFulfillment) add("correctedFulfillmentRefund", 1, order);

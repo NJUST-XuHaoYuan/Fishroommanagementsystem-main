@@ -68,10 +68,10 @@ export function NewCustomerEvidenceGallery({ orderId, attachments, onRemove, dis
   </div>;
 }
 
-export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = false, onChange, onBusyChange, payment = false }: {
+export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = false, onChange, onBusyChange, payment = false, refund = false }: {
   orderId: string; attachments: NewCustomerEvidenceAttachment[]; disabled?: boolean;
   onChange: (attachments: NewCustomerEvidenceAttachment[]) => void; onBusyChange: (busy: boolean) => void;
-  payment?: boolean;
+  payment?: boolean; refund?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ name: string; index: number; total: number; percent: number } | null>(null);
@@ -145,9 +145,9 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     } finally { operation.finish(); }
   };
 
-  return <section className="space-y-2" aria-label={payment ? "上传付款图片凭证" : "上传新客审批图片凭证"} aria-busy={busy}>
-    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">{payment ? "付款凭证" : "添加微信证明"}<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
-    <p className="text-xs leading-5 text-muted-foreground">{payment ? "请上传能看清付款金额、时间和收款账户的截图，由财务核对实际到账。" : "请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。"}最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
+  return <section className="space-y-2" aria-label={payment ? refund ? "上传退款图片凭证" : "上传付款图片凭证" : "上传新客审批图片凭证"} aria-busy={busy}>
+    <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">{payment ? refund ? "退款凭证" : "付款凭证" : "添加微信证明"}<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
+    <p className="text-xs leading-5 text-muted-foreground">{payment ? refund ? "请上传能看清退款金额、时间和退款账户的截图，由财务核对实际出账。" : "请上传能看清付款金额、时间和收款账户的截图，由财务核对实际到账。" : "请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。"}最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
     <p className="text-xs leading-5 text-muted-foreground">上传后需提交申请才会绑定；本人本单未提交的图片草稿 24 小时内可恢复，过期后需重新上传。</p>
     <NewCustomerEvidenceGallery orderId={orderId} attachments={attachments} onRemove={id => void remove(id)} disabled={disabled || busy} payment={payment} />
     <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden" aria-label="选择图片凭证" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onChange={event => {

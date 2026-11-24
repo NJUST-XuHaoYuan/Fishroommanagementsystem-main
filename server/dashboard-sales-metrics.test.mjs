@@ -209,3 +209,13 @@ test("corrected-fulfillment refund warning is scoped to refund business date and
   const noRefund = metrics([order({ payments: [receipt("p", 200)] })], shipments);
   assert.equal(noRefund.salesMetricWarnings.correctedFulfillmentRefundCount, 0);
 });
+
+test("freight refunds remain cash outflows but do not count as goods returns or shipment damage", () => {
+  const result = metrics([order({ payments: [receipt("paid", 250),
+    refund("freight", 10, { refundCategory: "shipping_fee", shippingAmount: 10, refundStage: "after_shipment" }),
+    refund("mixed", 240, { shippingAmount: 40, refundStage: "before_shipment" })] })]);
+  assert.equal(result.dailyFinanceData[0].received, 250);
+  assert.equal(result.dailyFinanceData[0].unshippedRefund, 200);
+  assert.equal(result.dailyFinanceData[0].shippedDamage, 0);
+  assert.equal(isUnshippedOrderRefund(refund("shipping-only", 10, { refundCategory: "shipping_fee", refundStage: "before_shipment" })), false);
+});
