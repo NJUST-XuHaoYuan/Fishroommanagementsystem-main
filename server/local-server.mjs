@@ -85,6 +85,7 @@ import {
   updateLockedAppState,
 } from "./shipment-actual-shipping-fee-rules.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
+import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
@@ -6296,9 +6297,13 @@ function validateOrderCanComplete(order = {}, shipments = []) {
     throw new Error("订单仍有未签收或未处理的发货，不能标记完成");
   }
   validateOrderShippingFeesRecorded(order, shipments);
-  const paymentGate = shipmentPaymentGateForOrder(order, shipments);
-  if (!paymentGate.canShip) {
-    throw new Error(`订单尚有 ¥${paymentGate.outstandingAmount.toFixed(2)} 未核销，不能标记完成`);
+  const completionFinancial = orderCompletionFinancialCheck(order, calcAmountDueForOrder(order, shipments));
+  if (!completionFinancial.canComplete) {
+    const error = new Error(completionFinancial.reasons.map(reason => reason.message).join("；"));
+    error.statusCode = 409;
+    error.code = "ORDER_COMPLETION_FINANCE_REQUIRED";
+    error.completionFinancial = completionFinancial;
+    throw error;
   }
 }
 
@@ -6559,8 +6564,7 @@ function validateOrderStatusForPatch(req, currentOrder = {}, nextOrder = {}, nex
     throw new Error("取消订单必须通过订单专用接口");
   }
   if (nextStatus === "completed") {
-    validateOrderCanComplete(nextOrder, nextShipments);
-    return;
+    throw httpError(409, "完成订单必须通过完成订单入口，核对财务与履约条件", "ORDER_COMPLETION_DEDICATED_REQUIRED");
   }
 
   const relatedShipments = nextShipments.filter((shipment) =>
@@ -6676,11 +6680,6 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     if (paymentAction && (hasShippingSettlement(currentOrder) || usesOrderCashier(currentOrder))) throw httpError(409, "新运费流程的资金记录必须通过收款凭证、运费退款或财务专用入口登记", "SHIPPING_SETTLEMENT_PAYMENT_DEDICATED_REQUIRED");
     if (paymentAction) {
       requireModulePermissionForAuth(req, "finance", paymentAction);
-    }
-
-    if (nextOrder.status === "completed" && currentOrder.status !== "completed") {
-      requireOrderPermissionForAuth(req, "update");
-      validateOrderCanComplete(nextOrder, nextShipments);
     }
   }
 
@@ -13362,6 +13361,9 @@ async function handleApi(req, res, url) {
       const currentOrder = orderMatches[0];
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑");
+      if (Object.prototype.hasOwnProperty.call(body, "status") && body.status !== currentOrder.status) {
+        throw httpError(409, "订单状态必须通过对应业务入口修改", "ORDER_STATUS_DEDICATED_REQUIRED");
+      }
       requireVisibleSiteForAuth(req, state, currentOrder.siteId, "不能修改未授权场地的订单");
 
       const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder, {
@@ -14114,6 +14116,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const requestedOrderId = String(body.orderId ?? "").trim();
@@ -14135,16 +14138,6 @@ async function handleApi(req, res, url) {
       }
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能标记完成");
       validateOrderShippingFeesRecorded(currentOrder, state.shipments);
-      const paymentGate = shipmentPaymentGateForOrder(currentOrder, state.shipments);
-      if (!paymentGate.canShip) {
-        const blocked = await commitShipmentPaymentBlock(client, req, state, currentOrder, paymentGate);
-        sendJson(req, res, 409, {
-          ok: false,
-          code: "CREDIT_SALE_CONFIRMATION_REQUIRED",
-          ...blocked,
-        });
-        return;
-      }
       validateOrderCanComplete(currentOrder, state.shipments);
 
       const nextOrder = { ...currentOrder, status: "completed" };
@@ -14177,6 +14170,7 @@ async function handleApi(req, res, url) {
       sendJson(req, res, error?.statusCode || 400, {
         ok: false,
         ...(error?.code ? { code: error.code } : {}),
+        ...(error?.completionFinancial ? { completionFinancial: error.completionFinancial } : {}),
         error: error.message || "完成订单失败",
       });
     } finally {

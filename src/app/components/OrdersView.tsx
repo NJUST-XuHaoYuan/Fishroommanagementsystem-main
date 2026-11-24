@@ -10,6 +10,8 @@ import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
 import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderCashierPanel } from "./OrderCashierPanel";
+import { OrderCompletionActions, type OrderCompletionCheck } from "./OrderCompletionActions";
+import { orderCompletionFinancialCheck } from "../../../server/order-completion-finance.mjs";
 import { getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel } from "../utils/shippingSettlement";
 import { orderPaymentProofSummary } from "../utils/orderPaymentProof";
 import { Button } from "./ui/button";
@@ -4442,10 +4444,12 @@ function OrderDetailDialog({
   const [refundOpen, setRefundOpen] = useState(false);
   const [refundSaving, setRefundSaving] = useState(false);
   const refundSaveLock = useRef(false);
+  const [completionSaving, setCompletionSaving] = useState(false);
+  const completionSaveLock = useRef(false);
   const refundContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
   const refundContextRef = useRef(refundContextKey);
   refundContextRef.current = refundContextKey;
-  useEffect(() => { setRefundOpen(false); setRefundSaving(false); }, [refundContextKey]);
+  useEffect(() => { setRefundOpen(false); setRefundSaving(false); setCompletionSaving(false); }, [refundContextKey]);
   const personnel = state.personnel ?? [];
   const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
   const ownerCandidates = useOrderOwnerCandidates(order?.siteId, state.user, open && editMode, personnel, order?.contactPersonnelId || resolveOrderContactPersonnel(personnel, order || {})?.id);
@@ -4763,12 +4767,33 @@ function OrderDetailDialog({
   const allShipmentsResolved = activeOrderShipments.length > 0 && activeOrderShipments.every((s) =>
     s.status === "delivered" || s.status === "damaged"
   );
-  const canCompleteOrder = !!order &&
-    order.status !== "cancelled" &&
-    order.status !== "completed" &&
-    allItemsShipped &&
-    allShipmentsResolved &&
-    !pendingActualShippingFee;
+  const pendingFulfillmentCorrection = orderShipments.some((shipment) => shipmentFulfillmentState(shipment)?.pending);
+  const completionFinancial = orderCompletionFinancialCheck(order ?? {}, amountDue);
+  const completionChecks: OrderCompletionCheck[] = [
+    {
+      id: "items", label: "商品已全部发货或自提", complete: allItemsShipped, target: "logistics",
+      detail: allItemsShipped ? undefined : inventoryActiveItems.length === 0
+        ? "没有可完成履约的商品，请先核对订单商品。"
+        : `还有 ${unshippedItems.length} 件商品未${order && isPickupOrderSource(order.source) ? "自提" : "发货"}。`,
+    },
+    {
+      id: "delivery", label: "签收与报损已处理", complete: allShipmentsResolved, target: "logistics",
+      detail: allShipmentsResolved ? undefined : "所有发货需已签收，或已完成报损处理。",
+    },
+    {
+      id: "fulfillment", label: "实际履约信息已核实", complete: !pendingFulfillmentCorrection, target: "logistics",
+      detail: pendingFulfillmentCorrection ? "存在待核实的实际发货或签收时间，请先更正履约记录。" : undefined,
+    },
+    {
+      id: "freight", label: "运费信息齐全", complete: !pendingActualShippingFee, target: "logistics",
+      detail: pendingActualShippingFee ? `还有 ${pendingActualShippingFeeCount} 笔实际运费未补录。`
+        : order && orderShippingFeeMode(order) === "collect" ? "自提或到付无需补录实际运费。" : undefined,
+    },
+    {
+      id: "finance", label: "收退款已核验并结清", complete: completionFinancial.canComplete, target: "cashier",
+      detail: completionFinancial.canComplete ? "财务已核验净收款与最终应收一致。" : completionFinancial.reasons.map((reason) => reason.message).join("；"),
+    },
+  ];
   const canShip = !!order && shippableUnshippedItems.length > 0
     && order.status !== "cancelled" && order.status !== "completed";
   const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
@@ -4839,24 +4864,28 @@ function OrderDetailDialog({
     }
   };
 
-  const completeOrder = async () => {
-    if (!order) return;
-    if (!permission.requirePermission("update")) return;
-    if (!allItemsShipped)
-      return toast.error(isPickupOrderSource(order.source)
-        ? "尚有商品未自提，请先完成所有自提再确认完成"
-        : "尚有商品未发货，请先完成所有发货再确认完成");
-    if (!allShipmentsResolved)
-      return toast.error("尚有发货未签收或报损未完成处理，请先处理完发货状态");
-    if (pendingActualShippingFee)
-      return toast.error(`尚有 ${pendingActualShippingFeeCount} 笔实际运费未补录，不能完成订单`);
-    if (!confirmWrite("完成", `将订单「${order.orderNo}」标记为已完成，完成后不可再编辑。`)) return;
+  const completeOrder = async (): Promise<boolean> => {
+    if (!order || completionSaveLock.current || !permission.requirePermission("update")) return false;
+    const unmetCheck = completionChecks.find((check) => !check.complete);
+    if (unmetCheck) { toast.error(unmetCheck.detail || unmetCheck.label); return false; }
+    const session = captureNewCustomerSession();
+    if (!isNewCustomerSessionCurrent(session, state.user)) { toast.error("登录状态已变化，请重新登录后操作"); return false; }
+    const requestContext = refundContextKey;
+    completionSaveLock.current = true;
+    setCompletionSaving(true);
     try {
       const result = await postOrderApi("orders/complete", { orderId: order.id });
-      applyOrderApiResult(setState, result);
+      if (!isNewCustomerSessionCurrent(session) || refundContextRef.current !== requestContext) return false;
+      applyOrderApiResult(setState, result, { session: session!, shouldApply: () => refundContextRef.current === requestContext });
       toast.success("订单已完成");
+      return true;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+      if (isNewCustomerSessionCurrent(session) && refundContextRef.current === requestContext)
+        toast.error(error instanceof Error ? error.message : "保存失败，请重试");
+      return false;
+    } finally {
+      completionSaveLock.current = false;
+      if (refundContextRef.current === requestContext) setCompletionSaving(false);
     }
   };
 
@@ -5149,13 +5178,13 @@ function OrderDetailDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(o) => { if (editSaving) return; if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
+      <Dialog open={open} onOpenChange={(o) => { if (editSaving || completionSaving) return; if (!o && editMode) cancelEdit(); onOpenChange(o); }}>
         <DialogContent
           aria-describedby={undefined}
-          className="fishroom-fullscreen-dialog flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-3 overflow-hidden rounded-none border-0 p-4 sm:h-[90dvh] sm:max-h-[90dvh] sm:w-[92vw] sm:max-w-[1080px] sm:rounded-xl sm:border sm:p-6"
+          className="fishroom-fullscreen-dialog order-detail-dialog [&>button:last-child]:size-[44px] [&>button:last-child]:inline-flex [&>button:last-child]:items-center [&>button:last-child]:justify-center [&>button:last-child]:top-2 [&>button:last-child]:right-2 flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-3 overflow-hidden rounded-none border-0 p-4 sm:h-[90dvh] sm:max-h-[90dvh] sm:w-[92vw] sm:max-w-[1080px] sm:rounded-xl sm:border sm:p-6"
         >
           <DialogHeader>
-            <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-3 flex-wrap pr-10">
               <DialogTitle>{order.orderNo}</DialogTitle>
               <OrderStatusTags order={order} shipments={state.shipments} />
               {editMode && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">编辑中</span>}
@@ -5632,7 +5661,7 @@ function OrderDetailDialog({
             </div>
           </Tabs>
 
-          <DialogFooter className="flex-wrap gap-2 pt-2 border-t">
+          {(editMode || (permission.canUpdate && order.status !== "cancelled" && order.status !== "completed")) && <DialogFooter className="flex-wrap items-center gap-2 pt-2 border-t">
             {editMode ? (
               <>
                 <Button variant="ghost" onClick={cancelEdit} disabled={editSaving}>取消编辑</Button>
@@ -5683,38 +5712,23 @@ function OrderDetailDialog({
                     </Button>
                   </div>
                 )}
-                {detailTab === "logistics" && permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && activeOrderShipments.length > 0 && (
-                  <div className="flex flex-col items-end gap-1">
-                    {!allItemsShipped && (
-                      <p className="text-xs text-purple-500">
-                        尚有 {unshippedItems.length} 件{isPickupOrderSource(order.source) ? "未自提" : "未发货"}
-                      </p>
-                    )}
-                    {allItemsShipped && !allShipmentsResolved && (
-                      <p className="text-xs text-purple-500">尚有发货未签收或报损未完成处理</p>
-                    )}
-                    {allItemsShipped && allShipmentsResolved && pendingActualShippingFee && (
-                      <p className="text-xs text-amber-600">尚有 {pendingActualShippingFeeCount} 笔实际运费未补录</p>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className={!canCompleteOrder ? "text-muted-foreground border-muted" : "text-emerald-600"}
-                      onClick={completeOrder}
-                      disabled={!canCompleteOrder}
-                    >
-                      <CheckCircle className="size-3.5 mr-1" />完成订单
-                    </Button>
+                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && (
+                  <div className="sm:ml-auto">
+                    <OrderCompletionActions
+                      key={refundContextKey}
+                      checks={completionChecks}
+                      orderNo={order.orderNo}
+                      amountDue={amountDue}
+                      verifiedNetReceived={completionFinancial.verifiedNetReceived}
+                      saving={completionSaving}
+                      onNavigate={setDetailTab}
+                      onComplete={completeOrder}
+                    />
                   </div>
                 )}
-
-
-
-                <div className="flex-1" />
-                <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
               </>
             )}
-          </DialogFooter>
+          </DialogFooter>}
         </DialogContent>
       </Dialog>
 

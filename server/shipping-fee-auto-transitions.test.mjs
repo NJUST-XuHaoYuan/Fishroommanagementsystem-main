@@ -11,6 +11,7 @@ import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
 import { closeEndedOrderOwnerAssignments } from "./order-owner-assignment.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { paymentEvidenceShipmentSnapshot } from "./payment-proof-rules.mjs";
+import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 
 const source = await readFile(new URL("./local-server.mjs", import.meta.url), "utf8");
 
@@ -80,6 +81,7 @@ function createAutomaticTransitions(clock) {
     "closeEndedOrderOwnerAssignments",
     "paymentEvidenceShipmentSnapshot",
     "calcAmountDueForOrder",
+    "orderCompletionFinancialCheck",
     `"use strict";\n${validateFeesSource}\n${validateCompleteSource}\n${automaticTransitionsSource}\nreturn applyAutomaticOrderTransitions;`,
   )(
     todayInChina,
@@ -100,6 +102,7 @@ function createAutomaticTransitions(clock) {
     closeEndedOrderOwnerAssignments,
     paymentEvidenceShipmentSnapshot,
     calcAmountDueForOrder,
+    orderCompletionFinancialCheck,
   );
 }
 
@@ -116,6 +119,7 @@ function stateWithShipment(mode, {
       source: "私域线上",
       shippingFeeMode: mode,
       paymentGateOpen,
+      payments: paymentGateOpen ? [{ id: "paid", type: "balance", amount: 100, verificationStatus: "verified" }] : [],
       items: [{ stockItemId: "stock-1" }],
     }],
     shipments: [{
@@ -185,6 +189,30 @@ test("automatic shipment records uncovered value as credit and does not require 
   });
   deliveredState.shipments[0].deliveredAt = "2026-10-20T10:00:00";
   const creditCompletion = applyAutomaticOrderTransitions(deliveredState);
-  assert.equal(creditCompletion.summary.autoCompletedCount, 1);
-  assert.equal(creditCompletion.state.orders[0].status, "completed");
+  assert.equal(creditCompletion.summary.autoCompletedCount, 0);
+  assert.equal(creditCompletion.state.orders[0].status, "shipped");
+});
+
+test("automatic batch skips each financial blocker and continues completing settled orders", () => {
+  const apply = createAutomaticTransitions({ today: "2026-10-27" });
+  const state = stateWithShipment("collect", { shipmentStatus: "delivered" });
+  const first = state.orders[0], shipment = { ...state.shipments[0], deliveredAt: "2026-10-20T10:00:00" };
+  const pendingPayment = { id: "pending-money", type: "balance", amount: 100, verificationStatus: "pending" };
+  state.orders = [
+    { ...first, id: "unpaid", payments: [] },
+    { ...first, id: "pending-payment", payments: [pendingPayment] },
+    { ...first, id: "pending-proof", paymentClaims: [{ id: "proof", status: "pending", amount: 100 }] },
+    { ...first, id: "pending-refund", payments: [...first.payments, { id: "refund", type: "refund", amount: 10, verificationStatus: "pending" }] },
+    { ...first, id: "overpaid", payments: [{ ...first.payments[0], amount: 110 }] },
+    { ...first, id: "settled" },
+    { ...first, id: "old-completed", status: "completed", payments: [] },
+  ];
+  state.shipments = state.orders.map(order => ({ ...shipment, id: `shipment-${order.id}`, orderId: order.id }));
+  const result = apply(state);
+  assert.equal(result.summary.autoCompletedCount, 1);
+  assert.deepEqual(result.state.orders.map(order => [order.id, order.status]), [
+    ["unpaid", "shipped"], ["pending-payment", "shipped"], ["pending-proof", "shipped"],
+    ["pending-refund", "shipped"], ["overpaid", "shipped"], ["settled", "completed"], ["old-completed", "completed"],
+  ]);
+  assert.deepEqual(result.state.orders.at(-1), state.orders.at(-1));
 });

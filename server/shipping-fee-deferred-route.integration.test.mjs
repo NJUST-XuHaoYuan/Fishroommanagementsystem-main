@@ -28,7 +28,8 @@ async function setup(t, mode, overrides = {}) {
 
 for (const mode of ["prepaid", "free"]) {
   test(`${mode}: unknown fee permits outbound, packing proof and receipt, but completion waits for fee`, async (t) => {
-    const s = await setup(t, mode);
+    const s = await setup(t, mode, { payments: [{ id: "paid", type: "balance", amount: mode === "prepaid" ? 211.45 : 188,
+      verificationStatus: "verified", time: "2026-10-20T12:00:00+08:00" }] });
     const before = await s.readPersistedState();
     const out = await s.request("/api/shipments/outbound", { token: s.admin, body: outboundBody });
     ok(out);
@@ -100,7 +101,7 @@ for (const mode of ["prepaid", "free"]) {
   });
 }
 
-test("prepaid: later actual fee updates receivable while credit can finish without fabricating extra receipts", async (t) => {
+test("prepaid: later actual fee allows credit shipment but completion requires verified difference", async (t) => {
   const s = await setup(t, "prepaid", {
     source: "私域线上", customerId: "fulfillment-customer", shippingAddress: "测试地址", paymentChannel: "cash",
     payments: [{ id: "paid", type: "balance", amount: 208, time: "2026-10-20T12:00:00+08:00",
@@ -113,10 +114,15 @@ test("prepaid: later actual fee updates receivable while credit can finish witho
   ok(await s.request("/api/shipments/actual-shipping-fee", { token: s.admin, body: {
     shipmentId, expectedActualShippingFee: 0, actualShippingFee: 30,
   } }));
+  const blocked = await s.request("/api/orders/complete", { token: s.admin, body: { orderId: "moved-order" } });
+  assert.equal(blocked.response.status, 409); assert.equal(blocked.body.completionFinancial.outstandingAmount, 10);
+  ok(await s.request("/api/orders/payment", { token: s.admin, body: { orderId: "moved-order", action: "add", payment: { id: "difference", type: "balance", amount: 10, time: "2026-10-23T12:00:00+08:00", paymentMethodId: "pm-cash" } } }));
+  assert.equal((await s.request("/api/orders/complete", { token: s.admin, body: { orderId: "moved-order" } })).response.status, 409);
+  ok(await s.request("/api/orders/payment", { token: s.admin, body: { orderId: "moved-order", action: "verify", paymentId: "difference" } }));
   const completed = await s.request("/api/orders/complete", { token: s.admin, body: { orderId: "moved-order" } }); ok(completed);
   const state = await s.readPersistedState();
   assert.equal(state.orders[0].status, "completed");
-  assert.equal(state.orders[0].payments.length, 1); assert.equal(state.orders[0].payments[0].amount, 208);
+  assert.equal(state.orders[0].payments.length, 2); assert.equal(state.orders[0].payments[0].amount, 208);
 });
 
 test("free: delayed fee remains seller expense and does not create customer arrears", async (t) => {

@@ -45,8 +45,8 @@ test("new create distinguishes advance quote from deferred charge; legacy orders
   assert.deepEqual((await s.readPersistedState()).orders, before.orders);
 });
 
-test("new shipment zero cost is explicit and concurrency-safe; credit completion remains allowed", async t => {
-  const s = await setup(t, state => { state.orders[0].shippingSettlementTiming = "after_shipping"; state.orders[0].shippingFee = 0; state.shipments = [shipment(0)]; });
+test("new shipment zero cost is explicit and concurrency-safe; settled order can complete", async t => {
+  const s = await setup(t, state => { state.orders[0].shippingSettlementTiming = "after_shipping"; state.orders[0].shippingFee = 0; state.shipments = [shipment(0)]; state.orders[0].payments = [receipt(1000, 0)]; });
   assert.equal((await s.detail()).shippingSettlement.status, "pending_fee");
   denied(await s.request("/api/orders/complete", { orderId: "proof-order" }));
   const saved = await s.request("/api/shipments/actual-shipping-fee", { shipmentId: "freight-shipment", actualShippingFee: 0,
@@ -55,7 +55,7 @@ test("new shipment zero cost is explicit and concurrency-safe; credit completion
   const stale = await s.request("/api/shipments/actual-shipping-fee", { shipmentId: "freight-shipment", actualShippingFee: 5,
     expectedActualShippingFee: 0, expectedActualShippingFeeRecordedAt: "" }); assert.equal(stale.response.status, 409);
   const complete = await s.request("/api/orders/complete", { orderId: "proof-order" }); ok(complete);
-  assert.equal(complete.body.order.payments.length, 0);
+  assert.equal(complete.body.order.payments.length, 1);
   assert.equal((await s.detail()).shippingSettlement.status, "settled");
 });
 
