@@ -5,18 +5,18 @@ import {
   shipmentHasActuallyShipped,
 } from "./order-refund-rules.mjs";
 
-test("preparing and outbound shipments remain eligible for ordinary refunds", () => {
+test("preparing and outbound shipments are classified before actual shipment", () => {
   assert.equal(shipmentHasActuallyShipped({ status: "preparing" }), false);
   assert.equal(shipmentHasActuallyShipped({ status: "outbound" }), false);
 });
 
-test("shipped, delivered, and damaged shipments require damage refunds", () => {
+test("shipped, delivered, and damaged shipments are classified after actual shipment", () => {
   assert.equal(shipmentHasActuallyShipped({ status: "shipped" }), true);
   assert.equal(shipmentHasActuallyShipped({ status: "delivered" }), true);
   assert.equal(shipmentHasActuallyShipped({ status: "damaged" }), true);
 });
 
-test("legacy shipped timestamps also block ordinary refunds", () => {
+test("legacy shipped timestamps also count as actual shipment", () => {
   assert.equal(shipmentHasActuallyShipped({ status: "outbound", shippedAt: "2026-08-03 12:30" }), true);
 });
 

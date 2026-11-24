@@ -16,6 +16,12 @@ function fixture() {
     shipMethod: "express", itemStockIds: ["ordered-completed"], actualShippingFee: 0, packingProof: ["one", "two"] }];
   return data;
 }
+function seedConfirmedReceipts(data, ids) {
+  for (const order of data.state.orders.filter(order => ids.includes(order.id))) order.payments = [{
+    id: `receipt-${order.id}`, type: "balance", amount: 1000, time: "2026-11-01T10:00:00+08:00",
+    verificationStatus: "verified", channel: order.paymentChannel, account: order.paymentAccount,
+  }];
+}
 async function setup(t, customize = () => {}) {
   const data = fixture(); customize(data);
   const server = await startMutableRouteServer(data); t.after(() => server.stop());
@@ -75,18 +81,18 @@ test("another effective order reservation suppresses both sold release and cance
 });
 
 test("completed refunds preserve all order/stock/shipment states and remain pending finance verification", async (t) => {
-  const s = await setup(t); const before = await s.readPersistedState();
+  const s = await setup(t, data => seedConfirmedReceipts(data, ["COMPLETED"])); const before = await s.readPersistedState();
   const response = await s.write("/api/orders/refund", { orderId: "COMPLETED", id: "refund-completed", amount: 20,
     notes: "测试退款", operator: "forged", verificationStatus: "verified", verifiedAt: "1900" }); ok(response);
   const after = await s.readPersistedState(); const oldOrder = before.orders.find((item) => item.id === "COMPLETED");
   const order = after.orders.find((item) => item.id === "COMPLETED");
   const { salesAmountSnapshot, ...retainedOrder } = order;
-  assert.deepEqual({ ...retainedOrder, payments: [] }, oldOrder);
+  assert.deepEqual({ ...retainedOrder, payments: oldOrder.payments }, oldOrder);
   assert.equal(salesAmountSnapshot.source, "legacy"); assert.equal(salesAmountSnapshot.amount, 123.45);
   assert.deepEqual(response.body.order.salesAmountSnapshot, salesAmountSnapshot);
-  assert.equal(order.payments.length, 1); assert.equal(order.payments[0].verificationStatus, "pending");
-  assert.equal(order.payments[0].recordedBy, "pricing-editor"); assert.equal(order.payments[0].type, "refund");
-  assert.equal(order.payments[0].recordSource, "order"); assert.equal(order.payments[0].refundMethod, "platform");
+  assert.equal(order.payments.length, 2); assert.equal(order.payments.at(-1).verificationStatus, "pending");
+  assert.equal(order.payments.at(-1).recordedBy, "pricing-editor"); assert.equal(order.payments.at(-1).type, "refund");
+  assert.equal(order.payments.at(-1).recordSource, "order"); assert.equal(order.payments.at(-1).refundMethod, "platform");
   assert.deepEqual(after.stock, before.stock); assert.deepEqual(after.shipments, before.shipments);
   assert.equal(after.stockStatusHistory, undefined);
   assert.equal((await s.write("/api/orders/refund", { orderId: "COMPLETED", id: "refund-completed", amount: 20 })).response.status, 400);
@@ -94,8 +100,9 @@ test("completed refunds preserve all order/stock/shipment states and remain pend
   assert.equal((await s.write("/api/orders/return-item", { orderId: "COMPLETED", stockItemId: "ordered-completed" })).response.status, 400);
 });
 
-test("refund-only writes do not cancel sold; shipped incomplete orders still require shipment damage flow", async (t) => {
+test("refund-only writes preserve sold and allow actual refund for shipped incomplete orders", async (t) => {
   const s = await setup(t, (data) => {
+    seedConfirmedReceipts(data, ["ORDER-RELEASE", "COMPLETED"]);
     data.state.orders.push({ ...structuredClone(data.state.orders[1]), id: "SHIPPED", orderNo: "SHIPPED", status: "shipped" });
     data.state.shipments.push({ ...structuredClone(data.state.shipments[0]), id: "shipment-incomplete", orderId: "SHIPPED" });
   });
@@ -103,11 +110,13 @@ test("refund-only writes do not cancel sold; shipped incomplete orders still req
   ok(await s.write("/api/orders/refund", { orderId: "ORDER-RELEASE", amount: 10, id: "refund-pending" }));
   const after = await s.readPersistedState(); assert.deepEqual(after.stock, before.stock); assert.equal(after.stockStatusHistory, undefined);
   const shipped = await s.write("/api/orders/refund", { orderId: "SHIPPED", amount: 10 });
-  assert.equal(shipped.response.status, 400); assert.match(shipped.body.error, /报损退款/);
+  ok(shipped); assert.equal(shipped.body.order.payments.at(-1).refundStage, "after_shipment");
+  const afterShippedRefund = await s.readPersistedState();
+  assert.deepEqual(afterShippedRefund.stock, before.stock); assert.deepEqual(afterShippedRefund.shipments, before.shipments);
   for (const amount of [0, -1, "not-a-number"]) {
     assert.equal((await s.write("/api/orders/refund", { orderId: "COMPLETED", amount })).response.status, 400);
   }
-  assert.deepEqual(await s.readPersistedState(), after);
+  assert.deepEqual(await s.readPersistedState(), afterShippedRefund);
 });
 
 test("unauthorized, cross-site, revoked and generic forgery paths cannot create release or refund records", async (t) => {
@@ -140,7 +149,7 @@ test("injected persistence failure rolls back order release, sold state and jour
 });
 
 test("concurrent retry of the same return or refund writes once under the order lock", async (t) => {
-  const s = await setup(t);
+  const s = await setup(t, data => seedConfirmedReceipts(data, ["COMPLETED"]));
   const returns = await Promise.all([1, 2].map(() => s.write("/api/orders/return-item", {
     orderId: "ORDER-RELEASE", stockItemId: "release-follower",
   })));
@@ -151,7 +160,7 @@ test("concurrent retry of the same return or refund writes once under the order 
   })));
   assert.deepEqual(refunds.map((result) => result.response.status).sort(), [200, 400]);
   const state = await s.readPersistedState();
-  assert.equal(state.orders.find((item) => item.id === "COMPLETED").payments.length, 1);
+  assert.equal(state.orders.find((item) => item.id === "COMPLETED").payments.length, 2);
   assert.equal(state.stockStatusHistory.length, 1);
 });
 

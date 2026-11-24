@@ -1985,11 +1985,14 @@ function OrderRefundDialog({
   const refundMethodName = cashierFlow ? refundMethod?.name || "" : order.paymentMethodName || refundMethod?.name || (refundChannel ? paymentChannelLabel(refundChannel) : "");
   const platformRefund = isPlatformPaymentChannel(refundChannel);
   const busy = saving || proofUploading;
+  const refundableAmount = Math.max(0, Math.round((order.payments ?? []).reduce((total, payment) =>
+    total + (payment.type === "refund" ? -Number(payment.amount || 0) : isPaymentVerified(payment) ? Number(payment.amount || 0) : 0), 0) * 100) / 100);
 
   const submit = async () => {
     if (busy) return;
     setError("");
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return setError("请输入有效退款金额");
+    if (draft.amount > refundableAmount + 0.005) return setError(`本单最多可登记退款 ¥${refundableAmount.toFixed(2)}；待核验收款需先由财务确认。`);
     if (!draft.time) return setError("请选择退款时间");
     if (cashierFlow && !selectedRefundMethod) return setError("请选择本笔退款的出账方式和账户");
     if (!refundChannel || !refundAccount) return setError("该订单的付款方式尚未配置收款账户，请联系管理员处理");
@@ -2013,7 +2016,8 @@ function OrderRefundDialog({
         <DialogHeader>
           <DialogTitle>登记退款 · {order.orderNo}</DialogTitle>
         </DialogHeader>
-        <p id="order-refund-inventory-hint" className="text-sm leading-6 text-muted-foreground">仅登记资金退款，不自动退鱼、不取消已售标记，不改变已完成订单或发货状态。登记后仍需财务核销。</p>
+        <p id="order-refund-inventory-hint" className="text-sm leading-6 text-muted-foreground">仅登记实际退钱，不自动退鱼、不取消已售标记，不改变订单或发货状态。登记后由财务核验出账。</p>
+        <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm">可登记退款余额 <strong>¥{refundableAmount.toFixed(2)}</strong><span className="mt-1 block text-xs text-muted-foreground">已核验实收减去全部已登记退款，含待核验退款；未核验收款暂不计入。</span></p>
         <fieldset disabled={busy} className="grid min-w-0 gap-4 sm:grid-cols-2">
           <div className="grid gap-1.5">
             <Label htmlFor="order-refund-amount">退款金额（元）<span className="ml-0.5 text-red-500">*</span></Label>
@@ -2077,8 +2081,8 @@ function OrderRefundDialog({
   );
 }
 
-export function canRegisterOrderRefund(order: Pick<Order, "status"> | null, hasActuallyShipped: boolean, canUpdate: boolean) {
-  return Boolean(order && canUpdate && (order.status === "completed" || !hasActuallyShipped));
+export function canRegisterOrderRefund(order: Pick<Order, "status"> | null, _hasActuallyShipped: boolean, canUpdate: boolean) {
+  return Boolean(order && canUpdate && order.status !== "cancelled");
 }
 
 export function OrderRefundAction({ order, hasActuallyShipped, canUpdate, saving = false, onOpen }: {
@@ -2141,8 +2145,8 @@ function ReturnItemDialog({
           </div>
           <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
             {hasActuallyShipped
-              ? `确认后会从订单中移除此未发货商品，订单应收自动减少 ¥${item.price.toFixed(2)}。该订单已有商品发货，不能再登记普通退款；已发货商品退款必须走报损退款。`
-              : `确认后会从订单中移除此商品，订单应收自动减少 ¥${item.price.toFixed(2)}。如需退回资金，可在本订单登记退款。`}
+              ? `确认后会从订单中移除此未发货商品，订单应收自动减少 ¥${item.price.toFixed(2)}。如需退回资金，请在本订单的“收银台”登记实际退款。`
+              : `确认后会从订单中移除此商品，订单应收自动减少 ¥${item.price.toFixed(2)}。如需退回资金，请在本订单的“收银台”登记实际退款。`}
           </div>
         </div>
         <DialogFooter>
@@ -2803,7 +2807,7 @@ function ReportDamageDialog({
                   </p>
                 </div>
                 <div className="rounded-lg border border-orange-100 bg-orange-50 px-3 py-2 text-xs text-orange-800">
-                  确认后会登记报损退款并调减订单应收；如已收款，财务台账会据此显示待退款并由财务核销。
+                  确认后仅记录报损并调减订单应收。实际退钱后，请到本订单的“收银台”登记退款，由财务核验出账。
                 </div>
               </div>
                 </div>
@@ -4809,7 +4813,7 @@ function OrderDetailDialog({
 
   const submitOrderRefund = async (draft: OrderRefundDraft) => {
     if (!order || refundSaveLock.current || !permission.requirePermission("update")) return false;
-    if (!canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)) throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
+    if (!canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)) throw new Error("当前订单不可登记退款，请检查订单状态和修改权限");
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) throw new Error("登录状态已变化，请重新登录后操作");
     const requestContext = refundContextKey;
@@ -4945,7 +4949,7 @@ function OrderDetailDialog({
     if (!order) return false;
     if (!permission.requirePermission("update")) return false;
     if (shipment.shipMethod === "pickup") { toast.error("上门自取订单不可报损"); return false; }
-    if (!confirmWrite("修改", result.resolution === "refund" ? "将发货单报损并登记报损退款，订单应收同步调减，后续由财务核销。" : "将发货单报损并选择库存鱼补发。")) return false;
+    if (!confirmWrite("修改", result.resolution === "refund" ? "将记录发货报损并调减应收。实际退钱需在收银台另行登记。" : "将发货单报损并选择库存鱼补发。")) return false;
     try {
       const response = await postOrderApi("shipments/damage", {
         shipmentId: shipment.id,
@@ -4954,7 +4958,7 @@ function OrderDetailDialog({
       applyOrderApiResult(setState, response);
       setShipmentAction(null);
       setDamageShipment(null);
-      toast.success(result.resolution === "refund" ? "报损退款已登记，待财务核销" : "已报损，已选择库存鱼进入待发货");
+      toast.success(result.resolution === "refund" ? "报损及应收调整已登记，实际退钱请到收银台登记" : "已报损，已选择库存鱼进入待发货");
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存失败，请重试");

@@ -5,6 +5,7 @@ import { paymentProofFixture, PRICING_TEST_PASSWORD } from "./test-support/payme
 
 const ok = result => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 const denied = result => assert.ok(result.response.status >= 400 && result.response.status < 500, JSON.stringify(result.body));
+const verifiedReceipt = () => ({ id: "snapshot-receipt", type: "balance", amount: 1000, time: "2026-11-17T10:00:00+08:00", verificationStatus: "verified", channel: "wechat", account: "合成微信收款账户" });
 async function setup(t, customize = () => {}) {
   const fixture = paymentProofFixture();
   fixture.state.systemSettings.orderPackagingFee = 15;
@@ -44,7 +45,7 @@ test("refund stage and fish identity are server snapshots even for partial shipm
     state.stock.find(item => item.id === "second-original").sold = true;
     state.shipments = [{ id: "sales-shipment", orderId: "proof-order", status: "shipped", siteId: "nanjing", shipMethod: "express",
       shippedAt: "2026-11-18T10:00:00", itemStockIds: ["proof-fish"], packingProof: ["one", "two"], actualShippingFee: 0 }];
-    state.orders.push({ ...structuredClone(state.orders[0]), id: "completed-sales", orderNo: "SALES-COMPLETED", status: "completed", items: [] });
+    state.orders.push({ ...structuredClone(state.orders[0]), id: "completed-sales", orderNo: "SALES-COMPLETED", status: "completed", items: [], payments: [verifiedReceipt()] });
   });
   const returned = await s.write("/api/orders/return-item", { orderId: "proof-order", stockItemId: "second-original",
     refund: { id: "partial-refund", type: "refund", amount: 200, time: "2026-11-19T11:00:00", refundStage: "after_shipment", refundShipmentId: "forged", refundItems: [] } }); ok(returned);
@@ -52,42 +53,42 @@ test("refund stage and fish identity are server snapshots even for partial shipm
   assert.equal(payment.refundStage, "before_shipment"); assert.equal(payment.refundShipmentId, ""); assert.equal(payment.refundItems[0].stockItemId, "second-original");
   assert.equal(returned.body.order.salesAmountSnapshot.amount, 1200);
   const refund = await s.write("/api/orders/refund", { orderId: "completed-sales", amount: 30, time: "2026-11-19T11:00:00", refundStage: "before_shipment" }); ok(refund);
-  assert.equal(refund.body.order.payments[0].refundStage, "after_shipment");
+  assert.equal(refund.body.order.payments.at(-1).refundStage, "after_shipment");
 });
 
 test("refund metadata cannot be forged by order, generic state, or finance edits and survives verification", async t => {
-  const s = await setup(t);
+  const s = await setup(t, state => { state.orders[0].payments = [verifiedReceipt()]; });
   const result = await s.write("/api/orders/refund", { orderId: "proof-order", amount: 50, time: "2026-11-19T11:00:00" }); ok(result);
   const order = result.body.order; const before = await s.readPersistedState();
   const forged = { ...order, salesAmountSnapshot: { ...order.salesAmountSnapshot, amount: 1 } };
   denied(await s.write("/api/orders/update", { ...forged, orderId: order.id }));
   denied(await s.write("/api/state/patch", { patch: { orders: [forged] }, basePatch: { orders: before.orders } }));
-  const payment = order.payments[0];
+  const payment = order.payments.at(-1);
   denied(await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...payment, refundStage: "after_shipment" } }));
   denied(await s.write("/api/orders/payment", { orderId: order.id, action: "add", payment: { id: "forged", type: "refund", amount: 10, refundStage: "before_shipment" } }));
   assert.deepEqual(await s.readPersistedState(), before);
   const edited = await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...payment, time: "2026-11-19T15:00:00", notes: "财务补充说明" } }); ok(edited);
-  assert.equal(edited.body.order.payments[0].refundOccurredAt, "2026-11-19T11:00:00");
+  assert.equal(edited.body.order.payments.at(-1).refundOccurredAt, "2026-11-19T11:00:00");
   assert.deepEqual(edited.body.order.salesAmountSnapshot, before.orders[0].salesAmountSnapshot);
   const verified = await s.write("/api/orders/payment", { orderId: order.id, action: "verify", paymentId: payment.id }); ok(verified);
-  assert.equal(verified.body.order.payments[0].refundOccurredAt, "2026-11-19T11:00:00");
+  assert.equal(verified.body.order.payments.at(-1).refundOccurredAt, "2026-11-19T11:00:00");
 });
 
 test("refund statement linking and unlinking retain the original business date and stage", async t => {
-  const s = await setup(t);
+  const s = await setup(t, state => { state.orders[0].payments = [verifiedReceipt()]; });
   const refund = await s.write("/api/orders/refund", { orderId: "proof-order", amount: 50, time: "2026-11-18T11:00:00" }); ok(refund);
-  const original = refund.body.order.payments[0];
+  const original = refund.body.order.payments.at(-1);
   const imported = await s.write("/api/finance/statements/import", { siteId: "nanjing", paymentMethodId: "pm-wechat", fileName: "合成退款流水.csv",
     csvText: ["交易时间,交易单号,收支类型,交易金额,付款方,备注", "2026-11-19 15:00:00,REFUND-SNAPSHOT-001,支出,50.00,付款凭证合成客户,SO-PROOF-TEST 退款"].join("\n") }); ok(imported);
   const overview = await s.read("/api/finance/overview?siteId=nanjing"); ok(overview); const statement = overview.body.statements[0];
   assert.ok(statement);
   if (statement.matchStatus === "unmatched") ok(await s.write("/api/finance/statements/link", { action: "link", statementId: statement.id, orderId: "proof-order" }));
-  const linked = (await s.readPersistedState()).orders[0].payments[0];
+  const linked = (await s.readPersistedState()).orders[0].payments.at(-1);
   assert.equal(linked.refundOccurredAt, original.refundOccurredAt); assert.equal(linked.refundStage, original.refundStage);
   assert.deepEqual(linked.refundItems, original.refundItems); assert.equal(linked.statementOriginal.time, original.time);
   assert.equal(linked.statementId, statement.id); assert.notEqual(linked.time, original.time);
   ok(await s.write("/api/finance/statements/link", { action: "unlink", statementId: statement.id }));
-  const unlinked = (await s.readPersistedState()).orders[0].payments[0];
+  const unlinked = (await s.readPersistedState()).orders[0].payments.at(-1);
   assert.equal(unlinked.time, original.time); assert.equal(unlinked.refundOccurredAt, original.refundOccurredAt);
   assert.equal(unlinked.refundStage, original.refundStage); assert.deepEqual(unlinked.refundItems, original.refundItems);
 });

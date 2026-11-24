@@ -82,9 +82,9 @@ test("load failures are explicit and can retry, not mistaken for no cancellation
   assert.doesNotMatch(loading, /暂无/);
 });
 
-test("completed shipped orders expose refund action only to editors; ordinary shipped orders keep damage workflow", () => {
-  for (const status of ["pending", "confirmed", "completed", "cancelled"]) for (const shipped of [false, true]) for (const canUpdate of [false, true]) {
-    const expected = canUpdate && (status === "completed" || !shipped);
+test("cashier refund is available to editors before and after shipment but not for cancelled orders", () => {
+  for (const status of ["pending", "confirmed", "shipped", "completed", "cancelled"]) for (const shipped of [false, true]) for (const canUpdate of [false, true]) {
+    const expected = canUpdate && status !== "cancelled";
     assert.equal(orders.canRegisterOrderRefund({ status }, shipped, canUpdate), expected);
     const html = renderToStaticMarkup(createElement(orders.OrderRefundAction, { order: { status }, hasActuallyShipped: shipped, canUpdate, onOpen() {} }));
     assert.equal(html.includes("登记退款"), expected, `${status}/${shipped}/${canUpdate}`);

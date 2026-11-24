@@ -52,6 +52,7 @@ test("real dashboard route separates registered receipts, unshipped returns, ful
     refund: { id: "partial-refund", type: "refund", amount: 40, time: `${today}T10:00:00`, proof: [], notes: "合成未发货鱼退款" } }); ok(returned);
   assert.equal(returned.body.order.payments.at(-1).refundStage, "before_shipment");
   assert.equal(returned.body.order.salesAmountSnapshot.amount, 200, "capture before removing the returned line");
+  ok(await server.write("/api/orders/payment", { orderId: "COMPLETED-METRIC", action: "verify", paymentId: "receipt-completed" }));
   ok(await server.write("/api/orders/refund", { orderId: "COMPLETED-METRIC", id: "completed-refund", amount: 30, time: `${today}T10:15:00` }));
   ok(await server.write("/api/shipments/damage", { shipmentId: "adjust-shipped", resolution: "refund", damagedItemStockIds: ["shipment-delivered"], refundAmount: 50 }));
   summary = await server.summary();
@@ -80,6 +81,7 @@ test("real dashboard route separates registered receipts, unshipped returns, ful
 
 test("generic patches cannot rewrite stored sale, refund-stage or replacement-value business facts", async t => {
   const server = await setup(t);
+  ok(await server.write("/api/orders/payment", { orderId: "COMPLETED-METRIC", action: "verify", paymentId: "receipt-completed" }));
   ok(await server.write("/api/orders/refund", { orderId: "COMPLETED-METRIC", id: "immutable-refund", amount: 20 }));
   let state = await server.readPersistedState();
   for (const modify of [

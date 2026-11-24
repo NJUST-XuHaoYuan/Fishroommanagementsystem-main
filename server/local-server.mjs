@@ -13905,8 +13905,11 @@ async function handleApi(req, res, url) {
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
       const orderId = String(currentOrder.id ?? "");
-      if (currentOrder.status !== "completed" && orderHasActuallyShipped(state.shipments, currentOrder.id)) {
-        throw new Error("订单已经发货，不能登记普通退款，请在对应发货单使用报损退款");
+      if (currentOrder.status === "cancelled") throw new Error("已取消订单不能登记退款");
+      const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
+      const paymentId = String(body.id || uid("pay"));
+      if (currentPayments.some(payment => String(payment?.id ?? "") === paymentId)) {
+        throw new Error("退款记录已存在，请刷新后重试");
       }
 
       const refundMethod = usesOrderCashier(currentOrder)
@@ -13918,9 +13921,20 @@ async function handleApi(req, res, url) {
       if (!account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
       const amount = normalizeMoney(body.amount, "Refund amount");
       if (amount <= 0) throw new Error("退款金额必须大于 0");
+      // Pending refunds reserve money immediately; verified refunds must not
+      // be deducted twice by starting from a pre-netted receipt total.
+      const refundableCents = currentPayments.reduce((total, payment) => {
+        const paymentAmount = Number(payment?.amount);
+        if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) return total;
+        const cents = Math.round(paymentAmount * 100);
+        return total + (payment.type === "refund" ? -cents : isPaymentVerified(payment) ? cents : 0);
+      }, 0);
+      if (Math.round(amount * 100) > Math.max(0, refundableCents)) {
+        throw httpError(409, `当前最多可登记退款 ¥${(Math.max(0, refundableCents) / 100).toFixed(2)}，按已核验实收扣除全部已登记退款计算`, "ORDER_REFUND_EXCEEDS_RECEIPTS");
+      }
       const refundAllocation = validateOrderRefundAllocation(currentOrder, amount);
       const payment = normalizePaymentRecord({
-        id: body.id || uid("pay"),
+        id: paymentId,
         time: body.time || nowDatetimeInChina(),
         type: "refund",
         amount,
@@ -13938,10 +13952,6 @@ async function handleApi(req, res, url) {
         ...refundMetadataForOrder(currentOrder, state.shipments, { time: body.time || nowDatetimeInChina() }),
         ...(refundAllocation ? { shippingAmount: refundAllocation.shippingAmount } : {}),
       });
-      const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
-      if (currentPayments.some((item) => String(item?.id ?? "") === payment.id)) {
-        throw new Error("退款记录已存在，请刷新后重试");
-      }
       const nextOrder = { ...captureOrderSalesAmount(currentOrder, nowDatetimeInChina()), payments: [...currentPayments, payment] };
       const nextOrders = orders.map((order) => String(order?.id ?? "") === orderId ? nextOrder : order);
       const refundPath = payment.refundMethod === "platform" ? "平台退款冲减" : "账户退款出账";
