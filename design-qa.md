@@ -1,81 +1,64 @@
-# Mini-program catalog: approved compact variant
+# 订单管理本地测试版 · Design QA
 
-Date: 2026-09-08
+Date: 2026-11-24
+Scope: order-list toolbar, filters, contextual export selection, desktop/mobile integration. Local only; no production deployment or shared baseline push.
 
-## Visual evidence
+## Visual target and evidence
 
-- Source: `/Users/xuhaoyuan/.codex/generated_images/019edf7b-cbed-7512-bffd-ea1594ba6d82/exec-5fd35d52-d7c3-4f37-9e75-ce5fccc6bb78.png` (853 x 1844).
-- Evidence directory: `/Users/xuhaoyuan/Documents/New project/miniprogram-preview-20260908/`.
-- Native implementation: `catalog-compact-390.jpg` (1149 x 768 developer-tool window); content crop `catalog-compact-390-screen.jpg` (244 x 528).
-- Full-view comparison: `catalog-reference-normalized.png` and `catalog-compact-normalized.jpg`, both normalized to 390 px width and viewed together. The implementation is an enlarged simulator capture, not a full-resolution device screenshot; do not infer pixel-perfect sharpness from it.
-- Additional native check: `catalog-compact-320.jpg`, iPhone 5 / 320 x 568. Standard check: iPhone 12/13 / 390 x 844. Also observed at iPhone 15 Pro Max / 430 x 932.
-- State: loaded catalog from the production public API. No mocked stock or changes to production data.
+- Selected direction: design 1 (chosen as the conservative existing-product layout after the user asked to implement locally).
+- Source: /Users/xuhaoyuan/.codex/generated_images/01a00a9b-b53c-7610-8cd6-5b29b236c6f9/exec-a5266ce9-d2fc-4cbe-b928-c40ac3cf1c7b.png
+- Implementation: http://127.0.0.1:8787 → 销售管理 → 订单管理.
+- Source and desktop capture: 1487 × 1058 px; desktop CSS viewport 1487 × 1058, DPR 1.
+- Final desktop: .data/orders-ui-qa/desktop-final.png
+- Full-view combined comparison: .data/orders-ui-qa/desktop-comparison.jpg
+- Focused toolbar combined comparison: .data/orders-ui-qa/toolbar-comparison.jpg
+- Mobile CSS viewport/capture: 390 × 844 px, DPR 1. No horizontal overflow (scrollWidth = innerWidth = 390).
+- Final mobile: .data/orders-ui-qa/mobile-final.png
+- Mobile before/after combined comparison: .data/orders-ui-qa/mobile-comparison.jpg
+- Date-range drawer: .data/orders-ui-qa/mobile-filter-range.png
+- State: 南京; all orders; no selected rows or active filters. Source uses sample data; implementation uses the independent local production-data copy (2,202 Nanjing orders). These differences are intentional, not fabricated production state.
 
-## Findings and intentional differences
+## Findings and comparison history
 
-- No actionable P0/P1/P2 layout defects in the checked home states. Titles, counts and two-column rows do not overlap at 320, 390 or 430 px.
-- Typography: fixed 22 px category headings, 15 px subcategory names and 12 px metadata. System Chinese fonts preserve readability rather than reproducing generated glyph artifacts.
-- Layout: white canvas, flat inset category bands, single-line headings/counts, left accent bars, two-column subcategory grid, full-width single-category rows and horizontal rules without vertical dividers or section cards. Rows retain at least 56 px touch height and grow for text.
-- Color: teal, ruby, olive and blue groups each have a distinct light tint. Coral styling is present but cannot be visually checked against live content because the current public catalog has no available coral group.
-- Assets: original frameless logo and handwritten slogan remain unchanged, at existing native-navigation dimensions. The oversized brand in the generated illustration is intentionally not used; native status bar and capsule need safe space.
-- Content: labels/counts are bound to the public catalog. The illustration's coral inventory and abbreviated metadata are not substituted for real data. Empty categories remain hidden according to the existing catalog contract.
-- Focused check: inspected header/count alignment and two-column row typography in the normalized pair and native 320 px capture. Screenshot scaling limits assessment of raster sharpness; original brand assets are unchanged.
+1. [P2, fixed] Global mobile button minimum height stretched order switches and checkboxes vertically. Evidence: mobile-default.png. Added order-page-scoped control sizing, retained larger label click targets; mobile-final.png and mobile-comparison.jpg confirm normal proportions. Mobile summary pairs retain two columns so each card is more compact.
+2. Capturing immediately after changing browser viewport produced one incomplete frame (489 px wide). Re-captured after observing the final DOM viewport and verified the saved image is 1487 × 1058 before regenerating comparisons. Incomplete comparison was replaced, not used to pass QA.
+3. No remaining actionable P0/P1/P2 findings in the final combined comparisons.
 
-## Validation
+## Required fidelity surfaces
 
-- 13 focused Node tests passed: layout contract/navigation, privacy/cache rules, and video preview regression tests.
-- Native WeChat compilation succeeded. Debugger reported zero errors after recompilation and after category navigation; warnings remain and were not treated as proof of zero warnings.
-- Tapped a category, verified the corresponding product list and counts, and returned to the catalog through its existing return button.
-- Only homepage WXML/WXSS and focused tests changed. Public data logic and video controls are untouched.
-- Physical-device visual acceptance remains for the user's preview scan. No production publication or review submission is part of this change.
+- Typography: uses the existing system font and 14 px root, with the established table/body scale. Preserves the real product's denser typography rather than enlarging the whole app to match the illustrative mock. Headline, active status tab and order number have clear hierarchy. Labels remain legible and do not clip at tested widths.
+- Spacing/layout: header actions are grouped at the right; status navigation, search/filter row, result count and table are separate. Dates and wholesale are in a sheet. Zero-selection export bar is removed. Full existing navigation is retained rather than replacing it with the mock's thin illustrative sidebar. Desktop table displays 20 rows per page; mobile keeps existing 12-row cards.
+- Colors/tokens: existing gray background, white cards, charcoal primary actions, border and focus tokens retained. Existing source/payment/fulfillment status colors remain because this task does not redesign those business indicators.
+- Images/icons: existing Marine Forest logo retained. UI controls use existing Lucide icons. No placeholder raster assets or recreated brand art.
+- Copy/content: “我的未完成” preserves the original responsible-person/unfinished scope. “已出库待发货” clearly names the actual filter and excludes pickup. Today/tomorrow are planned dates and may include already-shipped orders; explanations are present in the sheet and button titles. Counts on shortcuts refer to current-site totals; result count reflects combined filters. All orders includes cancelled orders.
 
-Comparison history: initial implementation compared with the selected image; no additional visual-fix iteration was required. Differences above are deliberate native-app and real-data constraints.
+## Interaction verification
+
+Performed through the in-app browser against the actual local app:
+
+- Desktop page selection: 20 rows on page 1, 40 after also selecting page 2.
+- Search for SO-2026-3341 clears previous selection, shows one matching order and selects only that order.
+- Mobile page selection: 12 rows. Explicit select-all-results chooses exactly 2,202 matching orders.
+- Switching to Jiangyin clears Nanjing selection; restored Nanjing afterward.
+- Pending-outbound filter shows 7 orders without automatically selecting them. Export dialog explicitly limits output to selected pending-outbound items.
+- Today shows 5 matching orders; tomorrow shows zero with a clear empty state and disabled page-selection checkbox; repeated shortcut click clears the condition.
+- My unfinished combines with the planned date and selects the unfinished status; clear all restores all orders.
+- Native calendar selection verified order dates 2026-11-23 through 2026-11-24 combined with planned shipment 2026-11-24 through 2026-11-25 (3 results). Removing the shipment-date chip fully clears both shipment boundaries while retaining the order-date range (6 results).
+- Wholesale filter, condition chips and clear all operate without changing unrelated business data.
+- New-order source chooser and payment-claim dialog open successfully; closed without submitting business changes.
+- No browser console errors observed.
+- Existing targeted checks: 25/25 pass across order-date-filters, orderSearch, OrderWholesaleTag and StockPickerBioDialog. Production build succeeds.
+- No actual order creation, financial verification, shipment or data mutation was submitted; export dialog scope was checked without writing business data.
+
+## Local runtime evidence
+
+Frontend source commit: d28f2fed96c6ad7c16beed5deca3a786d42b5153.
+Frontend image: fishroom-local-test-frontend:d28f2fed96c6ad7c16beed5deca3a786d42b5153.
+Built and container JS SHA-256 match: ba4c440a494afb93f65302e8f959ca8f11f7a40780bd1f9510a75726d9010005.
+Backend and database containers retained; backend API version remains its existing local version. Startup and stop shortcuts include the frontend-only Compose override, so restarting preserves the new local UI.
+
+## Follow-up polish
+
+- [P3] Existing detailed status tags and mobile card information remain relatively dense. Revisit only after user feedback on this local version.
 
 final result: passed
-
-## Product images and identical-specimen groups
-
-Date: 2026-09-09
-
-- Product-level return navigation is explicitly left aligned, overriding native mini-button margins. Product cards use the configured product image, then the species default or placeholder; actual specimen media remains in the next level.
-- Arrival, feeding/health and special-price tags wrap and can coexist. Product tags that apply to only part of the inventory include the matching quantity.
-- Groups require matching product, site, batch, tank, arrival, status, price, notes and complete maintenance history. Private history is represented by an opaque server-generated signature. Missing or ambiguous evidence keeps fish separate; list-level media summaries are not used as proof of equality.
-- Display grouping does not merge database records. Each member retains its original selection code; switching members loads that fish's detail and temporarily disables copying. The member picker has a bounded, scrollable height for larger groups.
-- Existing central catalog visibility, exclusion and quantity-cap policies remain intact. No production inventory records were changed.
-
-### Evidence and validation
-
-- Native WeChat simulator captures in the evidence directory above: `product-default-tags-320.jpg`, `product-default-tags-430.jpg`, `specimen-groups-430.jpg`, and `group-detail-code-switch-430.jpg`.
-- Checked 320 px and 430 px product views: default images, left navigation, wrapping tags, aligned prices, and no horizontal text overflow. The developer-tool screenshots are scaled window captures, not physical-device renders.
-- A live product with 56 specimens displayed as five distinct groups. Sampled members from four groups had identical full public histories. A 13-member detail picker scrolled to its last member, updated the selection code, re-enabled copying, and retained one shared history display.
-- 541 Node tests passed, including the actual PostgreSQL history-signature fixture and public API privacy/visibility regression tests. Vite production build passed; its existing large-chunk warning remains.
-- Read-only clone benchmark: full maintenance data was about 17.4 MB; SQL history digests about 0.87 MB, with a roughly 339 ms projection query and 19 ms application signature step in this run. These measurements are not a production latency guarantee.
-- Backend revision `78bc21b0d8967f2397f3078bbd9fc2579efd76fa` was deployed after verifying the previous live revision was merged and taking a database backup. Health, version and live catalog checks passed. Existing frontend and database containers were not recreated.
-- Mini-program delivery is a preview only. No official upload, review submission or publication was performed. Physical-device acceptance remains for the user's preview scan.
-
-## Stock cards and explicit return navigation
-
-Date: 2026-09-09
-
-- Supersedes the previous grouped-detail presentation: stock uses ordinary two-column product cards with product names, prices and inventory quantities. Default product-list images and actual stock media in the next level remain unchanged. Different history/arrival/status/price groups still remain separate.
-- Group detail opens with product identity, inventory quantity and maintenance history. Individual codes are collapsed behind an explicit action; unnumbered members use ordinal labels instead of database IDs. Actual selection codes and member switching are preserved.
-- Every non-root page has an explicit left-aligned return action in loading, success and error states. Existing matching parent pages are reused to preserve filters and scrolling; direct-entry pages reconstruct their parent instead of requiring a pre-existing navigation stack.
-- Sticky product navigation reserves the measured custom-header height, avoiding overlap with the status bar and WeChat capsule. Stock/detail pages use their native header plus an in-page return row; stock filters sit below that row.
-- Evidence: `/Users/xuhaoyuan/Documents/New project/miniprogram-preview-20260909/`, including `stock-card-430.jpg`, `stock-detail-430.jpg`, `stock-card-scrolled-320.jpg`, `stock-detail-320.jpg`, and `products-return-preserved-320.jpg`. These are native developer-tool window captures, not physical-device screenshots.
-- Checked 320 px and 430 px views, two-column cards, wrapping tags, quantity counts, expanded/collapsed selection codes, member-code switching, and return navigation. Native return from the five-feeding-fish detail preserved its filter; return to the product list preserved the original scrolled position.
-- 546 Node tests passed with zero skips, including navigation fallbacks, grouping/privacy regressions and the PostgreSQL history-signature fixture. Native compilation and exercised routes reported zero errors. Developer-tool warnings remain; unsupported attribute-based page selectors were replaced with class-only selectors in the touched controls.
-- Scope is mini-program UI, navigation utilities and regression tests only. No new backend deployment or database changes; official mini-program upload/review/publication is not part of this preview iteration. Physical-device acceptance remains pending.
-
-## Stock identifiers, individual notes and unambiguous quantities
-
-Date: 2026-09-09
-
-- Replaced the stock-card fish-code label with dark-blue `编号`; individual stock notes appear directly below in red with a visible `备注` prefix. Removed top filter controls and list-card tank locations. Status tags, arrival dates and tank information in detail remain available.
-- Numbered or individually noted fish always have separate cards. Only unnumbered, unnoted fish with matching complete-history signatures and all existing grouping conditions can form a `同款可选 N 条` card. Both cards and detail label prices per unit. Actual database records and selection codes are unchanged.
-- Added the specifically requested individual note to the public stock whitelist. Product/customer/order notes and purchase prices remain excluded. Missing note data from a legacy API fails closed for grouping.
-- Validation: 548 Node tests passed with zero skips, including PostgreSQL integration fixtures, new note/privacy rules and grouping invariants. Vite production build passed with the existing large-chunk warning.
-- Read-only production catalog check: 531 visible stock rows, all with a string note field; 64 non-empty notes. The new view model produces 158 cards, including 39 groups, preserving the total of 531 stock rows. No grouped card contains a manual number or individual note.
-- Native WeChat checks at 430 px and 320 px covered numbered cards, red notes, scrolling, detail, both return levels and grouped stock. Confirmed the supplied example `304` displays its existing `22+` note; no production data was edited. Evidence directory: `/Users/xuhaoyuan/Documents/New project/miniprogram-preview-20260909/`, files `number-notes-cards-430.jpg`, `number304-card-430.jpg`, `number304-detail-430.jpg`, `number-notes-cards-320.jpg`, `number-notes-scrolled-320.jpg`, and `clear-group-cards-320.jpg`.
-- A developer-tool restart initially reported `simulator not found` / `subPackages` in the tool's own runtime. A complete IDE restart cleared the startup failure; exercised pages then reported zero errors. Remaining warnings included developer-tool hot reload, SharedArrayBuffer deprecation and unsupported worker telemetry; these were inspected rather than counted as application errors. These captures are scaled simulator windows, not physical-device acceptance.
-- Compatible backend revision `11458fb7c66f772986d6953d4576a06c39366f40` was deployed after verifying the live revision was merged. Database and uploads backups are in `/home/ubuntu/backups/pre-11458fb7c66f/`; archive checks and container health passed. Existing frontend and database containers were not recreated.
-- Mini-program CLI preview succeeded at 203169 bytes (198.4 KB), using the live HTTPS public API with normal domain checks. Preview evidence: `number-notes-preview-qr.jpg` and `number-notes-preview-info.json` in the evidence directory. No official mini-program upload, review submission or publication was performed.
