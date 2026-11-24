@@ -11,8 +11,8 @@ const business = (order) => Object.fromEntries(Object.entries(order).filter(([ke
 const expected = (order) => ({ expectedIsWholesaleOrder: order?.isWholesaleOrder === true,
   expectedWholesaleOrderUpdatedAt: String(order?.wholesaleOrderUpdatedAt ?? "") });
 const createInput = (extra = {}) => ({
-  siteId: "nanjing", source: "平台下单", platformOrderNo: "WHOLESALE-CREATE", date: "2026-11-02",
-  paymentChannel: "douyin", plannedShipDate: "2026-11-05", contactPersonnelId: "pricing-editor",
+  siteId: "nanjing", source: "批发", customerId: "wholesale-customer", date: "2026-11-02",
+  paymentChannel: "cash", plannedShipDate: "2026-11-05", contactPersonnelId: "pricing-editor", shippingAddress: "南京测试收货地址",
   items: [{ stockItemId: "follower", price: 150 }], shippingFeeMode: "collect", ...extra,
 });
 
@@ -177,7 +177,8 @@ test("wholesale creation uses server audit metadata and ordinary edits preserve 
   assert.equal(created.body.order.wholesaleOrderUpdatedBy, "pricing-editor");
   assert.equal(created.body.order.wholesaleOrderUpdatedByName, "价格测试editor");
   assert.ok(Number.isFinite(Date.parse(created.body.order.wholesaleOrderUpdatedAt)));
-  assert.equal(created.body.order.source, "平台下单");
+  assert.equal(created.body.order.source, "批发");
+  assert.equal(created.body.order.shippingAddress, "南京测试收货地址");
   assert.equal(created.body.order.items[0].price, 150);
   assert.match(created.body.operationLog.detail, /批发订单/);
   const persisted = await s.readPersistedState();
@@ -187,13 +188,14 @@ test("wholesale creation uses server audit metadata and ordinary edits preserve 
   assert.deepEqual(tag(await s.readOrder()), tag(marked));
 });
 
-test("absent and false creation choices remain ordinary and ignore forged audit fields", async (t) => {
+test("all five retail sources create ordinary orders and ignore forged audit fields", async (t) => {
   const data = fixture(); delete data.state.commissionLedgerV1;
   const s = await setup(t, data);
-  for (const [index, choice] of [{}, { isWholesaleOrder: false }].entries()) {
+  const fishIds = ["follower", "follower-stale", "legacy-equal", "legacy-different", "legacy-equal-new"];
+  for (const [index, source] of ["平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下"].entries()) {
     const created = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput({
-      ...choice, platformOrderNo: `ORDINARY-CREATE-${index}`,
-      items: [{ stockItemId: index ? "follower-stale" : "follower", price: 150 }],
+      ...(index % 2 ? { isWholesaleOrder: false } : {}), source, platformOrderNo: `ORDINARY-CREATE-${index}`,
+      items: [{ stockItemId: fishIds[index], price: 150 }],
       wholesaleOrderUpdatedAt: "forged", wholesaleOrderUpdatedBy: "admin", wholesaleOrderUpdatedByName: "forged",
     }) }); ok(created);
     assert.deepEqual(tag(created.body.order), {});
@@ -211,6 +213,66 @@ test("invalid creation booleans roll back the complete order, inventory and audi
     assert.equal(result.body.code, "ORDER_WHOLESALE_TAG_INVALID");
     assert.deepEqual(await s.readPersistedState(), before);
   }
+  for (const source of ["批发", "平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下"]) {
+    const result = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput({
+      source, platformOrderNo: "SOURCE-CONFLICT", isWholesaleOrder: source !== "批发",
+    }) });
+    assert.equal(result.response.status, 400, JSON.stringify(result.body));
+    assert.equal(result.body.code, "ORDER_WHOLESALE_SOURCE_CONFLICT");
+    assert.deepEqual(await s.readPersistedState(), before);
+  }
+});
+
+test("wholesale source uses customer and shipping validation and edits synchronize classification atomically", async (t) => {
+  const data = fixture(); delete data.state.commissionLedgerV1;
+  const s = await setup(t, data); const before = await s.readPersistedState();
+  for (const invalid of [{ customerId: "" }, { plannedShipDate: "" }, { paymentChannel: "douyin" }]) {
+    const result = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput(invalid) });
+    assert.equal(result.response.status, 400, JSON.stringify(result.body));
+    assert.deepEqual(await s.readPersistedState(), before);
+  }
+  const result = await s.request("/api/orders/create", { token: s.tokens.editor, body: createInput() }); ok(result);
+  const wholesale = result.body.order;
+  assert.equal(wholesale.isWholesaleOrder, true, "an omitted flag derives wholesale from its source");
+  assert.equal(wholesale.customerId, "wholesale-customer");
+  assert.equal(wholesale.paymentChannel, "cash");
+  assert.equal(wholesale.plannedShipDate, "2026-11-05");
+  const createdState = await s.readPersistedState();
+  const unmarked = await s.mark(false, { orderId: wholesale.id });
+  assert.equal(unmarked.response.status, 409);
+  assert.equal(unmarked.body.code, "ORDER_WHOLESALE_SOURCE_PROTECTED");
+  const patched = await s.request("/api/state/patch", { token: s.tokens.editor, body: {
+    patch: { orders: [{ ...wholesale, source: "私域线上" }] }, basePatch: { orders: [wholesale] },
+  } });
+  assert.equal(patched.response.status, 409, JSON.stringify(patched.body));
+  assert.deepEqual(await s.readPersistedState(), createdState);
+  const retailResult = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
+    ...wholesale, orderId: wholesale.id, source: "私域线上",
+  } }); ok(retailResult);
+  const retail = retailResult.body.order;
+  assert.equal(retail.isWholesaleOrder, false);
+  assert.equal(retail.wholesaleOrderUpdatedBy, "pricing-editor");
+  assert.ok(retail.wholesaleOrderUpdatedAt > wholesale.wholesaleOrderUpdatedAt);
+  assert.match(retailResult.body.operationLog.detail, /取消批发标记/);
+  assert.deepEqual(retail.items, wholesale.items);
+  assert.deepEqual(retail.salesAmountSnapshot, wholesale.salesAmountSnapshot);
+  assert.deepEqual((await s.readPersistedState()).stock, createdState.stock);
+  assert.deepEqual(await s.readOrder(wholesale.id), retail);
+  const restored = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
+    ...retail, orderId: retail.id, source: "批发",
+  } }); ok(restored);
+  assert.equal(restored.body.order.isWholesaleOrder, true);
+  assert.match(restored.body.operationLog.detail, /标记为批发订单/);
+  assert.deepEqual(await s.readOrder(wholesale.id), restored.body.order);
+
+  ok(await s.mark(true));
+  const legacy = await s.readOrder();
+  const legacyEdit = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
+    ...legacy, orderId: legacy.id, source: "闲鱼平台", platformOrderNo: "LEGACY-XIANYU",
+  } }); ok(legacyEdit);
+  assert.deepEqual(tag(legacyEdit.body.order), tag(legacy), "legacy tags survive edits between the five retail sources");
+  ok(await s.mark(false));
+  assert.equal((await s.readOrder()).isWholesaleOrder, false, "legacy source orders retain their dedicated unmark entry");
 });
 
 test("initial classification requires current create permission and site access, later changes still require update", async (t) => {

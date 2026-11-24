@@ -40,6 +40,11 @@ const ORDER_SOURCE_META: Record<string, OrderSourceMeta> = {
     platform: false,
     badgeClass: "border-sky-300 bg-sky-100 text-sky-800",
   },
+  "批发": {
+    label: "批发",
+    platform: false,
+    badgeClass: "border-slate-300 bg-slate-100 text-slate-800",
+  },
 };
 
 export function orderSourceLabel(source?: string): string {
@@ -54,6 +59,10 @@ export function orderSourceBadgeClass(source?: string): string {
 
 export function isPlatformOrderSource(source?: string): boolean {
   return ORDER_SOURCE_META[String(source ?? "").trim()]?.platform === true;
+}
+
+export function isAddressOrderSource(source?: string): boolean {
+  return ["私域线上", "批发"].includes(String(source ?? "").trim());
 }
 
 export function platformPaymentChannelForOrderSource(source?: string): PaymentChannel | "" {

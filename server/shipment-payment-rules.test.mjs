@@ -11,7 +11,7 @@ test("all sources may ship while only verified net receipts confirm money", () =
     { type: "refund", amount: 100, verificationStatus: "verified" },
   ];
   assert.equal(verifiedNetPaymentAmount(payments), 700);
-  for (const source of ["私域线上", "平台下单", "闲鱼平台", "微拍堂平台", "线下"]) {
+  for (const source of ["私域线上", "平台下单", "闲鱼平台", "微拍堂平台", "线下", "批发"]) {
     const gate = shipmentPaymentGate({ source, payments }, 1000);
     assert.equal(gate.canShip, true, source); assert.equal(gate.status, "credit_sale");
     assert.equal(gate.verifiedAmount, 700); assert.equal(gate.creditAmount, 300); assert.equal(gate.pendingProofAmount, 0);

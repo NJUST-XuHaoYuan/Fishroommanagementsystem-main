@@ -539,7 +539,7 @@ export type StockLossRecord = {
 };
 
 export type OrderStatus = "pending" | "confirmed" | "shipped" | "completed" | "cancelled" | "damaged";
-export const ORDER_SOURCE_OPTIONS = ["平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下"] as const;
+export const ORDER_SOURCE_OPTIONS = ["平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下", "批发"] as const;
 export type OrderSource = typeof ORDER_SOURCE_OPTIONS[number];
 
 export type OrderItem = {

@@ -33,7 +33,7 @@ import { expectedOrderFulfillmentLocation, resolveOrderFulfillmentStock } from "
 import {
   assertOrderAcquisitionTagUnchanged,
 } from "./order-acquisition-tag.mjs";
-import { assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
+import { assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag, synchronizeUpdatedOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 import {
   assertOrderOwnerAssignmentUnchanged, planOrderOwnerAssignment, orderOwnerAssignmentDetail,
   planOrderOwnerAssignmentDecision, ownerAssignmentNotifications, closeEndedOrderOwnerAssignments, assignmentTargetBlockedReason,
@@ -6011,7 +6011,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
     : paymentMethod.name;
   const paymentAccount = preserveCurrentPayment ? currentPaymentAccount : paymentMethod.account;
   const paymentReference = String(currentOrder?.paymentReference ?? "").trim();
-  const shippingAddress = source === "私域线上"
+  const shippingAddress = ["私域线上", "批发"].includes(source)
     ? String(body.shippingAddress ?? currentOrder?.shippingAddress ?? "").trim()
     : "";
   const plannedShipDate = isPickupOrder
@@ -13277,7 +13277,8 @@ async function handleApi(req, res, url) {
         ...currentOrder,
         ...nextOrderInput,
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
-      let nextOrder = { ...ownerPlan.order, salesAmountSnapshot: captureOrderSalesAmount(currentOrder, nowDatetimeInChina()).salesAmountSnapshot };
+      const classifiedOrder = synchronizeUpdatedOrderWholesaleTag(currentOrder, ownerPlan.order, req.auth.account);
+      let nextOrder = { ...classifiedOrder, salesAmountSnapshot: captureOrderSalesAmount(currentOrder, nowDatetimeInChina()).salesAmountSnapshot };
       let nextNotifications = ownerAssignmentNotifications(currentStationNotifications(state), nextOrder, { now: new Date().toISOString(), actor: req.auth.account, createId: () => uid("notice") });
       let creditApprovalCleared = false;
       const creditTermsChanged = creditApprovalSensitiveSnapshot(currentOrder) !== creditApprovalSensitiveSnapshot(nextOrder);
@@ -13303,7 +13304,7 @@ async function handleApi(req, res, url) {
         operator,
         module: "订单管理",
         action: "修改记录",
-        detail: `修改订单「${nextOrder.orderNo}」${creditApprovalCleared ? "，原赊销确认已失效" : ""}${ownerPlan.requested ? `，申请转交负责人给 ${nextOrder.ownerAssignment.toName}，接受前由 ${nextOrder.contactPerson || "原负责人"} 负责（申请 ${nextOrder.ownerAssignment.requestId}）` : ""}`,
+        detail: `修改订单「${nextOrder.orderNo}」${(currentOrder.source === "批发") !== (nextOrder.source === "批发") ? `，订单来源由 ${orderSourceLabel(currentOrder.source)} 改为 ${orderSourceLabel(nextOrder.source)}，${nextOrder.isWholesaleOrder ? "标记为批发订单" : "取消批发标记"}` : ""}${creditApprovalCleared ? "，原赊销确认已失效" : ""}${ownerPlan.requested ? `，申请转交负责人给 ${nextOrder.ownerAssignment.toName}，接受前由 ${nextOrder.contactPerson || "原负责人"} 负责（申请 ${nextOrder.ownerAssignment.requestId}）` : ""}`,
       };
       const nextState = {
         ...state,

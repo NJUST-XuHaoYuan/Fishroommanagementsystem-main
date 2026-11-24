@@ -1,26 +1,56 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ORDER_WHOLESALE_TAG_FIELDS, assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag } from "./order-wholesale-tag.mjs";
+import { ORDER_WHOLESALE_TAG_FIELDS, assertOrderWholesaleTagUnchanged, initializeCreatedOrderWholesaleTag, planOrderWholesaleTag, synchronizeUpdatedOrderWholesaleTag } from "./order-wholesale-tag.mjs";
 
 const account = { username: "editor", name: "订单员工" };
 const now = "2026-11-02T09:00:00.000Z";
 const request = { isWholesaleOrder: true, expectedIsWholesaleOrder: false, expectedWholesaleOrderUpdatedAt: "" };
 
-test("creation accepts an explicit classification and always generates audit metadata on the server", () => {
-  const order = { id: "new-order", source: "私域线上", items: [{ price: 100 }], payments: [] };
+test("creation derives classification from source and always generates audit metadata on the server", () => {
+  const order = { id: "new-order", source: "批发", items: [{ price: 100 }], payments: [] };
   const forged = { wholesaleOrderUpdatedAt: "1900-01-01", wholesaleOrderUpdatedBy: "admin", wholesaleOrderUpdatedByName: "forged" };
-  assert.equal(initializeCreatedOrderWholesaleTag(order, forged, account, now), order);
-  assert.equal(initializeCreatedOrderWholesaleTag(order, { ...forged, isWholesaleOrder: false }, account, now), order);
-  assert.deepEqual(initializeCreatedOrderWholesaleTag(order, { ...forged, isWholesaleOrder: true }, account, now), {
+  const marked = {
     ...order, isWholesaleOrder: true, wholesaleOrderUpdatedAt: now,
     wholesaleOrderUpdatedBy: "editor", wholesaleOrderUpdatedByName: "订单员工",
+  };
+  assert.deepEqual(initializeCreatedOrderWholesaleTag(order, forged, account, now), marked);
+  assert.deepEqual(initializeCreatedOrderWholesaleTag(order, { ...forged, isWholesaleOrder: true }, account, now), marked);
+  assert.throws(() => initializeCreatedOrderWholesaleTag(order, { isWholesaleOrder: false }, account, now), {
+    code: "ORDER_WHOLESALE_SOURCE_CONFLICT", statusCode: 400,
   });
+  for (const source of ["平台下单", "闲鱼平台", "微拍堂平台", "私域线上", "线下"]) {
+    const retail = { ...order, source };
+    assert.equal(initializeCreatedOrderWholesaleTag(retail, forged, account, now), retail);
+    assert.equal(initializeCreatedOrderWholesaleTag(retail, { ...forged, isWholesaleOrder: false }, account, now), retail);
+    assert.throws(() => initializeCreatedOrderWholesaleTag(retail, { isWholesaleOrder: true }, account, now), {
+      code: "ORDER_WHOLESALE_SOURCE_CONFLICT", statusCode: 400,
+    });
+  }
   for (const value of ["true", "false", 0, 1, null, undefined, {}, []]) {
     assert.throws(() => initializeCreatedOrderWholesaleTag(order, { isWholesaleOrder: value }, account, now), {
       statusCode: 400, code: "ORDER_WHOLESALE_TAG_INVALID",
     });
   }
   assert.equal(order.isWholesaleOrder, undefined);
+});
+
+test("source edits synchronize classification only across wholesale, preserving historical retail-source tags", () => {
+  const retail = { id: "legacy", source: "平台下单", notes: "legacy" };
+  const marked = planOrderWholesaleTag(retail, request, account, now).order;
+  const anotherRetail = { ...marked, source: "闲鱼平台" };
+  assert.equal(synchronizeUpdatedOrderWholesaleTag(marked, anotherRetail, account, now), anotherRetail);
+  const wholesale = synchronizeUpdatedOrderWholesaleTag(retail, { ...retail, source: "批发" }, account, now);
+  assert.equal(wholesale.isWholesaleOrder, true);
+  assert.equal(wholesale.wholesaleOrderUpdatedBy, "editor");
+  assert.throws(() => planOrderWholesaleTag(wholesale, { ...request, isWholesaleOrder: false }, account, now), {
+    statusCode: 409, code: "ORDER_WHOLESALE_SOURCE_PROTECTED",
+  });
+  const reverted = synchronizeUpdatedOrderWholesaleTag(wholesale, { ...wholesale, source: "私域线上" }, account, now);
+  assert.equal(reverted.isWholesaleOrder, false);
+  assert.equal(reverted.wholesaleOrderUpdatedAt, "2026-11-02T09:00:00.001Z");
+  for (const [current, next] of [[retail, { ...retail, source: "批发" }], [wholesale, { ...wholesale, source: "私域线上" }]]) {
+    assert.throws(() => assertOrderWholesaleTagUnchanged(current, next), { code: "ORDER_WHOLESALE_SOURCE_PROTECTED" });
+  }
 });
 
 test("wholesale is explicit metadata only and uses the authenticated actor, not supplied audit fields", () => {

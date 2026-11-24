@@ -60,6 +60,7 @@ import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { rankOrderSearchRows } from "../utils/orderSearch";
 import { beijingOrderCalendar, matchesPlannedShipmentRange } from "../utils/order-date-filters";
 import {
+  isAddressOrderSource,
   isPlatformOrderSource,
   isPlatformPaymentChannel,
   orderSourceBadgeClass,
@@ -174,6 +175,15 @@ const NEW_ORDER_SOURCE_CHOICES = [
     activeClass: "border-sky-400 bg-sky-50 text-sky-900 hover:border-sky-500 hover:bg-sky-100",
     iconClass: "bg-sky-200 text-sky-800",
     descriptionClass: "text-sky-700",
+  },
+  {
+    value: "批发",
+    label: "批发",
+    description: "选择客户并添加商品，创建批发订单",
+    icon: PackageCheck,
+    activeClass: "border-slate-400 bg-slate-100 text-slate-900 hover:border-slate-500 hover:bg-slate-200",
+    iconClass: "bg-slate-200 text-slate-800",
+    descriptionClass: "text-slate-700",
   },
 ] as const;
 
@@ -1154,7 +1164,7 @@ export function exportOrdersExcel(orders: Order[], state: Store) {
       platformOrderNoForOrder(order),
       orderCustomer?.name ?? (isPlatformOrderSource(order.source) ? platformOrderDisplayName(order) : "—"),
       orderCustomer?.phone || "",
-      order.source === "私域线上" ? effectiveOrderAddress(order, orderCustomer) || "" : "",
+      isAddressOrderSource(order.source) ? effectiveOrderAddress(order, orderCustomer) || "" : "",
       order.date,
       isPickupOrderSource(order.source)
         ? "无需发货"
@@ -4561,7 +4571,7 @@ function OrderDetailDialog({
           ? ""
           : editForm.paymentMethodId,
         paymentChannel: editPaymentMethod.channel,
-        shippingAddress: editForm.source === "私域线上" ? editForm.shippingAddress.trim() : "",
+        shippingAddress: isAddressOrderSource(editForm.source) ? editForm.shippingAddress.trim() : "",
         plannedShipDate: isPickupOrderSource(editForm.source) ? "" : editForm.plannedShipDate,
         ...(editForm.ownerSelectionChanged && selectedContactPersonnel ? {
           contactPersonnelId: selectedContactPersonnel.id,
@@ -4641,7 +4651,7 @@ function OrderDetailDialog({
         platformOrderNo: isPlatformOrderSource(nextSource) ? form.platformOrderNo : "",
         paymentMethodId: selectedPaymentMethod?.id ?? "",
         paymentChannel: selectedPaymentMethod?.channel ?? "",
-        shippingAddress: nextSource === "私域线上" ? form.shippingAddress : "",
+        shippingAddress: isAddressOrderSource(nextSource) ? form.shippingAddress : "",
         plannedShipDate: isPickupOrderSource(nextSource) ? "" : form.plannedShipDate,
         shippingFeeMode: isPickupOrderSource(nextSource) ? "collect" : form.shippingFeeMode,
         shippingFee: isPickupOrderSource(nextSource) ? 0 : form.shippingFee,
@@ -5165,7 +5175,7 @@ function OrderDetailDialog({
                     {formatOrderCreatedAt(order.createdAt)}
                   </div>
                 </div>
-                {editForm.source === "私域线上" && (
+                {isAddressOrderSource(editForm.source) && (
                   <div className="grid gap-1.5 col-span-4">
                     <Label className="text-xs">本单收货地址</Label>
                     <Input
@@ -5219,7 +5229,7 @@ function OrderDetailDialog({
                   </div>
                 )}
                 <div><span className="text-muted-foreground">订单负责人：</span>{order.contactPerson || "—"}</div>
-                {order.source === "私域线上" && displayAddress && (
+                {isAddressOrderSource(order.source) && displayAddress && (
                   <div className="col-span-2">
                     <span className="text-muted-foreground">收货地址：</span>
                     {displayAddress}
@@ -6281,7 +6291,6 @@ function NewOrderDialog({
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today);
   const [source, setSource] = useState("");
-  const [isWholesaleOrder, setIsWholesaleOrder] = useState(false);
   const [platformOrderNo, setPlatformOrderNo] = useState("");
   const [paymentMethodId, setPaymentMethodId] = useState("");
   const [shippingAddress, setShippingAddress] = useState("");
@@ -6310,7 +6319,6 @@ function NewOrderDialog({
   useEffect(() => {
     if (open) {
       setCustomerId(""); setDate(today); setSource(""); setPlatformOrderNo(""); setPaymentMethodId(""); setShippingAddress(""); setPlannedShipDate(""); setContactPersonnelId(defaultContactPersonnelId); setNotes("");
-      setIsWholesaleOrder(false);
       setSelectedItems(new Map());
       setShippingFeeMode("prepaid"); setShippingFee(0); setDiscount(0);
       setPickerOpen(false);
@@ -6327,6 +6335,7 @@ function NewOrderDialog({
   const selectedCustomerAddress = String(selectedCustomer?.address ?? "").trim();
   const platformOrder = isPlatformOrderSource(source);
   const pickupOrder = isPickupOrderSource(source);
+  const isWholesaleOrder = source === "批发";
   const availablePaymentMethods = useMemo(
     () => paymentMethodsForOrderSource(configuredPaymentMethods(state.systemSettings), source),
     [source, state.systemSettings]
@@ -6503,7 +6512,7 @@ function NewOrderDialog({
         douyinOrderNo: source === "平台下单" ? platformOrderNo.trim() : "",
         paymentMethodId,
         paymentChannel,
-        shippingAddress: source === "私域线上" ? shippingAddress.trim() : "",
+        shippingAddress: isAddressOrderSource(source) ? shippingAddress.trim() : "",
         plannedShipDate: pickupOrder ? "" : plannedShipDate,
         contactPersonnelId: selectedContactPersonnel.id,
         contactPerson: selectedContactPersonnel.name.trim(),
@@ -6540,27 +6549,6 @@ function NewOrderDialog({
     })
   ), [selectedItems, state.stock, state.products]);
 
-  const orderTypeChoice = (
-    <div className="flex flex-wrap items-center gap-3" role="group" aria-label="订单类型">
-      <span className="text-sm text-muted-foreground">订单类型</span>
-      <div className="inline-flex gap-1 rounded-lg border bg-muted/30 p-1">
-        {([false, true] as const).map((wholesale) => (
-          <button
-            key={String(wholesale)}
-            type="button"
-            disabled={creating}
-            aria-pressed={isWholesaleOrder === wholesale}
-            onClick={() => setIsWholesaleOrder(wholesale)}
-            className={`inline-flex min-h-10 items-center justify-center gap-1.5 rounded-md px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${isWholesaleOrder === wholesale ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
-          >
-            {wholesale && <Tag className="size-4" aria-hidden="true" />}
-            {wholesale ? "批发订单" : "普通订单"}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-
   return (
     <>
       <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next); }}>
@@ -6576,10 +6564,9 @@ function NewOrderDialog({
             <div className="flex flex-1 flex-col items-center justify-start overflow-y-auto p-4 sm:justify-center sm:p-8">
               <div className="w-full max-w-3xl">
                 <div className="mb-5 text-center">
-                  <div className="text-base font-semibold text-foreground">选择订单类型与来源</div>
-                  <div className="mt-1 text-sm text-muted-foreground">批发可在这里直接选择，来源决定后续必填信息和履约方式</div>
+                  <div className="text-base font-semibold text-foreground">选择订单类型</div>
+                  <div className="mt-1 text-sm text-muted-foreground">前五项为零售订单；批发请直接选择「批发」</div>
                 </div>
-                <div className="mb-5 flex justify-center">{orderTypeChoice}</div>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {NEW_ORDER_SOURCE_CHOICES.map((choice) => {
                     const SourceIcon = choice.icon;
@@ -6609,10 +6596,10 @@ function NewOrderDialog({
 
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5 sm:px-4">
               <div className="flex min-w-0 items-center gap-2">
-                <span className="text-xs text-muted-foreground">订单来源</span>
+                <span className="text-xs text-muted-foreground">订单类型</span>
                 <span className="truncate text-sm font-semibold text-foreground">{orderSourceLabel(source)}</span>
+                <Badge variant="outline">{isWholesaleOrder ? "批发订单" : "零售订单"}</Badge>
               </div>
-              {orderTypeChoice}
               <Button type="button" variant="ghost" size="sm" onClick={() => chooseSource("")}>
                 重新选择
               </Button>
@@ -6729,7 +6716,7 @@ function NewOrderDialog({
                   {paymentAccount || (paymentMethodId ? "未配置，请联系管理员" : "选择付款方式后自动带出")}
                 </div>
               </div>
-              {source === "私域线上" && (
+              {isAddressOrderSource(source) && (
                 <div className="grid gap-2 md:col-span-2 xl:col-span-3">
                   <Label>本单收货地址</Label>
                   <Input

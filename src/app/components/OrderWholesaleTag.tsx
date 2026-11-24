@@ -127,12 +127,13 @@ function formatWholesaleTime(value?: string) {
 }
 
 export function OrderWholesaleTag({ order, viewer, canUpdate, onOrderUpdated }: {
-  order: OrderWholesaleFields; viewer: User; canUpdate: boolean;
+  order: OrderWholesaleFields & { source?: string; status?: string }; viewer: User; canUpdate: boolean;
   onOrderUpdated: (order: OrderWholesaleFields, session: WholesaleMutationSession) => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const wholesaleSource = order.source === "批发";
   const pendingRef = useRef(false);
   const currentOrderIdRef = useRef(order.id);
   currentOrderIdRef.current = order.id;
@@ -141,10 +142,10 @@ export function OrderWholesaleTag({ order, viewer, canUpdate, onOrderUpdated }: 
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  useEffect(() => { setError(""); setMessage(""); }, [order.id]);
+  useEffect(() => { setError(""); setMessage(""); }, [order.id, order.source]);
 
   const toggle = async () => {
-    if (!canUpdate || pendingRef.current || !order.id) return;
+    if (!canUpdate || pendingRef.current || !order.id || wholesaleSource) return;
     const session = captureWholesaleMutationSession(viewer);
     if (!session) { setError("登录状态已变化，请重新登录后操作。"); return; }
     const orderId = order.id;
@@ -186,9 +187,13 @@ export function OrderWholesaleTag({ order, viewer, canUpdate, onOrderUpdated }: 
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold">批发订单标记</h3><OrderWholesaleBadge marked={order.isWholesaleOrder} />{order.isWholesaleOrder !== true && <span className="text-xs text-muted-foreground">未标记批发</span>}</div>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">仅分类当前订单，不改变客户类型、订单金额、提成或发货流程。点击后直接保存，可随时取消。</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{wholesaleSource
+          ? order.status === "completed"
+            ? "此订单来源为「批发」。已完成订单不能修改订单类型。"
+            : "此订单来源为「批发」。如需改为零售，请编辑订单并修改订单来源。"
+          : "仅分类当前订单，不改变客户类型、订单金额、提成或发货流程。点击后直接保存，可随时取消。"}</p>
       </div>
-      {canUpdate && <Button type="button" variant="outline" className="!min-h-[44px] shrink-0" disabled={pending} onClick={() => void toggle()}>{pending ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Tag className="size-4" aria-hidden="true" />}{pending ? "正在保存…" : order.isWholesaleOrder === true ? "取消批发标记" : "标记为批发订单"}</Button>}
+      {canUpdate && !wholesaleSource && <Button type="button" variant="outline" className="!min-h-[44px] shrink-0" disabled={pending} onClick={() => void toggle()}>{pending ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Tag className="size-4" aria-hidden="true" />}{pending ? "正在保存…" : order.isWholesaleOrder === true ? "取消批发标记" : "标记为批发订单"}</Button>}
     </div>
     {order.wholesaleOrderUpdatedAt && <p className="mt-2 break-words text-xs leading-5 text-muted-foreground">最近{order.isWholesaleOrder === true ? "标记" : "取消"}：{actor} · {formatWholesaleTime(order.wholesaleOrderUpdatedAt)}（北京时间）</p>}
     {!canUpdate && <p className="mt-2 text-xs text-muted-foreground">当前账号仅可查看，需有订单修改权限才能更改标记。</p>}

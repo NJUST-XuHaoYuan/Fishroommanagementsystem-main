@@ -4,6 +4,7 @@ export const ORDER_SOURCE_CONFIG = {
   "微拍堂平台": { label: "微拍堂", platform: true, paymentChannel: "weipaitang", orderNoLabel: "微拍堂订单编号" },
   "私域线上": { label: "线上私域", platform: false, paymentChannel: "", orderNoLabel: "" },
   "线下": { label: "线下自提", platform: false, paymentChannel: "", orderNoLabel: "" },
+  "批发": { label: "批发", platform: false, paymentChannel: "", orderNoLabel: "" },
 };
 
 export const ORDER_SOURCE_VALUES = new Set(Object.keys(ORDER_SOURCE_CONFIG));

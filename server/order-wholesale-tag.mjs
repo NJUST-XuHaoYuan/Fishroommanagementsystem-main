@@ -18,17 +18,24 @@ export function assertOrderWholesaleTagUnchanged(current = {}, next = {}) {
   if (snapshot(current) !== snapshot(next)) {
     fail(409, "ORDER_WHOLESALE_TAG_PROTECTED", "批发订单标记必须通过专用入口修改，请刷新后重试");
   }
+  if ((current.source === "批发") !== (next.source === "批发")) {
+    fail(409, "ORDER_WHOLESALE_SOURCE_PROTECTED", "请在订单编辑页面修改批发来源，以同步订单分类");
+  }
 }
 
-// Creation chooses the initial classification within the order transaction.
-// Only the boolean is accepted from the form; audit identity and time stay
-// server-owned, and later changes still use the dedicated CAS-protected route.
+// Creation derives its classification from the chosen source. An optional
+// boolean must agree; audit identity and time remain server-owned. Historical
+// retail-source tags still use the dedicated CAS-protected route.
 export function initializeCreatedOrderWholesaleTag(order, body, account, now = new Date().toISOString()) {
-  if (!Object.prototype.hasOwnProperty.call(body, "isWholesaleOrder")) return order;
-  if (typeof body.isWholesaleOrder !== "boolean") {
+  const supplied = Object.prototype.hasOwnProperty.call(body, "isWholesaleOrder");
+  if (supplied && typeof body.isWholesaleOrder !== "boolean") {
     fail(400, "ORDER_WHOLESALE_TAG_INVALID", "请选择是否标记为批发订单");
   }
-  if (!body.isWholesaleOrder) return order;
+  const wholesale = order.source === "批发";
+  if (supplied && body.isWholesaleOrder !== wholesale) {
+    fail(400, "ORDER_WHOLESALE_SOURCE_CONFLICT", "订单来源与批发标记不一致，请重新选择订单来源");
+  }
+  if (!wholesale) return order;
   return planOrderWholesaleTag(order, {
     isWholesaleOrder: true,
     expectedIsWholesaleOrder: false,
@@ -36,9 +43,23 @@ export function initializeCreatedOrderWholesaleTag(order, body, account, now = n
   }, account, now).order;
 }
 
+// Retail-source historical tags remain editable through their existing route.
+// Only crossing the new wholesale source boundary changes classification here.
+export function synchronizeUpdatedOrderWholesaleTag(currentOrder, nextOrder, account, now = new Date().toISOString()) {
+  if ((currentOrder.source === "批发") === (nextOrder.source === "批发")) return nextOrder;
+  return planOrderWholesaleTag(nextOrder, {
+    isWholesaleOrder: nextOrder.source === "批发",
+    expectedIsWholesaleOrder: currentOrder.isWholesaleOrder === true,
+    expectedWholesaleOrderUpdatedAt: String(currentOrder.wholesaleOrderUpdatedAt ?? ""),
+  }, account, now).order;
+}
+
 export function planOrderWholesaleTag(order, body, account, now = new Date().toISOString()) {
   if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.isWholesaleOrder !== "boolean") {
     fail(400, "ORDER_WHOLESALE_TAG_INVALID", "请选择是否标记为批发订单");
+  }
+  if (order?.source === "批发" && !body.isWholesaleOrder) {
+    fail(409, "ORDER_WHOLESALE_SOURCE_PROTECTED", "批发来源订单不能单独取消批发标记，请在订单编辑页面改为零售来源");
   }
   if (typeof body.expectedIsWholesaleOrder !== "boolean" ||
       typeof body.expectedWholesaleOrderUpdatedAt !== "string" || body.expectedWholesaleOrderUpdatedAt.length > 100) {

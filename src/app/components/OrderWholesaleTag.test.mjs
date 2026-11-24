@@ -61,6 +61,15 @@ test("panel shows named actor and fixed Beijing timestamp for mark and removal",
   assert.match(renderPanel({ order: { ...order, isWholesaleOrder: false } }), /最近取消/);
 });
 
+test("wholesale source directs classification changes through source editing", () => {
+  const markup = renderPanel({ order: { id: "order-wholesale", source: "批发", isWholesaleOrder: true } });
+  assert.match(markup, /请编辑订单并修改订单来源/);
+  assert.doesNotMatch(markup, /<button|取消批发标记/);
+  const completed = renderPanel({ order: { id: "order-wholesale", source: "批发", isWholesaleOrder: true, status: "completed" } });
+  assert.match(completed, /已完成订单不能修改订单类型/);
+  assert.doesNotMatch(completed, /请编辑订单/);
+});
+
 test("metadata merge does not roll back order content, remove current fields, or revive deleted orders", () => {
   const current = [{ id: "order-1", status: "completed", customerId: "customer-new", discount: 50, newCustomerApproval: { status: "approved" }, items: [{ id: "latest-item" }], isWholesaleOrder: false }];
   const incoming = { id: "order-1", status: "pending", customerId: "customer-old", discount: 0, items: [], isWholesaleOrder: true, wholesaleOrderUpdatedAt: "2026-11-02T02:03:04.000Z", wholesaleOrderUpdatedBy: "admin", wholesaleOrderUpdatedByName: "管理员" };
