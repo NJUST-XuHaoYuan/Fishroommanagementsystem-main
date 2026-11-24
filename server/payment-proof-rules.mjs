@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { usesOrderCashier, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
-import { hasShippingSettlement, shippingSettlementSummary, allocateShippingProof, paymentShippingAmount } from "./shipping-settlement.mjs";
+import { hasShippingSettlement, shippingSettlementSummary, allocateShippingProof, paymentShippingAmount, registeredOrderCashSummary } from "./shipping-settlement.mjs";
 import { isPaymentVerified, resolvePaymentMethodSnapshot, verifiedPaymentTotals } from "./payment-utils.mjs";
 import { creditSaleOrderOwner } from "./credit-sale-approval-rules.mjs";
 import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
@@ -90,8 +90,6 @@ export function planPaymentProofSubmission(state, order, account, body, { amount
   if (evidence.some(record => activeIds.has(record.id) || activePrints.has(record.sha256))) fail("同一张付款凭证已提交，请勿重复登记", "PAYMENT_PROOF_DUPLICATE");
   const usesSettlement = hasShippingSettlement(order);
   if (!usesSettlement) {
-    const total = otherClaims.reduce((sum, claim) => sum + Number(claim.amount || 0), amount);
-    if (total - amountDue > 0.005) fail("申报付款金额累计不能超过当前订单应收，请核对已有申报", "PAYMENT_PROOF_OVERPAID");
     if (body.purpose === "shipping_fee" || Number(body.shippingAmount || 0) !== 0) fail("历史订单请使用原收款流程", "PAYMENT_PROOF_LEGACY_PURPOSE", 400);
   }
   const method = usesOrderCashier(order)
@@ -101,30 +99,25 @@ export function planPaymentProofSubmission(state, order, account, body, { amount
   const externalTransactionNo = text(body.externalTransactionNo).slice(0, 200);
   if (externalTransactionNo && list(state.orders).some(other => paymentClaims(other).some(claim => claim.status !== "rejected" && claim.id !== existing?.id &&
     text(claim.externalTransactionNo) === externalTransactionNo && claim.channel === method.channel && claim.account === method.account))) fail("该支付流水号已在付款凭证中登记，请核对", "PAYMENT_PROOF_DUPLICATE");
+  const candidates = eligiblePaymentProofPayments(order).filter(payment => money(payment.amount) === money(amount) && payment.channel === method.channel && text(payment.account) === method.account);
+  const matchedPayment = candidates.length === 1 ? candidates[0] : null;
+  if (matchedPayment && otherClaims.some(claim => claim.matchingPaymentId === matchedPayment.id || claim.paymentId === matchedPayment.id)) fail("该收款已有凭证待核验，请勿重复提交", "PAYMENT_PROOF_DUPLICATE");
+  const context = { ...order, payments: list(order.payments).filter(payment => payment.id !== matchedPayment?.id), paymentClaims: claims.filter(claim => claim.id !== existing?.id) };
+  const registered = registeredOrderCashSummary(context);
+  if (!matchedPayment && registered.netRecorded + amount - amountDue > 0.005) fail("本次申报与已登记收退款净额合计超过当前订单应收", "PAYMENT_PROOF_OVERPAID");
   let allocation = null;
   if (usesSettlement) {
     if (body.purpose != null && !["order", "shipping_fee"].includes(body.purpose)) fail("请选择有效收款用途", "PAYMENT_PROOF_PURPOSE", 400);
-    const candidates = eligiblePaymentProofPayments(order).filter(payment => money(payment.amount) === money(amount) && payment.channel === method.channel && text(payment.account) === method.account);
-    const matchedPayment = candidates.length === 1 ? candidates[0] : null;
-    if (matchedPayment && otherClaims.some(claim => claim.matchingPaymentId === matchedPayment.id || claim.paymentId === matchedPayment.id)) fail("该收款已有凭证待核验，请勿重复提交", "PAYMENT_PROOF_DUPLICATE");
-    const context = { ...order, payments: list(order.payments).filter(payment => payment.id !== matchedPayment?.id), paymentClaims: claims.filter(claim => claim.id !== existing?.id) };
     const summary = shippingSettlementSummary(context, state.shipments);
     const split = matchedPayment && (matchedPayment.shippingAmount != null || matchedPayment.type === "shipping_fee")
       ? { purpose: matchedPayment.type === "shipping_fee" ? "shipping_fee" : "order", shippingAmount: paymentShippingAmount(matchedPayment), goodsAmount: money(amount - paymentShippingAmount(matchedPayment)) }
       : allocateShippingProof(context, state.shipments, amount, body.purpose || "order");
     if (body.shippingAmount != null && (!Number.isFinite(Number(body.shippingAmount)) || Math.abs(Number(body.shippingAmount) - split.shippingAmount) > 0.005)) fail("货款与运费分配已变化，请刷新后核对", "PAYMENT_PROOF_ALLOCATION_STALE");
     if (!matchedPayment && split.shippingAmount - summary.toCollect > 0.005) fail("运费申报超过当前待收运费，请核对已登记款项", "PAYMENT_PROOF_SHIPPING_OVERPAID");
-    const linkedClaims = new Set(list(context.payments).map(payment => text(payment.paymentProofClaimId)));
-    const linkedPayments = new Set(list(context.payments).map(payment => text(payment.id)));
-    const committed = list(context.payments).filter(payment => payment.verificationStatus !== "rejected")
-      .reduce((sum, payment) => sum + (payment.type === "refund" ? -Number(payment.amount || 0) : Number(payment.amount || 0)), 0) +
-      list(context.paymentClaims).filter(claim => claim.status === "pending" && !linkedClaims.has(text(claim.id)) && !linkedPayments.has(text(claim.paymentId)) && !linkedPayments.has(text(claim.matchingPaymentId)))
-        .reduce((sum, claim) => sum + Number(claim.amount || 0), 0);
-    if (!matchedPayment && committed + amount - amountDue > 0.005) fail("本次申报与已登记收款合计超过当前订单应收", "PAYMENT_PROOF_OVERPAID");
     allocation = { ...split, shippingDueAtSubmission: Math.max(summary.shippingDue, matchedPayment ? split.shippingAmount : 0), ...(matchedPayment ? { matchingPaymentId: matchedPayment.id } : {}) };
   }
   const claim = { id: existing?.id || createId(), version: Number(existing?.version || 0) + 1, status: "pending", amount: money(amount), time,
-    ...(allocation || {}), ...method, externalTransactionNo, notes: text(body.notes).slice(0, 1000), evidenceAttachments: evidence.map(paymentEvidenceMetadata),
+    ...(allocation || {}), ...(!usesSettlement && matchedPayment ? { matchingPaymentId: matchedPayment.id } : {}), ...method, externalTransactionNo, notes: text(body.notes).slice(0, 1000), evidenceAttachments: evidence.map(paymentEvidenceMetadata),
     submittedBy: account.username, submittedByPersonnelId: account.id, submittedAt: now,
     reviewedBy: "", reviewedAt: "", rejectionReason: "", paymentId: "",
     ...(existing ? { previousReviews: [...list(existing.previousReviews), Object.fromEntries(Object.entries(existing).filter(([key]) => key !== "previousReviews"))] } : {}) };
@@ -159,8 +152,9 @@ export function planPaymentProofReview(order, account, body, { now, createPaymen
         verifiedBy: isPaymentVerified(payment) ? payment.verifiedBy : account.username,
         verifiedAt: isPaymentVerified(payment) ? payment.verifiedAt : now, paymentProofClaimId: claim.id } : payment);
     } else {
-      const committed = payments.reduce((sum, payment) => sum + (payment.type === "refund"
-        ? isPaymentVerified(payment) ? -Number(payment.amount || 0) : 0 : Number(payment.amount || 0)), 0);
+      // Actual refunds reserve money when registered. Reviewing a receipt must
+      // not require finance to verify the refund first; completion checks both.
+      const committed = registeredOrderCashSummary({ payments }).netRecorded;
       // A proof submitted against a valid prepayment quote remains reviewable
       // when carrier cost later falls. The saved quote is server-owned and only
       // extends the freight portion, never the merchandise receivable.

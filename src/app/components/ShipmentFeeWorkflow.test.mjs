@@ -73,8 +73,10 @@ test("order workflow independently saves during outbound and after receipt, only
   assert.doesNotMatch(deliver, /shipmentHasPendingActualShippingFee/);
   assert.match(deliver, /permission\.requirePermission\("update"\)/);
   const complete = source.slice(source.indexOf("const completeOrder ="), source.indexOf("const markShipmentDelivered ="));
-  assert.match(complete, /if \(pendingActualShippingFee\)/);
-  assert.match(complete, /不能完成订单/);
+  assert.match(complete, /completionChecks\.find\(\(check\) => !check\.complete\)/);
+  assert.match(complete, /if \(unmetCheck\).*return false/);
+  assert.match(source, /id: "freight", label: "运费信息齐全", complete: !pendingActualShippingFee/);
+  assert.match(source, /id: "finance", label: "收退款已核验并结清", complete: completionFinancial\.canComplete/);
   assert.match(source, /onShipmentAction=\{permission\.canUpdate && !\["completed", "cancelled"\]\.includes\(order\.status\)/);
   assert.match(source, /onShipmentAction && canEditShipmentActualShippingFee\(sh, orderShippingFeeMode\(order\), order\.status\)/);
   assert.match(source, /postOrderApi\("shipments\/actual-shipping-fee", payload\)/);

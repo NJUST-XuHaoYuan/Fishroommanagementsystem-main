@@ -102,16 +102,21 @@ test("freight overpayment refunds require private proof, reserve amount once, pr
   denied(await s.request("/api/orders/payment", { orderId: "proof-order", action: "delete", paymentId: body.id }, "finance-reviewer"));
 });
 
-test("refund waits for verified overpayment and all shipment fees, never an estimated prepayment", async t => {
+test("refund uses registered pending income but still waits for all actual shipment fees", async t => {
   const s = await setup(t, state => { state.orders[0].payments = [{ ...receipt(), verificationStatus: "pending" }]; state.shipments = [shipment(40)]; });
-  const d = await s.detail(); assert.equal(d.shippingSettlement.toRefund, 0);
+  const d = await s.detail(); assert.equal(d.shippingSettlement.toRefund, 10); assert.equal(d.registeredCash.availableRefund, 1050);
   const evidence = await s.upload();
-  denied(await s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "refund-without-receipt", expectedVersion: (await s.detail()).shippingSettlement.version,
+  ok(await s.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "refund-pending-receipt", expectedVersion: (await s.detail()).shippingSettlement.version,
     amount: 10, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [evidence.id] }));
-  assert.equal((await s.readPersistedState()).orders[0].payments.length, 1);
+  assert.equal((await s.readPersistedState()).orders[0].payments.length, 2);
+  const unfinished = await setup(t, state => { state.orders[0].payments = [{ ...receipt(), verificationStatus: "pending" }]; state.shipments = [shipment(0)]; });
+  const ev = await unfinished.upload();
+  const rejected = await unfinished.request("/api/orders/shipping-refund", { orderId: "proof-order", id: "refund-before-final-fee", expectedVersion: (await unfinished.detail()).shippingSettlement.version,
+    amount: 10, time: NOW, paymentMethodId: "pm-wechat", evidenceIds: [ev.id] });
+  assert.equal(rejected.body.code, "SHIPPING_REFUND_NOT_FINAL");
 });
 
-test("prepaid proof remains reviewable after actual freight drops; only verified excess becomes refundable", async t => {
+test("prepaid proof remains reviewable after actual freight drops and registered excess is refundable before verification", async t => {
   const s = await setup(t, state => { state.shipments = [shipment(0)]; });
   const evidence = await s.upload();
   const submitted = await s.request("/api/orders/payment-proof/submit", { orderId: "proof-order", amount: 1050, time: NOW,
@@ -119,7 +124,7 @@ test("prepaid proof remains reviewable after actual freight drops; only verified
   const claim = (await s.readPersistedState()).orders[0].paymentClaims[0]; assert.equal(claim.shippingAmount, 50);
   ok(await s.request("/api/shipments/actual-shipping-fee", { shipmentId: "freight-shipment", expectedActualShippingFee: 0,
     expectedActualShippingFeeRecordedAt: "", actualShippingFee: 40 }));
-  assert.equal((await s.detail()).shippingSettlement.toRefund, 0);
+  assert.equal((await s.detail()).shippingSettlement.toRefund, 10);
   const d = await s.request("/api/orders/payment-proof/detail?orderId=proof-order", undefined, "finance-reviewer"); ok(d);
   ok(await s.request("/api/orders/payment-proof/review", { orderId: "proof-order", claimId: claim.id, expectedVersion: claim.version,
     reviewToken: d.body.reviewToken, decision: "approve" }, "finance-reviewer"));

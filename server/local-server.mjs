@@ -90,7 +90,7 @@ import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payme
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
 import { usesOrderCashier, cashierMethodAllowedForOrder, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
-import { hasShippingSettlement, shippingSettlementSummary, planShippingRefund, validateShippingReceipt, validateOrderRefundAllocation, isShippingRefund } from "./shipping-settlement.mjs";
+import { hasShippingSettlement, shippingSettlementSummary, registeredOrderCashSummary, planShippingRefund, validateShippingReceipt, validateOrderRefundAllocation, isShippingRefund } from "./shipping-settlement.mjs";
 import {
   ensureApprovalNotifications,
   ensureCreditSaleNotifications,
@@ -5356,8 +5356,7 @@ function linkStatementToStateOrder(state = {}, statement = {}, orderId = "", met
     }
     if (proofReceipts.length) throw httpError(409, "订单已有同金额付款凭证核验收款，请联系财务核对原收款与银行流水，不能再次入账", "PAYMENT_PROOF_STATEMENT_OVERLAP");
     if (proofPaymentIds.size) {
-      const totals = financePaymentTotals(currentOrder);
-      const remaining = calcAmountDueForOrder(currentOrder, state.shipments) - totals.received + totals.refunded - totals.pendingReceived;
+      const remaining = calcAmountDueForOrder(currentOrder, state.shipments) - registeredOrderCashSummary(currentOrder).netRecorded;
       if (Number(statement.amount) - remaining > 0.005) throw httpError(409, "该订单已有核验收款，本次关联会超过剩余应收，请先核对付款凭证和银行流水", "PAYMENT_PROOF_STATEMENT_OVERLAP");
     }
   }
@@ -13656,8 +13655,7 @@ async function handleApi(req, res, url) {
           if (allocation) payment.shippingAmount = allocation.shippingAmount;
         }
         if (payment.type !== "refund" && paymentClaims(currentOrder).some(claim => claim.status === "approved")) {
-          const committed = currentPayments.reduce((sum, item) => sum + (item.type === "refund"
-            ? isPaymentVerified(item) ? -Number(item.amount || 0) : 0 : Number(item.amount || 0)), 0);
+          const committed = registeredOrderCashSummary(currentOrder).netRecorded;
           if (committed + payment.amount - calcAmountDueForOrder(currentOrder, state.shipments) > 0.005) {
             throw httpError(409, "订单已有付款凭证核验收款，再次新增会超过应收，请关联原收款核对，避免重复登记", "PAYMENT_PROOF_PAYMENT_OVERLAP");
           }
@@ -13803,6 +13801,7 @@ async function handleApi(req, res, url) {
       sendJson(req, res, 200, {
         ok: true, orderId: order.id,
         shippingSettlement: shippingSettlementDetail(order, state.shipments),
+        registeredCash: registeredOrderCashSummary(order),
         canRefund: canManageProof && hasShippingSettlement(order) && order.status !== "cancelled",
         paymentMethods: canManageProof ? orderCashierPaymentMethods(state.systemSettings, order) : [],
         refunds: (order.payments ?? []).filter(isShippingRefund).map(payment => canReadProof ? payment : { ...payment, proof: [], evidenceAttachments: [] }),
@@ -13927,16 +13926,11 @@ async function handleApi(req, res, url) {
       if (!account) throw new Error("该订单的付款方式尚未配置收款账户，请联系管理员处理");
       const amount = normalizeMoney(body.amount, "Refund amount");
       if (amount <= 0) throw new Error("退款金额必须大于 0");
-      // Pending refunds reserve money immediately; verified refunds must not
-      // be deducted twice by starting from a pre-netted receipt total.
-      const refundableCents = currentPayments.reduce((total, payment) => {
-        const paymentAmount = Number(payment?.amount);
-        if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) return total;
-        const cents = Math.round(paymentAmount * 100);
-        return total + (payment.type === "refund" ? -cents : isPaymentVerified(payment) ? cents : 0);
-      }, 0);
-      if (Math.round(amount * 100) > Math.max(0, refundableCents)) {
-        throw httpError(409, `当前最多可登记退款 ¥${(Math.max(0, refundableCents) / 100).toFixed(2)}，按已核验实收扣除全部已登记退款计算`, "ORDER_REFUND_EXCEEDS_RECEIPTS");
+      // Business registration does not wait for finance. Claims and payments
+      // are de-duplicated, and every registered refund reserves money at once.
+      const registeredCash = registeredOrderCashSummary(currentOrder);
+      if (registeredCash.invalidRecordCount || amount - registeredCash.availableRefund > 0.005) {
+        throw httpError(409, `当前最多可登记退款 ¥${registeredCash.availableRefund.toFixed(2)}，按有效已登记收款扣除全部已登记退款计算`, "ORDER_REFUND_EXCEEDS_RECEIPTS");
       }
       const refundAllocation = validateOrderRefundAllocation(currentOrder, amount);
       const payment = normalizePaymentRecord({

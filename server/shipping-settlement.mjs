@@ -20,12 +20,56 @@ export function paymentShippingAmount(payment = {}) {
   return Math.min(positive(payment.amount), positive(payment.shippingAmount));
 }
 function registeredCash(order, excludeClaimId = "") {
-  const payments = list(order.payments).filter(validPayment);
-  const linkedClaimIds = new Set(payments.map(payment => text(payment.paymentProofClaimId)).filter(Boolean));
-  const linkedPaymentIds = new Set(payments.map(payment => text(payment.id)).filter(Boolean));
-  const pending = list(order.paymentClaims).filter(claim => claim.status === "pending" && claim.id !== excludeClaimId &&
-    !linkedClaimIds.has(text(claim.id)) && !linkedPaymentIds.has(text(claim.paymentId)) && !linkedPaymentIds.has(text(claim.matchingPaymentId)));
-  return { payments, pending };
+  let invalidRecordCount = 0;
+  const unique = (records, fingerprint) => {
+    const seen = new Map();
+    return records.filter(record => {
+      if (!record || typeof record !== "object") { invalidRecordCount += 1; return false; }
+      const id = text(record.id);
+      if (!id) return true; // Legacy rows without an ID cannot safely be merged by amount.
+      const value = fingerprint(record);
+      if (seen.has(id)) { if (seen.get(id) !== value) invalidRecordCount += 1; return false; }
+      seen.set(id, value); return true;
+    });
+  };
+  const payments = unique(list(order.payments).filter(validPayment), payment => JSON.stringify([
+    payment.type, payment.amount, payment.shippingAmount, payment.refundCategory, payment.verificationStatus,
+    payment.paymentProofClaimId, payment.channel, payment.account,
+  ]));
+  const receipts = payments.filter(payment => payment.type !== "refund");
+  const linkedClaimIds = new Set(receipts.map(payment => text(payment.paymentProofClaimId)).filter(Boolean));
+  const linkedPaymentIds = new Set(receipts.map(payment => text(payment.id)).filter(Boolean));
+  const pending = unique(list(order.paymentClaims).filter(claim => claim?.status === "pending" && claim.id !== excludeClaimId &&
+    !linkedClaimIds.has(text(claim.id)) && !linkedPaymentIds.has(text(claim.paymentId)) && !linkedPaymentIds.has(text(claim.matchingPaymentId))),
+    claim => JSON.stringify([claim.amount, claim.purpose, claim.shippingAmount, claim.paymentId, claim.matchingPaymentId, claim.channel, claim.account]));
+  for (const record of [...payments, ...pending]) {
+    const amount = Number(record.amount);
+    if (record.amount == null || record.amount === "" || typeof record.amount === "boolean" || !Number.isFinite(amount) || amount < 0 ||
+        !Number.isSafeInteger(Math.round(amount * 100)) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) invalidRecordCount += 1;
+    if (record.shippingAmount != null && (!Number.isFinite(Number(record.shippingAmount)) || Number(record.shippingAmount) < 0 || Number(record.shippingAmount) > amount)) invalidRecordCount += 1;
+  }
+  return { payments, pending, invalidRecordCount };
+}
+
+/** Business cash declarations, independently from later financial verification. */
+export function registeredOrderCashSummary(order = {}) {
+  const { payments, pending, invalidRecordCount } = registeredCash(order);
+  const receipts = payments.filter(payment => payment.type !== "refund");
+  const refunds = payments.filter(payment => payment.type === "refund");
+  const amount = record => Number.isFinite(Number(record.amount)) && Number(record.amount) >= 0 ? Math.round(Number(record.amount) * 100) : 0;
+  const sum = records => records.reduce((total, record) => total + amount(record), 0) / 100;
+  const pendingProofAmount = sum(pending);
+  const recordedReceived = money(sum(receipts) + pendingProofAmount);
+  const recordedRefunded = sum(refunds);
+  const netRecorded = money(recordedReceived - recordedRefunded);
+  return {
+    recordedReceived, recordedRefunded, netRecorded, availableRefund: invalidRecordCount ? 0 : positive(netRecorded),
+    verifiedReceived: sum(receipts.filter(verified)), verifiedRefunded: sum(refunds.filter(verified)),
+    pendingReceiptAmount: sum(receipts.filter(payment => !verified(payment))), pendingProofAmount,
+    pendingRefundAmount: sum(refunds.filter(payment => !verified(payment))),
+    pendingReceiptCount: receipts.filter(payment => !verified(payment)).length, pendingProofCount: pending.length,
+    pendingRefundCount: refunds.filter(payment => !verified(payment)).length, invalidRecordCount,
+  };
 }
 
 // Same damage adjustment as the final order receivable. Legacy damage records
@@ -68,20 +112,22 @@ export function shippingSettlementSummary(order = {}, shipments = [], finalAmoun
   const toCollect = order.status === "cancelled" ? 0 : positive(shippingDue - recordedShippingReceived + shippingRefunded);
   const calculatedFinalAmountDue = money(list(order.items).reduce((sum, item) => sum + Number(item.price || 0), 0) - positive(order.discount) + positive(order.packagingFee) + shippingDue - damageReceivableAdjustment(order, shipments));
   const finalReceivable = finalAmountDue === undefined ? calculatedFinalAmountDue : Number(finalAmountDue);
-  const verifiedOrderReceived = money(receipts.filter(verified).reduce((sum, payment) => sum + positive(payment.amount), 0));
-  const registeredOrderRefunded = money(refunds.reduce((sum, payment) => sum + positive(payment.amount), 0));
+  const cash = registeredOrderCashSummary(order);
+  const verifiedOrderReceived = cash.verifiedReceived;
+  const registeredOrderReceived = cash.recordedReceived;
+  const registeredOrderRefunded = cash.recordedRefunded;
   // Every registered refund reserves cash immediately, including ordinary
   // merchandise refunds which intentionally retain their original category.
-  const orderRefundableAmount = [finalReceivable, verifiedOrderReceived, registeredOrderRefunded].every(Number.isFinite) && finalReceivable >= 0
-    ? positive(verifiedOrderReceived - registeredOrderRefunded - finalReceivable) : 0;
-  const toRefund = finalized && order.status !== "cancelled"
-    ? Math.min(positive(verifiedShippingReceived - shippingRefunded - shippingDue), orderRefundableAmount) : 0;
+  const orderRefundableAmount = !cash.invalidRecordCount && [finalReceivable, registeredOrderReceived, registeredOrderRefunded].every(Number.isFinite) && finalReceivable >= 0
+    ? positive(registeredOrderReceived - registeredOrderRefunded - finalReceivable) : 0;
+  const toRefund = finalized && order.status !== "cancelled" && !cash.invalidRecordCount
+    ? Math.min(positive(recordedShippingReceived - shippingRefunded - shippingDue), orderRefundableAmount) : 0;
   const status = !customerPaysShipping || order.status === "cancelled" ? "not_applicable" : !enabled ? "legacy" : toRefund > 0 ? "to_refund" :
     toCollect > 0 ? "to_collect" : pendingShipping > 0 || pendingRefundAmount > 0 ? "proof_pending" : !finalized ? "pending_fee" : "settled";
   return { enabled, timing: enabled ? order.shippingSettlementTiming : null, customerPaysShipping, estimatedFee, actualFee, pendingShipmentCount,
     finalized, shippingDue, goodsDue, paymentShippingReceived, recordedShippingReceived, verifiedShippingReceived, pendingProofShipping,
     pendingShipping, shippingRefunded, verifiedShippingRefunded, pendingRefundAmount, finalAmountDue: finalReceivable,
-    verifiedOrderReceived, registeredOrderRefunded, orderRefundableAmount, toCollect, toRefund, status };
+    verifiedOrderReceived, registeredOrderReceived, registeredOrderRefunded, orderRefundableAmount, toCollect, toRefund, status };
 }
 
 export function allocateShippingProof(order = {}, shipments = [], amount = 0, purpose = "order", excludeClaimId = "") {
@@ -104,7 +150,7 @@ export function planShippingRefund(order, shipments, body, { now, account, creat
   if (!summary.finalized) fail("请先完成全部商品出库并确认各发货单实际运费，再退还运费差额", "SHIPPING_REFUND_NOT_FINAL");
   const amount = Number(body.amount);
   if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) fail("退款金额必须为正数且最多两位小数", "SHIPPING_REFUND_AMOUNT", 400);
-  if (amount - summary.toRefund > 0.005) fail(`当前可退运费差额为 ¥${summary.toRefund.toFixed(2)}，请核对收款核验及已有退款记录`, "SHIPPING_REFUND_EXCEEDS_AVAILABLE");
+  if (amount - summary.toRefund > 0.005) fail(`当前可登记运费差额退款为 ¥${summary.toRefund.toFixed(2)}，请核对已登记收款、实际运费及已有退款记录`, "SHIPPING_REFUND_EXCEEDS_AVAILABLE");
   const time = text(body.time || now);
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(time) || !Number.isFinite(Date.parse(time))) fail("请填写有效退款时间", "SHIPPING_REFUND_TIME", 400);
   const payment = { id: createId(), type: "refund", refundCategory: "shipping_fee", shippingAmount: money(amount), amount: money(amount), time,
@@ -129,12 +175,14 @@ export function validateShippingReceipt(order, shipments, amount, purpose = "ord
 export function validateOrderRefundAllocation(order, amount) {
   if (!hasShippingSettlement(order)) return null;
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > 100000000 || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-7) fail("退款金额必须为正数且最多两位小数", "ORDER_REFUND_AMOUNT", 400);
-  const payments = list(order.payments).filter(validPayment);
-  const receipts = payments.filter(payment => payment.type !== "refund" && verified(payment));
+  const { payments, pending } = registeredCash(order);
+  const receipts = payments.filter(payment => payment.type !== "refund");
   const refunds = payments.filter(payment => payment.type === "refund");
-  const shippingAvailable = positive(receipts.reduce((sum, payment) => sum + paymentShippingAmount(payment), 0) - refunds.reduce((sum, payment) => sum + paymentShippingAmount(payment), 0));
-  const goodsAvailable = positive(receipts.reduce((sum, payment) => sum + positive(payment.amount) - paymentShippingAmount(payment), 0) - refunds.reduce((sum, payment) => sum + positive(payment.amount) - paymentShippingAmount(payment), 0));
-  if (amount - goodsAvailable - shippingAvailable > 0.005) fail("退款金额超过已核验收款扣除已登记退款后的余额", "ORDER_REFUND_EXCEEDS_VERIFIED");
+  const claimShipping = claim => claim.purpose === "shipping_fee" ? positive(claim.amount) : Math.min(positive(claim.amount), positive(claim.shippingAmount));
+  const cash = registeredOrderCashSummary(order);
+  const goodsAvailable = positive(receipts.reduce((sum, payment) => sum + positive(payment.amount) - paymentShippingAmount(payment), 0) +
+    pending.reduce((sum, claim) => sum + positive(claim.amount) - claimShipping(claim), 0) - refunds.reduce((sum, payment) => sum + positive(payment.amount) - paymentShippingAmount(payment), 0));
+  if (cash.invalidRecordCount || amount - cash.availableRefund > 0.005) fail("退款金额超过有效已登记收款扣除全部已登记退款后的余额", "ORDER_REFUND_EXCEEDS_RECORDED");
   const goodsAmount = Math.min(amount, goodsAvailable);
   return { shippingAmount: money(amount - goodsAmount), goodsAmount: money(goodsAmount) };
 }

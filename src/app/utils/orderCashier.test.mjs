@@ -41,3 +41,22 @@ test("approved orphan evidence is visible for reconciliation but never invents m
   const entries = api.orderCashierEntries({ payments: [], paymentClaims: [claim("orphan", 999, { status: "approved", paymentId: "missing" })] });
   assert.equal(entries[0].status, "unmatched"); assert.equal(api.orderCashierTotals(entries).received, 0);
 });
+
+test("pending receipts and proofs count toward registered money with persisted-link deduplication", () => {
+  const entries = api.orderCashierEntries({ payments: [payment("cash", 80, { verificationStatus: "pending" })],
+    paymentClaims: [claim("cash-proof", 80, { matchingPaymentId: "cash" }), claim("additional", 46)] });
+  assert.deepEqual(api.orderCashierTotals(entries), { received: 126, refunded: 0, netRecorded: 126, confirmedReceived: 0, confirmedRefunded: 0 });
+});
+
+test("registered refund reserves the balance before finance checks either side", () => {
+  const entries = api.orderCashierEntries({ paymentClaims: [claim("pending-proof", 126)],
+    payments: [payment("refund", 16, { type: "refund", verificationStatus: "pending", refundCategory: "shipping_fee" })] });
+  assert.deepEqual(api.orderCashierTotals(entries), { received: 126, refunded: 16, netRecorded: 110, confirmedReceived: 0, confirmedRefunded: 0 });
+});
+
+test("duplicate record identifiers do not inflate cashier totals", () => {
+  const receipt = payment("cash", 100, { verificationStatus: "pending" });
+  const proof = claim("proof", 26);
+  const entries = api.orderCashierEntries({ payments: [receipt, { ...receipt }], paymentClaims: [proof, { ...proof }] });
+  assert.equal(api.orderCashierTotals(entries).received, 126);
+});

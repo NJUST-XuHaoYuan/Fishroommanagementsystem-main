@@ -38,26 +38,29 @@ for (const [shipMethod, status] of [["pickup", "delivered"], ["express", "shippe
   });
 }
 
-test("pending receipt and pending payment proof are not refundable confirmed cash", async t => {
+test("pending receipt permits business refund and its linked pending proof does not double the limit", async t => {
   const s = await setup(t, state => {
     state.orders[0].payments = [receipt("not-verified", 1000, "pending")];
-    state.orders[0].paymentClaims = [{ id: "pending-claim", amount: 1000, status: "pending" }];
+    state.orders[0].paymentClaims = [{ id: "pending-claim", amount: 1000, status: "pending", matchingPaymentId: "not-verified" }];
   });
-  const before = await s.readPersistedState(); const r = await s.write({ amount: 1 }); denied(r);
-  assert.equal(r.body.code, "ORDER_REFUND_EXCEEDS_RECEIPTS"); assert.match(r.body.error, /0\.00/);
+  const before = await s.readPersistedState(); const r = await s.write({ amount: 1000.01 }); denied(r);
+  assert.equal(r.body.code, "ORDER_REFUND_EXCEEDS_RECEIPTS"); assert.match(r.body.error, /1000\.00/);
   assert.deepEqual(await s.readPersistedState(), before);
+  ok(await s.write({ id: "pending-income-refund", amount: 1000 }));
+  const after = await s.readPersistedState(); assert.equal(after.orders[0].payments.at(-1).verificationStatus, "pending");
+  denied(await s.write({ amount: 0.01 })); assert.deepEqual(await s.readPersistedState(), after);
 });
 
-test("verified income minus all registered refunds counts verified refund once and reserves pending refund", async t => {
+test("registered income minus all registered refunds counts verified refund once and reserves pending refund", async t => {
   const s = await setup(t, state => { state.orders[0].payments = [receipt("confirmed", 100), receipt("pending-receipt", 500, "pending"),
     refund("verified-refund", 30, "verified"), refund("pending-refund", 20)]; });
   const before = await s.readPersistedState();
-  const excess = await s.write({ id: "too-much", amount: 50.01 }); denied(excess); assert.match(excess.body.error, /50\.00/);
+  const excess = await s.write({ id: "too-much", amount: 550.01 }); denied(excess); assert.match(excess.body.error, /550\.00/);
   assert.deepEqual(await s.readPersistedState(), before);
-  const accepted = await s.write({ id: "remaining-50", amount: 50 }); ok(accepted); assert.equal(accepted.body.order.payments.at(-1).amount, 50);
+  const accepted = await s.write({ id: "remaining-550", amount: 550 }); ok(accepted); assert.equal(accepted.body.order.payments.at(-1).amount, 550);
   assert.equal(accepted.body.order.payments.at(-1).refundStage, "before_shipment");
   const after = await s.readPersistedState(); denied(await s.write({ id: "over-remaining", amount: 0.01 }));
-  const duplicate = await s.write({ id: "remaining-50", amount: 50 }); denied(duplicate); assert.match(duplicate.body.error, /已存在/);
+  const duplicate = await s.write({ id: "remaining-550", amount: 550 }); denied(duplicate); assert.match(duplicate.body.error, /已存在/);
   assert.deepEqual(await s.readPersistedState(), after);
 });
 

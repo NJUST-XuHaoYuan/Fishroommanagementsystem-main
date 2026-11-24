@@ -12,7 +12,7 @@ import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderCashierPanel } from "./OrderCashierPanel";
 import { OrderCompletionActions, type OrderCompletionCheck } from "./OrderCompletionActions";
 import { orderCompletionFinancialCheck } from "../../../server/order-completion-finance.mjs";
-import { getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel } from "../utils/shippingSettlement";
+import { getRegisteredOrderCashSummary, getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel, type RegisteredOrderCashSummary } from "../utils/shippingSettlement";
 import { orderPaymentProofSummary } from "../utils/orderPaymentProof";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -1954,7 +1954,7 @@ function OrderRefundDialog({
   const { state } = useStore();
   const [proofUploading, setProofUploading] = useState(false);
   const [error, setError] = useState("");
-  const [refundSnapshot, setRefundSnapshot] = useState<{ context: string; version: string } | null>(null);
+  const [refundSnapshot, setRefundSnapshot] = useState<{ context: string; version: string; registeredCash?: RegisteredOrderCashSummary } | null>(null);
   const [refundSnapshotError, setRefundSnapshotError] = useState("");
   const needsRefundSnapshot = !!order && getShippingSettlementSummary(order, state.shipments).enabled;
   const refundSnapshotContext = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
@@ -1971,7 +1971,8 @@ function OrderRefundDialog({
         if (controller.signal.aborted || !isNewCustomerSessionCurrent(session)) return;
         if (!response.ok || !result.ok || result.orderId !== requestedOrderId || !result.shippingSettlement?.version)
           throw new Error(result.error || "退款余额加载失败，请关闭后重新打开。");
-        setRefundSnapshot({ context: refundSnapshotContext, version: result.shippingSettlement.version });
+        setRefundSnapshot({ context: refundSnapshotContext, version: result.shippingSettlement.version,
+          ...(Number.isFinite(result.registeredCash?.availableRefund) ? { registeredCash: result.registeredCash } : {}) });
       }).catch(cause => { if (!controller.signal.aborted && isNewCustomerSessionCurrent(session)) setRefundSnapshotError(cause instanceof Error ? cause.message : "退款余额加载失败，请关闭后重新打开。"); });
     return () => controller.abort();
   }, [open, refundSnapshotContext, needsRefundSnapshot]);
@@ -2010,14 +2011,15 @@ function OrderRefundDialog({
   const platformRefund = isPlatformPaymentChannel(refundChannel);
   const snapshotLoading = needsRefundSnapshot && !currentRefundSnapshot && !refundSnapshotError;
   const busy = saving || proofUploading;
-  const refundableAmount = Math.max(0, Math.round((order.payments ?? []).reduce((total, payment) =>
-    total + (payment.type === "refund" ? -Number(payment.amount || 0) : isPaymentVerified(payment) ? Number(payment.amount || 0) : 0), 0) * 100) / 100);
+  const registeredCash = currentRefundSnapshot?.registeredCash ?? getRegisteredOrderCashSummary(order);
+  const refundableAmount = registeredCash.availableRefund;
 
   const submit = async () => {
     if (busy || (needsRefundSnapshot && !currentRefundSnapshot)) return;
     setError("");
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) return setError("请输入有效退款金额");
-    if (draft.amount > refundableAmount + 0.005) return setError(`本单最多可登记退款 ¥${refundableAmount.toFixed(2)}；待核验收款需先由财务确认。`);
+    if (registeredCash.invalidRecordCount) return setError("收退款记录金额存在异常，请先核对记录后再登记退款。");
+    if (draft.amount > refundableAmount + 0.005) return setError(`本单最多可登记退款 ¥${refundableAmount.toFixed(2)}，请核对已登记收款和退款。`);
     if (!draft.time) return setError("请选择退款时间");
     if (cashierFlow && !selectedRefundMethod) return setError("请选择本笔退款的出账方式和账户");
     if (!refundChannel || !refundAccount) return setError("该订单的付款方式尚未配置收款账户，请联系管理员处理");
@@ -2042,7 +2044,7 @@ function OrderRefundDialog({
           <DialogTitle>登记退款 · {order.orderNo}</DialogTitle>
         </DialogHeader>
         <p id="order-refund-inventory-hint" className="text-sm leading-6 text-muted-foreground">仅登记实际退钱，不自动退鱼、不取消已售标记，不改变订单或发货状态。登记后由财务核验出账。</p>
-        <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm">可登记退款余额 <strong>¥{refundableAmount.toFixed(2)}</strong><span className="mt-1 block text-xs text-muted-foreground">已核验实收减去全部已登记退款，含待核验退款；未核验收款暂不计入。</span></p>
+        <OrderRefundBalanceNotice cash={registeredCash} />
         <fieldset disabled={busy} className="grid min-w-0 gap-4 sm:grid-cols-2">
           <div className="grid gap-1.5">
             <Label htmlFor="order-refund-amount">退款金额（元）<span className="ml-0.5 text-red-500">*</span></Label>
@@ -2050,6 +2052,7 @@ function OrderRefundDialog({
               id="order-refund-amount"
               type="number"
               min={0}
+              max={refundableAmount}
               step={0.01}
               value={draft.amount || ""}
               onChange={(event) => setDraft((current) => ({ ...current, amount: Number(event.target.value) }))}
@@ -2106,6 +2109,14 @@ function OrderRefundDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+export function OrderRefundBalanceNotice({ cash }: { cash: RegisteredOrderCashSummary }) {
+  return <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+    <p>可登记退款余额 <strong>¥{cash.availableRefund.toFixed(2)}</strong></p>
+    <p className="mt-1 text-xs text-muted-foreground">已登记有效收款减去全部已登记退款，包含待核验款项；财务事后核验，不影响退款登记。</p>
+    {cash.invalidRecordCount > 0 && <p role="alert" className="mt-1 text-xs text-destructive">收退款记录金额存在异常，请先核对记录。</p>}
+  </div>;
 }
 
 export function canRegisterOrderRefund(order: Pick<Order, "status"> | null, _hasActuallyShipped: boolean, canUpdate: boolean) {

@@ -7,6 +7,7 @@ import { reconcileCommissionLedger } from "./commission-ledger.mjs";
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { paymentEvidencePath, PAYMENT_EVIDENCE_DIRECTORY } from "./payment-evidence.mjs";
 import { publicVideoDerivativeProxyPath } from "./video-preview.mjs";
+import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 
 const ok = result => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 const denied = result => assert.ok(result.response.status >= 400 && result.response.status < 500, JSON.stringify(result.body));
@@ -36,6 +37,74 @@ async function setup(t, customize = () => {}) {
   };
   return { ...s, tokens, request, detail, upload, submit, review };
 }
+
+test("a receipt can be reviewed after an actual refund was registered but before that refund is verified", async t => {
+  const s = await setup(t, state => {
+    state.orders[0].orderFormSchemaVersion = 4;
+    state.orders[0].items[0].price = 900;
+    const extra = { ...state.stock[0], id: "returned-fish", code: "RETURN-100" };
+    state.stock.push(extra);
+    state.orders[0].items.push({ ...state.orders[0].items[0], stockItemId: extra.id, fishCode: extra.code, price: 100 });
+  });
+  ok(await s.submit(1000));
+  const claim = pendingClaim(await s.readPersistedState());
+  ok(await s.request("/api/orders/return-item", { orderId: "proof-order", stockItemId: "returned-fish" }));
+  ok(await s.request("/api/orders/refund", { orderId: "proof-order", id: "refund-before-review", amount: 100,
+    time: "2026-11-18T12:05:00+08:00", paymentMethodId: "pm-wechat", notes: "合成测试已实际退回100" }));
+  ok(await s.review(claim));
+  const order = (await s.readPersistedState()).orders[0];
+  assert.equal(order.items.length, 1);
+  assert.equal(order.payments.find(payment => payment.type === "refund").verificationStatus, "pending");
+  assert.equal(order.payments.find(payment => payment.type !== "refund").amount, 1000);
+  const completion = orderCompletionFinancialCheck(order, 900);
+  assert.equal(completion.canComplete, false);
+  assert.ok(completion.reasons.some(reason => reason.code === "REFUND_PENDING"));
+  ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "verify", paymentId: "refund-before-review" }, "finance-reviewer"));
+  assert.equal(orderCompletionFinancialCheck((await s.readPersistedState()).orders[0], 900).canComplete, true);
+});
+
+for (const refundStatus of ["pending", "verified"]) {
+  test(`pickup can register and review a replacement collection after a ${refundStatus} refund`, async t => {
+    const s = await setup(t, state => {
+      const order = state.orders[0];
+      order.orderFormSchemaVersion = 4; order.source = "线下";
+      order.payments = [
+        { id: "original-receipt", type: "balance", amount: 1000, verificationStatus: "verified", channel: "wechat", account: "合成微信收款账户", paymentProofClaimId: "original-claim" },
+        { id: "actual-refund", type: "refund", amount: 100, verificationStatus: refundStatus, channel: "wechat", account: "合成微信收款账户" },
+      ];
+      order.paymentClaims = [{ id: "original-claim", status: "approved", amount: 1000, paymentId: "original-receipt" }];
+    });
+    ok(await s.submit(100));
+    const claim = pendingClaim(await s.readPersistedState());
+    assert.equal(claim.status, "pending");
+    ok(await s.review(claim));
+    const order = (await s.readPersistedState()).orders[0];
+    assert.equal(order.payments.filter(payment => payment.type !== "refund").reduce((sum, payment) => sum + payment.amount, 0), 1100);
+    assert.equal(orderCompletionFinancialCheck(order, 1000).canComplete, refundStatus === "verified");
+    const tooMuch = await s.submit(1, {}, "pricing-editor", evidencePng({ width: 11 }));
+    denied(tooMuch); assert.equal(tooMuch.body.code, "PAYMENT_PROOF_OVERPAID");
+  });
+}
+
+test("rejecting a receipt after refund preserves the actual refund and allows a corrected proof without double counting", async t => {
+  const s = await setup(t, state => { state.orders[0].orderFormSchemaVersion = 4; });
+  ok(await s.submit(1000)); const original = pendingClaim(await s.readPersistedState());
+  ok(await s.request("/api/orders/refund", { orderId: "proof-order", id: "actual-refund-rejected-proof", amount: 100,
+    time: "2026-11-18T12:05:00+08:00", paymentMethodId: "pm-wechat" }));
+  ok(await s.review(original, { decision: "reject", reason: "合成凭证截图需要补正" }));
+  const rejectedState = await s.readPersistedState();
+  assert.equal(rejectedState.orders[0].payments.length, 1);
+  assert.equal(rejectedState.orders[0].payments[0].type, "refund");
+  assert.equal(orderCompletionFinancialCheck(rejectedState.orders[0], 1000).canComplete, false);
+  const rejected = pendingClaim(rejectedState);
+  ok(await s.submit(1000, { claimId: rejected.id, expectedVersion: rejected.version }, "pricing-editor", evidencePng({ width: 12 })));
+  const resubmitted = pendingClaim(await s.readPersistedState());
+  assert.equal(resubmitted.id, rejected.id); assert.equal(resubmitted.status, "pending");
+  ok(await s.review(resubmitted));
+  const order = (await s.readPersistedState()).orders[0];
+  assert.equal(order.paymentClaims.length, 1); assert.equal(order.payments.length, 2);
+  assert.equal(orderCompletionFinancialCheck(order, 1000).canComplete, false);
+});
 
 test("owner proof is a pending declaration; finance approval confirms one receipt and accrues commission once", async t => {
   const s = await setup(t);
@@ -171,11 +240,13 @@ test("proof approved before bank import can explicitly bind the later statement 
 });
 
 test("new verified receipts cannot overlap already recorded money; fully paid legacy orders may bind proof without extra money", async t => {
-  const s = await setup(t, state => { state.orders[0].items[0].price = 100;
-    state.orders[0].payments = [{ id: "already-received", type: "balance", amount: 50, time: "2026-11-18T11:00:00+08:00",
-      channel: "wechat", account: "合成微信收款账户", verificationStatus: "verified", proof: [] }];
-  });
-  ok(await s.submit(100)); const claim = pendingClaim(await s.readPersistedState()); const before = await s.readPersistedState();
+  const s = await setup(t, state => { state.orders[0].items[0].price = 100; });
+  ok(await s.submit(100)); const claim = pendingClaim(await s.readPersistedState());
+  // A receipt imported/recorded after submission must still be checked at review.
+  ok(await s.request("/api/orders/payment", { orderId: "proof-order", action: "add", payment: {
+    id: "already-received", type: "balance", amount: 50, time: "2026-11-18T11:00:00+08:00", paymentMethodId: "pm-wechat",
+  } }, "finance-reviewer"));
+  const before = await s.readPersistedState();
   const overlap = await s.review(claim); denied(overlap); assert.match(overlap.body.error, /超过|重叠|已有|应收/);
   assert.deepEqual(await s.readPersistedState(), before);
   const full = await setup(t, state => { state.orders[0].payments = [{ id: "legacy-full", type: "balance", amount: 1000,

@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { useStore, type Order, type PaymentRecord, type Shipment, type Store } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerEvidenceAttachment, type NewCustomerSession } from "../utils/newCustomerEvidence";
-import { getShippingSettlementSummary, shippingSettlementStatusLabel, type ShippingSettlementSummary } from "../utils/shippingSettlement";
+import { getShippingSettlementSummary, shippingRefundDraftAmount, shippingSettlementStatusLabel, type ShippingSettlementSummary } from "../utils/shippingSettlement";
 import { NewCustomerEvidenceGallery, NewCustomerEvidenceUploader } from "./NewCustomerEvidence";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -83,7 +83,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
     handledRefundRequest.current = refundOpenRequest;
     if (!actionAllowed || summary.toRefund <= 0) { setError("当前没有可登记的运费差额退款，请刷新后核对。"); return; }
     if (refundOpen) { refundFormRef.current?.scrollIntoView({ behavior: "auto", block: "start" }); return; }
-    setDraft({ ...blankRefund(), amount: String(summary.toRefund), paymentMethodId: "" });
+    setDraft({ ...blankRefund(), amount: shippingRefundDraftAmount(summary), paymentMethodId: "" });
     setRefundOpen(true); setError("");
   }, [refundOpenRequest, loading, saving, uploading, actionAllowed, summary.toRefund, refundOpen]);
   useEffect(() => { if (refundOpen) refundFormRef.current?.scrollIntoView({ behavior: "auto", block: "start" }); }, [refundOpen]);
@@ -131,7 +131,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
     {summary.pendingShipping > 0 && <p className="text-xs leading-5 text-muted-foreground">运费收款 {currency(summary.pendingShipping)} 待财务核验，已从待收金额中扣除，请勿重复收款。</p>}
     {summary.pendingRefundAmount > 0 && <p className="text-xs leading-5 text-muted-foreground">运费退款 {currency(summary.pendingRefundAmount)} 已登记，待财务核对出账，请勿重复退款。</p>}
     <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
-      <div className="text-sm font-medium">{summary.toRefund > 0 ? `待退运费差额 ${currency(summary.toRefund)}` : summary.toCollect > 0 ? "待收运费已包含在整单待收金额中" : summary.finalized ? summary.status === "settled" ? "运费已结清" : "等待财务核验" : "实际运费待确定"}</div>
+      <div className="text-sm font-medium">{summary.toRefund > 0 ? `待退运费差额 ${currency(summary.toRefund)}` : summary.toCollect > 0 ? "待收运费已包含在整单待收金额中" : summary.finalized ? summary.status === "settled" ? "运费已结清" : "运费收退已登记，待财务核验" : "实际运费待确定"}</div>
       <div className="flex flex-wrap gap-2">
         {onRecordActualFee && !summary.finalized && <Button type="button" variant="outline" className="min-h-11" disabled={!canUpdate || saving || uploading} onClick={onRecordActualFee}>补录实际运费</Button>}
         {summary.toRefund > 0 && !refundOpen && <span className="text-xs text-muted-foreground">请从上方“登记退款”选择退运费差额</span>}
@@ -140,7 +140,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
     {loading && <p role="status" className="text-xs text-muted-foreground">正在核对最新运费记录…</p>}
     {error && !refundOpen && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
     {refundOpen && <div ref={refundFormRef} className="space-y-4 border-t pt-4">
-      <div><h4 className="text-sm font-semibold">登记已退运费差额</h4><p className="mt-1 text-xs leading-5 text-muted-foreground">先向客户完成退款，再登记金额和凭证。这里不会自动转账，也不影响鱼只、订单商品或提成。</p></div>
+      <div><h4 className="text-sm font-semibold">登记已退运费差额</h4><p className="mt-1 text-xs leading-5 text-muted-foreground">先向客户完成退款，再登记金额和凭证，财务事后核验。待核验收款可用于登记退款；这里不会自动转账，也不影响鱼只、订单商品或提成。</p></div>
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         <label className="grid min-w-0 gap-1.5 text-sm">退款金额（元）<Input aria-label="运费退款金额" type="number" min="0.01" max={summary.toRefund} step="0.01" className="min-h-11" disabled={saving || uploading} value={draft.amount} onChange={event => setDraft(current => ({ ...current, amount: event.target.value }))} /></label>
         <label className="grid min-w-0 gap-1.5 text-sm">实际退款时间<Input aria-label="运费退款时间" type="datetime-local" className="min-h-11 min-w-0" disabled={saving || uploading} value={draft.time} onChange={event => setDraft(current => ({ ...current, time: event.target.value }))} /></label>

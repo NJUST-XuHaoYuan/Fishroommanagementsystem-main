@@ -49,7 +49,7 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
 
   return <section aria-label="订单收银台" className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><h3 className="flex items-center gap-2 text-base font-semibold"><Wallet className="size-4" aria-hidden="true" />收银台</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">按每笔实际收付登记金额、账户和凭证，财务分别核验。</p></div>
+      <div className="min-w-0"><h3 className="flex items-center gap-2 text-base font-semibold"><Wallet className="size-4" aria-hidden="true" />收银台</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">按每笔实际收付登记金额、账户和凭证，财务事后核验；完成订单前需核验结清。</p></div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" className="min-h-11" disabled={!canRecord} onClick={requestPayment}><ArrowDownLeft className="size-4" />登记收款</Button>
         {refundAvailable && <Button type="button" variant="outline" className="min-h-11" disabled={refundSaving} onClick={() => freight.toRefund > 0 ? setRefundChoiceOpen(true) : onRefund()}><ArrowUpRight className="size-4" />登记退款</Button>}
@@ -84,7 +84,7 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
 
     <Dialog open={refundChoiceOpen} onOpenChange={setRefundChoiceOpen}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader><DialogTitle>选择退款类型</DialogTitle><DialogDescription>本单有运费差额可退，请按本次实际退款原因登记。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>选择退款类型</DialogTitle><DialogDescription>本单有运费差额可退，请按本次实际退款原因登记，无需等待财务核验收款。</DialogDescription></DialogHeader>
         <Button type="button" variant="outline" className="h-auto min-h-[44px] justify-start whitespace-normal py-3 text-left" onClick={() => { setRefundChoiceOpen(false); setShippingRefundRequest(Date.now()); }}>
           <span><span className="block font-medium">退运费差额 · {currency(freight.toRefund)}</span><span className="mt-1 block text-xs font-normal text-muted-foreground">实际运费低于预收，退还多收的运费。</span></span>
         </Button>
@@ -138,7 +138,7 @@ export function OrderCashierBalanceSummary({ order, shipments, amountDue, netRec
     </div>
     <div className="min-w-0 text-sm">
       <p className="font-medium">{balance > 0 ? "待收金额" : balance < 0 ? "应退金额" : "已登记收齐"}{balance !== 0 && <strong className="ml-2 text-lg tabular-nums">{currency(Math.abs(balance))}</strong>}</p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">按已登记收退款计算，到账仍需财务核验。</p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">按已登记收退款计算，包含待核验款项；到账仍需财务核验，不影响登记退款。</p>
     </div>
   </section>;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shippingSettlementSummary, allocateShippingProof, validateShippingReceipt, planShippingRefund } from './shipping-settlement.mjs';
+import { shippingSettlementSummary, registeredOrderCashSummary, allocateShippingProof, validateShippingReceipt, planShippingRefund } from './shipping-settlement.mjs';
 import { paymentProofDetail, planPaymentProofSubmission, planPaymentProofReview, paymentProofReviewToken } from './payment-proof-rules.mjs';
 
 const now = '2026-11-25T12:00:00+08:00';
@@ -25,7 +25,7 @@ test('split shipment confirmed subtotals never imply final refund before remaini
   const done=shippingSettlementSummary(o,[shipment(),shipment({id:'s2',itemStockIds:['fish2'],actualShippingFee:0,actualShippingFeeRecordedAt:now})]);
   assert.equal(done.toRefund,10);
 });
-test('registered pending freight reserves collection but is not refundable until verified',()=>{
+test('registered pending freight reserves collection but cannot refund while merchandise remains unpaid',()=>{
   const o=order({shippingSettlementTiming:'after_shipping',shippingFee:0,paymentClaims:[{id:'c',status:'pending',purpose:'shipping_fee',amount:40,shippingAmount:40}]});
   const summary=shippingSettlementSummary(o,[shipment()]);
   assert.equal(summary.toCollect,0);assert.equal(summary.verifiedShippingReceived,0);assert.equal(summary.status,'proof_pending');assert.equal(summary.toRefund,0);

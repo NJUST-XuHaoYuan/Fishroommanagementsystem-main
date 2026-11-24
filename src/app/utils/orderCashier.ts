@@ -1,5 +1,6 @@
 import type { Order, PaymentRecord } from "../store";
 import type { PaymentProofClaim } from "./orderPaymentProof";
+import { getRegisteredOrderCashSummary } from "./shippingSettlement";
 
 export type CashierEntry = {
   id: string;
@@ -63,8 +64,10 @@ export function orderCashierEntries(order: Pick<Order, "payments" | "paymentClai
 }
 
 export function orderCashierTotals(entries: CashierEntry[]) {
-  const sum = (direction: CashierEntry["direction"], confirmed: boolean) => money(entries.reduce((total, entry) =>
-    total + (entry.direction === direction && (!confirmed || entry.payment?.verificationStatus !== "pending" && Boolean(entry.payment)) ? entry.recordedAmount : 0), 0));
-  const received = sum("in", false), refunded = sum("out", false);
-  return { received, refunded, netRecorded: Math.round((received - refunded) * 100) / 100, confirmedReceived: sum("in", true), confirmedRefunded: sum("out", true) };
+  const cash = getRegisteredOrderCashSummary({
+    payments: entries.flatMap(entry => entry.payment ? [entry.payment] : []),
+    paymentClaims: entries.flatMap(entry => entry.claim ? [entry.claim] : []),
+  });
+  return { received: cash.recordedReceived, refunded: cash.recordedRefunded, netRecorded: cash.netRecorded,
+    confirmedReceived: cash.verifiedReceived, confirmedRefunded: cash.verifiedRefunded };
 }
