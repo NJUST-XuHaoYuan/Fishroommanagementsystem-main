@@ -139,10 +139,17 @@ test("tag endpoint and conflict handling cannot accidentally use generic saves o
 
 test("orders integration filters desktop/mobile rows and updates current detail from the metadata-only store merge", async () => {
   const source = await readFile(new URL("./OrdersView.tsx", import.meta.url), "utf8");
+  const toolbarSource = await readFile(new URL("./OrdersToolbar.tsx", import.meta.url), "utf8");
   assert.match(source, /<OrderWholesaleBadge marked=\{order.isWholesaleOrder\}/);
-  assert.equal((source.match(/<OrderWholesaleFilter value=\{wholesaleFilter\}/g) || []).length, 2);
+  // One responsive toolbar controls the same filtered result set on both layouts.
+  assert.equal((source.match(/<OrdersToolbar\b/g) || []).length, 1);
+  assert.match(source, /wholesale=\{wholesaleFilter\}\s+onWholesaleChange=\{setWholesaleFilter\}/);
+  assert.match(toolbarSource, /aria-label="筛选订单批发标记"/);
+  assert.match(toolbarSource, /props\.onWholesaleChange\(value\)/);
   assert.match(source, /!matchesWholesaleOrderFilter\(o, wholesaleFilter\)/);
   assert.match(source, /rankOrderSearchRows\(filteredOrders, mobileSearch\)/);
+  assert.match(source, /mobileVisibleOrders = matchingOrders\.slice\(/);
+  assert.match(source, /<DataTable[\s\S]*?data=\{matchingOrders\}/);
   assert.match(source, /mobileSearch, statusFilter, wholesaleFilter/);
   assert.match(source, /<OrderWholesaleTag[\s\S]{0,160}canUpdate=\{permission.canUpdate\}/);
   assert.match(source, /viewer=\{state.user\}/);

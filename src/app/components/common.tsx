@@ -14,7 +14,7 @@ import { ChevronLeft, ChevronRight, Search, Plus } from "lucide-react";
 
 type Column<T> = {
   key: string;
-  title: ReactNode;
+  title: ReactNode | ((visibleRows: T[]) => ReactNode);
   render?: (row: T) => ReactNode;
   width?: string;
 };
@@ -34,6 +34,8 @@ type Props<T> = {
   onRowDoubleClick?: (row: T) => void;
   mobileRender?: (row: T) => ReactNode;
   tableMinWidth?: string;
+  hideToolbar?: boolean;
+  emptyMessage?: string;
 };
 
 export function DataTable<T extends { id: string }>({
@@ -51,6 +53,8 @@ export function DataTable<T extends { id: string }>({
   onRowDoubleClick,
   mobileRender,
   tableMinWidth,
+  hideToolbar = false,
+  emptyMessage,
 }: Props<T>) {
   const [internalSearch, setInternalSearch] = useState("");
   const q = searchValue ?? internalSearch;
@@ -127,7 +131,7 @@ export function DataTable<T extends { id: string }>({
 
   return (
     <div ref={tableRootRef} className="flex flex-col gap-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      {!hideToolbar && <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input
@@ -146,7 +150,7 @@ export function DataTable<T extends { id: string }>({
             <Plus className="size-4" /> {addLabel}
           </Button>
         )}
-      </div>
+      </div>}
       <div className="fishroom-table-shell hidden overflow-x-auto rounded-xl md:block">
         <table className="w-full" style={tableMinWidth ? { minWidth: tableMinWidth } : undefined}>
           <thead>
@@ -157,7 +161,7 @@ export function DataTable<T extends { id: string }>({
                   className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground"
                   style={c.width ? { width: c.width } : undefined}
                 >
-                  {c.title}
+                  {typeof c.title === "function" ? c.title(slice) : c.title}
                 </th>
               ))}
               {actions && <th className="w-40 px-4 py-3 text-right text-xs font-semibold text-muted-foreground">操作</th>}
@@ -170,7 +174,7 @@ export function DataTable<T extends { id: string }>({
                   colSpan={columns.length + (actions ? 1 : 0)}
                   className="px-4 py-14 text-center text-sm text-muted-foreground"
                 >
-                  {q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。"}
+                  {emptyMessage ?? (q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。")}
                 </td>
               </tr>
             ) : (
@@ -196,7 +200,7 @@ export function DataTable<T extends { id: string }>({
       <div className="flex flex-col gap-3 md:hidden">
         {slice.length === 0 ? (
           <div className="fishroom-card rounded-xl px-4 py-10 text-center text-sm text-muted-foreground">
-            {q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。"}
+            {emptyMessage ?? (q.trim() ? "没有符合搜索条件的记录。" : "暂无数据，使用上方操作新增记录。")}
           </div>
         ) : (
           slice.map((row) => (
@@ -219,7 +223,7 @@ export function DataTable<T extends { id: string }>({
                         c.render ? c.render(row) : String((row as any)[c.key] ?? "")
                       ) : (
                         <>
-                          <span className="text-muted-foreground">{c.title}</span>
+                          <span className="text-muted-foreground">{typeof c.title === "function" ? c.title(slice) : c.title}</span>
                           <div className="min-w-0 break-words text-foreground">
                             {c.render ? c.render(row) : String((row as any)[c.key] ?? "")}
                           </div>

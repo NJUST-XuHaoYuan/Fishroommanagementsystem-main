@@ -7,6 +7,7 @@ import {
   configuredOrderPackagingFee, ShippingFeeMode,
 } from "../store";
 import { DataTable } from "./common";
+import { OrdersToolbar } from "./OrdersToolbar";
 import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
 import { orderPaymentProofSummary } from "../utils/orderPaymentProof";
 import { Button } from "./ui/button";
@@ -18,7 +19,7 @@ import { OrderOwnerAssignmentBadge, OrderOwnerAssignmentPanel, useOrderOwnerCand
 import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { StockOrderReleaseDetails, StockOrderReleaseLoadState, stockOrderReleaseTimelineEvents, useStockOrderReleaseHistory } from "./StockOrderReleaseHistory";
 import { mergeOwnerAssignmentForSession, ownerSelectionHint, retainNewerOwnerAssignments } from "../utils/orderOwnerAssignment";
-import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleFilter, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
+import { matchesWholesaleOrderFilter, mergeWholesaleOrderTagForSession, retainNewerWholesaleOrderTags, OrderWholesaleBadge, OrderWholesaleTag, type OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "./ui/dialog";
@@ -56,7 +57,7 @@ import { MediaVideo } from "./MediaVideo";
 import { authJsonHeaders } from "../utils/authSession";
 import { visibleSitesForUser } from "../utils/sites";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
-import { orderSearchRank, rankOrderSearchRows } from "../utils/orderSearch";
+import { rankOrderSearchRows } from "../utils/orderSearch";
 import { beijingOrderCalendar, matchesPlannedShipmentRange } from "../utils/order-date-filters";
 import {
   isPlatformOrderSource,
@@ -7182,13 +7183,10 @@ export function OrdersView({
     };
   }, []);
 
-  const toggleShipPlanQuickFilter = (value: "today" | "tomorrow") => {
-    const next = shipPlanQuickFilter === value ? "" : value;
-    setShipPlanQuickFilter(next);
-    if (next) {
-      setPlannedShipFrom("");
-      setPlannedShipTo("");
-    }
+  const changeShipPlanQuickFilter = (value: "" | "today" | "tomorrow") => {
+    setShipPlanQuickFilter(value);
+    setPlannedShipFrom("");
+    setPlannedShipTo("");
   };
 
   const changePlannedShipFrom = (value: string) => {
@@ -7424,17 +7422,18 @@ export function OrdersView({
 	    });
 	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, myActiveOnly, isCurrentUserContactOrder, dateFrom, dateTo]);
 
-  const mobileFilteredOrders = useMemo(() => {
+  const matchingOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
   }, [filteredOrders, mobileSearch]);
 
   useEffect(() => {
     setMobilePage(1);
-  }, [mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly]);
+    setSelectedOrderIds(new Set());
+  }, [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly]);
 
-  const mobileTotalPages = Math.max(1, Math.ceil(mobileFilteredOrders.length / MOBILE_ORDER_PAGE_SIZE));
+  const mobileTotalPages = Math.max(1, Math.ceil(matchingOrders.length / MOBILE_ORDER_PAGE_SIZE));
   const currentMobilePage = Math.min(mobilePage, mobileTotalPages);
-  const mobileVisibleOrders = mobileFilteredOrders.slice(
+  const mobileVisibleOrders = matchingOrders.slice(
     (currentMobilePage - 1) * MOBILE_ORDER_PAGE_SIZE,
     currentMobilePage * MOBILE_ORDER_PAGE_SIZE
   );
@@ -7456,49 +7455,45 @@ export function OrdersView({
   useEffect(() => {
     setSelectedOrderIds((prev) => {
       if (prev.size === 0) return prev;
-      const existingIds = new Set(state.orders.map((order) => order.id));
+      const existingIds = new Set(matchingOrders.map((order) => order.id));
       const next = new Set([...prev].filter((id) => existingIds.has(id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [state.orders]);
+  }, [matchingOrders]);
 
   const selectedOrders = useMemo(
-    () => orderList.filter((order) => selectedOrderIds.has(order.id)),
-    [orderList, selectedOrderIds]
+    () => matchingOrders.filter((order) => selectedOrderIds.has(order.id)),
+    [matchingOrders, selectedOrderIds]
   );
-  const allFilteredSelected = filteredOrders.length > 0 && filteredOrders.every((order) => selectedOrderIds.has(order.id));
-  const allMobileFilteredSelected = mobileFilteredOrders.length > 0 && mobileFilteredOrders.every((order) => selectedOrderIds.has(order.id));
+  const allMatchingSelected = matchingOrders.length > 0 && matchingOrders.every((order) => selectedOrderIds.has(order.id));
 
   const toggleSelectedOrder = (id: string, checked: boolean) => {
-    setSelectedOrderIds((prev) => {
-      const next = new Set(prev);
+    setSelectedOrderIds((previous) => {
+      const next = new Set(previous);
       checked ? next.add(id) : next.delete(id);
       return next;
     });
   };
 
-  const toggleMobileFilteredOrders = () => {
-    setSelectedOrderIds((prev) => {
-      const next = new Set(prev);
-      if (allMobileFilteredSelected) {
-        mobileFilteredOrders.forEach((order) => next.delete(order.id));
-      } else {
-        mobileFilteredOrders.forEach((order) => next.add(order.id));
-      }
+  const selectOrderRows = (rows: OrderListRow[], checked: boolean) => {
+    setSelectedOrderIds((previous) => {
+      const next = new Set(previous);
+      rows.forEach((order) => checked ? next.add(order.id) : next.delete(order.id));
       return next;
     });
   };
 
-  const toggleFilteredOrders = () => {
-    setSelectedOrderIds((prev) => {
-      const next = new Set(prev);
-      if (allFilteredSelected) {
-        filteredOrders.forEach((order) => next.delete(order.id));
-      } else {
-        filteredOrders.forEach((order) => next.add(order.id));
-      }
-      return next;
-    });
+  const renderPageSelection = (rows: OrderListRow[]) => {
+    const count = rows.filter((order) => selectedOrderIds.has(order.id)).length;
+    return <label className="inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-xs">
+      <Checkbox
+        checked={rows.length > 0 && count === rows.length ? true : count > 0 ? "indeterminate" : false}
+        onCheckedChange={(checked) => selectOrderRows(rows, checked === true)}
+        disabled={rows.length === 0}
+        aria-label="选择本页订单"
+      />
+      本页
+    </label>;
   };
 
   const doDeleteOrder = async () => {
@@ -7526,15 +7521,7 @@ export function OrdersView({
     toast.success("订单已删除");
   };
 
-  const STATUS_FILTERS = [
-    { key: "all",       label: "全部" },
-    { key: "active",    label: "未完成" },
-    { key: "completed", label: "已完成" },
-  ] as const;
-
-  const hasOrderFilter = Boolean(dateFrom || dateTo || quickShipDate || plannedShipFrom || plannedShipTo || pendingTrackingOnly || myActiveOnly || mobileSearch || statusFilter !== "all" || wholesaleFilter !== "all");
-  const orderTableFilterKey = [statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly].join("|");
-  const dateFromMax = dateTo && dateTo < today ? dateTo : today;
+  const orderTableFilterKey = [activeSiteId, mobileSearch, statusFilter, wholesaleFilter, dateFrom, dateTo, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, myActiveOnly].join("|");
   const myActiveOrderCount = useMemo(
     () => orderList.filter((order) => isActiveOrder(order) && isCurrentUserContactOrder(order)).length,
     [orderList, isCurrentUserContactOrder]
@@ -7710,256 +7697,70 @@ export function OrdersView({
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h2>订单管理</h2>
-        <p className="text-sm text-muted-foreground">
-          创建时确认订单应收，创建后直接安排出库与发货
-        </p>
-      </div>
+      <OrdersToolbar
+        status={statusFilter}
+        onStatusChange={(value) => {
+          setStatusFilter(value);
+          if (value !== "active") setMyActiveOnly(false);
+        }}
+        search={mobileSearch}
+        onSearchChange={setMobileSearch}
+        myActiveOnly={myActiveOnly}
+        onMyActiveChange={(value) => {
+          setMyActiveOnly(value);
+          if (value) setStatusFilter("active");
+        }}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        onDateFromChange={changeDateFrom}
+        onDateToChange={changeDateTo}
+        onClearOrderDates={() => { setDateFrom(""); setDateTo(""); }}
+        today={today}
+        quickShip={shipPlanQuickFilter}
+        onQuickShipChange={changeShipPlanQuickFilter}
+        plannedFrom={quickShipDate || plannedShipFrom}
+        plannedTo={quickShipDate || plannedShipTo}
+        onPlannedFromChange={changePlannedShipFrom}
+        onPlannedToChange={changePlannedShipTo}
+        onClearPlannedDates={() => changeShipPlanQuickFilter("")}
+        wholesale={wholesaleFilter}
+        onWholesaleChange={setWholesaleFilter}
+        pendingTrackingOnly={pendingTrackingOnly}
+        onPendingTrackingChange={setPendingTrackingOnly}
+        onClear={clearOrderFilters}
+        resultCount={matchingOrders.length}
+        todayCount={todayShipCount}
+        tomorrowCount={tomorrowShipCount}
+        pendingCount={pendingTrackingCount}
+        myCount={myActiveOrderCount}
+        canCreate={permission.canCreate}
+        onCreate={() => setNewOpen(true)}
+        canClaim={permission.canUpdate}
+        pendingClaims={pendingPaymentClaimCount}
+        onClaim={() => { setPaymentClaimOpen(true); void loadPaymentClaims(true); }}
+      />
+
+      {selectedOrders.length > 0 && (
+        <section aria-label="已选订单批量操作" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+            <span className="font-medium" role="status">已选 {selectedOrders.length} 个订单</span>
+            {!allMatchingSelected && <button type="button" className="text-sm underline underline-offset-4" onClick={() => selectOrderRows(matchingOrders, true)}>
+              选择全部 {matchingOrders.length} 个搜索结果
+            </button>}
+            <button type="button" className="text-sm text-muted-foreground hover:text-foreground" onClick={() => setSelectedOrderIds(new Set())}>清空选择</button>
+          </div>
+          <Button type="button" size="sm" variant="outline" onClick={() => setExportFormatOpen(true)}>
+            <Download className="size-4" />
+            {pendingTrackingOnly ? "导出出库发货表" : "导出所选订单"}
+          </Button>
+        </section>
+      )}
 
       <div className="flex flex-col gap-3 pb-16 md:hidden">
-        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
-          {STATUS_FILTERS.map(({ key, label }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => {
-                setStatusFilter(key);
-                if (key !== "active") setMyActiveOnly(false);
-              }}
-              className={`h-10 shrink-0 rounded-full px-4 text-sm font-medium transition-colors ${
-                statusFilter === key
-                  ? "bg-sky-600 text-white"
-                  : "border border-border bg-card text-muted-foreground"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="flex items-center justify-between px-1">
+          {renderPageSelection(mobileVisibleOrders)}
+          <span className="text-xs text-muted-foreground">第 {currentMobilePage} / {mobileTotalPages} 页</span>
         </div>
-
-        <section className="rounded-lg border bg-card p-3 shadow-sm">
-          <div className="flex gap-2">
-            <div className="relative min-w-0 flex-1">
-              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={mobileSearch}
-                onChange={(event) => setMobileSearch(event.target.value)}
-                placeholder="搜索鱼码、订单、客户、商品..."
-                className="h-10 pl-9"
-              />
-            </div>
-            {permission.canCreate && (
-              <Button type="button" className="h-10 shrink-0 px-3" onClick={() => setNewOpen(true)}>
-                <Plus className="size-4" />
-                新建
-              </Button>
-            )}
-          </div>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant={myActiveOnly ? "default" : "outline"}
-              className={myActiveOnly
-                ? "h-10 bg-sky-600 text-white hover:bg-sky-700"
-                : "h-10 border-sky-200 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
-              }
-              onClick={() => {
-                const next = !myActiveOnly;
-                setMyActiveOnly(next);
-                if (next) {
-                  setStatusFilter("active");
-                  setDateFrom("");
-                  setDateTo("");
-                  setPendingTrackingOnly(false);
-                }
-              }}
-            >
-              <UserRound className="size-3.5 mr-1" />
-              我的 {myActiveOrderCount}
-            </Button>
-            {permission.canUpdate && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className={pendingPaymentClaimCount > 0 ? "h-10 border-amber-300 bg-amber-50 text-amber-800" : "h-10"}
-                onClick={() => { setPaymentClaimOpen(true); void loadPaymentClaims(true); }}
-              >
-                <CircleDollarSign className="mr-1 size-3.5" />
-                待认领 {pendingPaymentClaimCount}
-              </Button>
-            )}
-            <Button
-              type="button"
-              size="sm"
-              variant={todayShipOnly ? "default" : "outline"}
-              aria-pressed={todayShipOnly}
-              aria-label="筛选今日发货计划"
-              className={todayShipOnly
-                ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
-                : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
-              }
-              onClick={() => toggleShipPlanQuickFilter("today")}
-            >
-              <Truck className="size-3.5 mr-1" />
-              今日发货 {todayShipCount}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={tomorrowShipOnly ? "default" : "outline"}
-              aria-pressed={tomorrowShipOnly}
-              aria-label="筛选明日发货计划"
-              className={tomorrowShipOnly
-                ? "h-10 bg-orange-600 text-white hover:bg-orange-700"
-                : "h-10 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
-              }
-              onClick={() => toggleShipPlanQuickFilter("tomorrow")}
-            >
-              <Truck className="size-3.5 mr-1" />
-              明日发货 {tomorrowShipCount}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={pendingTrackingOnly ? "default" : "outline"}
-              className={pendingTrackingOnly
-                ? "h-10 bg-emerald-600 text-white hover:bg-emerald-700"
-                : "h-10 border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
-              }
-              onClick={() => {
-                const next = !pendingTrackingOnly;
-                setPendingTrackingOnly(next);
-                if (next) {
-                  setMyActiveOnly(false);
-                  setStatusFilter("all");
-                  setDateFrom("");
-                  setDateTo("");
-                  setSelectedOrderIds(new Set(
-                    orderList
-                      .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
-                      .filter((order) => matchesPlannedShipmentRange(order, {
-                        from: quickShipDate || plannedShipFrom,
-                        to: quickShipDate || plannedShipTo,
-                      }))
-                      .map((order) => order.id)
-                  ));
-                }
-              }}
-            >
-              <Truck className="size-3.5 mr-1" />
-              出库待发 {pendingTrackingCount}
-            </Button>
-          </div>
-
-          <fieldset className="mt-3 min-w-0">
-            <legend className="mb-2 text-xs font-medium text-foreground">下单日期筛选</legend>
-            <div className="grid grid-cols-2 gap-2">
-            <div className="grid min-w-0 gap-1">
-              <Label htmlFor="mobile-order-date-from" className="text-xs text-muted-foreground">开始日期</Label>
-              <Input
-                id="mobile-order-date-from"
-                aria-label="下单开始日期"
-                type="date"
-                value={dateFrom}
-                max={dateFromMax}
-                onChange={(event) => changeDateFrom(event.target.value)}
-                className="h-10 min-w-0 text-sm"
-              />
-            </div>
-            <div className="grid min-w-0 gap-1">
-              <Label htmlFor="mobile-order-date-to" className="text-xs text-muted-foreground">结束日期</Label>
-              <Input
-                id="mobile-order-date-to"
-                aria-label="下单结束日期"
-                type="date"
-                value={dateTo}
-                min={dateFrom || undefined}
-                max={today}
-                onChange={(event) => changeDateTo(event.target.value)}
-                className="h-10 min-w-0 text-sm"
-              />
-            </div>
-            </div>
-          </fieldset>
-
-          <fieldset className="mt-3 min-w-0">
-            <legend className="mb-2 text-xs font-medium text-foreground">预计发货日期筛选</legend>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="grid min-w-0 gap-1">
-                <Label htmlFor="mobile-planned-ship-from" className="text-xs text-muted-foreground">开始日期</Label>
-                <Input
-                  id="mobile-planned-ship-from"
-                  aria-label="预计发货开始日期"
-                  type="date"
-                  value={quickShipDate || plannedShipFrom}
-                  max={quickShipDate ? undefined : plannedShipTo || undefined}
-                  onChange={(event) => changePlannedShipFrom(event.target.value)}
-                  className="h-10 min-w-0 text-sm"
-                />
-              </div>
-              <div className="grid min-w-0 gap-1">
-                <Label htmlFor="mobile-planned-ship-to" className="text-xs text-muted-foreground">结束日期</Label>
-                <Input
-                  id="mobile-planned-ship-to"
-                  aria-label="预计发货结束日期"
-                  type="date"
-                  value={quickShipDate || plannedShipTo}
-                  min={quickShipDate ? undefined : plannedShipFrom || undefined}
-                  onChange={(event) => changePlannedShipTo(event.target.value)}
-                  className="h-10 min-w-0 text-sm"
-                />
-              </div>
-            </div>
-          </fieldset>
-
-          <OrderWholesaleFilter value={wholesaleFilter} onChange={setWholesaleFilter} className="mt-3" />
-
-          {hasOrderFilter && (
-            <button
-              type="button"
-              onClick={clearOrderFilters}
-              className="mt-3 h-9 text-sm font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-            >
-              清除筛选
-            </button>
-          )}
-        </section>
-
-        <section className="rounded-lg border bg-muted/20 p-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-foreground">共 {mobileFilteredOrders.length} 单</div>
-              <div className="text-xs text-muted-foreground">已选 {selectedOrders.length} 单用于导出</div>
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-9 px-3"
-                disabled={mobileFilteredOrders.length === 0}
-                onClick={toggleMobileFilteredOrders}
-              >
-                {allMobileFilteredSelected ? "取消" : "全选"}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-9 px-3"
-                onClick={() => setExportFormatOpen(true)}
-                disabled={selectedOrders.length === 0}
-              >
-                导出
-              </Button>
-            </div>
-          </div>
-        </section>
-
         <div ref={mobileListRef} className="flex flex-col gap-3">
           {mobileVisibleOrders.length === 0 ? (
             <div className="rounded-lg border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
@@ -7970,7 +7771,7 @@ export function OrdersView({
           )}
         </div>
 
-        {mobileFilteredOrders.length > 0 && mobileTotalPages > 1 && (
+        {matchingOrders.length > 0 && mobileTotalPages > 1 && (
           <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem] items-center gap-2 rounded-lg border bg-card p-2">
             <Button
               type="button"
@@ -8013,229 +7814,19 @@ export function OrdersView({
         )}
       </div>
 
-      {/* Filter bar */}
-      <div className="hidden items-center gap-3 flex-wrap md:flex">
-        <OrderWholesaleFilter value={wholesaleFilter} onChange={setWholesaleFilter} />
-        <div className="flex gap-1">
-          {STATUS_FILTERS.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => {
-                setStatusFilter(key);
-                if (key !== "active") setMyActiveOnly(false);
-              }}
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
-                statusFilter === key
-                  ? "bg-sky-600 text-white"
-                  : "bg-muted text-muted-foreground hover:bg-muted/70"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant={myActiveOnly ? "default" : "outline"}
-            className={myActiveOnly
-              ? "h-7 bg-sky-600 hover:bg-sky-700 text-white"
-              : "h-7 border-sky-200 text-sky-700 hover:bg-sky-50 hover:text-sky-800"
-            }
-            onClick={() => {
-              const next = !myActiveOnly;
-              setMyActiveOnly(next);
-              if (next) {
-                setStatusFilter("active");
-                setDateFrom("");
-                setDateTo("");
-                setPendingTrackingOnly(false);
-              }
-            }}
-          >
-            <UserRound className="size-3.5 mr-1" />
-            我的未完成{myActiveOrderCount > 0 ? ` ${myActiveOrderCount}` : ""}
-          </Button>
-          {permission.canUpdate && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className={pendingPaymentClaimCount > 0 ? "h-7 border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : "h-7"}
-              onClick={() => { setPaymentClaimOpen(true); void loadPaymentClaims(true); }}
-            >
-              <CircleDollarSign className="mr-1 size-3.5" />
-              待认领收款{pendingPaymentClaimCount > 0 ? ` ${pendingPaymentClaimCount}` : ""}
-            </Button>
-          )}
-          <div className="flex items-center gap-2" role="group" aria-label="下单日期筛选">
-          <span className="text-xs text-muted-foreground shrink-0">下单日期筛选</span>
-          <Input
-            aria-label="下单开始日期"
-            type="date"
-            value={dateFrom}
-            max={dateFromMax}
-            onChange={(e) => changeDateFrom(e.target.value)}
-            className="h-7 w-34 text-xs"
-          />
-          <span className="text-xs text-muted-foreground">—</span>
-          <Input
-            aria-label="下单结束日期"
-            type="date"
-            value={dateTo}
-            min={dateFrom || undefined}
-            max={today}
-            onChange={(e) => changeDateTo(e.target.value)}
-            className="h-7 w-34 text-xs"
-          />
-          </div>
-          <div className="flex items-center gap-2" role="group" aria-label="预计发货日期筛选">
-            <span className="shrink-0 text-xs text-muted-foreground">预计发货日期筛选</span>
-            <Input
-              aria-label="预计发货开始日期"
-              type="date"
-              value={quickShipDate || plannedShipFrom}
-              max={quickShipDate ? undefined : plannedShipTo || undefined}
-              onChange={(event) => changePlannedShipFrom(event.target.value)}
-              className="h-7 w-34 text-xs"
-            />
-            <span className="text-xs text-muted-foreground">—</span>
-            <Input
-              aria-label="预计发货结束日期"
-              type="date"
-              value={quickShipDate || plannedShipTo}
-              min={quickShipDate ? undefined : plannedShipFrom || undefined}
-              onChange={(event) => changePlannedShipTo(event.target.value)}
-              className="h-7 w-34 text-xs"
-            />
-          </div>
-          <Button
-            type="button"
-            size="sm"
-            variant={todayShipOnly ? "default" : "outline"}
-            aria-pressed={todayShipOnly}
-            className={todayShipOnly
-              ? "h-7 bg-orange-600 hover:bg-orange-700 text-white"
-              : "h-7 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
-            }
-            onClick={() => toggleShipPlanQuickFilter("today")}
-          >
-            <Truck className="size-3.5 mr-1" />
-            筛选今日发货计划{todayShipCount > 0 ? ` ${todayShipCount}` : ""}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={tomorrowShipOnly ? "default" : "outline"}
-            aria-pressed={tomorrowShipOnly}
-            className={tomorrowShipOnly
-              ? "h-7 bg-orange-600 hover:bg-orange-700 text-white"
-              : "h-7 border-orange-200 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
-            }
-            onClick={() => toggleShipPlanQuickFilter("tomorrow")}
-          >
-            <Truck className="size-3.5 mr-1" />
-            筛选明日发货计划{tomorrowShipCount > 0 ? ` ${tomorrowShipCount}` : ""}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={pendingTrackingOnly ? "default" : "outline"}
-            className={pendingTrackingOnly
-              ? "h-7 bg-emerald-600 hover:bg-emerald-700 text-white"
-              : "h-7 border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
-            }
-            onClick={() => {
-              const next = !pendingTrackingOnly;
-              setPendingTrackingOnly(next);
-              if (next) {
-                setMyActiveOnly(false);
-                setStatusFilter("all");
-                setDateFrom("");
-                setDateTo("");
-                setSelectedOrderIds(new Set(
-                  orderList
-                    .filter((order) => hasPendingTrackingShipmentOrder(order, state.shipments))
-                    .filter((order) => matchesPlannedShipmentRange(order, {
-                      from: quickShipDate || plannedShipFrom,
-                      to: quickShipDate || plannedShipTo,
-                    }))
-                    .map((order) => order.id)
-                ));
-              }
-            }}
-          >
-            <Truck className="size-3.5 mr-1" />
-            筛选出库发货订单{pendingTrackingCount > 0 ? ` ${pendingTrackingCount}` : ""}
-          </Button>
-          {hasOrderFilter && (
-            <button
-              type="button"
-              onClick={clearOrderFilters}
-              className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
-            >
-              清除
-            </button>
-          )}
-        </div>
-	      </div>
-
-	      <div className="hidden flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2 md:flex">
-	        <div className="flex flex-wrap items-center gap-2 text-sm">
-	          <span className="text-muted-foreground">批量导出</span>
-	          <span className="font-medium">已选 {selectedOrders.length} 个订单</span>
-	          {selectedOrders.length > 0 && (
-	            <Button
-	              type="button"
-	              size="sm"
-	              variant="ghost"
-	              onClick={() => setSelectedOrderIds(new Set())}
-	            >
-	              清空选择
-	            </Button>
-	          )}
-	        </div>
-	        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={() => setExportFormatOpen(true)}
-          disabled={selectedOrders.length === 0}
-        >
-          <Download className="size-3.5 mr-1" />
-          {pendingTrackingOnly ? "导出选中出库发货表" : "导出选中订单信息"}
-        </Button>
-	      </div>
-
 	      <div className="hidden md:block">
 	      <DataTable
 	        key={orderTableFilterKey}
-	        data={filteredOrders}
-        searchValue={mobileSearch}
-        onSearchChange={setMobileSearch}
-        searchKeys={["searchText"] as (keyof OrderListRow)[]}
-        searchPlaceholder="搜索鱼码、订单号、客户、商品、来源..."
-        searchRank={orderSearchRank}
-        onAdd={permission.canCreate ? () => setNewOpen(true) : undefined}
-	        addLabel="新建订单"
+	        data={matchingOrders}
+        hideToolbar
+        emptyMessage="没有符合条件的订单，请调整或清除筛选。"
+        searchKeys={[]}
+        pageSize={20}
 	        columns={[
 	          {
 	            key: "select",
-	            title: (
-	              <div className="flex items-center gap-2">
-	                <span>选择</span>
-	                <button
-	                  type="button"
-	                  className="rounded border border-sky-200 px-1.5 py-0.5 text-xs font-medium text-sky-600 hover:bg-sky-50 disabled:border-border disabled:text-muted-foreground"
-	                  onClick={toggleFilteredOrders}
-	                  disabled={filteredOrders.length === 0}
-	                >
-	                  {allFilteredSelected ? "取消" : "全选"}
-	                </button>
-	              </div>
-	            ),
-	            width: "110px",
+            title: renderPageSelection,
+            width: "84px",
 	            render: (r) => (
 	              <Checkbox
 	                checked={selectedOrderIds.has(r.id)}
@@ -8247,18 +7838,21 @@ export function OrdersView({
 	          },
 	          {
 	            key: "customerId",
-            title: "客户",
+            title: "订单 / 客户",
             render: (r) => {
               const customer = getCustomer(r.customerId);
               if (!customer) {
                 return isPlatformOrderSource(r.source) ? (
                   <div>
+                    <div className="font-semibold tabular-nums">{r.orderNo}</div>
                     <div className="text-sm font-medium text-foreground">{orderSourceLabel(r.source)}订单</div>
                     <div className="text-xs text-muted-foreground">{platformOrderNoForOrder(r) || "未填写编号"}</div>
                   </div>
-                ) : <span className="text-muted-foreground">—</span>;
+                ) : <div><div className="font-semibold tabular-nums">{r.orderNo}</div><span className="text-muted-foreground">未关联客户</span></div>;
               }
               return (
+                <div className="space-y-0.5">
+                <div className="font-semibold tabular-nums">{r.orderNo}</div>
                 <Button
                   type="button"
                   variant="link"
@@ -8270,6 +7864,7 @@ export function OrdersView({
                 >
                   {customer.name}
                 </Button>
+                </div>
               );
             },
           },
