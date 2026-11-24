@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { ChevronDown, CircleDollarSign, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { useId, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, CircleDollarSign, Plus, Search, SlidersHorizontal, UserRound, UsersRound, X } from "lucide-react";
 import type { OrderWholesaleFilterValue } from "./OrderWholesaleTag";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -64,6 +64,9 @@ function FilterChip({ children, onRemove }: { children: React.ReactNode; onRemov
 }
 
 export function OrdersToolbar(props: OrdersToolbarProps) {
+  const scopePanelId = useId();
+  const scopeLabel = props.scope === "mine" ? "我的订单" : "全部订单";
+  const statusLabel = props.status === "active" ? "未完成" : props.status === "completed" ? "已完成" : "全部状态";
   const [filterOpen, setFilterOpen] = useState(false);
   const [focusPlannedDate, setFocusPlannedDate] = useState(false);
   const plannedDateRef = useRef<HTMLInputElement>(null);
@@ -83,10 +86,10 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
     <div className="flex items-center gap-1.5" role="group" aria-label="发货计划快捷筛选">
       <Button type="button" size="sm" className="h-9 px-3" variant={!hasPlannedDates ? "default" : "outline"} aria-pressed={!hasPlannedDates} onClick={props.onClearPlannedDates}>不限</Button>
       <Button type="button" size="sm" className="h-9 px-3" variant={props.quickShip === "today" ? "default" : "outline"} aria-pressed={props.quickShip === "today"} onClick={() => props.onQuickShipChange(props.quickShip === "today" ? "" : "today")} title={`当前场地预计今天发货 ${props.todayCount} 单，包含已发货订单`}>
-        今天 <span className="tabular-nums opacity-70">{props.todayCount}</span>
+        今天
       </Button>
       <Button type="button" size="sm" className="h-9 px-3" variant={props.quickShip === "tomorrow" ? "default" : "outline"} aria-pressed={props.quickShip === "tomorrow"} onClick={() => props.onQuickShipChange(props.quickShip === "tomorrow" ? "" : "tomorrow")} title={`当前场地预计明天发货 ${props.tomorrowCount} 单，包含已发货订单`}>
-        明天 <span className="tabular-nums opacity-70">{props.tomorrowCount}</span>
+        明天
       </Button>
       <Button type="button" size="sm" className="h-9 px-3" variant={customPlannedDates ? "default" : "outline"} aria-pressed={customPlannedDates} onClick={() => openFilters(true)}>
         自定义 <ChevronDown className="size-3.5" aria-hidden="true" />
@@ -95,7 +98,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
   );
 
   return (
-    <section className="flex min-w-0 flex-col gap-5" aria-label="订单查找与筛选">
+    <section className="flex min-w-0 flex-col gap-4" aria-label="订单查找与筛选">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">订单管理</h1>
         <div className="flex flex-wrap items-center gap-2">
@@ -110,59 +113,68 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
         </div>
       </div>
 
-      <div className="flex flex-col gap-4">
-        <nav className="flex gap-6 border-b" aria-label="订单范围">
-          {([["mine", "我的"], ["all", "全部"]] as const).map(([value, label]) => (
+      <div className="min-w-0">
+        <nav className="relative z-10 -mb-px flex gap-1 px-3 sm:gap-2 sm:px-4" aria-label="订单范围">
+          {([["mine", "我的订单", UserRound], ["all", "全部订单", UsersRound]] as const).map(([value, label, Icon]) => (
             <button
               key={value}
+              id={`${scopePanelId}-${value}`}
               type="button"
               aria-pressed={props.scope === value}
+              aria-controls={scopePanelId}
               title={value === "mine" ? "由我负责的订单" : "当前场地内有权限查看的全部订单"}
               onClick={() => props.onScopeChange(value)}
-              className={`-mb-px min-h-11 border-b-2 px-3 pb-3 pt-1 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${props.scope === value ? "border-primary font-semibold text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+              className={`relative flex min-h-12 flex-1 items-center justify-center gap-2 rounded-t-lg border px-4 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:flex-none sm:px-6 sm:text-base ${props.scope === value ? "border-border border-b-card bg-card font-semibold text-foreground before:absolute before:inset-x-4 before:top-0 before:h-0.5 before:rounded-full before:bg-primary" : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
             >
+              <Icon className="size-4" aria-hidden="true" />
               {label}
             </button>
           ))}
         </nav>
-        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="订单状态">
-          <span className="mr-1 text-sm text-muted-foreground">状态</span>
-          {([["all", "全部状态"], ["active", "未完成"], ["completed", "已完成"]] as const).map(([value, label]) => (
-            <Button
-              key={value}
-              type="button"
-              size="sm"
-              variant={props.status === value ? "default" : "outline"}
-              className="h-9 px-3"
-              aria-pressed={props.status === value}
-              title={value === "all" ? "包含已取消订单" : undefined}
-              onClick={() => props.onStatusChange(value)}
-            >
-              {label}
+        <div id={scopePanelId} role="region" aria-labelledby={`${scopePanelId}-${props.scope}`} className="min-w-0 rounded-lg border bg-card px-3 py-3 sm:px-5 sm:py-4">
+          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-b pb-3 sm:mb-4 sm:pb-4" role="group" aria-label="订单状态">
+            <span className="text-sm text-muted-foreground">完成状态</span>
+            <div className="flex min-w-0 flex-1 items-center rounded-lg bg-muted p-1 sm:flex-none">
+              {([["all", "全部状态"], ["active", "未完成"], ["completed", "已完成"]] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`min-h-10 flex-1 rounded-md px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9 sm:flex-none sm:px-4 ${props.status === value ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:bg-card hover:text-foreground"}`}
+                  aria-pressed={props.status === value}
+                  title={value === "all" ? "包含已取消订单" : undefined}
+                  onClick={() => props.onStatusChange(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-3">
+            <div className="relative min-w-0 flex-1 md:min-w-64">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+              <Input value={props.search} onChange={event => props.onSearchChange(event.target.value)} placeholder="搜索订单号、客户、鱼码或商品" aria-label="搜索订单" className="fishroom-control h-10 pl-9 pr-9" />
+              {props.search && <button type="button" aria-label="清除搜索关键词" onClick={() => props.onSearchChange("")} className="absolute right-1 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><X className="size-4" aria-hidden="true" /></button>}
+            </div>
+            <Button type="button" variant="outline" className="h-10 gap-2 px-3" onClick={() => openFilters()} aria-expanded={filterOpen} aria-label={filterCount ? `筛选，已选 ${filterCount} 个条件` : "筛选"}>
+              <SlidersHorizontal className="size-4" aria-hidden="true" />
+              筛选 {filterCount > 0 && <span className="flex size-5 items-center justify-center rounded bg-primary text-xs text-primary-foreground">{filterCount}</span>}
             </Button>
-          ))}
+            <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t pt-3 xl:w-auto xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+              <span className="shrink-0 text-sm text-muted-foreground">发货计划</span>
+              {planChoices}
+            </div>
+          </div>
+
         </div>
       </div>
 
-      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-3">
-        <div className="relative min-w-0 flex-1 md:min-w-64">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          <Input value={props.search} onChange={event => props.onSearchChange(event.target.value)} placeholder="搜索订单号、客户、鱼码或商品" aria-label="搜索订单" className="fishroom-control h-10 pl-9 pr-9" />
-          {props.search && <button type="button" aria-label="清除搜索关键词" onClick={() => props.onSearchChange("")} className="absolute right-1 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><X className="size-4" aria-hidden="true" /></button>}
-        </div>
-        <Button type="button" variant="outline" className="h-10 gap-2 px-3" onClick={() => openFilters()} aria-expanded={filterOpen} aria-label={filterCount ? `筛选，已选 ${filterCount} 个条件` : "筛选"}>
-          <SlidersHorizontal className="size-4" aria-hidden="true" />
-          筛选 {filterCount > 0 && <span className="flex size-5 items-center justify-center rounded bg-primary text-xs text-primary-foreground">{filterCount}</span>}
-        </Button>
-        <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-t pt-3 xl:w-auto xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
-          <span className="shrink-0 text-sm text-muted-foreground">发货计划</span>
-          {planChoices}
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t pt-3">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="mr-1 text-sm text-muted-foreground" aria-live="polite">共 <strong className="font-medium tabular-nums text-foreground">{props.resultCount.toLocaleString("zh-CN")}</strong> 个订单</span>
+          <span className="mr-1 inline-flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground" aria-live="polite">
+            <span>{scopeLabel}</span><ChevronRight className="size-3.5" aria-hidden="true" /><span>{statusLabel}</span>
+            <span className="mx-0.5" aria-hidden="true">·</span><span>共 <strong className="font-semibold tabular-nums text-foreground">{props.resultCount.toLocaleString("zh-CN")}</strong> 单</span>
+          </span>
           {hasOrderDates && <FilterChip onRemove={props.onClearOrderDates}>{`下单：${dateRangeLabel(props.dateFrom, props.dateTo)}`}</FilterChip>}
           {hasPlannedDates && <FilterChip onRemove={props.onClearPlannedDates}>{`预计发货：${props.quickShip === "today" ? "今天" : props.quickShip === "tomorrow" ? "明天" : dateRangeLabel(props.plannedFrom, props.plannedTo)}`}</FilterChip>}
           {props.wholesale !== "all" && <FilterChip onRemove={() => props.onWholesaleChange("all")}>{props.wholesale === "wholesale" ? "批发订单" : "未标记批发"}</FilterChip>}
