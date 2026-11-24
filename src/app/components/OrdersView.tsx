@@ -4331,6 +4331,9 @@ type EditForm = {
   customerId: string; date: string; source: string; platformOrderNo: string; paymentMethodId: string; paymentChannel: PaymentChannel | ""; shippingAddress: string; plannedShipDate: string; contactPersonnelId: string; contactPerson: string; notes: string;
   shippingFeeMode: ShippingFeeMode; shippingFee: number; packagingFee: number; discount: number;
   items: OrderPickerItem[];
+  expectedSource: string;
+  expectedIsWholesaleOrder: boolean;
+  expectedWholesaleOrderUpdatedAt: string;
   expectedContactPersonnelId: string;
   expectedOwnerAssignmentRequestId: string;
   ownerSelectionChanged: boolean;
@@ -4497,6 +4500,9 @@ function OrderDetailDialog({
     setEditForm({
       customerId: order.customerId, date: order.date, plannedShipDate: order.plannedShipDate ?? "",
       source: order.source ?? "",
+      expectedSource: order.source ?? "",
+      expectedIsWholesaleOrder: order.isWholesaleOrder === true,
+      expectedWholesaleOrderUpdatedAt: order.wholesaleOrderUpdatedAt ?? "",
       platformOrderNo: platformOrderNoForOrder(order),
       paymentMethodId,
       paymentChannel,
@@ -4565,6 +4571,9 @@ function OrderDetailDialog({
         customerId: isPlatformOrderSource(editForm.source) ? (order.customerId || editForm.customerId) : editForm.customerId,
         date: editForm.date,
         source: editForm.source.trim(),
+        expectedSource: editForm.expectedSource,
+        expectedIsWholesaleOrder: editForm.expectedIsWholesaleOrder,
+        expectedWholesaleOrderUpdatedAt: editForm.expectedWholesaleOrderUpdatedAt,
         platformOrderNo: isPlatformOrderSource(editForm.source) ? editForm.platformOrderNo.trim() : "",
         douyinOrderNo: editForm.source === "平台下单" ? editForm.platformOrderNo.trim() : "",
         paymentMethodId: editForm.paymentMethodId === historicalOrderPaymentMethodId(order.id)

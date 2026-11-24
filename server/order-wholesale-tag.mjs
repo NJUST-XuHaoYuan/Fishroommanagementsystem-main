@@ -45,8 +45,16 @@ export function initializeCreatedOrderWholesaleTag(order, body, account, now = n
 
 // Retail-source historical tags remain editable through their existing route.
 // Only crossing the new wholesale source boundary changes classification here.
-export function synchronizeUpdatedOrderWholesaleTag(currentOrder, nextOrder, account, now = new Date().toISOString()) {
+export function synchronizeUpdatedOrderWholesaleTag(currentOrder, nextOrder, body, account, now = new Date().toISOString()) {
   if ((currentOrder.source === "批发") === (nextOrder.source === "批发")) return nextOrder;
+  // A stale edit form must not turn another operator's source change into an
+  // unintended classification change. Expectations come from the opened form,
+  // not from the locked record used to plan the actual mutation below.
+  if (typeof body?.expectedSource !== "string" || body.expectedSource !== currentOrder.source ||
+      typeof body.expectedIsWholesaleOrder !== "boolean" || body.expectedIsWholesaleOrder !== (currentOrder.isWholesaleOrder === true) ||
+      typeof body.expectedWholesaleOrderUpdatedAt !== "string" || body.expectedWholesaleOrderUpdatedAt !== String(currentOrder.wholesaleOrderUpdatedAt ?? "")) {
+    fail(409, "ORDER_WHOLESALE_SOURCE_CONFLICT", "订单来源或批发标记已变化，请刷新订单后重新编辑");
+  }
   return planOrderWholesaleTag(nextOrder, {
     isWholesaleOrder: nextOrder.source === "批发",
     expectedIsWholesaleOrder: currentOrder.isWholesaleOrder === true,

@@ -13277,7 +13277,7 @@ async function handleApi(req, res, url) {
         ...currentOrder,
         ...nextOrderInput,
       }, req.auth.account, body, { requestId: uid("order-owner"), canUpdateOrder: orderPermissionAllowedForAccount });
-      const classifiedOrder = synchronizeUpdatedOrderWholesaleTag(currentOrder, ownerPlan.order, req.auth.account);
+      const classifiedOrder = synchronizeUpdatedOrderWholesaleTag(currentOrder, ownerPlan.order, body, req.auth.account);
       let nextOrder = { ...classifiedOrder, salesAmountSnapshot: captureOrderSalesAmount(currentOrder, nowDatetimeInChina()).salesAmountSnapshot };
       let nextNotifications = ownerAssignmentNotifications(currentStationNotifications(state), nextOrder, { now: new Date().toISOString(), actor: req.auth.account, createId: () => uid("notice") });
       let creditApprovalCleared = false;

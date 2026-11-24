@@ -10,6 +10,7 @@ const tag = (order) => Object.fromEntries(ORDER_WHOLESALE_TAG_FIELDS.filter((key
 const business = (order) => Object.fromEntries(Object.entries(order).filter(([key]) => !ORDER_WHOLESALE_TAG_FIELDS.includes(key)));
 const expected = (order) => ({ expectedIsWholesaleOrder: order?.isWholesaleOrder === true,
   expectedWholesaleOrderUpdatedAt: String(order?.wholesaleOrderUpdatedAt ?? "") });
+const sourceExpectation = (order) => ({ ...expected(order), expectedSource: order.source });
 const createInput = (extra = {}) => ({
   siteId: "nanjing", source: "批发", customerId: "wholesale-customer", date: "2026-11-02",
   paymentChannel: "cash", plannedShipDate: "2026-11-05", contactPersonnelId: "pricing-editor", shippingAddress: "南京测试收货地址",
@@ -247,7 +248,7 @@ test("wholesale source uses customer and shipping validation and edits synchroni
   assert.equal(patched.response.status, 409, JSON.stringify(patched.body));
   assert.deepEqual(await s.readPersistedState(), createdState);
   const retailResult = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
-    ...wholesale, orderId: wholesale.id, source: "私域线上",
+    ...wholesale, ...sourceExpectation(wholesale), orderId: wholesale.id, source: "私域线上",
   } }); ok(retailResult);
   const retail = retailResult.body.order;
   assert.equal(retail.isWholesaleOrder, false);
@@ -259,7 +260,7 @@ test("wholesale source uses customer and shipping validation and edits synchroni
   assert.deepEqual((await s.readPersistedState()).stock, createdState.stock);
   assert.deepEqual(await s.readOrder(wholesale.id), retail);
   const restored = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
-    ...retail, orderId: retail.id, source: "批发",
+    ...retail, ...sourceExpectation(retail), orderId: retail.id, source: "批发",
   } }); ok(restored);
   assert.equal(restored.body.order.isWholesaleOrder, true);
   assert.match(restored.body.operationLog.detail, /标记为批发订单/);
@@ -301,6 +302,47 @@ test("initial classification requires current create permission and site access,
   assert.equal(deniedCreate.response.status, 400, JSON.stringify(deniedCreate.body));
   assert.match(deniedCreate.body.error, /没有订单模块的操作权限/);
   assert.deepEqual(await s.readPersistedState(), afterRevocation);
+});
+
+test("stale edit forms cannot overwrite a concurrent wholesale source change or an ABA tag change", async (t) => {
+  const data = fixture(); delete data.state.commissionLedgerV1;
+  const s = await setup(t, data);
+  const created = await s.request("/api/orders/create", { token: s.tokens.editor,
+    body: createInput({ source: "私域线上" }) }); ok(created);
+  const original = created.body.order;
+  const edit = (form, source, extra = {}) => s.request("/api/orders/update", { token: s.tokens.editor,
+    body: { ...form, ...sourceExpectation(form), orderId: form.id, source, ...extra } });
+  const wholesaleResult = await edit(original, "批发"); ok(wholesaleResult);
+  const wholesale = wholesaleResult.body.order;
+  let committed = await s.readPersistedState();
+  const staleRetail = await edit(original, original.source, { notes: "only changing a stale note" });
+  assert.equal(staleRetail.response.status, 409);
+  assert.equal(staleRetail.body.code, "ORDER_WHOLESALE_SOURCE_CONFLICT");
+  assert.deepEqual(await s.readPersistedState(), committed);
+  const legacyClient = await s.request("/api/orders/update", { token: s.tokens.editor, body: {
+    ...wholesale, orderId: wholesale.id, source: "私域线上",
+  } });
+  assert.equal(legacyClient.response.status, 409, "an old client cannot cross the source boundary without original values");
+  assert.deepEqual(await s.readPersistedState(), committed);
+
+  const retailResult = await edit(wholesale, "私域线上"); ok(retailResult);
+  const retail = retailResult.body.order;
+  committed = await s.readPersistedState();
+  const staleWholesale = await edit(wholesale, wholesale.source, { notes: "another stale note" });
+  assert.equal(staleWholesale.response.status, 409);
+  assert.deepEqual(await s.readPersistedState(), committed);
+
+  ok(await s.mark(true, { orderId: retail.id }));
+  ok(await s.mark(false, { orderId: retail.id }));
+  committed = await s.readPersistedState();
+  const staleTagVersion = await edit(retail, "批发");
+  assert.equal(staleTagVersion.response.status, 409, "a matching source and boolean cannot hide an intervening tag edit");
+  assert.equal(staleTagVersion.body.code, "ORDER_WHOLESALE_SOURCE_CONFLICT");
+  assert.deepEqual(await s.readPersistedState(), committed);
+  const fresh = await s.readOrder(retail.id);
+  const retry = await edit(fresh, "批发"); ok(retry);
+  assert.equal(retry.body.order.isWholesaleOrder, true);
+  assert.deepEqual(await s.readOrder(retail.id), retry.body.order);
 });
 
 test("a pending inventory approval preserves a tag added after the request, and retired full-state writes remain blocked", async (t) => {

@@ -5,6 +5,8 @@ import { ORDER_WHOLESALE_TAG_FIELDS, assertOrderWholesaleTagUnchanged, initializ
 const account = { username: "editor", name: "订单员工" };
 const now = "2026-11-02T09:00:00.000Z";
 const request = { isWholesaleOrder: true, expectedIsWholesaleOrder: false, expectedWholesaleOrderUpdatedAt: "" };
+const sourceExpectation = (order) => ({ expectedSource: order.source, expectedIsWholesaleOrder: order.isWholesaleOrder === true,
+  expectedWholesaleOrderUpdatedAt: String(order.wholesaleOrderUpdatedAt ?? "") });
 
 test("creation derives classification from source and always generates audit metadata on the server", () => {
   const order = { id: "new-order", source: "批发", items: [{ price: 100 }], payments: [] };
@@ -38,18 +40,31 @@ test("source edits synchronize classification only across wholesale, preserving 
   const retail = { id: "legacy", source: "平台下单", notes: "legacy" };
   const marked = planOrderWholesaleTag(retail, request, account, now).order;
   const anotherRetail = { ...marked, source: "闲鱼平台" };
-  assert.equal(synchronizeUpdatedOrderWholesaleTag(marked, anotherRetail, account, now), anotherRetail);
-  const wholesale = synchronizeUpdatedOrderWholesaleTag(retail, { ...retail, source: "批发" }, account, now);
+  assert.equal(synchronizeUpdatedOrderWholesaleTag(marked, anotherRetail, {}, account, now), anotherRetail);
+  const wholesale = synchronizeUpdatedOrderWholesaleTag(retail, { ...retail, source: "批发" }, sourceExpectation(retail), account, now);
   assert.equal(wholesale.isWholesaleOrder, true);
   assert.equal(wholesale.wholesaleOrderUpdatedBy, "editor");
   assert.throws(() => planOrderWholesaleTag(wholesale, { ...request, isWholesaleOrder: false }, account, now), {
     statusCode: 409, code: "ORDER_WHOLESALE_SOURCE_PROTECTED",
   });
-  const reverted = synchronizeUpdatedOrderWholesaleTag(wholesale, { ...wholesale, source: "私域线上" }, account, now);
+  const reverted = synchronizeUpdatedOrderWholesaleTag(wholesale, { ...wholesale, source: "私域线上" }, sourceExpectation(wholesale), account, now);
   assert.equal(reverted.isWholesaleOrder, false);
   assert.equal(reverted.wholesaleOrderUpdatedAt, "2026-11-02T09:00:00.001Z");
   for (const [current, next] of [[retail, { ...retail, source: "批发" }], [wholesale, { ...wholesale, source: "私域线上" }]]) {
     assert.throws(() => assertOrderWholesaleTagUnchanged(current, next), { code: "ORDER_WHOLESALE_SOURCE_PROTECTED" });
+  }
+});
+
+test("crossing the wholesale source boundary rejects missing, malformed and stale form expectations", () => {
+  const current = { source: "批发", isWholesaleOrder: true, wholesaleOrderUpdatedAt: now };
+  const next = { ...current, source: "私域线上" };
+  const base = sourceExpectation(current);
+  for (const body of [undefined, {}, { ...base, expectedSource: "私域线上" }, { ...base, expectedSource: null },
+    { ...base, expectedIsWholesaleOrder: "true" }, { ...base, expectedIsWholesaleOrder: false },
+    { ...base, expectedWholesaleOrderUpdatedAt: null }, { ...base, expectedWholesaleOrderUpdatedAt: "older-version" }]) {
+    assert.throws(() => synchronizeUpdatedOrderWholesaleTag(current, next, body, account, now), {
+      statusCode: 409, code: "ORDER_WHOLESALE_SOURCE_CONFLICT",
+    });
   }
 });
 
