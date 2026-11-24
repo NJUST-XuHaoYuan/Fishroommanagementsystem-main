@@ -10,6 +10,7 @@ import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
 import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderCashierPanel } from "./OrderCashierPanel";
+import { ShipmentWorkflowHeader } from "./ShipmentWorkflowHeader";
 import { OrderCompletionActions, type OrderCompletionCheck } from "./OrderCompletionActions";
 import { orderCompletionFinancialCheck } from "../../../server/order-completion-finance.mjs";
 import { getRegisteredOrderCashSummary, getShippingSettlementSummary, shippingSettlementFilterStatus, shippingSettlementStatusLabel, type RegisteredOrderCashSummary } from "../utils/shippingSettlement";
@@ -1315,7 +1316,7 @@ export function ShipmentStatusBadge({
 }) {
   const corrected = shipmentFulfillmentState(shipment);
   if (corrected) {
-    const className = `ml-auto inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${corrected.pending ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`;
+    const className = `inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${corrected.pending ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`;
     const content = <>{corrected.pending ? <AlertTriangle className="size-3" aria-hidden="true" /> : <CheckCircle className="size-3" aria-hidden="true" />}{corrected.label}</>;
     return onClick
       ? <button type="button" onClick={onClick} title="查看履约记录和发货操作" className={`${className} min-h-11 cursor-pointer hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}>{content}</button>
@@ -1323,7 +1324,7 @@ export function ShipmentStatusBadge({
   }
   if (shipment.status === "delivered") {
     return (
-      <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
         <CheckCircle className="size-3" /> 已签收
       </span>
     );
@@ -1332,32 +1333,34 @@ export function ShipmentStatusBadge({
   if (shipment.status === "damaged") {
     const label = shipment.damageResolution === "reship" ? "已报损 · 补发" : "已报损 · 退款";
     return (
-      <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">
         <XCircle className="size-3" /> {label}
       </span>
     );
   }
 
-  if (shipment.status === "outbound" && onClick) {
+  if (shipment.status === "outbound") {
+    if (!onClick) return <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800"><PackageCheck className="size-3" aria-hidden="true" />已出库/待发货</span>;
     return (
       <button
         type="button"
         onClick={onClick}
         title="点击上传打包凭证并确认发货"
-        className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-sky-100 text-sky-700 hover:bg-sky-200 transition-colors cursor-pointer"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-sky-100 text-sky-700 hover:bg-sky-200 transition-colors cursor-pointer"
       >
         <PackageCheck className="size-3" /> 已出库/待发货
       </button>
     );
   }
 
-  if (shipment.status === "shipped" && onClick) {
+  if (shipment.status === "shipped") {
+    if (!onClick) return <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800"><Truck className="size-3" aria-hidden="true" />运输中</span>;
     return (
       <button
         type="button"
         onClick={onClick}
         title="点击处理运输状态"
-        className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors cursor-pointer"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-colors cursor-pointer"
       >
         <Truck className="size-3" /> 运输中
       </button>
@@ -1365,7 +1368,7 @@ export function ShipmentStatusBadge({
   }
 
   return (
-    <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">
       <Truck className="size-3" /> 待发货
     </span>
   );
@@ -2250,8 +2253,9 @@ export function ShipmentActualShippingFeeFields({
 
 function ShipmentActionDialog({
   shipment, order, open, saving = false, onOpenChange, onDelivered, onDamage, onCancelShipment, onConfirmShipment,
-  onSaveActualShippingFee,
+  onSaveActualShippingFee, mode = "fulfillment",
 }: {
+  mode?: "fulfillment" | "fee";
   shipment: Shipment | null;
   order: Order | null;
   open: boolean;
@@ -2278,7 +2282,7 @@ function ShipmentActionDialog({
       setActualShippingFeeError("");
       setActualShippingFeeSaved(false);
     }
-  }, [open, shipment?.id]);
+  }, [open, shipment?.id, mode]);
 
   if (!shipment) return null;
   const method = shipment.shipMethod === "pickup" ? "上门自取" : (shipment.carrier || "快递");
@@ -2335,9 +2339,21 @@ function ShipmentActionDialog({
     />
   ) : null;
 
+  if (mode === "fee") return <Dialog open={open} onOpenChange={(nextOpen) => { if (!actionLocked) onOpenChange(nextOpen); }}>
+    <DialogContent aria-describedby={undefined} aria-busy={actionLocked}
+      onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
+      onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
+      className={`max-w-lg max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}>
+      <DialogHeader><DialogTitle>{shippingFeePending ? "补录实际运费" : "修改实际运费"}</DialogTitle></DialogHeader>
+      <p className="text-sm text-muted-foreground">{order?.orderNo} · {method}{shipment.trackingNo ? ` · ${shipment.trackingNo}` : ""}</p>
+      {actualShippingFeeFields || <p className="text-sm text-muted-foreground">当前订单不允许修改实际运费。</p>}
+      <p className="text-sm leading-6 text-muted-foreground">这里只登记承运方收取的实际费用。客户补款或退款，请到本订单的「收银台」办理。</p>
+    </DialogContent>
+  </Dialog>;
+
   if (shipment.status === "outbound") {
     const confirmShipment = () => {
-      if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正履约记录”中核对。");
+      if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正发货与签收时间”中核对。");
       if (packingProof.length < 2) {
         toast.error("请至少上传 2 张打包凭证：捞鱼照片和封箱前照片");
         return;
@@ -2355,7 +2371,7 @@ function ShipmentActionDialog({
           className={`max-w-2xl max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
         >
           <DialogHeader>
-            <DialogTitle>出库发货确认</DialogTitle>
+            <DialogTitle>{shipment.shipMethod === "pickup" ? "上传照片并确认自提" : "上传打包照片并确认发货"}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="rounded-lg border bg-muted/30 p-3 text-sm flex flex-col gap-1">
@@ -2365,17 +2381,15 @@ function ShipmentActionDialog({
               <div><span className="text-muted-foreground">出库日期：</span>{shipment.outboundDate || shipment.shipDate}</div>
               <div><span className="text-muted-foreground">商品数：</span>{(shipment.itemStockIds ?? []).length} 条</div>
             </div>
-            {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用“更正履约记录”；已核实发货时间后可继续确认发货。</p></>}
+            {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用“更正发货与签收时间”；已核实发货时间后可继续确认发货。</p></>}
 
             <div className="grid gap-2">
-              <Label>打包凭证<span className="text-red-500 ml-0.5">*</span></Label>
+              <Label>打包照片<span className="text-red-500 ml-0.5">*</span></Label>
               <ProofUploader images={packingProof} onChange={setPackingProof} />
               <p className="text-xs text-muted-foreground">
-                至少上传 2 张：鱼捞出后的照片、封箱前照片。上传后点击「确认发货」才会进入运输中。
+                至少上传 2 张：鱼捞出后的照片、封箱前照片。{shipment.shipMethod === "pickup" ? "上传后点击「确认自提」完成此次自提。" : "上传后点击「确认发货」才会进入运输中。"}
               </p>
             </div>
-
-            {actualShippingFeeFields}
 
             <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
               已出库的鱼已经不在缸内显示；如果出库点错，可以在真正发货前取消出库。
@@ -2383,7 +2397,6 @@ function ShipmentActionDialog({
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>关闭</Button>
             <Button
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
@@ -2395,7 +2408,7 @@ function ShipmentActionDialog({
             </Button>
             <Button className="min-h-11" onClick={confirmShipment} disabled={actionLocked || !editableOrder || Boolean(shipmentFulfillmentState(shipment)?.shippingTimePending)}>
               <Truck className="size-4 mr-1" />
-              {saving ? "保存中..." : "确认发货"}
+              {saving ? "保存中..." : shipment.shipMethod === "pickup" ? "确认自提" : "确认发货"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2410,10 +2423,10 @@ function ShipmentActionDialog({
         aria-busy={actionLocked}
         onEscapeKeyDown={(event) => { if (actionLocked) event.preventDefault(); }}
         onPointerDownOutside={(event) => { if (actionLocked) event.preventDefault(); }}
-        className={`max-w-sm max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
+        className={`max-w-lg max-h-[90dvh] overflow-y-auto ${actionLocked ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}
       >
         <DialogHeader>
-          <DialogTitle>{shipment.status === "shipped" ? "处理运输状态" : "补录 / 修正运费"}</DialogTitle>
+          <DialogTitle>登记收货结果</DialogTitle>
         </DialogHeader>
         <div className="rounded-lg border bg-muted/30 p-3 text-sm flex flex-col gap-1">
           <div><span className="text-muted-foreground">订单：</span>{order?.orderNo ?? "—"}</div>
@@ -2425,40 +2438,19 @@ function ShipmentActionDialog({
           <div><span className="text-muted-foreground">原登记发货时间：</span>{formatShipmentCreatedAt(shipment.shippedAt)}</div>
           <div><span className="text-muted-foreground">原登记发货日期：</span>{shipment.shipDate}</div>
         </div>
-        {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用订单详情中的“更正履约记录”；实际履约信息全部核实后可继续确认收货。</p></>}
-        {actualShippingFeeFields}
-        {shipment.status === "shipped" && editableOrder && <div className="grid grid-cols-3 gap-3">
-          <Button
-            variant="outline"
-            className="h-auto py-3 text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-            onClick={() => onDelivered(shipment)}
-            disabled={actionLocked || Boolean(shipmentFulfillmentState(shipment)?.pending)}
-          >
-            <CheckCircle className="size-4" />
-            确认收货
+        {shipment.fulfillmentCorrection && <><ShipmentFulfillmentRecord shipment={shipment} /><p className="text-xs leading-5 text-muted-foreground">如需更正核对内容，请由管理员使用订单详情中的“更正发货与签收时间”；实际履约信息全部核实后可继续确认收货。</p></>}
+        {shipment.status === "shipped" && editableOrder && <div className="grid gap-3">
+          <p className="text-sm leading-6 text-muted-foreground">客户收货后，按实际情况选择；仍在运输途中时无需操作。</p>
+          <Button type="button" className="h-auto min-h-14 justify-start gap-3 whitespace-normal px-4 py-3 text-left"
+            onClick={() => onDelivered(shipment)} disabled={actionLocked || Boolean(shipmentFulfillmentState(shipment)?.pending)}>
+            <CheckCircle className="size-5 shrink-0" aria-hidden="true" /><span><span className="block font-medium">客户已正常收货</span><span className="mt-1 block text-xs font-normal opacity-90">确认后，将这批鱼标记为已签收</span></span>
           </Button>
-          <Button
-            variant="outline"
-            className="h-auto py-3 text-red-700 border-red-200 hover:bg-red-50"
-            onClick={() => onDamage(shipment)}
-            disabled={actionLocked}
-          >
-            <XCircle className="size-4" />
-            报损处理
-          </Button>
-          <Button
-            variant="outline"
-            className="h-auto py-3 text-amber-700 border-amber-200 hover:bg-amber-50"
-            onClick={() => onCancelShipment(shipment)}
-            disabled={actionLocked}
-          >
-            <RotateCcw className="size-4" />
-            取消发货
+          <Button type="button" variant="outline" className="h-auto min-h-14 justify-start gap-3 whitespace-normal px-4 py-3 text-left"
+            onClick={() => onDamage(shipment)} disabled={actionLocked}>
+            <AlertTriangle className="size-5 shrink-0 text-destructive" aria-hidden="true" /><span><span className="block font-medium">收到的鱼有损耗</span><span className="mt-1 block text-xs font-normal text-muted-foreground">选择受损鱼只，减免货款或安排补发；实际退款在收银台登记</span></span>
           </Button>
         </div>}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={actionLocked}>取消</Button>
-        </DialogFooter>
+
       </DialogContent>
     </Dialog>
   );
@@ -4082,7 +4074,7 @@ function StockPickerBioDialog({
 // ─── ItemsWithShipments ───────────────────────────────────────────────────────
 
 function ItemsWithShipments({
-  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onCorrectFulfillment, onReturnItem, canReturnItem, flat = false,
+  order, orderShipments, shippedItemIds, getProduct, getStockItem, subTankName, onShipmentAction, onEditShipmentFee, onCancelShipment, onCorrectFulfillment, onReturnItem, canReturnItem, flat = false,
 }: {
   order: Order;
   orderShipments: Shipment[];
@@ -4091,6 +4083,8 @@ function ItemsWithShipments({
   getStockItem: (id: string) => StockItem | undefined;
   subTankName: (id: string) => string;
   onShipmentAction?: (shipment: Shipment) => void;
+  onEditShipmentFee?: (shipment: Shipment) => void;
+  onCancelShipment?: (shipment: Shipment) => void;
   onCorrectFulfillment?: (shipment: Shipment) => void;
   onReturnItem?: (item: OrderItem) => void;
   canReturnItem?: boolean;
@@ -4212,62 +4206,16 @@ function ItemsWithShipments({
         const shItems = order.items.filter((i) => (sh.itemStockIds ?? []).includes(i.stockItemId));
         const packingProofs = shipmentPackingProofs(sh);
         const damageReplacements = sh.damageResolution === "reship" ? (sh.damageReplacements ?? []) : [];
-        const fulfillment = shipmentFulfillmentState(sh);
-        const shipmentHeaderTone = fulfillment?.pending ? "bg-amber-50/60 text-amber-900" : sh.status === "delivered"
-          ? "bg-emerald-50/60 text-emerald-800"
-          : sh.status === "damaged"
-            ? "bg-red-50/60 text-red-800"
-            : sh.status === "outbound"
-              ? "bg-sky-50/60 text-sky-800"
-              : "bg-purple-50/60 text-purple-800";
         return (
           <div key={sh.id}>
-            {/* Shipment header */}
-            <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-4 py-1.5 text-xs font-medium ${shipmentHeaderTone}`}>
-              {sh.shipMethod === "pickup"
-                ? <MapPin className="size-3.5 shrink-0" />
-                : <Truck className="size-3.5 shrink-0" />}
-              <span className="min-w-0 flex-1 basis-64 break-words py-0.5">
-                {sh.status === "outbound" ? "出库单" : "发货单"} {si + 1}：
-                {sh.shipMethod === "pickup" ? "上门自取" : `${sh.carrier || "快递"}`}
-                {sh.trackingNo ? ` · ${sh.trackingNo}` : ""}
-                {" · "}{sh.status === "outbound" ? `登记出库：${sh.outboundDate || sh.shipDate}` : `原登记发货：${formatShipmentCreatedAt(sh.shippedAt || sh.shipDate)}`}
-              </span>
-              <ShipmentStatusBadge
-                shipment={sh}
-                onClick={onShipmentAction && (sh.status === "outbound" || (sh.status === "shipped" && sh.shipMethod !== "pickup"))
-                  ? () => onShipmentAction?.(sh)
-                  : undefined}
-              />
-              {shipmentHasPendingActualShippingFee(order, sh) && (
-                <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">待补运费</Badge>
-              )}
-              {onShipmentAction && canEditShipmentActualShippingFee(sh, orderShippingFeeMode(order), order.status) && (
-                <Button
-                  type="button" size="sm" variant="outline"
-                  className="min-h-11 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white"
-                  onClick={() => onShipmentAction(sh)}
-                >
-                  <CircleDollarSign className="size-3.5" aria-hidden="true" />
-                  {shipmentHasPendingActualShippingFee(order, sh) ? "补录运费" : "修改运费"}
-                </Button>
-              )}
-              {packingProofs.length > 0 && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-9 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white"
-                  onClick={() => setProofShipment({ shipment: sh, number: si + 1 })}
-                >
-                  <Camera className="size-3.5" />
-                  凭证 {packingProofs.length} 张
-                </Button>
-              )}
-              {onCorrectFulfillment && sh.status !== "preparing" && <Button type="button" size="sm" variant="outline" className="min-h-11 border-current/25 bg-white/70 px-2.5 text-current hover:bg-white" onClick={() => onCorrectFulfillment(sh)}>
-                <Clock className="size-3.5" aria-hidden="true" />更正履约记录
-              </Button>}
-            </div>
+            <ShipmentWorkflowHeader order={order} shipment={sh} number={si + 1} itemCount={sh.itemStockIds?.length ?? shItems.length}
+              statusBadge={<ShipmentStatusBadge shipment={sh} />}
+              onProgress={onShipmentAction ? () => onShipmentAction(sh) : undefined}
+              onEditFee={onEditShipmentFee && canEditShipmentActualShippingFee(sh, orderShippingFeeMode(order), order.status) ? () => onEditShipmentFee(sh) : undefined}
+              onViewProof={packingProofs.length ? () => setProofShipment({ shipment: sh, number: si + 1 }) : undefined}
+              onCorrect={onCorrectFulfillment && sh.status !== "preparing" ? () => onCorrectFulfillment(sh) : undefined}
+              onCancel={onCancelShipment && ["outbound", "shipped"].includes(sh.status) ? () => onCancelShipment(sh) : undefined}
+            />
             <ShipmentFulfillmentRecord shipment={sh} />
             {damageReplacements.length > 0 && (
               <div className="border-t border-sky-100 bg-sky-50/40 px-4 py-3">
@@ -4466,6 +4414,9 @@ function OrderDetailDialog({
     };
   }, [open]);
   const [shipmentAction, setShipmentAction] = useState<Shipment | null>(null);
+  const [shipmentActionMode, setShipmentActionMode] = useState<"fulfillment" | "fee">("fulfillment");
+  const openShipmentProgress = (shipment: Shipment) => { setShipmentActionMode("fulfillment"); setShipmentAction(shipment); };
+  const openShipmentFee = (shipment: Shipment) => { setShipmentActionMode("fee"); setShipmentAction(shipment); };
   const [cancelShipmentTarget, setCancelShipmentTarget] = useState<Shipment | null>(null);
   const [fulfillmentCorrectionTarget, setFulfillmentCorrectionTarget] = useState<Shipment | null>(null);
   const cancelShipmentContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
@@ -4818,7 +4769,7 @@ function OrderDetailDialog({
     },
     {
       id: "fulfillment", label: "实际履约信息已核实", complete: !pendingFulfillmentCorrection, target: "logistics",
-      detail: pendingFulfillmentCorrection ? "存在待核实的实际发货或签收时间，请先更正履约记录。" : undefined,
+      detail: pendingFulfillmentCorrection ? "存在待核实的实际发货或签收时间，请先更正发货与签收时间。" : undefined,
     },
     {
       id: "freight", label: "运费信息齐全", complete: !pendingActualShippingFee, target: "logistics",
@@ -4929,7 +4880,7 @@ function OrderDetailDialog({
     if (!order) return;
     if (!permission.requirePermission("update")) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能修改签收状态");
-    if (shipmentFulfillmentState(shipment)?.pending) return toast.error("此单实际履约信息尚未核实，请由管理员在“更正履约记录”中核对后再确认收货。");
+    if (shipmentFulfillmentState(shipment)?.pending) return toast.error("此单实际履约信息尚未核实，请由管理员在“更正发货与签收时间”中核对后再确认收货。");
     if (!confirmWrite("修改", "将该发货单状态改为已签收。")) return;
     shipmentFeeRequestSequence.current += 1;
     try {
@@ -4979,7 +4930,7 @@ function OrderDetailDialog({
     if (shipmentConfirmSaving) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能再确认发货");
     if (shipment.status !== "outbound") return toast.error("只有已出库的商品可以确认发货");
-    if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正履约记录”中核对。");
+    if (shipmentFulfillmentState(shipment)?.shippingTimePending) return toast.error("实际发货时间尚未核实，请管理员先在“更正发货与签收时间”中核对。");
     if (packingProof.length < 2) return toast.error("请至少上传 2 张打包凭证");
     if (!confirmWrite("发货", "将保存打包凭证，并把该出库单改为已发货。")) return;
     shipmentFeeRequestSequence.current += 1;
@@ -5513,7 +5464,7 @@ function OrderDetailDialog({
                 </>
               ) : (
                 /* View mode: items grouped by shipment */
-                <div className="overflow-y-auto rounded-b-lg" style={{ maxHeight: "28rem" }}>
+                <div className="min-w-0 rounded-b-lg">
                   <ItemsWithShipments
                     flat
                     order={order}
@@ -5561,7 +5512,7 @@ function OrderDetailDialog({
               <TabsContent value="cashier" forceMount hidden={detailTab !== "cashier"} style={detailTab !== "cashier" ? { display: "none" } : undefined} className="m-0 space-y-5">
                 <OrderCashierPanel key={`cashier:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} amountDue={amountDue} canUpdate={permission.canUpdate} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
                   onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
-                  onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); setShipmentAction(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
+                  onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); openShipmentFee(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
                   {!editMode && feeContent}
                 </OrderCashierPanel>
               </TabsContent>
@@ -5574,7 +5525,7 @@ function OrderDetailDialog({
                   {!isPickupOrderSource(order.source) && <div><dt className="text-muted-foreground">计划承运方</dt><dd className="mt-1 font-medium">{order.plannedCarrier || "出库时选择"}</dd></div>}
                   {!isPickupOrderSource(order.source) && <div className="sm:col-span-2"><dt className="text-muted-foreground">收货地址</dt><dd className="mt-1 break-words">{displayAddress || (isPlatformOrderSource(order.source) ? "以平台订单收货地址为准" : "未填写")}</dd></div>}
                 </dl>
-                <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">在这里安排出库、上传打包凭证、填写运单、补录实际运费及签收。客户付款和退款在收银台逐笔登记。</p>
+                <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">按批次安排出库、发货和签收；实际运费确定后再补录。客户付款和退款在「收银台」办理。</p>
               </section>
             {/* ── Items table ── */}
             <div className="rounded-lg border flex flex-col">
@@ -5676,7 +5627,7 @@ function OrderDetailDialog({
                 </>
               ) : (
                 /* View mode: items grouped by shipment */
-                <div className="overflow-y-auto rounded-b-lg" style={{ maxHeight: "28rem" }}>
+                <div className="min-w-0 rounded-b-lg">
                   <ItemsWithShipments
                     order={order}
                     orderShipments={orderShipments}
@@ -5684,7 +5635,9 @@ function OrderDetailDialog({
                     getProduct={getProduct}
                     getStockItem={getAccessibleStockItem}
                     subTankName={subTankName}
-                    onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? setShipmentAction : undefined}
+                    onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? openShipmentProgress : undefined}
+                    onEditShipmentFee={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? openShipmentFee : undefined}
+                    onCancelShipment={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? cancelShipment : undefined}
                     onCorrectFulfillment={state.user?.role === "admin" ? setFulfillmentCorrectionTarget : undefined}
                     onReturnItem={openReturnItem}
                     canReturnItem={canReturnOrderItem}
@@ -5790,6 +5743,7 @@ function OrderDetailDialog({
       />
 
       <ShipmentActionDialog
+        mode={shipmentActionMode}
         shipment={shipmentAction}
         order={order}
         open={!!shipmentAction}

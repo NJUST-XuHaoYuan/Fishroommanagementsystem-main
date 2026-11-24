@@ -64,7 +64,9 @@ test("outbound never pre-fills an estimate or records it as an actual charge", a
 test("order workflow independently saves during outbound and after receipt, only completion checks pending fees", async () => {
   const source = await readFile(new URL("./OrdersView.tsx", import.meta.url), "utf8");
   const dialog = source.slice(source.indexOf("function ShipmentActionDialog("), source.indexOf("function ReportDamageDialog("));
-  assert.equal((dialog.match(/\{actualShippingFeeFields\}/g) ?? []).length, 2);
+  const feeDialog = dialog.slice(dialog.indexOf('if (mode === "fee")'), dialog.indexOf('if (shipment.status === "outbound")'));
+  assert.match(feeDialog, /actualShippingFeeFields/);
+  assert.doesNotMatch(feeDialog, /onDelivered\(shipment\)|onCancelShipment\(shipment\)|onDamage\(shipment\)/);
   assert.match(dialog, /canEditShipmentActualShippingFee\(shipment, shippingFeeMode, order\?\.status\)/);
   assert.match(dialog, /shippingFeeSaveLock\.current/);
   assert.doesNotMatch(dialog, /disabled=\{actionLocked \|\| shippingFeePending\}/);
@@ -78,7 +80,7 @@ test("order workflow independently saves during outbound and after receipt, only
   assert.match(source, /id: "freight", label: "运费信息齐全", complete: !pendingActualShippingFee/);
   assert.match(source, /id: "finance", label: "收退款已核验并结清", complete: completionFinancial\.canComplete/);
   assert.match(source, /onShipmentAction=\{permission\.canUpdate && !\["completed", "cancelled"\]\.includes\(order\.status\)/);
-  assert.match(source, /onShipmentAction && canEditShipmentActualShippingFee\(sh, orderShippingFeeMode\(order\), order\.status\)/);
+  assert.match(source, /onEditShipmentFee && canEditShipmentActualShippingFee\(sh, orderShippingFeeMode\(order\), order\.status\)/);
   assert.match(source, /postOrderApi\("shipments\/actual-shipping-fee", payload\)/);
   assert.match(source, /请关闭窗口并刷新后核对再保存/);
   assert.doesNotMatch(source, /确认收货前必须先补录实际运费|笔寄付实际运费未补录/);
@@ -181,4 +183,14 @@ test("shipment and receipt actions consult their own evidence rather than blocki
   const confirm = source.slice(source.indexOf("const confirmOutboundShipment ="), source.indexOf("const cancelShipment ="));
   assert.match(confirm, /if \(shipmentFulfillmentState\(shipment\)\?\.shippingTimePending\) return toast\.error/);
   assert.doesNotMatch(confirm, /if \(shipmentFulfillmentState\(shipment\)\?\.pending\)/);
+});
+
+
+test("read-only status badges keep the real shipment status without exposing actions", () => {
+  for (const [status, label] of [["outbound", "已出库/待发货"], ["shipped", "运输中"], ["delivered", "已签收"]]) {
+    const html = renderToStaticMarkup(createElement(orders.ShipmentStatusBadge, { shipment: { id:"s", status } }));
+    assert.ok(html.includes(label));
+    assert.doesNotMatch(html, /<button/);
+    if (status !== "outbound") assert.doesNotMatch(html, /待发货/);
+  }
 });

@@ -103,7 +103,7 @@ export function ShipmentFulfillmentCorrectionDialog({ shipmentId, viewer, onClos
     previewSession.current = null;
     setPreview(null); setLoading(true); setError(""); setStale(false);
     const current = () => mounted.current && currentSequence === sequence.current && isNewCustomerSessionCurrent(session, propsRef.current.viewer);
-    if (!session || propsRef.current.viewer?.role !== "admin" || !isNewCustomerSessionCurrent(session, propsRef.current.viewer)) { setLoading(false); setError("仅管理员可以更正履约记录，请重新登录后操作。"); return; }
+    if (!session || propsRef.current.viewer?.role !== "admin" || !isNewCustomerSessionCurrent(session, propsRef.current.viewer)) { setLoading(false); setError("仅管理员可以更正发货与签收时间，请重新登录后操作。"); return; }
     try {
       const response = await fetch(`/api/shipments/fulfillment-correction?shipmentId=${encodeURIComponent(shipmentId)}`, { headers: authJsonHeaders(), signal: requestController.signal, cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
@@ -150,7 +150,7 @@ export function ShipmentFulfillmentCorrectionDialog({ shipmentId, viewer, onClos
   return <Dialog open onOpenChange={next => { if (!next && !busy.current) onClose(); }}>
     <DialogContent aria-describedby={descriptionId} aria-busy={saving} onEscapeKeyDown={event => { if (busy.current) event.preventDefault(); }} onPointerDownOutside={event => { if (busy.current) event.preventDefault(); }}
       className={`max-h-[90dvh] w-[calc(100%-2rem)] max-w-xl overflow-y-auto ${saving ? "[&_[data-slot=dialog-close]]:pointer-events-none [&_[data-slot=dialog-close]]:opacity-30" : ""}`}>
-      <DialogHeader><DialogTitle>更正履约记录</DialogTitle><DialogDescription id={descriptionId} className="pt-1 leading-6">按实际核对结果填写，北京时间；无法核实就保留未知。更正不重新出库，不改库存、订单金额、收款及提成。</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>更正发货与签收时间</DialogTitle><DialogDescription id={descriptionId} className="pt-1 leading-6">按实际核对结果填写，北京时间；无法核实就保留未知。更正不重新出库，不改库存、订单金额、收款及提成。</DialogDescription></DialogHeader>
       {error && <div ref={errorRef} tabIndex={-1} role="alert" className="rounded-md border border-destructive/40 px-3 py-2 text-sm leading-6 text-destructive outline-none focus-visible:ring-2 focus-visible:ring-ring">{error}</div>}
       {loading ? <div role="status" className="space-y-3 py-2"><p className="text-sm text-muted-foreground">正在加载原登记及更正记录…</p><div className="h-20 rounded-md bg-muted" /><div className="h-28 rounded-md bg-muted" /></div> : preview ? <>
         <div className="space-y-1.5 rounded-md border bg-muted/20 p-3 text-xs leading-5">
