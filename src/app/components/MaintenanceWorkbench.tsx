@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from "react";
 import { Check, Loader2, Plus, RefreshCw } from "lucide-react";
 import { isPersonnelAccountEnabled, useStore } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
@@ -27,7 +27,13 @@ const controlClass = "min-h-11 min-w-0 rounded-md border border-input bg-backgro
 const historyLabels: Record<string, string> = { create_task: "安排任务", start_task: "开始执行", complete_task: "完成任务", cancel_task: "取消任务", create_plan: "创建计划", set_plan_enabled: "调整计划", add_handoff: "写交接", materialize_task: "计划生成任务" };
 
 function Field({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) {
-  return <label className={`grid min-w-0 gap-1.5 text-sm ${wide ? "sm:col-span-2" : ""}`}><span className="font-medium">{label}</span>{children}</label>;
+  const generatedId = useId();
+  const control = isValidElement(children) ? children as ReactElement<{ id?: string }> : null;
+  const id = control?.props.id || generatedId;
+  return <div className={`grid min-w-0 gap-1.5 text-sm ${wide ? "sm:col-span-2" : ""}`}>
+    <label htmlFor={id} className="font-medium">{label}</label>
+    {control ? cloneElement(control, { id }) : children}
+  </div>;
 }
 
 export function MaintenanceWorkbench({ onOpenDaily }: { onOpenDaily?: () => void }) {
