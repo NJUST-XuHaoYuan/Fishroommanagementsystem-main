@@ -17,6 +17,11 @@ import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { CalendarDays, Check, ChevronDown, Eye, Image as ImageIcon, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { MediaPreviewTrigger } from "./MediaPreviewDialog";
+import { StockMaintenanceHistory } from "./StockMaintenanceHistory";
+import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { batchOrderIdentityKey } from "../utils/batchOrderDialog";
+import { usePermission } from "../utils/permissions";
 
 type SearchOption = {
   value: string;
@@ -143,6 +148,7 @@ function SearchableFilter({
 }
 
 type LossRow = StockLossRecord & {
+  fishCode: string;
   productId: string;
   speciesId: string;
   batchId: string;
@@ -173,8 +179,14 @@ type LossRow = StockLossRecord & {
 };
 
 export function LossRecordsView() {
-  const { state } = useStore();
-  const [viewing, setViewing] = useState<LossRow | null>(null);
+  const { state, activeSiteId } = useStore();
+  const dailyPermission = usePermission("daily");
+  const inventoryPermission = usePermission("stockIn");
+  const canReadStatusHistory = [dailyPermission, inventoryPermission].some(permission => permission.canCreate || permission.canUpdate || permission.canDelete);
+  const identity = batchOrderIdentityKey(state.user);
+  const [selection, setSelection] = useState<{ id: string; siteId: string; identity: string; tab: string } | null>(null);
+  useEffect(() => { setSelection(null); }, [identity, activeSiteId]);
+  const openDetails = (row: LossRow, tab: string) => setSelection({ id: row.id, siteId: activeSiteId, identity, tab });
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [batchId, setBatchId] = useState("all");
@@ -287,6 +299,8 @@ export function LossRecordsView() {
           speciesCommonNames,
           item?.basePrice,
           item?.inDate,
+          item?.code,
+          record.stockItemId,
         ].filter(Boolean).join(" ");
         const batchSearch = [
           b?.batchNo,
@@ -304,6 +318,7 @@ export function LossRecordsView() {
         ].filter(Boolean).join(" ");
         return {
           ...record,
+          fishCode: item?.code ?? "",
           productId: item?.productId ?? "",
           speciesId: p?.speciesId ?? "",
           batchId: item?.batchId ?? "",
@@ -335,6 +350,9 @@ export function LossRecordsView() {
       })
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [state.lossRecords, state.stock, state.products, state.species, state.batches, state.tankGroups]);
+
+  const viewing = selection?.identity === identity && selection.siteId === activeSiteId
+    ? rows.find(row => row.id === selection.id) ?? null : null;
 
   const productOptions = useMemo(() => {
     const products = state.products.filter((p) => speciesId === "all" || p.speciesId === speciesId);
@@ -434,7 +452,7 @@ export function LossRecordsView() {
     <div className="flex flex-col gap-4">
       <div>
         <h2>损耗记录</h2>
-        <p className="text-sm text-muted-foreground">追溯每条损耗鱼的来源、缸位、原因和照片凭证</p>
+        <p className="text-sm text-muted-foreground">查看损耗原因和凭证，也可按鱼只追溯损耗前的维护历史、照片和视频。</p>
       </div>
 
       <div className="rounded-lg border bg-card p-4">
@@ -540,7 +558,7 @@ export function LossRecordsView() {
       <DataTable
         data={filteredRows}
         searchKeys={["date", "productSearch", "batchSearch", "tankSearch", "reason", "operator"]}
-        searchPlaceholder="搜索日期、商品规格产地、物种俗名学名、批次供应商、缸位位置、原因..."
+        searchPlaceholder="搜索鱼只编号、日期、商品、物种、批次、缸位、原因..."
         pageSize={10}
         columns={[
           { key: "date", title: "损耗日期", width: "110px" },
@@ -550,6 +568,7 @@ export function LossRecordsView() {
             render: (row) => (
               <div className="flex flex-col gap-0.5">
                 <span className="font-medium">{row.productName}</span>
+                <span className="text-xs text-muted-foreground break-all">{row.fishCode ? `编号 ${row.fishCode}` : `鱼只 ID ${row.stockItemId}`}</span>
                 <span className="text-xs text-muted-foreground">
                   {[row.productSize && `规格 ${row.productSize}`, row.productOrigin && `产地 ${row.productOrigin}`, `售价 ¥${row.basePrice.toFixed(2)}`].filter(Boolean).join(" / ")}
                 </span>
@@ -611,20 +630,29 @@ export function LossRecordsView() {
           },
         ]}
         actions={(row) => (
-          <Button size="sm" variant="outline" onClick={() => setViewing(row)}>
-            <Eye className="size-3.5 mr-1" />
-            查看
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" className="min-h-11" onClick={() => openDetails(row, "loss")}>
+              <Eye className="size-3.5 mr-1" />损耗详情
+            </Button>
+            <Button size="sm" variant="outline" className="min-h-11" onClick={() => openDetails(row, "maintenance")}>维护历史</Button>
+          </div>
         )}
       />
 
-      <Dialog open={!!viewing} onOpenChange={(open) => !open && setViewing(null)}>
-        <DialogContent aria-describedby={undefined} className="sm:max-w-3xl">
+      <Dialog open={!!viewing} onOpenChange={(open) => !open && setSelection(null)}>
+        <DialogContent aria-describedby={undefined} className="sm:max-w-3xl max-h-[90dvh] flex flex-col overflow-hidden">
           <DialogHeader>
-            <DialogTitle>损耗详情</DialogTitle>
+            <DialogTitle className="pr-8 break-words">{viewing?.productName} · 已损耗鱼只</DialogTitle>
+            {viewing && <p className="text-sm text-muted-foreground break-all">{viewing.fishCode ? `编号 ${viewing.fishCode}` : `鱼只 ID ${viewing.stockItemId}`} · 损耗日期 {viewing.date}</p>}
           </DialogHeader>
           {viewing && (
-            <div className="grid gap-4 py-2">
+            <Tabs value={selection?.tab ?? "loss"} onValueChange={tab => setSelection(current => current ? { ...current, tab } : null)} className="flex-1 min-h-0 min-w-0 gap-3">
+              <TabsList aria-label="损耗鱼只详情" className="grid h-auto w-full grid-cols-2 shrink-0">
+                <TabsTrigger value="loss" className="min-h-11">损耗详情</TabsTrigger>
+                <TabsTrigger value="maintenance" className="min-h-11">维护历史</TabsTrigger>
+              </TabsList>
+              <TabsContent value="loss" className="min-h-0 overflow-y-auto overscroll-contain pr-1">
+              <div className="grid gap-4 py-2">
               <div className="grid gap-3 rounded-lg border p-4 text-sm sm:grid-cols-2">
                 <div>
                   <div className="text-xs text-muted-foreground">商品</div>
@@ -700,10 +728,16 @@ export function LossRecordsView() {
                   </div>
                 )}
               </div>
-            </div>
+              </div>
+              </TabsContent>
+              <TabsContent value="maintenance" className="min-h-0 overflow-y-auto overscroll-contain pr-1 space-y-5">
+                <StockMaintenanceHistory key={`${identity}:${activeSiteId}:${viewing.stockItemId}`} stockItemId={viewing.stockItemId} />
+                {canReadStatusHistory && <StockStatusHistoryPanel key={`status:${identity}:${activeSiteId}:${viewing.stockItemId}`} stockItemId={viewing.stockItemId} />}
+              </TabsContent>
+            </Tabs>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setViewing(null)}>关闭</Button>
+          <DialogFooter className="shrink-0 border-t pt-3">
+            <Button variant="outline" className="min-h-11" onClick={() => setSelection(null)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
