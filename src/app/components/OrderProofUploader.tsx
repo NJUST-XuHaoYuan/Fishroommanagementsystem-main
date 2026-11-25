@@ -6,6 +6,7 @@ import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { uploadOriginalMedia } from "../utils/media";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { IMAGE_PASTE_HELP, imageFilesFromTransfer, readClipboardImages } from "../utils/imageClipboard";
+import { ScreenshotCaptureButton } from "./ScreenshotCaptureButton";
 
 export function OrderProofUploader({ images, onChange, disabled = false, onUploadingChange }: {
   images: string[]; onChange: (images: string[]) => void; disabled?: boolean;
@@ -18,6 +19,7 @@ export function OrderProofUploader({ images, onChange, disabled = false, onUploa
   const callbacksRef = useRef({ onChange, onUploadingChange });
   callbacksRef.current = { onChange, onUploadingChange };
   const operationRef = useRef<AbortController | null>(null);
+  const screenshotSessionRef = useRef<ReturnType<typeof captureNewCustomerSession>>(null);
   const mountedRef = useRef(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -27,16 +29,17 @@ export function OrderProofUploader({ images, onChange, disabled = false, onUploa
   }, []);
 
   const handleFiles = async (input: File[] | (() => Promise<File[]>)) => {
-    if (disabled || operationRef.current) return;
+    if (disabled || operationRef.current) return false;
     const session = captureNewCustomerSession();
-    if (!session) { setError("请重新登录后上传凭证。"); return; }
+    if (!session) { setError("请重新登录后上传凭证。"); return false; }
     const operation = new AbortController();
     operationRef.current = operation;
     const current = () => mountedRef.current && !operation.signal.aborted && isNewCustomerSessionCurrent(session);
     setLoading(true); setError(""); callbacksRef.current.onUploadingChange?.(true);
+    let uploaded = 0;
     try {
       const files = typeof input === "function" ? await input() : input;
-      if (!current()) return;
+      if (!current()) return false;
       const accepted = files.filter(file => file.type.startsWith("image/"));
       if (!accepted.length) throw new Error("请选择图片文件。");
       for (const file of accepted) {
@@ -47,15 +50,18 @@ export function OrderProofUploader({ images, onChange, disabled = false, onUploa
           const next = [...imagesRef.current, url];
           imagesRef.current = next;
           callbacksRef.current.onChange(next);
+          uploaded += 1;
         } catch (cause) {
           if (current()) setError(cause instanceof Error ? cause.message : "凭证上传失败，请重试。");
         }
       }
+      return uploaded === accepted.length && uploaded > 0;
     } catch (cause) {
       if (current()) {
         setError(cause instanceof Error ? cause.message : IMAGE_PASTE_HELP);
         pasteRef.current?.focus();
       }
+      return false;
     } finally {
       if (operationRef.current === operation) {
         operationRef.current = null;
@@ -82,12 +88,23 @@ export function OrderProofUploader({ images, onChange, disabled = false, onUploa
       </button>
     </div>)}</div>}
     <div className="flex flex-wrap gap-2">
+      <ScreenshotCaptureButton disabled={disabled || loading}
+        onCaptureStart={() => {
+          if (disabled || operationRef.current) return false;
+          screenshotSessionRef.current = captureNewCustomerSession();
+          if (!screenshotSessionRef.current) { setError("请重新登录后截图。"); return false; }
+          return true;
+        }}
+        onCapture={async file => {
+          if (!isNewCustomerSessionCurrent(screenshotSessionRef.current)) { setError("登录状态已变化，请关闭截图并重新打开当前订单。"); return false; }
+          return handleFiles([file]);
+        }} />
       <Button type="button" variant="outline" className="min-h-11" disabled={disabled || loading} onClick={() => fileRef.current?.click()}>
         {loading ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ImagePlus className="size-4" />}{loading ? "正在处理图片…" : "添加图片凭证"}
       </Button>
       <Button type="button" variant="outline" className="min-h-11" disabled={disabled || loading} onClick={() => void handleFiles(() => readClipboardImages())}><ClipboardPaste className="size-4" />粘贴截图</Button>
     </div>
-    <p className="text-xs leading-5 text-muted-foreground">截图复制后，点「粘贴截图」；也可点击本区域按 Ctrl+V / ⌘V，无需保存文件。</p>
+    <p className="text-xs leading-5 text-muted-foreground">点「截图上传」选择付款窗口；已有截图可点「粘贴截图」或按 Ctrl+V / ⌘V，无需保存文件。</p>
     <input ref={fileRef} type="file" accept="image/*" multiple disabled={disabled || loading} className="hidden" aria-label="选择图片凭证"
       onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void handleFiles(files); }} />
     {error && <p role="alert" className="text-xs leading-5 text-destructive">{error}</p>}
