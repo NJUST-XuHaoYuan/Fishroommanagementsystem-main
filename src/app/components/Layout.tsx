@@ -15,6 +15,7 @@ import {
   ChevronRight,
   LogOut,
   LayoutDashboard,
+  ClipboardList,
   ShoppingBag,
   Cloud,
   CloudOff,
@@ -40,6 +41,9 @@ import { canAccessDashboard, resolveDashboardView } from "../utils/dashboardAcce
 
 export type ViewKey =
   | "dashboard"
+  | "workbench"
+  | "workbenchSales"
+  | "workbenchInventory"
   | "notifications"
   | "species"
   | "products"
@@ -213,6 +217,8 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
   const currentLabel =
     view === "dashboard"
       ? "首页"
+      : ["workbench", "workbenchSales", "workbenchInventory"].includes(view)
+        ? "工作台"
       : view === "notifications"
         ? "站内信中心"
       : view === "profile"
@@ -280,6 +286,13 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             <span>{user?.role === "admin" ? "首页概览" : "首页 · 我的提成"}</span>
           </button>
         )}
+        <button
+          onClick={() => navigate("workbench")}
+          className={navButtonClass(["workbench", "workbenchSales", "workbenchInventory"].includes(view), "main")}
+        >
+          <ClipboardList className="size-4 shrink-0" />
+          <span>工作台</span>
+        </button>
         <button
           onClick={() => navigate("notifications")}
           className={navButtonClass(view === "notifications", "main")}

@@ -64,6 +64,7 @@ import { authJsonHeaders } from "../utils/authSession";
 import { visibleSitesForUser } from "../utils/sites";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { rankOrderSearchRows } from "../utils/orderSearch";
+import { paymentClaimsForOrderScope } from "../utils/personalOrderWorkspace";
 import { beijingOrderCalendar, matchesPlannedShipmentRange } from "../utils/order-date-filters";
 import {
   isAddressOrderSource,
@@ -6985,6 +6986,7 @@ function NewOrderDialog({
 // ─── Main View ────────────────────────────────────────────────────────────────
 
 type OrdersViewProps = {
+  personalWorkspace?: boolean;
   allStock?: StockItem[];
   allTankGroups?: TankGroup[];
   openOrderRequest?: { orderId: string; requestId: number } | null;
@@ -7138,6 +7140,7 @@ function PaymentClaimDialog({
 }
 
 export function OrdersView({
+  personalWorkspace = false,
   allStock,
   allTankGroups,
   openOrderRequest,
@@ -7173,7 +7176,8 @@ export function OrdersView({
   const [plannedShipTo, setPlannedShipTo] = useState("");
   const [pendingTrackingOnly, setPendingTrackingOnly] = useState(false);
   const [shippingSettlementFilter, setShippingSettlementFilter] = useState("all");
-  const [ownerScope, setOwnerScope] = useState<"mine" | "all">("all");
+  const [selectedOwnerScope, setOwnerScope] = useState<"mine" | "all">("all");
+  const ownerScope = personalWorkspace ? "mine" : selectedOwnerScope;
   const [orderCalendar, setOrderCalendar] = useState(() => beijingOrderCalendar());
   const { today, tomorrow } = orderCalendar;
   const todayShipOnly = shipPlanQuickFilter === "today";
@@ -7226,7 +7230,7 @@ export function OrdersView({
     setPlannedShipTo("");
     setPendingTrackingOnly(false);
     setShippingSettlementFilter("all");
-    setOwnerScope("all");
+    setOwnerScope(personalWorkspace ? "mine" : "all");
     setMobileSearch("");
     setMobilePage(1);
   };
@@ -7257,8 +7261,6 @@ export function OrdersView({
   useEffect(() => {
     void loadPaymentClaims(false);
   }, [loadPaymentClaims, state.orders]);
-
-  const pendingPaymentClaimCount = paymentClaimData.candidates.length + paymentClaimData.cashOrders.length;
 
   const customers = state.customers ?? [];
   const getCustomer = (customerId: string) => customers.find((c) => c.id === customerId);
@@ -7299,10 +7301,6 @@ export function OrdersView({
     }
   }, [openOrderRequest?.requestId]);
 
-  const orderList = useMemo(
-    () => [...state.orders].sort(compareOrdersByCreatedDesc),
-    [state.orders]
-  );
   const currentContactPersonnel = useMemo(() => {
     const reference = normalizedContactReference(state.user?.username);
     if (!reference) return undefined;
@@ -7320,6 +7318,17 @@ export function OrdersView({
     if (!currentContactPersonnel) return false;
     return resolveOrderContactPersonnel(state.personnel ?? [], order, true)?.id === currentContactPersonnel.id;
   }, [currentContactPersonnel, state.personnel]);
+  const orderList = useMemo(
+    () => state.orders.filter(order => !personalWorkspace || isCurrentUserContactOrder(order)).sort(compareOrdersByCreatedDesc),
+    [state.orders, personalWorkspace, isCurrentUserContactOrder]
+  );
+  const scopedPaymentClaimData = useMemo(
+    () => paymentClaimsForOrderScope(paymentClaimData, personalWorkspace
+      ? new Set(orderList.map(order => order.id))
+      : null),
+    [paymentClaimData, personalWorkspace, orderList]
+  );
+  const pendingPaymentClaimCount = scopedPaymentClaimData.candidates.length + scopedPaymentClaimData.cashOrders.length;
 
   type OrderListRow = Order & {
     searchText: string;
@@ -7708,6 +7717,7 @@ export function OrdersView({
   return (
     <div className="orders-management flex flex-col gap-4">
       <OrdersToolbar
+        personalWorkspace={personalWorkspace}
         scope={ownerScope}
         onScopeChange={setOwnerScope}
         status={statusFilter}
@@ -8029,7 +8039,7 @@ export function OrdersView({
 
       <PaymentClaimDialog
         open={paymentClaimOpen}
-        data={paymentClaimData}
+        data={scopedPaymentClaimData}
         loading={paymentClaimsLoading}
         onOpenChange={setPaymentClaimOpen}
         onRefresh={() => loadPaymentClaims(true)}

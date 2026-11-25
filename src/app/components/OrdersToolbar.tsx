@@ -7,6 +7,7 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Switch } from "./ui/switch";
 
 export type OrdersToolbarProps = {
+  personalWorkspace?: boolean;
   scope: "mine" | "all";
   onScopeChange: (value: OrdersToolbarProps["scope"]) => void;
   status: "all" | "active" | "completed";
@@ -81,7 +82,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
   const hasPlannedDates = Boolean(props.quickShip || props.plannedFrom || props.plannedTo);
   const customPlannedDates = !props.quickShip && hasPlannedDates;
   const filterCount = [hasOrderDates, hasPlannedDates, props.wholesale !== "all", props.pendingTrackingOnly, props.shippingSettlement !== "all"].filter(Boolean).length;
-  const hasFilters = filterCount > 0 || props.scope !== "all" || props.status !== "all" || Boolean(props.search.trim());
+  const hasFilters = filterCount > 0 || (!props.personalWorkspace && props.scope !== "all") || props.status !== "all" || Boolean(props.search.trim());
   const dateFromMax = props.dateTo && props.dateTo < props.today ? props.dateTo : props.today;
 
   const openFilters = (focusDates = false) => {
@@ -110,7 +111,7 @@ export function OrdersToolbar(props: OrdersToolbarProps) {
       <div className="min-w-0">
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between lg:gap-3">
           <nav className="relative z-10 order-2 -mb-px flex gap-1 px-3 sm:gap-2 sm:px-4 lg:order-1" aria-label="订单范围">
-            {([["mine", "我的订单", UserRound], ["all", "全部订单", UsersRound]] as const).map(([value, label, Icon]) => (
+            {([["mine", "我的订单", UserRound], ["all", "全部订单", UsersRound]] as const).filter(([value]) => !props.personalWorkspace || value === "mine").map(([value, label, Icon]) => (
               <button
                 key={value}
                 id={`${scopePanelId}-${value}`}

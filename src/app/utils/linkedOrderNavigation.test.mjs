@@ -37,7 +37,7 @@ test("explicit forbidden, unknown, blank and all-site targets cannot bypass site
 });
 
 test("existing inventory, daily and notification links preserve their source and loaded site", () => {
-  for (const sourceView of ["stockIn", "daily", "notifications"]) {
+  for (const sourceView of ["stockIn", "daily", "notifications", "workbenchInventory"]) {
     assert.deepEqual(buildLinkedOrderNavigation({
       ...base, sourceView, cachedOrderSiteId: "jiangyin",
     }), {

@@ -8,6 +8,8 @@ import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
+import { WorkbenchView, type WorkbenchSection } from "./components/WorkbenchView";
+import { MaintenanceWorkbench } from "./components/MaintenanceWorkbench";
 import { SpeciesView } from "./components/SpeciesView";
 import { ProductsView } from "./components/ProductsView";
 import { TankGroupsView } from "./components/TankGroupsView";
@@ -96,6 +98,9 @@ const PERSISTED_KEYS = AUDIT_COLLECTIONS
 
 const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   dashboard: ["sites", "systemSettings"],
+  workbench: ["tankGroups", "personnel", "systemSettings"],
+  workbenchSales: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "personnel"],
+  workbenchInventory: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   notifications: [],
   species: ["species", "speciesCategories", "speciesCategoryMajorMap", "products"],
   categorySettings: ["species", "speciesCategories", "speciesCategoryMajorMap"],
@@ -2131,6 +2136,14 @@ function AdminApp() {
   );
 
   const renderView = () => {
+    if (view === "workbench" || view === "workbenchSales" || view === "workbenchInventory") {
+      const section: WorkbenchSection = view === "workbenchSales" ? "sales" : view === "workbenchInventory" ? "inventory" : "maintenance";
+      return <WorkbenchView section={section} onSectionChange={next => handleSetView(next === "sales" ? "workbenchSales" : next === "inventory" ? "workbenchInventory" : "workbench")}>
+        {section === "maintenance" && <MaintenanceWorkbench key={`${currentUserKey}:${scopedSiteId}`} onOpenDaily={() => handleSetView("daily")} />}
+        {section === "sales" && <OrdersView key={`workbench-sales:${currentUserKey}:${scopedSiteId}`} personalWorkspace allStock={state.stock} allTankGroups={state.tankGroups} />}
+        {section === "inventory" && <StockInView key={`workbench-inventory:${currentUserKey}:${scopedSiteId}`} allOrders={state.orders} onOpenOrder={requestOpenOrder} />}
+      </WorkbenchView>;
+    }
     switch (view) {
       case "dashboard":  return <Dashboard />;
       case "notifications": return <NotificationCenterView onOpenOrder={requestOpenOrder} />;

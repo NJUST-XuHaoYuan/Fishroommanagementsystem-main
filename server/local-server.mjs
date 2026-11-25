@@ -87,6 +87,7 @@ import {
 import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
+import { createMaintenanceWorkbenchHandler } from "./maintenance-workbench.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
 import { usesOrderCashier, cashierMethodAllowedForOrder, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
@@ -8821,6 +8822,11 @@ const handlePaymentProofApi = createPaymentProofHandler({
   limiter: newCustomerEvidenceLimiter, ffmpegPath: FFMPEG_PATH, ffprobePath: FFPROBE_PATH, nowInChina: nowDatetimeInChina,
 });
 
+const handleMaintenanceWorkbenchApi = createMaintenanceWorkbenchHandler({
+  pool, stateId, readBody, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
+  requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission, nowInChina: nowDatetimeInChina,
+});
+
 async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
@@ -12579,6 +12585,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await handleMaintenanceWorkbenchApi(req, res, url)) return;
   if (await handlePaymentProofApi(req, res, url)) return;
   if (["/api/orders/credit-sale/request", "/api/orders/credit-sale/confirm"].includes(url.pathname) && req.method === "POST") {
     sendJson(req, res, 409, { ok: false, code: "CREDIT_SALE_APPROVAL_RETIRED", error: "赊销审批已停用：所有订单可直接发货，无凭证或未覆盖的金额自动登记赊销；付款凭证由财务核验。" });

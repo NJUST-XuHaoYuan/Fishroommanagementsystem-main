@@ -1,6 +1,6 @@
 import type { ViewKey } from "../components/Layout";
 
-export type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily" | "notifications">;
+export type LinkedOrderSourceView = Extract<ViewKey, "stockIn" | "daily" | "notifications" | "workbenchInventory">;
 
 type LinkedOrderNavigationInput = {
   orderId: string;
@@ -24,7 +24,7 @@ export function buildLinkedOrderNavigation(input: LinkedOrderNavigationInput): {
   if (!orderId || !targetSiteId || !input.canAccessSite(targetSiteId)) return null;
   const sourceView = input.sourceView;
   const returnView = sourceView === "stockIn" || sourceView === "daily" ||
-    sourceView === "notifications"
+    sourceView === "notifications" || sourceView === "workbenchInventory"
     ? sourceView
     : undefined;
   return { orderId, targetSiteId, returnView, returnSiteId: input.activeSiteId };
