@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ClipboardPaste, ImagePlus, Loader2, RefreshCw, Trash2, ZoomIn } from "lucide-react";
 import { IMAGE_PASTE_HELP, imageFilesFromTransfer, readClipboardImages } from "../utils/imageClipboard";
-import { ScreenshotCaptureButton } from "./ScreenshotCaptureButton";
 import {
   captureNewCustomerSession,
   deleteNewCustomerEvidence,
@@ -87,7 +86,6 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
   orderRef.current = orderId;
   const mountedRef = useRef(true);
   const ownerSessionRef = useRef(captureNewCustomerSession());
-  const screenshotSessionRef = useRef<ReturnType<typeof captureNewCustomerSession>>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; pendingRef.current?.abort(); onBusyChange(false); };
@@ -111,12 +109,11 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
 
   const upload = async (input: File[] | (() => Promise<File[]>)) => {
     const operation = startOperation();
-    if (!operation) return false;
-    let uploaded = 0;
+    if (!operation) return;
     setErrors([]);
     try {
       const files = typeof input === "function" ? await input() : input;
-      if (!operation.current()) return false;
+      if (!operation.current()) return;
       const { accepted, errors: validationErrors } = planNewCustomerEvidenceFiles(files, attachmentsRef.current.length);
       setErrors(validationErrors);
       for (let index = 0; index < accepted.length; index += 1) {
@@ -131,19 +128,16 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
           const next = [...attachmentsRef.current, attachment];
           attachmentsRef.current = next;
           onChange(next);
-          uploaded += 1;
         } catch (cause) {
           if (!operation.current()) break;
           setErrors(current => [...current, `${file.name}：${cause instanceof Error ? cause.message : "上传失败，请重试。"}`]);
         }
       }
-      return uploaded === files.length && uploaded > 0;
     } catch (cause) {
       if (operation.current()) {
         setErrors([cause instanceof Error ? cause.message : IMAGE_PASTE_HELP]);
         pasteRef.current?.focus();
       }
-      return false;
     } finally { operation.finish(); }
   };
 
@@ -175,24 +169,10 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
       const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void upload(files);
     }} />
     <div className="flex flex-wrap gap-2">
-      <ScreenshotCaptureButton key={orderId} disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT}
-        onCaptureStart={() => {
-          const session = captureNewCustomerSession();
-          if (!session || session.key !== ownerSessionRef.current?.key || disabled || pendingRef.current) {
-            setErrors(["请确认登录状态，并等待当前图片处理完成后再截图。"]); return false;
-          }
-          screenshotSessionRef.current = session; return true;
-        }}
-        onCapture={async file => {
-          if (!isNewCustomerSessionCurrent(screenshotSessionRef.current)) {
-            setErrors(["登录状态已变化，请关闭截图并重新打开当前订单。"]); return false;
-          }
-          return upload([file]);
-        }} />
       <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onClick={() => inputRef.current?.click()}>{busy ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ImagePlus className="size-4" />}{busy ? "正在处理图片…" : "添加图片凭证"}</Button>
       <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onClick={() => void upload(() => readClipboardImages())}><ClipboardPaste className="size-4" />粘贴截图</Button>
     </div>
-    <p className="text-xs leading-5 text-muted-foreground">点「截图上传」选择付款窗口；已有截图可点「粘贴截图」或按 Ctrl+V / ⌘V，无需保存文件。</p>
+    <p className="text-xs leading-5 text-muted-foreground">截图复制后，点「粘贴截图」；也可点击本区域按 Ctrl+V / ⌘V，无需保存文件。</p>
     {progress && <div role="status" className="text-xs leading-5"><p className="break-all">正在上传 {progress.index}/{progress.total}：{progress.name} · {progress.percent === 100 ? "服务器校验中…" : `${progress.percent}%`}</p><progress max={100} value={progress.percent} className="mt-1 h-2 w-full" aria-label="图片上传进度" /></div>}
     {busy && <p className="text-xs text-muted-foreground">图片处理完成后才能提交申请。</p>}
     {errors.length > 0 && <ul role="alert" className="space-y-1 text-xs leading-5 text-destructive">{errors.map((error, index) => <li key={index} className="break-words">{error}</li>)}</ul>}
