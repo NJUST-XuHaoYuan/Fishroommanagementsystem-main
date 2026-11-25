@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ImagePlus, Loader2, RefreshCw, Trash2, ZoomIn } from "lucide-react";
+import { ClipboardPaste, ImagePlus, Loader2, RefreshCw, Trash2, ZoomIn } from "lucide-react";
+import { IMAGE_PASTE_HELP, imageFilesFromTransfer, readClipboardImages } from "../utils/imageClipboard";
 import {
   captureNewCustomerSession,
   deleteNewCustomerEvidence,
@@ -77,6 +78,7 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
   const [progress, setProgress] = useState<{ name: string; index: number; total: number; percent: number } | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pasteRef = useRef<HTMLElement>(null);
   const pendingRef = useRef<AbortController | null>(null);
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
@@ -105,12 +107,15 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     return { controller, current, finish };
   };
 
-  const upload = async (files: File[]) => {
+  const upload = async (input: File[] | (() => Promise<File[]>)) => {
     const operation = startOperation();
     if (!operation) return;
-    const { accepted, errors: validationErrors } = planNewCustomerEvidenceFiles(files, attachmentsRef.current.length);
-    setErrors(validationErrors);
+    setErrors([]);
     try {
+      const files = typeof input === "function" ? await input() : input;
+      if (!operation.current()) return;
+      const { accepted, errors: validationErrors } = planNewCustomerEvidenceFiles(files, attachmentsRef.current.length);
+      setErrors(validationErrors);
       for (let index = 0; index < accepted.length; index += 1) {
         if (!operation.current()) break;
         const file = accepted[index];
@@ -127,6 +132,11 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
           if (!operation.current()) break;
           setErrors(current => [...current, `${file.name}：${cause instanceof Error ? cause.message : "上传失败，请重试。"}`]);
         }
+      }
+    } catch (cause) {
+      if (operation.current()) {
+        setErrors([cause instanceof Error ? cause.message : IMAGE_PASTE_HELP]);
+        pasteRef.current?.focus();
       }
     } finally { operation.finish(); }
   };
@@ -145,7 +155,12 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     } finally { operation.finish(); }
   };
 
-  return <section className="space-y-2" aria-label={payment ? refund ? "上传退款图片凭证" : "上传付款图片凭证" : "上传新客审批图片凭证"} aria-busy={busy}>
+  return <section ref={pasteRef} tabIndex={0} className="space-y-2 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring" aria-label={payment ? refund ? "上传退款图片凭证" : "上传付款图片凭证" : "上传新客审批图片凭证"} aria-busy={busy} onPaste={event => {
+    const files = imageFilesFromTransfer(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault(); event.stopPropagation();
+    void upload(files);
+  }}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-medium">{payment ? refund ? "退款凭证" : "付款凭证" : "添加微信证明"}<span className="font-normal">（必填，至少1张）</span></h4><span className="text-xs text-muted-foreground">{attachments.length}/{NEW_CUSTOMER_EVIDENCE_LIMIT} 张</span></div>
     <p className="text-xs leading-5 text-muted-foreground">{payment ? refund ? "请上传能看清退款金额、时间和退款账户的截图，由财务核对实际出账。" : "请上传能看清付款金额、时间和收款账户的截图，由财务核对实际到账。" : "请上传能识别对应客户、证明已添加微信的截图，由管理员人工核对；系统不会自动识别图片真伪。"}最多 6 张，单张不超过 10 MB，仅支持 JPG、PNG、WebP。HEIC 请先转格式，确保关键文字清晰。图片仅供有权限的账号查看。</p>
     <p className="text-xs leading-5 text-muted-foreground">上传后需提交申请才会绑定；本人本单未提交的图片草稿 24 小时内可恢复，过期后需重新上传。</p>
@@ -153,7 +168,11 @@ export function NewCustomerEvidenceUploader({ orderId, attachments, disabled = f
     <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple className="hidden" aria-label="选择图片凭证" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onChange={event => {
       const files = Array.from(event.target.files || []); event.target.value = ""; if (files.length) void upload(files);
     }} />
-    <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onClick={() => inputRef.current?.click()}>{busy ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ImagePlus className="size-4" />}{busy ? "正在处理图片…" : "添加图片凭证"}</Button>
+    <div className="flex flex-wrap gap-2">
+      <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onClick={() => inputRef.current?.click()}>{busy ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <ImagePlus className="size-4" />}{busy ? "正在处理图片…" : "添加图片凭证"}</Button>
+      <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" disabled={disabled || busy || attachments.length >= NEW_CUSTOMER_EVIDENCE_LIMIT} onClick={() => void upload(() => readClipboardImages())}><ClipboardPaste className="size-4" />粘贴截图</Button>
+    </div>
+    <p className="text-xs leading-5 text-muted-foreground">截图复制后，点「粘贴截图」；也可点击本区域按 Ctrl+V / ⌘V，无需保存文件。</p>
     {progress && <div role="status" className="text-xs leading-5"><p className="break-all">正在上传 {progress.index}/{progress.total}：{progress.name} · {progress.percent === 100 ? "服务器校验中…" : `${progress.percent}%`}</p><progress max={100} value={progress.percent} className="mt-1 h-2 w-full" aria-label="图片上传进度" /></div>}
     {busy && <p className="text-xs text-muted-foreground">图片处理完成后才能提交申请。</p>}
     {errors.length > 0 && <ul role="alert" className="space-y-1 text-xs leading-5 text-destructive">{errors.map((error, index) => <li key={index} className="break-words">{error}</li>)}</ul>}

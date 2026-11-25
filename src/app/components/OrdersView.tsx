@@ -10,6 +10,7 @@ import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
 import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderCashierPanel } from "./OrderCashierPanel";
+import { OrderProofUploader as ProofUploader } from "./OrderProofUploader";
 import { ShipmentWorkflowHeader } from "./ShipmentWorkflowHeader";
 import { OrderCompletionActions, type OrderCompletionCheck } from "./OrderCompletionActions";
 import { orderCompletionFinancialCheck } from "../../../server/order-completion-finance.mjs";
@@ -1858,79 +1859,6 @@ function CustomerDetailDialog({
   );
 }
 
-// ─── ProofUploader ────────────────────────────────────────────────────────────
-
-function ProofUploader({
-  images, onChange, disabled = false, onUploadingChange,
-}: { images: string[]; onChange: (imgs: string[]) => void; disabled?: boolean; onUploadingChange?: (loading: boolean) => void }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(false);
-
-  const handleFiles = async (files: FileList) => {
-    if (disabled || loading) return;
-    setLoading(true);
-    onUploadingChange?.(true);
-    const results: string[] = [];
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
-      try {
-        toast.info("凭证原图上传中…");
-        results.push(await uploadOriginalMedia(file));
-        toast.success("凭证已上传");
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "凭证上传失败");
-      }
-    }
-    onChange([...images, ...results]);
-    setLoading(false);
-    onUploadingChange?.(false);
-  };
-
-  return (
-    <div className="flex flex-wrap gap-2 items-start">
-      {images.map((img, i) => (
-        <div key={i} className="relative group shrink-0">
-          <MediaPreviewTrigger src={img} mediaType="image" title={`凭证 ${i + 1}`} ariaLabel={`预览凭证 ${i + 1}`} className="size-14 overflow-hidden rounded border hover:opacity-80">
-          <ImageWithFallback
-            src={img}
-            alt="凭证"
-            className="size-full object-cover"
-          />
-          </MediaPreviewTrigger>
-          <button
-            type="button"
-            className="absolute -top-1 -right-1 size-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-            onClick={() => onChange(images.filter((_, j) => j !== i))}
-            disabled={disabled || loading}
-          >
-            <Trash2 className="size-2.5" />
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        className="size-14 rounded border border-dashed flex items-center justify-center text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors shrink-0"
-        onClick={() => fileRef.current?.click()}
-        disabled={disabled || loading}
-        title="上传凭证图片"
-      >
-        {loading
-          ? <div className="size-4 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
-          : <Plus className="size-4" />}
-      </button>
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        multiple
-        disabled={disabled || loading}
-        className="hidden"
-        onChange={(e) => e.target.files && handleFiles(e.target.files)}
-      />
-    </div>
-  );
-}
-
 type OrderRefundDraft = {
   expectedVersion?: string;
   paymentMethodId?: string;
@@ -2098,7 +2026,7 @@ function OrderRefundDialog({
           </div>
           <div className="grid gap-1.5 sm:col-span-2">
             <Label>退款凭证</Label>
-            <ProofUploader images={draft.proof} disabled={saving} onUploadingChange={setProofUploading} onChange={(proof) => setDraft((current) => ({ ...current, proof }))} />
+            <ProofUploader key={`${order.id}:${draft.id}`} images={draft.proof} disabled={saving} onUploadingChange={setProofUploading} onChange={(proof) => setDraft((current) => ({ ...current, proof }))} />
           </div>
         </fieldset>
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
@@ -2268,6 +2196,7 @@ function ShipmentActionDialog({
   onSaveActualShippingFee: (shipment: Shipment, actualShippingFee: number) => boolean | Promise<boolean>;
 }) {
   const [packingProof, setPackingProof] = useState<string[]>([]);
+  const [proofUploading, setProofUploading] = useState(false);
   const [actualShippingFee, setActualShippingFee] = useState(0);
   const [savingShippingFee, setSavingShippingFee] = useState(false);
   const [actualShippingFeeError, setActualShippingFeeError] = useState("");
@@ -2288,7 +2217,7 @@ function ShipmentActionDialog({
   const method = shipment.shipMethod === "pickup" ? "上门自取" : (shipment.carrier || "快递");
   const shippingFeeMode = orderShippingFeeMode(order);
   const shippingFeePending = !!order && shipmentHasPendingActualShippingFee(order, shipment);
-  const actionLocked = saving || savingShippingFee;
+  const actionLocked = saving || savingShippingFee || proofUploading;
   const editableOrder = !!order && !["completed", "cancelled"].includes(order.status);
 
   const saveActualShippingFee = async () => {
@@ -2385,7 +2314,7 @@ function ShipmentActionDialog({
 
             <div className="grid gap-2">
               <Label>打包照片<span className="text-red-500 ml-0.5">*</span></Label>
-              <ProofUploader images={packingProof} onChange={setPackingProof} />
+              <ProofUploader key={shipment.id} images={packingProof} disabled={saving || savingShippingFee} onUploadingChange={setProofUploading} onChange={setPackingProof} />
               <p className="text-xs text-muted-foreground">
                 至少上传 2 张：鱼捞出后的照片、封箱前照片。{shipment.shipMethod === "pickup" ? "上传后点击「确认自提」完成此次自提。" : "上传后点击「确认发货」才会进入运输中。"}
               </p>
@@ -2472,6 +2401,7 @@ function ReportDamageDialog({
   const [refundNotes, setRefundNotes] = useState("物流报损，待退款");
   const [reshipNotes, setReshipNotes] = useState("物流报损，安排补发");
   const [proof, setProof] = useState<string[]>([]);
+  const [proofUploading, setProofUploading] = useState(false);
   const [replacementByOriginal, setReplacementByOriginal] = useState<Record<string, string>>({});
   const [replacementGroupByOriginal, setReplacementGroupByOriginal] = useState<Record<string, string>>({});
   const [replacementSubTankByOriginal, setReplacementSubTankByOriginal] = useState<Record<string, string>>({});
@@ -2673,6 +2603,7 @@ function ReportDamageDialog({
         replacements,
       };
     }
+    if (proofUploading) { toast.error("请等待凭证上传完成"); return; }
     const ok = await onSubmit(shipment, result);
     if (ok !== false) onOpenChange(false);
   };
@@ -2853,7 +2784,7 @@ function ReportDamageDialog({
                 </div>
                 <div className="grid gap-2">
                   <Label>报损凭证</Label>
-                  <ProofUploader images={proof} onChange={setProof} />
+                  <ProofUploader key={shipment.id} images={proof} onChange={setProof} onUploadingChange={setProofUploading} />
                   <p className="text-xs text-muted-foreground">可上传物流异常截图、沟通记录或退款凭证，记录会随报损退款保留。</p>
                 </div>
               </TabsContent>
@@ -3085,7 +3016,7 @@ function ReportDamageDialog({
           <Button
             variant="destructive"
             onClick={submit}
-            disabled={!resolution || selectedDamagedItems.length === 0 || (resolution === "reship" && !reshipSelectionComplete)}
+            disabled={proofUploading || !resolution || selectedDamagedItems.length === 0 || (resolution === "reship" && !reshipSelectionComplete)}
           >
             <XCircle className="size-4 mr-1" />
             {!resolution ? "请先选择处理方式" : resolution === "refund" ? "确认报损退款" : "确认报损补发"}
