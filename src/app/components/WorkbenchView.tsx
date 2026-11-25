@@ -10,10 +10,6 @@ export function WorkbenchView({ section, onSectionChange, children }: {
   children: ReactNode;
 }) {
   return <section className="min-w-0 space-y-5" aria-label="工作台">
-    <header className="space-y-1">
-      <h1 className="text-xl font-semibold">工作台</h1>
-      <p className="text-sm text-muted-foreground">安排维护工作，跟进自己的订单，处理库存。</p>
-    </header>
     <Tabs value={section} onValueChange={value => onSectionChange(value as WorkbenchSection)} className="min-w-0 gap-5">
       <TabsList aria-label="工作板块" className="grid h-auto w-full grid-cols-3 gap-1 rounded-lg p-1 sm:w-fit">
         <TabsTrigger value="maintenance" className="min-h-11 gap-2 px-3 sm:px-7"><ClipboardList className="size-4 shrink-0" aria-hidden="true" />维护</TabsTrigger>

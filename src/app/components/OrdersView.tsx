@@ -8,6 +8,9 @@ import {
 } from "../store";
 import { DataTable } from "./common";
 import { OrdersToolbar } from "./OrdersToolbar";
+import { SalesWorkbenchToolbar, SalesWorkbenchOrderList } from "./SalesWorkbenchToolbar";
+import { OrderFollowupPanel } from "./OrderFollowupPanel";
+import { readOrderFollowupSummary, salesCollectionRemaining, salesPendingShipment, type FollowupSummaryRow, type SalesTodoKind } from "../utils/salesWorkbench";
 import { ShippingSettlementChoice } from "./ShippingSettlementChoice";
 import { OrderCashierPanel } from "./OrderCashierPanel";
 import { OrderProofUploader as ProofUploader } from "./OrderProofUploader";
@@ -4276,13 +4279,15 @@ type DamageResult =
   | { resolution: "reship"; notes: string; replacements: ReshipReplacement[] };
 
 function OrderDetailDialog({
-  order, open, onOpenChange, allStock, allTankGroups,
+  order, open, onOpenChange, allStock, allTankGroups, initialTab = "info", onFollowupSaved,
 }: {
   order: Order | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   allStock?: StockItem[];
   allTankGroups?: TankGroup[];
+  initialTab?: "info" | "cashier" | "logistics" | "followup";
+  onFollowupSaved?: () => void;
 }) {
   const { state, setState, saveStateTransform } = useStore();
   const permission = usePermission("orders");
@@ -4293,7 +4298,7 @@ function OrderDetailDialog({
 
   const [editMode, setEditMode] = useState(false);
   const [detailTab, setDetailTab] = useState("info");
-  useEffect(() => { setDetailTab("info"); }, [order?.id, open]);
+  useEffect(() => { setDetailTab(initialTab); }, [order?.id, open, initialTab]);
   const [editForm, setEditForm] = useState<EditForm | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const editSaveLock = useRef(false);
@@ -5111,10 +5116,11 @@ function OrderDetailDialog({
           </DialogHeader>
 
           <Tabs value={detailTab} onValueChange={setDetailTab} className="flex min-h-0 flex-1 flex-col gap-3">
-            <TabsList aria-label="订单详情栏目" className="grid h-11 w-full shrink-0 grid-cols-3 rounded-lg">
+            <TabsList aria-label="订单详情栏目" className="grid h-11 w-full shrink-0 grid-cols-4 rounded-lg">
               <TabsTrigger value="info" className="rounded-md">订单信息</TabsTrigger>
               <TabsTrigger value="cashier" disabled={editMode} className="rounded-md"><CircleDollarSign className="size-4" />收银台</TabsTrigger>
               <TabsTrigger value="logistics" disabled={editMode} className="rounded-md"><Truck className="size-4" />物流运输</TabsTrigger>
+              <TabsTrigger value="followup" disabled={editMode} className="rounded-md">回访记录</TabsTrigger>
             </TabsList>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
               <TabsContent value="info" className="m-0 space-y-5">
@@ -5448,6 +5454,7 @@ function OrderDetailDialog({
                   {!editMode && feeContent}
                 </OrderCashierPanel>
               </TabsContent>
+              <TabsContent value="followup" className="m-0 space-y-5">{order.status !== "completed" && <p className="text-sm text-muted-foreground">订单完成后可新增回访，已有回访记录仍可查看。</p>}<OrderFollowupPanel orderId={order.id} siteId={order.siteId || "nanjing"} allowCreate={order.status === "completed"} onSaved={onFollowupSaved} /></TabsContent>
               <TabsContent value="logistics" className="m-0 space-y-5">
 
               <section aria-label="物流安排" className="space-y-3 rounded-lg border p-4">
@@ -7151,6 +7158,9 @@ export function OrdersView({
 
   const [newOpen, setNewOpen] = useState(false);
   const [viewOrder, setViewOrder] = useState<Order | null>(null);
+  const [detailInitialTab, setDetailInitialTab] = useState<"info" | "cashier" | "logistics" | "followup">("info");
+  const [salesTodo, setSalesTodo] = useState<SalesTodoKind>("collection");
+  const [followupAttempt, setFollowupAttempt] = useState(0);
   const [createdOrderId, setCreatedOrderId] = useState<string | null>(null);
   useEffect(() => {
     const created = createdOrderId ? state.orders.find(order => order.id === createdOrderId) : undefined;
@@ -7236,7 +7246,7 @@ export function OrdersView({
   };
 
   const loadPaymentClaims = useCallback(async (showLoading = false) => {
-    if (!permission.canUpdate) {
+    if (!permission.canUpdate || personalWorkspace) {
       setPaymentClaimData({ candidates: [], cashOrders: [] });
       return;
     }
@@ -7256,7 +7266,7 @@ export function OrdersView({
     } finally {
       if (showLoading) setPaymentClaimsLoading(false);
     }
-  }, [activeSiteId, permission.canUpdate]);
+  }, [activeSiteId, permission.canUpdate, personalWorkspace]);
 
   useEffect(() => {
     void loadPaymentClaims(false);
@@ -7322,6 +7332,43 @@ export function OrdersView({
     () => state.orders.filter(order => !personalWorkspace || isCurrentUserContactOrder(order)).sort(compareOrdersByCreatedDesc),
     [state.orders, personalWorkspace, isCurrentUserContactOrder]
   );
+  const followupContext = JSON.stringify([activeSiteId, state.user?.username, state.user?.role, state.user?.visibleSiteIds, state.user?.account, captureNewCustomerSession()?.key,
+    orderList.filter(order => order.status === "completed").map(order => order.id).sort()]);
+  const followupContextRef = useRef(followupContext);
+  followupContextRef.current = followupContext;
+  const followupRequestKey = JSON.stringify([followupContext, followupAttempt]);
+  const [followupResult, setFollowupResult] = useState<{ key: string; loading: boolean; error: string; rows: FollowupSummaryRow[] | null } | null>(null);
+  const followups = followupResult?.key === followupRequestKey ? followupResult : { loading: true, error: "", rows: null };
+  useEffect(() => {
+    if (!personalWorkspace) return;
+    const controller = new AbortController();
+    const session = captureNewCustomerSession();
+    const current = () => !controller.signal.aborted && followupContextRef.current === followupContext && isNewCustomerSessionCurrent(session, state.user);
+    setFollowupResult({ key: followupRequestKey, loading: true, error: "", rows: null });
+    if (!session || !isNewCustomerSessionCurrent(session, state.user)) {
+      setFollowupResult({ key: followupRequestKey, loading: false, error: "登录已过期，请重新登录后查看回访待办。", rows: null });
+      return () => controller.abort();
+    }
+    void fetch(`/api/order-followups?siteId=${encodeURIComponent(activeSiteId)}`, { headers: authJsonHeaders(), signal: controller.signal, cache: "no-store" })
+      .then(async response => {
+        const body = await response.json().catch(() => null);
+        if (!response.ok || body?.ok !== true) throw new Error(body?.error || "回访待办加载失败，请重试。");
+        const rows = readOrderFollowupSummary(body, activeSiteId);
+        if (current()) setFollowupResult({ key: followupRequestKey, loading: false, error: "", rows });
+      }).catch(error => { if (current()) setFollowupResult({ key: followupRequestKey, loading: false, error: error instanceof Error ? error.message : "回访待办加载失败，请重试。", rows: null }); });
+    return () => controller.abort();
+  }, [personalWorkspace, followupContext, followupRequestKey, activeSiteId]);
+  const pendingFollowupIds = useMemo(() => new Set((followups.rows || []).filter(row => row.followupCount === 0).map(row => row.orderId)), [followups.rows]);
+  const salesTodoById = useMemo(() => new Map((personalWorkspace ? orderList : []).map(order => [order.id, {
+    remaining: salesCollectionRemaining(order, calcAmountDue(order, state.shipments)),
+    shipment: salesPendingShipment(order, state.shipments),
+    followup: order.status === "completed" && pendingFollowupIds.has(order.id),
+  }])), [orderList, personalWorkspace, state.shipments, pendingFollowupIds]);
+  const salesTodoCounts = useMemo(() => ({
+    collection: [...salesTodoById.values()].filter(value => value.remaining === null || value.remaining > 0).length,
+    shipment: [...salesTodoById.values()].filter(value => value.shipment.pending).length,
+    followup: followups.loading || followups.error || !followups.rows ? null : [...salesTodoById.values()].filter(value => value.followup).length,
+  }), [salesTodoById, followups.loading, followups.error, followups.rows]);
   const scopedPaymentClaimData = useMemo(
     () => paymentClaimsForOrderScope(paymentClaimData, personalWorkspace
       ? new Set(orderList.map(order => order.id))
@@ -7427,6 +7474,10 @@ export function OrdersView({
 
 	  const filteredOrders = useMemo(() => {
 	    return orderRows.filter((o) => {
+        if (personalWorkspace) {
+          const todo = salesTodoById.get(o.id);
+          return salesTodo === "collection" ? todo?.remaining === null || Number(todo?.remaining) > 0 : salesTodo === "shipment" ? todo?.shipment.pending === true : todo?.followup === true;
+        }
 	      if (!matchesWholesaleOrderFilter(o, wholesaleFilter)) return false;
         if (shippingSettlementFilter !== "all" && (o.status === "cancelled" || shippingSettlementFilterStatus(o, state.shipments) !== shippingSettlementFilter)) return false;
 	      if (!matchesPlannedShipmentRange(o, {
@@ -7441,7 +7492,7 @@ export function OrdersView({
       if (dateTo && o.date > dateTo) return false;
 	      return true;
 	    });
-	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, shippingSettlementFilter, ownerScope, isCurrentUserContactOrder, dateFrom, dateTo]);
+	  }, [orderRows, quickShipDate, plannedShipFrom, plannedShipTo, pendingTrackingOnly, state.shipments, statusFilter, wholesaleFilter, shippingSettlementFilter, ownerScope, isCurrentUserContactOrder, dateFrom, dateTo, personalWorkspace, salesTodo, salesTodoById]);
 
   const matchingOrders = useMemo(() => {
     return rankOrderSearchRows(filteredOrders, mobileSearch);
@@ -7716,6 +7767,20 @@ export function OrdersView({
 
   return (
     <div className="orders-management flex flex-col gap-4">
+      {personalWorkspace ? <>
+        <SalesWorkbenchToolbar tab={salesTodo} onTabChange={setSalesTodo} counts={salesTodoCounts} search={mobileSearch} onSearchChange={setMobileSearch} onRefresh={() => setFollowupAttempt(value => value + 1)} />
+        {salesTodo !== "followup" && followups.error && <p role="status" className="text-sm text-muted-foreground">回访待办暂时无法加载，请在「待回访」中重试；收款和发货待办仍可处理。</p>}
+        <SalesWorkbenchOrderList tab={salesTodo} rows={matchingOrders.map(order => {
+          const customer = getCustomer(order.customerId);
+          const names = [...new Set(order.items.map(item => state.products.find(product => product.id === item.productId)?.name).filter(Boolean))];
+          const todo = salesTodoById.get(order.id);
+          return { id: order.id, orderNo: order.orderNo, customer: customer?.name || (isPlatformOrderSource(order.source) ? platformOrderDisplayName(order) : "未关联客户"),
+            productSummary: `${names.slice(0, 3).join("、") || "商品记录"}${names.length > 3 ? "等" : ""} · ${order.items.length} 条`, date: order.date,
+            plannedDate: order.plannedShipDate || "", remaining: todo?.remaining ?? null, shippingLabel: todo?.shipment.label || "待处理" };
+        })} loading={salesTodo === "followup" && followups.loading} error={salesTodo === "followup" ? followups.error : ""} onRetry={() => setFollowupAttempt(value => value + 1)}
+          onOpen={id => { const order = orderList.find(entry => entry.id === id); if (order) { setDetailInitialTab(salesTodo === "collection" ? "cashier" : salesTodo === "shipment" ? "logistics" : "followup"); setViewOrder(order); } }}
+          onDetails={id => { const order = orderList.find(entry => entry.id === id); if (order) { setDetailInitialTab("info"); setViewOrder(order); } }} />
+      </> : <>
       <OrdersToolbar
         personalWorkspace={personalWorkspace}
         scope={ownerScope}
@@ -7968,6 +8033,7 @@ export function OrdersView({
         )}
       />
       </div>
+	      </>}
 
       <Dialog open={exportFormatOpen} onOpenChange={setExportFormatOpen}>
         <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
@@ -8049,12 +8115,15 @@ export function OrdersView({
 
       <OrderDetailDialog
         order={syncedViewOrder}
+        initialTab={detailInitialTab}
+        onFollowupSaved={() => setFollowupAttempt(value => value + 1)}
         allStock={allStock}
         allTankGroups={allTankGroups}
         open={!!viewOrder}
         onOpenChange={(o) => {
           if (o) return;
           setViewOrder(null);
+          setDetailInitialTab("info");
           onOpenOrderRequestHandled?.();
         }}
       />

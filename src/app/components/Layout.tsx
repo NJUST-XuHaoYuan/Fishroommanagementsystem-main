@@ -214,10 +214,12 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
     };
   }, []);
 
+  const isWorkbench = ["workbench", "workbenchSales", "workbenchInventory"].includes(view);
+
   const currentLabel =
     view === "dashboard"
       ? "首页"
-      : ["workbench", "workbenchSales", "workbenchInventory"].includes(view)
+      : isWorkbench
         ? "工作台"
       : view === "notifications"
         ? "站内信中心"
@@ -480,23 +482,32 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             >
               <Menu className="size-5" />
             </Button>
-            <div className="min-w-0 lg:hidden">
-              {currentSection && (
-                <div className="truncate text-[11px] leading-4 text-muted-foreground">
-                  {currentSection}
+            {isWorkbench ? (
+              <div className="min-w-0 py-1">
+                <h1 className="text-base font-semibold leading-6 text-foreground">工作台</h1>
+                <p className="text-xs leading-5 text-muted-foreground sm:text-sm">安排维护工作，跟进自己的订单，处理库存。</p>
+              </div>
+            ) : (
+              <>
+                <div className="min-w-0 lg:hidden">
+                  {currentSection && (
+                    <div className="truncate text-[11px] leading-4 text-muted-foreground">
+                      {currentSection}
+                    </div>
+                  )}
+                  <div className="truncate font-semibold text-foreground">{currentLabel}</div>
                 </div>
-              )}
-              <div className="truncate font-semibold text-foreground">{currentLabel}</div>
-            </div>
-            <div className="hidden items-center gap-2 lg:flex">
-              {currentSection && (
-                <>
-                  <span className="text-muted-foreground">{currentSection}</span>
-                  <ChevronRight className="size-4 text-muted-foreground" />
-                </>
-              )}
-              <span className="font-semibold text-foreground">{currentLabel}</span>
-            </div>
+                <div className="hidden items-center gap-2 lg:flex">
+                  {currentSection && (
+                    <>
+                      <span className="text-muted-foreground">{currentSection}</span>
+                      <ChevronRight className="size-4 text-muted-foreground" />
+                    </>
+                  )}
+                  <span className="font-semibold text-foreground">{currentLabel}</span>
+                </div>
+              </>
+            )}
           </div>
           <div className="flex min-w-0 shrink-0 items-center gap-2">
             <div className="lg:hidden"><SiteSelector compact /></div>
