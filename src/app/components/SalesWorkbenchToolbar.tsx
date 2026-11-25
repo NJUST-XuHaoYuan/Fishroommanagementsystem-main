@@ -10,7 +10,7 @@ export function SalesWorkbenchToolbar({ tab, onTabChange, counts, search, onSear
   search: string; onSearchChange: (value: string) => void; onRefresh: () => void;
 }) {
   return <div className="space-y-4">
-    <nav aria-label="我的销售待办" className="grid grid-cols-3 gap-2 sm:gap-3">
+    <nav aria-label="我的销售待办" className="workbench-three-columns grid grid-cols-3 gap-2 sm:gap-3">
       {([["collection", CircleDollarSign], ["shipment", Truck], ["followup", MessageSquare]] as const).map(([value, Icon]) => <button
         key={value} type="button" aria-pressed={tab === value} aria-controls="sales-workbench-list"
         onClick={() => onTabChange(value)}
