@@ -181,6 +181,7 @@ function createRecord(input, { stockItem, operator, now }) {
     id,
     siteId: String(stockItem?.siteId ?? "").trim(),
     stockItemId,
+    subTankId: String(stockItem?.subTankId ?? "").trim(),
     date,
     text,
     photos,

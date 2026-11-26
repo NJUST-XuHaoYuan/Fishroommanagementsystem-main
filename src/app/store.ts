@@ -289,7 +289,7 @@ export type BioRecordExpectedSnapshot = Pick<
 export type BioDetailsPatch = Partial<Pick<StockItem, "status" | "basePrice" | "priceMode" | "code" | "notes">>;
 
 export type BioRecordSaveChange =
-  | { action: "create"; stockItemId: string; record: BioRecordExpectedSnapshot }
+  | { action: "create"; stockItemId: string; expectedSubTankId?: string; record: BioRecordExpectedSnapshot }
   | { action: "updateTime"; stockItemId: string; recordId: string; record: { date: string }; expectedRecord: BioRecordExpectedSnapshot }
   | { action: "delete"; stockItemId: string; recordId: string; expectedRecord: BioRecordExpectedSnapshot }
   | {
@@ -370,11 +370,15 @@ export type DailyLog = {
   /** 本地记录时间，精确到秒；兼容历史 YYYY-MM-DD 日期值。 */
   date: string;
   tankGroupId?: string;
-  /** 旧数据兼容：历史日志曾挂在子缸上。 */
+  /** 指定时只记录这个子缸；省略时兼容整缸组养护。 */
   subTankId?: string;
   action: string;
   operator: string;
   notes: string;
+  photos?: string[];
+  videos?: string[];
+  /** 首次记录人，由服务端写入；编辑日志不改变归属。 */
+  createdBy?: string;
   /** 已同步到哪些鱼的个体历史，避免后续移缸后旧日志跟着新鱼走。 */
   syncedStockItemIds?: string[];
   syncedAt?: string;
@@ -1213,7 +1217,7 @@ export type StoreContextType = {
     subTank?: SubTank;
     subTankId?: string;
   }) => Promise<boolean>;
-  saveDailyLog: (change: { log?: DailyLog; deleteId?: string }) => Promise<boolean>;
+  saveDailyLog: (change: { log?: DailyLog; deleteId?: string; createOnly?: boolean }) => Promise<boolean>;
   saveWaterQualitySettings: (change: {
     parameters: WaterQualityParameterSetting[];
     assignments: WaterQualityTankGroupAssignment[];

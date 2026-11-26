@@ -88,6 +88,7 @@ import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
 import { createMaintenanceWorkbenchHandler } from "./maintenance-workbench.mjs";
+import { createMobileMaintenanceHistoryHandler } from "./mobile-maintenance-history.mjs";
 import { createOrderFollowupHandler } from "./order-followups.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
@@ -4801,7 +4802,7 @@ function dailyLogGroupId(state = {}, log = {}) {
   return findSubTank(state, subTankId)?.group?.id ?? "";
 }
 
-function activeStockItemsInTankGroup(state = {}, tankGroupId) {
+function activeStockItemsInTankGroup(state = {}, tankGroupId, subTankId = "") {
   const group = (Array.isArray(state.tankGroups) ? state.tankGroups : [])
     .find((item) => String(item?.id ?? "") === String(tankGroupId ?? ""));
   if (!group) return [];
@@ -4812,13 +4813,13 @@ function activeStockItemsInTankGroup(state = {}, tankGroupId) {
   );
   const shippedIds = shippedOutStockIds(state);
   return (Array.isArray(state.stock) ? state.stock : [])
-    .filter((item) => subTankIds.has(String(item?.subTankId ?? "")) && isPhysicallyInTank(item, shippedIds));
+    .filter((item) => subTankIds.has(String(item?.subTankId ?? "")) && (!subTankId || String(item?.subTankId ?? "") === subTankId) && isPhysicallyInTank(item, shippedIds));
 }
 
 function dailyLogRecordText(log = {}) {
   const action = String(log?.action ?? "").trim();
   const notes = String(log?.notes ?? "").trim();
-  return `缸组养护：${action}${notes ? `；备注：${notes}` : ""}`;
+  return `${log.subTankId ? "子缸养护" : "缸组养护"}：${action}${notes ? `；备注：${notes}` : ""}`;
 }
 
 function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingRecord = null, groupChanged = false) {
@@ -4832,6 +4833,8 @@ function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingReco
     stockItemId: String(stockItem.id),
     date: String(log.date),
     text: dailyLogRecordText(log),
+    // Tank media belongs to the tank log. Copying it to every fish would replace
+    // individual public-catalog thumbnails with a whole-tank image.
     photos: Array.isArray(existingRecord?.photos) ? existingRecord.photos : [],
     videos: Array.isArray(existingRecord?.videos) ? existingRecord.videos : [],
     sourceType: "dailyLog",
@@ -4854,7 +4857,7 @@ function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingReco
 }
 
 function syncDailyLogToBioRecords(state = {}, bioRecords = [], normalizedLog = {}, previousLog = null) {
-  const groupChanged = previousLog && dailyLogGroupId(state, previousLog) !== normalizedLog.tankGroupId;
+  const groupChanged = previousLog && (dailyLogGroupId(state, previousLog) !== normalizedLog.tankGroupId || String(previousLog.subTankId ?? "") !== String(normalizedLog.subTankId ?? ""));
   const existingForLog = (Array.isArray(bioRecords) ? bioRecords : [])
     .filter((record) => record?.sourceType === "dailyLog" && String(record?.sourceLogId ?? "") === String(normalizedLog.id));
   const existingByStockId = new Map(existingForLog.map((record) => [String(record.stockItemId), record]));
@@ -4865,7 +4868,7 @@ function syncDailyLogToBioRecords(state = {}, bioRecords = [], normalizedLog = {
     ? preservedStockIds
         .map((id) => (Array.isArray(state.stock) ? state.stock : []).find((item) => String(item?.id ?? "") === id))
         .filter(Boolean)
-    : activeStockItemsInTankGroup(state, normalizedLog.tankGroupId);
+    : activeStockItemsInTankGroup(state, normalizedLog.tankGroupId, normalizedLog.subTankId);
   const targetIds = targetItems.map((item) => String(item.id));
   const nextRecords = (Array.isArray(bioRecords) ? bioRecords : [])
     .filter((record) => !(record?.sourceType === "dailyLog" && String(record?.sourceLogId ?? "") === String(normalizedLog.id)));
@@ -8032,6 +8035,9 @@ async function backfillDailyLogBioRecords() {
         id: String(log.id || uid("daily")),
         date: String(log.date),
         tankGroupId,
+        ...(log.subTankId ? { subTankId: String(log.subTankId) } : {}),
+        ...(Array.isArray(log.photos) ? { photos: log.photos } : {}),
+        ...(Array.isArray(log.videos) ? { videos: log.videos } : {}),
         action: String(log.action ?? "").trim(),
         operator: String(log.operator ?? "").trim(),
         notes: String(log.notes ?? "").trim(),
@@ -8821,6 +8827,11 @@ const handlePaymentProofApi = createPaymentProofHandler({
   visibleState: siteVisibilityFilteredState, amountDue: calcAmountDueForOrder,
   commissionMutation: commissionStateForMutation, createId: uid, createLog: createOperationLog,
   limiter: newCustomerEvidenceLimiter, ffmpegPath: FFMPEG_PATH, ffprobePath: FFPROBE_PATH, nowInChina: nowDatetimeInChina,
+});
+
+const handleMobileMaintenanceHistoryApi = createMobileMaintenanceHistoryHandler({
+  pool, stateId, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
+  requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission,
 });
 
 const handleMaintenanceWorkbenchApi = createMaintenanceWorkbenchHandler({
@@ -12421,6 +12432,14 @@ async function handleApi(req, res, url) {
         now: nowDatetimeInChina(),
       });
 
+      if (action === "create" && body.expectedSubTankId !== undefined && !plan.idempotent) {
+        const expectedSubTankId = String(body.expectedSubTankId ?? "").trim();
+        if (!expectedSubTankId || isStockInTransfer(storedStockItem) || String(storedStockItem.subTankId ?? "") !== expectedSubTankId) {
+          const error = new Error("这条鱼的缸位已变化，请重新选缸后记录");
+          error.statusCode = 409; error.code = "BIO_STOCK_LOCATION_CHANGED"; throw error;
+        }
+      }
+
       if (["create", "saveDetails"].includes(action) && !plan.idempotent &&
           (storedStockItem.lost || Boolean(rows[0]?.stock_is_out))) {
         throw new Error("已损耗或已发货的鱼不能新增记录或修改信息");
@@ -12591,6 +12610,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await handleMobileMaintenanceHistoryApi(req, res, url)) return;
   if (await handleMaintenanceWorkbenchApi(req, res, url)) return;
   if (await handleOrderFollowupApi(req, res, url)) return;
   if (await handlePaymentProofApi(req, res, url)) return;
@@ -16616,6 +16636,7 @@ async function handleApi(req, res, url) {
             `SELECT
                data -> 'sites' AS sites,
                data -> 'tankGroups' AS tank_groups,
+               data -> 'personnel' AS personnel,
                COALESCE((
                  SELECT jsonb_agg(log_row.log_item ORDER BY log_row.ordinality)
                  FROM jsonb_array_elements(COALESCE(app_state.data -> 'logs', '[]'::jsonb))
@@ -16630,7 +16651,9 @@ async function handleApi(req, res, url) {
           const projectedState = {
             sites: Array.isArray(rows[0]?.sites) ? rows[0].sites : [],
             tankGroups: Array.isArray(rows[0]?.tank_groups) ? rows[0].tank_groups : [],
+            personnel: Array.isArray(rows[0]?.personnel) ? rows[0].personnel : [],
           };
+          refreshLockedMaintenanceMutationAuth(req, projectedState);
           const plan = planDailyLogSave({
             change: preparedChange,
             matchingLogs: Array.isArray(rows[0]?.matching_logs) ? rows[0].matching_logs : [],
@@ -16650,8 +16673,14 @@ async function handleApi(req, res, url) {
             throw error;
           }
 
+          if (plan.idempotent) {
+            await client.query("COMMIT");
+            sendJson(req, res, 200, { ok: true, idempotent: true, changedLog: plan.current });
+            return;
+          }
+
           const currentGroupId = plan.current ? dailyLogGroupId(projectedState, plan.current) : "";
-          const groupChanged = Boolean(plan.current && currentGroupId !== String(plan.log?.tankGroupId ?? ""));
+          const groupChanged = Boolean(plan.current && (currentGroupId !== String(plan.log?.tankGroupId ?? "") || String(plan.current.subTankId ?? "") !== String(plan.log?.subTankId ?? "")));
           const preserveSyncedStockIds = Boolean(
             plan.mode === "update" && !groupChanged && Array.isArray(plan.current?.syncedStockItemIds)
           );
@@ -16662,7 +16691,7 @@ async function handleApi(req, res, url) {
             ? projectedState.tankGroups.find((group) => String(group?.id ?? "").trim() === String(plan.log.tankGroupId ?? "").trim())
             : null;
           const targetSubTankIds = Array.isArray(targetGroup?.subTanks)
-            ? targetGroup.subTanks.map((tank) => String(tank?.id ?? "").trim()).filter(Boolean)
+            ? targetGroup.subTanks.map((tank) => String(tank?.id ?? "").trim()).filter(id => id && (!plan.log?.subTankId || id === plan.log.subTankId))
             : [];
           if (plan.log) {
             const targetSubTankIdSet = new Set(targetSubTankIds);

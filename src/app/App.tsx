@@ -9,7 +9,8 @@ import { LogoLoader } from "./components/LogoLoader";
 import { Layout, ViewKey } from "./components/Layout";
 import { Dashboard } from "./components/Dashboard";
 import { WorkbenchView, type WorkbenchSection } from "./components/WorkbenchView";
-import { MaintenanceWorkbench } from "./components/MaintenanceWorkbench";
+import { MobileMaintenanceWorkbench } from "./components/MobileMaintenanceWorkbench";
+import { useIsMobile } from "./components/ui/use-mobile";
 import { SpeciesView } from "./components/SpeciesView";
 import { ProductsView } from "./components/ProductsView";
 import { TankGroupsView } from "./components/TankGroupsView";
@@ -98,7 +99,7 @@ const PERSISTED_KEYS = AUDIT_COLLECTIONS
 
 const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   dashboard: ["sites", "systemSettings"],
-  workbench: ["tankGroups", "personnel", "systemSettings"],
+  workbench: ["tankGroups", "products", "stock", "shipments", "logs", "personnel", "systemSettings"],
   workbenchSales: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "personnel"],
   workbenchInventory: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   notifications: [],
@@ -621,6 +622,7 @@ function isPublicSiteHost(): boolean {
 }
 
 function AdminApp() {
+  const isMobileWorkbench = useIsMobile();
   const [isPublicSite] = useState(() => isPublicSiteHost());
   const [state, setStateBase] = useState<Store>(initialState);
   const [requestedView, setView] = useState<ViewKey>("dashboard");
@@ -1458,7 +1460,7 @@ function AdminApp() {
 	    }
 	  };
 
-		  const saveDailyLog = async (change: { log?: DailyLog; deleteId?: string }): Promise<boolean> => {
+		  const saveDailyLog = async (change: { log?: DailyLog; deleteId?: string; createOnly?: boolean }): Promise<boolean> => {
 		    clearTimeout(saveTimer.current);
 		    if (saveAbort.current) {
 		      saveAbort.current.abort();
@@ -2137,9 +2139,10 @@ function AdminApp() {
 
   const renderView = () => {
     if (view === "workbench" || view === "workbenchSales" || view === "workbenchInventory") {
+      if (!isMobileWorkbench) return <div className="rounded-lg border bg-background p-6"><h2 className="font-semibold">请在手机上打开工作台</h2><p className="mt-2 text-sm text-muted-foreground">工作台用于在缸边记录维护、给鱼拍照和拍视频。电脑端可继续使用日常管理。</p><button type="button" className="mt-4 min-h-11 rounded-md border px-4" onClick={() => handleSetView("daily")}>打开日常管理</button></div>;
+      if (view === "workbench") return <MobileMaintenanceWorkbench key={`${currentUserKey}:${scopedSiteId}`} />;
       const section: WorkbenchSection = view === "workbenchSales" ? "sales" : view === "workbenchInventory" ? "inventory" : "maintenance";
       return <WorkbenchView section={section} onSectionChange={next => handleSetView(next === "sales" ? "workbenchSales" : next === "inventory" ? "workbenchInventory" : "workbench")}>
-        {section === "maintenance" && <MaintenanceWorkbench key={`${currentUserKey}:${scopedSiteId}`} onOpenDaily={() => handleSetView("daily")} />}
         {section === "sales" && <OrdersView key={`workbench-sales:${currentUserKey}:${scopedSiteId}`} personalWorkspace allStock={state.stock} allTankGroups={state.tankGroups} />}
         {section === "inventory" && <StockInView key={`workbench-inventory:${currentUserKey}:${scopedSiteId}`} allOrders={state.orders} onOpenOrder={requestOpenOrder} />}
       </WorkbenchView>;

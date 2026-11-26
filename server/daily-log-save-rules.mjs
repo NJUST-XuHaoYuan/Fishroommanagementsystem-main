@@ -58,7 +58,22 @@ function groupForLog(tankGroups, log) {
   return matches[0] ?? null;
 }
 
-function normalizedLog(log, { id, group, operator, now }) {
+function media(value, label) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 30) throw new DailyLogSaveError(`${label}格式不正确或超过30个`);
+  return value.map(item => {
+    const url = text(item);
+    if (!url || url.length > 2048 || !/^(?:\/uploads\/|https?:\/\/)/i.test(url) || /[\u0000-\u0020\\]/.test(url) ||
+        /(?:\.\.|%2e|%2f|%5c|personnel-private|new-customer-evidence|payment-proof|\/api\/)/i.test(url)) {
+      throw new DailyLogSaveError(`${label}地址不正确，请重新上传`);
+    }
+    const parsed = new URL(url, "https://fishroom.invalid");
+    if (parsed.username || parsed.password) throw new DailyLogSaveError(`${label}地址不正确，请重新上传`);
+    return url;
+  });
+}
+
+function normalizedLog(log, { id, group, operator, now, current }) {
   const date = normalizeLocalDateTime(log?.date);
   const action = text(log?.action);
   const normalizedOperator = text(operator);
@@ -68,14 +83,23 @@ function normalizedLog(log, { id, group, operator, now }) {
   if (date > normalizeLocalDateTime(now)) {
     throw new DailyLogSaveError("养护日志时间不能晚于当前时间");
   }
+  // Old desktop editors omit these fields. Preserve their scope and attachments.
+  const subTankId = text(Object.hasOwn(log, "subTankId") ? log.subTankId : current?.subTankId);
+  if (subTankId) exactlyOne(group.subTanks, subTankId, {
+    label: "所选子缸", notFoundCode: "DAILY_LOG_SUB_TANK_NOT_IN_GROUP", duplicateCode: "DAILY_LOG_SUB_TANK_CONFLICT",
+  });
   return {
     id,
     siteId: text(group.siteId),
     date,
     tankGroupId: text(group.id),
+    ...(subTankId ? { subTankId } : {}),
     action,
     operator: normalizedOperator,
     notes: text(log?.notes),
+    photos: media(Object.hasOwn(log, "photos") ? log.photos : current?.photos, "照片"),
+    videos: media(Object.hasOwn(log, "videos") ? log.videos : current?.videos, "视频"),
+    createdBy: text(current?.createdBy || current?.operator) || normalizedOperator,
   };
 }
 
@@ -89,6 +113,7 @@ export function planDailyLogSave({
 } = {}) {
   const hasLog = Boolean(change?.log && typeof change.log === "object" && !Array.isArray(change.log));
   const deleteId = text(change?.deleteId);
+  if (change.createOnly !== undefined && typeof change.createOnly !== "boolean") throw new DailyLogSaveError("新增记录标记格式不正确");
   if (Number(hasLog) + Number(Boolean(deleteId)) !== 1) {
     throw new DailyLogSaveError("请只提交一项养护日志新增、修改或删除操作");
   }
@@ -127,7 +152,15 @@ export function planDailyLogSave({
     notFoundCode: "DAILY_LOG_GROUP_NOT_FOUND",
     duplicateCode: "DAILY_LOG_GROUP_ID_CONFLICT",
   });
-  const log = normalizedLog(change.log, { id, group, operator, now });
+  const log = normalizedLog(change.log, { id, group, operator, now, current });
+  if (change.createOnly && current) {
+    const keys = ["date", "tankGroupId", "subTankId", "action", "notes", "photos", "videos"];
+    const equal = keys.every(key => JSON.stringify(current[key] ?? (["photos", "videos"].includes(key) ? [] : "")) === JSON.stringify(log[key] ?? (["photos", "videos"].includes(key) ? [] : "")));
+    if (text(current.createdBy || current.operator) !== text(operator) || !equal) {
+      throw new DailyLogSaveError("这条记录已存在且内容不同，请刷新后核对，不能覆盖", { statusCode: 409, code: "DAILY_LOG_CREATE_CONFLICT" });
+    }
+    return { mode: "create", idempotent: true, current, log: current, currentSiteId: text(group.siteId), siteId: text(group.siteId) };
+  }
   const mode = current ? "update" : "create";
   const currentGroup = current ? groupForLog(tankGroups, current) : null;
   return {

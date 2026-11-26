@@ -1,0 +1,203 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, Camera, ChevronRight, ClipboardList, Droplets, Eye, Fish, FlaskConical, MapPin, MoreHorizontal, RefreshCw, Search, Utensils, X } from "lucide-react";
+import { toast } from "sonner";
+import { useStore, uid, type BioRecord, type DailyLog, type StockItem } from "../store";
+import { usePermission } from "../utils/permissions";
+import { matchesSite, siteName } from "../utils/sites";
+import { getInventoryOutStockIds, isPhysicallyInTank } from "../utils/inventory";
+import { nowDatetimeLocal, formatBioRecordTime } from "../utils/localDateTime";
+import { authJsonHeaders } from "../utils/authSession";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
+import { ImageWithFallback } from "./figma/ImageWithFallback";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
+import { MobileMaintenanceMedia } from "./MobileMaintenanceMedia";
+import "./mobile-maintenance.css";
+
+type Step = "sub" | "action" | "tankType" | "fishList" | "fishAction" | "form" | "confirm" | "history" | "detail" | "discard";
+type Draft = { id: string; scope: "tank" | "fish"; kind: string; fishId: string; date: string; text: string; medicine: string; photos: string[]; videos: string[] };
+type History = { id: string; kind: "tank" | "fish"; date: string; title: string; text: string; location: string; fishLabel: string; photos: string[]; videos: string[] };
+const types = [{ label: "喂食", Icon: Utensils }, { label: "换水", Icon: Droplets }, { label: "水质", Icon: FlaskConical }, { label: "观察", Icon: Eye }, { label: "治疗", Icon: ClipboardList }, { label: "其他", Icon: MoreHorizontal }];
+const freshDraft = (scope: Draft["scope"] = "tank", fishId = ""): Draft => ({ id: uid(), scope, fishId, kind: "", date: nowDatetimeLocal(), text: "", medicine: "", photos: [], videos: [] });
+
+export function MobileMaintenanceWorkbench() {
+  const { state, activeSiteId, saveDailyLog, saveBioRecordChange } = useStore();
+  const permission = usePermission("daily");
+  const [groupId, setGroupId] = useState("");
+  const [subId, setSubId] = useState("");
+  const [step, setStep] = useState<Step | null>(null);
+  const [groupSearch, setGroupSearch] = useState("");
+  const [fishSearch, setFishSearch] = useState("");
+  const [draft, setDraft] = useState<Draft>(() => freshDraft());
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [history, setHistory] = useState<History[]>([]);
+  const [historyError, setHistoryError] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyAll, setHistoryAll] = useState(false);
+  const [historyTruncated, setHistoryTruncated] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [detail, setDetail] = useState<History | null>(null);
+  const [returnStep, setReturnStep] = useState<Step>("action");
+  const [discardTo, setDiscardTo] = useState<Step | null>("action");
+  const busyRef = useRef(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const alive = useRef(true);
+  const context = JSON.stringify([activeSiteId, state.user?.username, state.user?.role, state.user?.visibleSiteIds, state.user?.account, captureNewCustomerSession()?.key]);
+  const contextRef = useRef(context); contextRef.current = context;
+  const canRead = permission.canCreate || permission.canUpdate || permission.canDelete;
+  const groups = useMemo(() => state.tankGroups.filter(group => matchesSite(group, activeSiteId)), [state.tankGroups, activeSiteId]);
+  const group = groups.find(item => item.id === groupId);
+  const sub = group?.subTanks.find(item => item.id === subId);
+  const location = group && sub ? `${group.name} / ${sub.name}` : "";
+  const outIds = useMemo(() => getInventoryOutStockIds(state), [state.orders, state.shipments, state.inventoryProjection]);
+  const tankFish = useMemo(() => sub ? state.stock.filter(item => item.subTankId === sub.id && isPhysicallyInTank(item, outIds)) : [], [state.stock, sub, outIds]);
+  const selectedFish = tankFish.find(item => item.id === draft.fishId);
+  const product = (item?: StockItem) => state.products.find(value => value.id === item?.productId);
+  const visibleFish = tankFish.filter(item => `${product(item)?.name || ""} ${item.code || ""} ${item.id}`.toLowerCase().includes(fishSearch.trim().toLowerCase()));
+  const fishLabel = (item?: StockItem) => item ? `${product(item)?.name || "未命名商品"} · ${item.code || `库存 ${item.id}`}` : "鱼只已不在当前子缸";
+  const dirty = Boolean(draft.text.trim() || draft.medicine.trim() || draft.photos.length || draft.videos.length);
+  const blocked = saving || uploading;
+  const displayName = state.personnel.find(person => person.username === state.user?.username)?.name || state.user?.username || "本人";
+  const draftText = [draft.kind === "拍照／视频" ? "" : `【${draft.kind}】`, draft.medicine.trim() ? `实际用药及用量：${draft.medicine.trim()}` : "", draft.text.trim()].filter(Boolean).join("\n");
+
+  useEffect(() => {
+    alive.current = true; setGroupId(""); setSubId(""); setStep(null); setDraft(freshDraft()); setHistory([]); setError(""); setSaving(false); setUploading(false); busyRef.current = false;
+    return () => { alive.current = false; };
+  }, [context]);
+  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [step]);
+  useEffect(() => {
+    if (!dirty && !uploading && !saving) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty, uploading, saving]);
+
+  const move = (next: Step | null) => { setError(""); setStep(next); };
+  const leave = (next: Step | null) => {
+    if (blocked || busyRef.current) return;
+    if (dirty) { setReturnStep(step || "action"); setDiscardTo(next); move("discard"); }
+    else { setDraft(freshDraft()); move(next); }
+  };
+  const close = () => { if (step === "discard") { move(returnStep); return; } leave(["form", "confirm", "fishAction", "fishList", "tankType"].includes(step || "") && sub ? "action" : null); };
+  const back = () => {
+    if (blocked) return;
+    if (step === "discard") { move(returnStep); return; }
+    if (step === "confirm") { move("form"); return; }
+    if (step === "form") { move(draft.scope === "fish" ? "fishAction" : "tankType"); return; }
+    if (step === "tankType") { leave("action"); return; }
+    if (step === "fishAction") { leave("fishList"); return; }
+    if (step === "fishList") { leave("action"); return; }
+    if (step === "detail") { move(returnStep); return; }
+    if (step === "history") { move(historyAll ? null : "action"); return; }
+    if (step === "action") { setDraft(freshDraft()); move("sub"); return; }
+    move(null);
+  };
+
+  useEffect(() => {
+    if (!canRead || activeSiteId === "all" || !state.user || !["action", "history"].includes(step || "")) return;
+    const session = captureNewCustomerSession(), captured = context;
+    if (!session) { setHistoryError("登录已过期，请重新登录。"); return; }
+    const controller = new AbortController();
+    const current = () => alive.current && !controller.signal.aborted && contextRef.current === captured && isNewCustomerSessionCurrent(session);
+    setHistory([]); setHistoryError(""); setHistoryLoading(true);
+    const params = new URLSearchParams({ siteId: activeSiteId, limit: "30" });
+    if (step === "action" || !historyAll) params.set("subTankId", subId);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/mobile-maintenance/history?${params}`, { headers: authJsonHeaders(), signal: controller.signal, cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) throw new Error(payload.error || "记录加载失败，请重试。");
+        if (!current()) return;
+        const logRows: History[] = (Array.isArray(payload.logs) ? payload.logs : []).map((log: DailyLog) => {
+          const tg = state.tankGroups.find(value => value.id === log.tankGroupId);
+          const st = tg?.subTanks.find(value => value.id === log.subTankId);
+          return { id: `tank:${log.id}`, kind: "tank", date: log.date, title: log.action, text: log.notes, location: [tg?.name || "原缸组", st?.name || (log.subTankId ? "原子缸" : "整缸组")].join(" / "), fishLabel: "", photos: log.photos || [], videos: log.videos || [] };
+        });
+        const fishRows: History[] = (Array.isArray(payload.bioRecords) ? payload.bioRecords : []).map((record: BioRecord) => {
+          const item = state.stock.find(value => value.id === record.stockItemId);
+          const recordedGroup = state.tankGroups.find(value => value.subTanks.some(tank => tank.id === record.subTankId));
+          const recordedSub = recordedGroup?.subTanks.find(value => value.id === record.subTankId);
+          const recordedLocation = record.tankLocation || [record.tankGroupName || recordedGroup?.name, record.subTankName || recordedSub?.name].filter(Boolean).join(" / ") || "历史缸位";
+          return { id: `fish:${record.id}`, kind: "fish", date: record.date, title: record.text?.match(/^【(.+?)】/)?.[1] || "鱼只记录", text: record.text, location: recordedLocation, fishLabel: item ? fishLabel(item) : `鱼只 ${record.stockItemId}`, photos: record.photos || [], videos: record.videos || [] };
+        });
+        setHistory([...logRows, ...fishRows].sort((a, b) => b.date.localeCompare(a.date)));
+        setHistoryTruncated(payload.truncated === true);
+      } catch (cause) { if (current()) setHistoryError(cause instanceof Error ? cause.message : "记录加载失败。"); }
+      finally { if (current()) setHistoryLoading(false); }
+    })();
+    return () => controller.abort();
+  }, [step, historyVersion, historyAll, subId, context, canRead]);
+
+  const validate = () => {
+    if (!permission.canCreate) return "没有添加维护记录的权限。";
+    if (!group || !sub) return "缸位已发生变化，请重新选择。";
+    if (draft.scope === "fish" && !selectedFish) return "这条鱼已离开当前子缸，请返回重新选鱼。";
+    if (!draft.kind) return "请选择记录类型。";
+    if (!draft.date || !Number.isFinite(Date.parse(draft.date))) return "请选择记录时间。";
+    if (draft.kind === "拍照／视频" && !draft.photos.length && !draft.videos.length) return "请先添加照片或视频。";
+    if (draft.kind !== "拍照／视频" && !draft.text.trim()) return "请填写本次观察、治疗或维护的实际情况。";
+    return "";
+  };
+  const save = async () => {
+    if (blocked || busyRef.current) return;
+    const problem = validate(); if (problem) { setError(problem); return; }
+    const session = captureNewCustomerSession(), captured = context;
+    if (!session) { setError("登录已过期，请重新登录。"); return; }
+    busyRef.current = true; setSaving(true); setError("");
+    try {
+      if (draft.scope === "tank") {
+        const ok = await saveDailyLog({ createOnly: true, log: { id: draft.id, siteId: activeSiteId, date: draft.date, tankGroupId: groupId, subTankId: subId, action: draft.kind, operator: "", notes: draftText, photos: draft.photos, videos: draft.videos } });
+        if (!ok) throw new Error("维护记录保存失败，内容已保留，请重试。");
+      } else {
+        const result = await saveBioRecordChange({ action: "create", stockItemId: draft.fishId, expectedSubTankId: subId, record: { id: draft.id, stockItemId: draft.fishId, date: draft.date, text: draftText, photos: draft.photos, videos: draft.videos } });
+        if (!result.ok) throw new Error(result.error || "鱼只记录保存失败，内容已保留，请重试。");
+      }
+      if (!alive.current || contextRef.current !== captured || !isNewCustomerSessionCurrent(session)) return;
+      setDraft(freshDraft()); setHistoryAll(false); setHistoryVersion(value => value + 1); move("action"); toast.success("记录已保存，可以继续维护这个缸。");
+    } catch (cause) {
+      if (alive.current && contextRef.current === captured && isNewCustomerSessionCurrent(session)) setError(cause instanceof Error ? cause.message : "保存失败，内容已保留。");
+    } finally { if (alive.current && contextRef.current === captured) { busyRef.current = false; setSaving(false); } }
+  };
+
+  const currentStrip = <div className="mm-location-strip"><MapPin aria-hidden="true" /><span>{siteName(state, activeSiteId)} · {step === "sub" ? group?.name : location || group?.name}</span></div>;
+  const identity = selectedFish ? <div className="mm-fish-identity"><span>当前鱼只</span><strong>{product(selectedFish)?.name || "未命名商品"}</strong><p>{selectedFish.code ? `编号 ${selectedFish.code}` : `库存编号 ${selectedFish.id}`} · {product(selectedFish)?.size || "规格未填"}</p></div> : <p role="alert" className="mm-error">这条鱼已离开当前子缸，请返回重新选择。</p>;
+  const attachmentPreview = (photos: string[], videos: string[]) => <div className="mm-attachments">{photos.map((src, index) => <MediaPreviewTrigger key={`p:${index}`} src={src} title={`照片 ${index + 1}`} ariaLabel={`预览照片 ${index + 1}`} allowDownload={false}><ImageWithFallback src={src} alt={`照片 ${index + 1}`} className="size-24 object-cover" /></MediaPreviewTrigger>)}{videos.map((src, index) => <MediaPreviewTrigger key={`v:${index}`} src={src} mediaType="video" title={`视频 ${index + 1}`} ariaLabel={`预览视频 ${index + 1}`} allowDownload={false} className="mm-video-preview"><Camera /><span>视频 {index + 1}</span></MediaPreviewTrigger>)}</div>;
+  const historyRows = <>{historyLoading ? <p role="status" className="mm-empty">正在读取你的记录…</p> : historyError ? <div role="alert" className="mm-empty"><p>{historyError}</p><Button variant="outline" onClick={() => setHistoryVersion(value => value + 1)}>重新加载</Button></div> : history.length ? <><div className="mm-history-list">{history.map(record => <button key={record.id} className="mm-history-row" onClick={() => { setDetail(record); setReturnStep(step || "action"); move("detail"); }}><span className="mm-history-icon">{record.kind === "fish" ? <Fish /> : <ClipboardList />}</span><span><strong>{record.title}</strong><small>{record.kind === "fish" ? record.fishLabel : record.location}</small><small>{formatBioRecordTime(record.date)}</small></span><ChevronRight /></button>)}</div>{historyTruncated && <p className="mm-note">这里只显示最近 30 条记录。</p>}</> : <p className="mm-empty">这里还没有你的记录。完成维护后，记录会出现在这里。</p>}</>;
+
+  let title = "选择子缸", progress = "", content: ReactNode = null, footer: ReactNode = null;
+  if (step === "sub") {
+    content = <>{currentStrip}<h2>站在哪个子缸前？</h2><p className="mm-lead">选好位置，再选择要做的事。</p><div className="mm-sub-grid">{group?.subTanks.map(tank => <button key={tank.id} onClick={() => { setSubId(tank.id); setDraft(freshDraft()); setHistoryAll(false); move("action"); }}><strong>{tank.name}</strong><span>{state.stock.filter(item => item.subTankId === tank.id && isPhysicallyInTank(item, outIds)).length} 条在缸鱼</span></button>)}</div>{!group?.subTanks.length && <p className="mm-empty">这个缸组还没有子缸，请先在缸组管理中配置。</p>}</>;
+  } else if (step === "action") {
+    title = "当前子缸"; content = <><div className="mm-location-focus"><span>{siteName(state, activeSiteId)} · {group?.name}</span><strong>{sub?.name || "子缸已移除"}</strong><button onClick={() => move("sub")}>更换缸位</button></div><h2>在这个缸做什么？</h2><div className="mm-actions"><button className="mm-action primary" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft()); move("tankType"); }}><ClipboardList /><span><strong>记录这个缸的维护</strong><small>喂食、换水、水质、观察等</small></span><ChevronRight /></button><button className="mm-action" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft("fish")); setFishSearch(""); move("fishList"); }}><Fish /><span><strong>记录单鱼 / 拍照视频</strong><small>观察、治疗，或拍下鱼的状态</small></span><ChevronRight /></button></div><div className="mm-section-title"><h3>我在这个缸的记录</h3><button aria-label="刷新我的维护记录" onClick={() => setHistoryVersion(value => value + 1)}><RefreshCw /></button></div>{historyRows}</>;
+  } else if (step === "tankType") {
+    title = "记录缸位维护"; progress = "1 / 3"; content = <>{currentStrip}<h2>这次做了什么？</h2><p className="mm-lead">选择一种维护类型。</p><div className="mm-type-grid">{types.map(({ label, Icon }) => <button key={label} aria-pressed={draft.kind === label} onClick={() => { setDraft(value => ({ ...value, kind: label })); move("form"); }}><Icon /><strong>{label}</strong></button>)}</div></>;
+  } else if (step === "fishList") {
+    title = "选择这个缸里的鱼"; content = <>{currentStrip}<h2>要记录哪条鱼？</h2><p className="mm-lead">这里只显示 {sub?.name} 当前在缸的鱼。</p><label className="mm-search"><Search /><Input aria-label="搜索当前子缸的鱼" value={fishSearch} onChange={event => setFishSearch(event.target.value)} placeholder="输入编号或商品名" /></label><div className="mm-fish-list">{visibleFish.map(item => <button key={item.id} onClick={() => { setDraft(freshDraft("fish", item.id)); move("fishAction"); }}><span className="mm-fish-icon">{product(item)?.imageUrl ? <ImageWithFallback src={product(item)!.imageUrl} alt="" className="size-12 object-cover" /> : <Fish />}</span><span><strong>{product(item)?.name || "未命名商品"}</strong><small>{item.code ? `编号 ${item.code}` : `库存 ${item.id}`} · {product(item)?.size || "规格未填"}</small></span><ChevronRight /></button>)}</div>{!tankFish.length ? <p className="mm-empty">这个子缸当前没有在缸鱼，仍然可以返回记录缸维护。</p> : !visibleFish.length && <p className="mm-empty">当前子缸没有匹配的鱼，请换一个编号或商品名。</p>}</>;
+  } else if (step === "fishAction") {
+    title = "单鱼记录"; content = <>{currentStrip}{identity}<h2>给这条鱼记录什么？</h2><div className="mm-actions">{[{ kind: "拍照／视频", Icon: Camera, note: "记录这条鱼的画面" }, { kind: "观察", Icon: Eye, note: "记录状态、摄食及其他情况" }, { kind: "治疗", Icon: ClipboardList, note: "记录实际治疗与用药，可附图片视频" }].map(({ kind, Icon, note }) => <button className="mm-action" key={kind} disabled={!selectedFish} onClick={() => { setDraft(value => ({ ...value, kind })); move("form"); }}><Icon /><span><strong>{kind}</strong><small>{note}</small></span><ChevronRight /></button>)}</div></>;
+  } else if (step === "form") {
+    title = draft.scope === "fish" ? `单鱼${draft.kind}` : `记录${draft.kind}`; progress = "2 / 3";
+    content = <>{currentStrip}{draft.scope === "fish" && identity}<label className="mm-field"><span>记录时间</span><Input type="datetime-local" step="1" value={draft.date} disabled={blocked} onChange={event => setDraft(value => ({ ...value, date: event.target.value }))} /></label>{draft.kind === "治疗" && <label className="mm-field"><span>实际药品及用量 <small>选填</small></span><Input value={draft.medicine} maxLength={500} disabled={blocked} onChange={event => setDraft(value => ({ ...value, medicine: event.target.value }))} placeholder="填写实际使用的药品、用量" /></label>}<label className="mm-field"><span>{draft.kind === "拍照／视频" ? "补充说明" : draft.kind === "治疗" ? "治疗情况" : "实际情况"}{draft.kind === "拍照／视频" && <small>选填</small>}</span><Textarea value={draft.text} maxLength={5000} disabled={blocked} onChange={event => setDraft(value => ({ ...value, text: event.target.value }))} placeholder={draft.kind === "治疗" ? "记录症状、处理过程和观察结果" : "填写实际情况"} /></label><MobileMaintenanceMedia key={draft.id} photos={draft.photos} videos={draft.videos} onChange={value => setDraft(current => ({ ...current, ...value }))} onBusyChange={setUploading} disabled={saving} /></>;
+    footer = <Button className="mm-next" disabled={blocked} onClick={() => { const problem = validate(); if (problem) setError(problem); else move("confirm"); }}>{uploading ? "附件上传中…" : "下一步：确认记录"}</Button>;
+  } else if (step === "confirm") {
+    title = "确认记录"; progress = "3 / 3"; content = <><h2>核对一下，就完成了</h2><dl className="mm-summary"><div><dt>缸位</dt><dd>{siteName(state, activeSiteId)} · {location}</dd></div>{draft.scope === "fish" && <div><dt>鱼只</dt><dd>{fishLabel(selectedFish)}</dd></div>}<div><dt>类型</dt><dd>{draft.kind}</dd></div><div><dt>时间</dt><dd>{formatBioRecordTime(draft.date)}</dd></div><div><dt>记录人</dt><dd>{displayName}</dd></div><div><dt>内容</dt><dd>{draftText || "照片／视频记录"}</dd></div></dl>{attachmentPreview(draft.photos, draft.videos)}<p className="mm-note">{draft.scope === "fish" ? "保存后进入这条鱼的维护历史。" : "维护文字同步到本缸鱼只历史，照片和视频保存在这个缸的记录中。"}</p></>;
+    footer = <Button className="mm-next" disabled={blocked} onClick={() => void save()}>{saving ? "正在保存…" : "保存记录"}</Button>;
+  } else if (step === "history") {
+    title = "我的维护记录"; content = <><h2>{historyAll ? `${siteName(state, activeSiteId)} · 我的记录` : location}</h2><p className="mm-lead">只显示由你登记的缸维护和单鱼记录。</p>{historyRows}</>;
+  } else if (step === "detail" && detail) {
+    title = "记录详情"; content = <><h2>{detail.title}</h2><p className="mm-lead">{detail.fishLabel || detail.location}</p><dl className="mm-summary"><div><dt>记录时间</dt><dd>{formatBioRecordTime(detail.date)}</dd></div><div><dt>记录人</dt><dd>{displayName}</dd></div><div><dt>缸位</dt><dd>{detail.location}</dd></div><div><dt>内容</dt><dd>{detail.text || "照片／视频记录"}</dd></div></dl>{attachmentPreview(detail.photos, detail.videos)}</>;
+  } else if (step === "discard") {
+    title = "退出这次记录"; content = <div className="mm-discard"><ClipboardList /><h2>记录还没有保存</h2><p>继续填写，或放弃这次内容。已保存的记录不会受影响。</p></div>; footer = <div className="mm-actions"><Button className="mm-next" onClick={() => move(returnStep)}>继续填写</Button><Button variant="ghost" className="min-h-12 text-destructive" onClick={() => { setDraft(freshDraft()); move(discardTo); }}>放弃这次记录</Button></div>;
+  }
+
+  if (!canRead) return <p className="mm-empty">当前账号没有维护操作权限，请联系管理员。</p>;
+  if (activeSiteId === "all") return <p className="mm-empty">请先在顶部选择你所在的场地，再选择缸位。</p>;
+  return <section className="mobile-maintenance" aria-label="手机维护工作台"><div className="mm-intro"><h2>你在哪个缸？</h2><p>选缸号，再选子缸。</p><span>{displayName} · {siteName(state, activeSiteId)}</span></div><label className="mm-search"><Search /><Input aria-label="搜索缸号" placeholder="输入缸号" value={groupSearch} onChange={event => setGroupSearch(event.target.value)} /></label><div className="mm-tank-list">{groups.filter(value => value.name.toLowerCase().includes(groupSearch.trim().toLowerCase())).map(value => <button key={value.id} onClick={() => { setGroupId(value.id); setSubId(""); setDraft(freshDraft()); move("sub"); }}><span className="mm-tank-icon"><Droplets /></span><span><strong>{value.name}</strong><small>{value.subTanks.length} 个子缸</small></span><ChevronRight /></button>)}</div>{!groups.length && <p className="mm-empty">当前场地还没有缸组，请先配置缸位。</p>}<Button variant="ghost" className="mm-my-history" onClick={() => { setHistoryAll(true); move("history"); }}><ClipboardList />查看我的维护记录<ChevronRight /></Button>
+    <Dialog open={step !== null} onOpenChange={open => { if (!open) close(); }}><DialogContent className="mobile-maintenance-dialog" onEscapeKeyDown={event => { event.preventDefault(); close(); }} onInteractOutside={event => event.preventDefault()}><header className="mm-dialog-head" data-no-dialog-drag><button aria-label="返回上一步" disabled={blocked} onClick={back}><ArrowLeft /></button><div><DialogTitle>{title}</DialogTitle>{progress && <span>{progress}</span>}</div><button aria-label="关闭维护记录" disabled={blocked} onClick={close}><X /></button></header><DialogDescription className="sr-only">先选择缸位，再逐步记录本人的维护工作或单鱼观察治疗。</DialogDescription><div className="mm-dialog-body" ref={bodyRef}>{error && <p role="alert" className="mm-error">{error}</p>}{content}</div>{footer && <footer className="mm-dialog-footer">{footer}</footer>}</DialogContent></Dialog>
+  </section>;
+}

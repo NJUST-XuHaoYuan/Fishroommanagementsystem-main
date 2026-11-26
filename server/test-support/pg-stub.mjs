@@ -165,6 +165,17 @@ function appStateRow(sql, values = []) {
   const publicBioRow = publicBioProjectionRow(sql, values);
   if (publicBioRow) return publicBioRow;
   const row = {};
+  if (/\bAS matching_logs\b/.test(sql)) row.matching_logs = (state.logs ?? []).filter(log => log.id === values[1]);
+  if (/\bAS target_stock\b/.test(sql) && /\bAS existing_bio_records\b/.test(sql)) {
+    const out = new Set((state.shipments ?? []).filter(shipment => shipment.status !== "preparing").flatMap(shipment => shipment.itemStockIds ?? []));
+    for (const order of state.orders ?? []) if (order.status === "completed") for (const item of order.items ?? []) if (!item.inventoryRemovedAt) out.add(item.stockItemId);
+    row.target_stock = (state.stock ?? []).filter(item => values[2] ? values[3].includes(item.id) : values[4].includes(item.subTankId) && !item.lost && item.tankTransfer?.status !== "in_transit" && !out.has(item.id));
+    row.existing_bio_records = (state.bioRecords ?? []).filter(record => record.sourceType === "dailyLog" && record.sourceLogId === values[1]);
+  }
+  if (/\bAS stock_id_counts\b/.test(sql)) {
+    row.stock_id_counts = Object.fromEntries((values[1] ?? []).map(id => [id, (state.stock ?? []).filter(item => item.id === id).length]));
+    row.global_bio_records = (state.bioRecords ?? []).filter(record => values[2].includes(record.id));
+  }
   if (/\bAS transfer_orders\b/.test(sql)) {
     row.transfer_orders = (state.orders ?? []).filter((item) => item.id === values[1]);
     row.transfer_shipments = (state.shipments ?? []).map(({ status, itemStockIds }) => ({ status, itemStockIds }));
@@ -341,6 +352,15 @@ function runQuery(query, values = []) {
     });
     return result(scoped);
   }
+  if (/\bown_records AS/.test(sql)) {
+    const [, username, siteId, subTankId, limit] = values;
+    const tank = (state.logs ?? []).filter(entry => (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!subTankId || entry.subTankId === subTankId)).map(entry => ({ kind: "tank", entry }));
+    const fish = (state.bioRecords ?? []).filter(entry => {
+      const item = (state.stock ?? []).find(stock => stock.id === entry.stockItemId);
+      return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId);
+    }).map(entry => ({ kind: "fish", entry }));
+    return result([...tank, ...fish].sort((a, b) => b.entry.date.localeCompare(a.entry.date) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit));
+  }
   if (/\bpicker_records\s+AS\s+MATERIALIZED\b/i.test(sql)) return result(catalogPickerPreviewRows(values));
   if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
     return result([appStateRow(sql, values)]);
@@ -354,6 +374,14 @@ function runQuery(query, values = []) {
         state = JSON.parse(values[1]);
       } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
         state = structuredClone(state);
+        if (/WHEN 'create' THEN COALESCE\(data -> 'logs'/.test(sql)) {
+          const [, id, storedLog, operation, maxLogs, mode, bioUpdates] = values;
+          const log = JSON.parse(storedLog);
+          state.logs = mode === "create" ? [...(state.logs ?? []), log] : mode === "update" ? (state.logs ?? []).map(item => item.id === id ? log : item) : (state.logs ?? []).filter(item => item.id !== id);
+          state.bioRecords = [...(state.bioRecords ?? []).filter(record => !(record.sourceType === "dailyLog" && record.sourceLogId === id)), ...JSON.parse(bioUpdates)];
+          state.operationLogs = [JSON.parse(operation), ...(state.operationLogs ?? []).slice(0, maxLogs)];
+          return result([], 1);
+        }
         for (const match of sql.matchAll(/'\{([A-Za-z][A-Za-z0-9]*)\}',\s*\$(\d+)::jsonb,\s*true/gi)) state[match[1]] = JSON.parse(values[Number(match[2]) - 1]);
         const stockReplace = sql.match(/stock_row\.stock_item\s*->>\s*'id'[\s\S]*?=\s*\$(\d+)\s+THEN\s*\$(\d+)::jsonb/);
         if (stockReplace) state.stock = (state.stock ?? []).map((item) => item.id === values[Number(stockReplace[1]) - 1] ? JSON.parse(values[Number(stockReplace[2]) - 1]) : item);

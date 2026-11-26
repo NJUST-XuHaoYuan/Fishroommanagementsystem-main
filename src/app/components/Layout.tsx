@@ -290,7 +290,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
         )}
         <button
           onClick={() => navigate("workbench")}
-          className={navButtonClass(["workbench", "workbenchSales", "workbenchInventory"].includes(view), "main")}
+          className={`${navButtonClass(["workbench", "workbenchSales", "workbenchInventory"].includes(view), "main")} md:hidden`}
         >
           <ClipboardList className="size-4 shrink-0" />
           <span>工作台</span>
@@ -484,8 +484,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
             </Button>
             {isWorkbench ? (
               <div className="min-w-0 py-1">
-                <h1 className="text-base font-semibold leading-6 text-foreground">工作台</h1>
-                <p className="text-xs leading-5 text-muted-foreground sm:text-sm">安排维护工作，跟进自己的订单，处理库存。</p>
+                <h1 className="text-base font-semibold leading-6 text-foreground">{view === "workbench" ? "维护工作台" : "工作台"}</h1>
               </div>
             ) : (
               <>
