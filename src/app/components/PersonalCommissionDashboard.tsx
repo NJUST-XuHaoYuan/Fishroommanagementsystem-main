@@ -113,7 +113,7 @@ export function PersonalCommissionDashboard() {
     setData(null);
     setError("");
     setLoading(true);
-    if (!username || role !== "staff") return () => controller.abort();
+    if (!username || (role !== "staff" && role !== "finance")) return () => controller.abort();
     void (async () => {
       try {
         // The server resolves identity and the current month. Never send a user or month selector.
@@ -132,6 +132,6 @@ export function PersonalCommissionDashboard() {
     return () => controller.abort();
   }, [username, role, month, refreshVersion]);
 
-  if (!username || role !== "staff") return null;
+  if (!username || (role !== "staff" && role !== "finance")) return null;
   return <PersonalCommissionContent data={data} loading={loading} error={error} onRefresh={() => setRefreshVersion((value) => value + 1)} />;
 }

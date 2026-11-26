@@ -399,7 +399,7 @@ export function Layout({ view, setView, children, saveStatus }: Props) {
               <div className="truncate text-[11px] text-muted-foreground">账号：{user.username}</div>
             )}
             <Badge variant="secondary" className="fishroom-status-pill w-fit text-xs">
-              {user.role === "admin" ? "管理员" : "店员"}
+              {user.role === "admin" ? "管理员" : user.role === "finance" ? "财务" : "店员"}
             </Badge>
           </div>
           <div className="flex shrink-0 items-center gap-1">

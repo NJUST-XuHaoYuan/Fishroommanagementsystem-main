@@ -181,3 +181,11 @@ test("masks sensitive values while retaining the final four characters", () => {
   assert.equal(maskedSensitiveValue("6222021001116245"), "••••••••••••6245");
   assert.equal(maskedSensitiveValue(""), "");
 });
+
+
+test("self profile preserves the finance account role", () => {
+  const { profile } = normalizePersonnelSelfProfileResult({ ok: true, profile: {
+    ...completeProfile(), account: { username: "finance-a", accessRole: "finance", accountEnabled: true },
+  } });
+  assert.equal(profile.account.accessRole, "finance");
+});

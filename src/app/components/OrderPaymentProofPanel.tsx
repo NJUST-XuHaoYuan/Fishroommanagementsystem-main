@@ -3,6 +3,7 @@ import { Check, FileCheck2, Loader2, Plus, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 import { useStore, type Order, type Store } from "../store";
 import { authJsonHeaders } from "../utils/authSession";
+import { usePermission } from "../utils/permissions";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerEvidenceAttachment, type NewCustomerSession } from "../utils/newCustomerEvidence";
 import { paymentProofDraftAllocation, getShippingSettlementSummary } from "../utils/shippingSettlement";
 import type { PaymentProofClaim, PaymentProofDetail } from "../utils/orderPaymentProof";
@@ -24,6 +25,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   presentation?: "default" | "cashier"; selectedClaimId?: string; onDetailChange?: (detail: PaymentProofDetail | null) => void;
 }) {
   const { state } = useStore();
+  const financePermission = usePermission("finance");
   const order = state.orders.find(item => item.id === orderId);
   const cashierOrder = order?.orderFormSchemaVersion === 4;
   const shippingSummary = order ? getShippingSettlementSummary(order, state.shipments) : null;
@@ -167,6 +169,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   const fieldError = (field: PaymentProofDraftField) => fieldIssues.find(issue => issue.field === field)?.message;
   const fieldErrorId = (field: PaymentProofDraftField) => `${fieldId}-${field}-error`;
   const review = (claim: PaymentProofClaim, decision: "approve" | "reject") => {
+    if (!detail?.canReview || !financePermission.canUpdate) return setError("付款凭证由财务岗位或管理员核验。");
     const selected = reviewChoice[claim.id]; const reason = reasons[claim.id]?.trim();
     if (decision === "approve" && !selected) return setError("请先选择关联现有收款流水，或明确选择新增一笔收款。");
     if (decision === "reject" && !reason) return setError("请填写驳回原因，方便订单负责人补充正确凭证。");
@@ -192,7 +195,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
           {claim.status === "rejected" && <p className="break-words text-sm text-destructive">驳回原因：{claim.rejectionReason || "请联系财务核对"}</p>}
           {claim.reviewedBy && <p className="text-xs text-muted-foreground">核验人：{claim.reviewedBy} · {String(claim.reviewedAt || "").replace("T", " ")}</p>}
           {claim.status === "rejected" && detail.canSubmit && !reviewOnly && <Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => { setDraft({ purpose: claim.purpose || "order", claimId: claim.id, expectedVersion: claim.version, amount: String(claim.amount), time: claim.time.slice(0, 16), paymentMethodId: claim.paymentMethodId, externalTransactionNo: claim.externalTransactionNo || "", notes: claim.notes || "", attachments: [] }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}>补充正确凭证并重提</Button>}
-          {claim.status === "pending" && detail.canReview && <div className="space-y-3 border-t pt-3">
+          {claim.status === "pending" && detail.canReview && financePermission.canUpdate && <div className="space-y-3 border-t pt-3">
             <label className="grid gap-1.5 text-sm"><span>核验后关联的收款流水</span><select aria-label={`核验流水 ${claim.id}`} value={reviewChoice[claim.id] || ""} disabled={busy || uploading} className="fishroom-control min-h-11 w-full min-w-0 rounded-md border bg-background px-3 text-sm" onChange={event => setReviewChoice(current => ({ ...current, [claim.id]: event.target.value }))}><option value="">请选择，避免同笔到账重复计收</option>{eligible.map(payment => <option key={payment.id} value={payment.id}>{payment.time} · {currency(payment.amount)} · {payment.externalTransactionNo || payment.id} · {payment.verificationStatus === "pending" ? "待核销" : "已核销"}</option>)}<option value="new" disabled={eligible.length > 0}>无对应现有流水，新增并确认到账</option></select></label>
             <label className="grid gap-1.5 text-sm"><span>核验说明／驳回原因</span><Textarea aria-label={`核验说明 ${claim.id}`} rows={2} disabled={busy} value={reasons[claim.id] || ""} onChange={event => setReasons(current => ({ ...current, [claim.id]: event.target.value }))} placeholder="驳回时必填；通过前请核对图片与真实到账" /></label>
             <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => review(claim, "reject")}><X className="size-4" />驳回凭证</Button><Button type="button" className="min-h-11" disabled={busy || uploading} onClick={() => review(claim, "approve")}><FileCheck2 className="size-4" />核验通过</Button></div>

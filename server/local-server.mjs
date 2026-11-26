@@ -12,6 +12,7 @@ import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
 import { createMiniProgramAuth } from "./miniprogram-auth.mjs";
+import { isAccountRole, normalizeAccountRole, permissionsForAccountRole } from "./account-role-rules.mjs";
 import { createCloudTestRequestGuard, validateCloudTestEnvironment } from "./cloud-test-access.mjs";
 import { createCloudTestMediaResolver } from "./cloud-test-media.mjs";
 import { inspectPreservedVideoFile, preserveOriginalVideoRequested } from "./preserved-video-upload.mjs";
@@ -2319,7 +2320,7 @@ function isDefaultCredential(username, password) {
 function publicUserFromAccount(account = {}, state = null) {
   if (!isPersonnelAccountEnabled(account)) return null;
   const username = String(account.username ?? "").trim();
-  const role = account.accessRole === "admin" ? "admin" : "staff";
+  const role = normalizeAccountRole(account.accessRole);
   if (!username) return null;
   if (role === "admin") return { username, role };
   const sites = state && Array.isArray(state.sites) ? getSitesFromState(state) : [];
@@ -2331,10 +2332,10 @@ function authAccountPermissionSummary(account = {}) {
   if (!isPersonnelAccountEnabled(account)) return null;
   const username = String(account.username ?? "").trim();
   if (!username) return null;
-  const accessRole = account.accessRole === "admin" ? "admin" : "staff";
+  const accessRole = normalizeAccountRole(account.accessRole);
   const permissions = accessRole === "admin"
     ? fullPermissionsValue()
-    : normalizePermissionsForStorage(account.permissions);
+    : permissionsForAccountRole(accessRole, normalizePermissionsForStorage(account.permissions));
   if (accessRole !== "admin") permissions.accounts = emptyPermissionsValue().accounts;
   return {
     personnelId: String(account?.id ?? ""),
@@ -2358,13 +2359,13 @@ function sanitizePersonnelRecordForResponse(person = {}, req, options = {}) {
   safePerson.missingProfileFields = missingPersonnelRecordFields(person);
   safePerson.profileComplete = safePerson.missingProfileFields.length === 0;
   safePerson.accountEnabled = isPersonnelAccountEnabled(safePerson);
-  if (safePerson.accessRole !== "admin" && safePerson.accessRole !== "staff") safePerson.accessRole = "staff";
+  safePerson.accessRole = normalizeAccountRole(safePerson.accessRole);
   safePerson.visibleSiteIds = safePerson.accessRole === "admin"
     ? []
     : normalizeVisibleSiteIds(safePerson.visibleSiteIds, []);
   safePerson.employmentStatus = isPersonnelResigned(safePerson) ? "resigned" : "active";
   if (options.includePermissions || isAdmin || isCurrentUser) {
-    safePerson.permissions = normalizePermissionsForStorage(safePerson.permissions);
+    safePerson.permissions = permissionsForAccountRole(safePerson.accessRole, normalizePermissionsForStorage(safePerson.permissions));
   } else {
     delete safePerson.permissions;
   }
@@ -2455,7 +2456,7 @@ function verifyAuthToken(token) {
   }
   try {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (typeof parsed.username !== "string" || (parsed.role !== "admin" && parsed.role !== "staff")) return null;
+    if (typeof parsed.username !== "string" || !isAccountRole(parsed.role)) return null;
     if (typeof parsed.exp !== "number" || parsed.exp <= Date.now()) return null;
     return parsed;
   } catch {
@@ -2519,7 +2520,7 @@ function hasModulePermission(account = {}, module, action = "update") {
   if (account?.accessRole === "admin") return true;
   if (module === "accounts") return false;
   if (!PERMISSION_MODULE_KEYS.includes(module) || !PERMISSION_ACTIONS.includes(action)) return false;
-  return normalizePermissionsForStorage(account?.permissions)?.[module]?.[action] === true;
+  return permissionsForAccountRole(account?.accessRole, normalizePermissionsForStorage(account?.permissions))?.[module]?.[action] === true;
 }
 
 function requireModulePermissionForAuth(req, module, action = "update") {
@@ -2650,7 +2651,7 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   const hasAccount = Boolean(username);
   const resigned = isPersonnelResigned(existing);
   const accountEnabled = hasAccount && !resigned && (source.accountEnabled ?? existing?.accountEnabled ?? true) !== false;
-  const accessRole = hasAccount && (source.accessRole ?? existing?.accessRole) === "admin" ? "admin" : "staff";
+  const accessRole = hasAccount ? normalizeAccountRole(source.accessRole ?? existing?.accessRole) : "staff";
   const sites = getSitesFromState(state);
   const visibleSiteIds = accessRole === "admin"
     ? []
@@ -2676,11 +2677,14 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
   if (hasAccount && !String(existing?.password ?? "").trim() && !plainPassword) {
     throw new Error("首次开通账号或补全旧账号时必须设置登录密码");
   }
-  if (accountEnabled && accessRole === "staff" && visibleSiteIds.length === 0) {
-    throw new Error("启用普通账号时至少选择一个可见场地");
+  if (accountEnabled && accessRole !== "admin" && visibleSiteIds.length === 0) {
+    throw new Error("启用普通或财务账号时至少选择一个可见场地");
   }
   if (plainPassword && plainPassword.length < 6) throw new Error("登录密码至少 6 位");
-  const sourcePermissions = source.permissions ?? existing?.permissions;
+  const sourcePermissions = normalizePermissionsForStorage(source.permissions ?? existing?.permissions);
+  if (accessRole === "finance" && existing?.accessRole !== "finance" && source.permissions?.finance?.delete !== true) {
+    sourcePermissions.finance.delete = false;
+  }
   const usernameChanged = Boolean(existing) && String(existing?.username ?? "") !== username;
   const securityStateChanged = Boolean(existing) && (
     Boolean(plainPassword) ||
@@ -2704,9 +2708,7 @@ function normalizePersonnelInput(input = {}, existing = null, state = {}) {
       ? emptyPermissionsValue()
       : accessRole === "admin"
       ? fullPermissionsValue()
-      : sourcePermissions
-      ? normalizePermissionsForStorage(sourcePermissions)
-      : emptyPermissionsValue(),
+      : permissionsForAccountRole(accessRole, normalizePermissionsForStorage(sourcePermissions)),
     gender: selfProfile.gender,
     nativePlace: selfProfile.nativePlace,
     birthMonth: selfProfile.birthMonth,
@@ -3159,7 +3161,7 @@ function selfProfileResponseForPersonnel(state = {}, person = {}) {
     personnelId: String(person?.id ?? ""),
     username: String(person?.username ?? ""),
     accountEnabled: isPersonnelAccountEnabled(person),
-    accessRole: person?.accessRole === "admin" ? "admin" : "staff",
+    accessRole: normalizeAccountRole(person?.accessRole),
   };
   const profileComplete = missingProfileFields.length === 0;
   return {
@@ -3333,7 +3335,9 @@ function stationNotificationForAuth(state = {}, req, notification = {}, options 
 
 function stationNotificationPayloadForAuth(state = {}, req, requestedLimit = 100, options = {}) {
   const username = String(req.auth?.user?.username ?? "").trim();
-  const allNotifications = notificationsForRecipient(currentStationNotifications(state), username);
+  const allNotifications = notificationsForRecipient(currentStationNotifications(state), username)
+    .filter(notification => notification.type !== "payment_proof" || notification.notificationRole !== "approver" ||
+      hasModulePermission(req.auth?.account, "finance", "update"));
   const limit = Math.min(500, Math.max(1, Number(requestedLimit) || 100));
   const ordersById = new Map(visibleOrdersForNotificationAuth(state, req.auth?.account)
     .map((order) => [String(order?.id ?? ""), order]));
@@ -5808,7 +5812,7 @@ function refreshLockedMutationAuth(req, state = {}, {
   if (!account || !isPersonnelAccountEnabled(account) ||
       String(account.id ?? "") !== String(req.auth?.account?.id ?? "") ||
       sessionVersionForAccount(account) !== sessionVersionForAccount(req.auth?.account) ||
-      (account.accessRole === "admin" ? "admin" : "staff") !== req.auth?.user?.role) {
+      normalizeAccountRole(account.accessRole) !== req.auth?.user?.role) {
     throw httpError(403, message, code);
   }
   req.auth = { ...req.auth, account };
@@ -8339,7 +8343,7 @@ async function backfillPersonnelProfiles() {
       const username = String(person.username ?? "").trim();
       const resigned = isPersonnelResigned(person);
       const accountEnabled = Boolean(username) && !resigned && person.accountEnabled !== false;
-      const accessRole = username && person.accessRole === "admin" ? "admin" : "staff";
+      const accessRole = username ? normalizeAccountRole(person.accessRole) : "staff";
       let visibleSiteIds = accessRole === "admin" ? [] : normalizeVisibleSiteIds(person.visibleSiteIds, sites);
       // Before this migration an empty staff scope meant all sites. Persist that legacy
       // meaning explicitly so all future empty scopes can safely fail closed.
@@ -8372,7 +8376,9 @@ async function backfillPersonnelProfiles() {
           ? emptyPermissionsValue()
           : accessRole === "admin"
           ? fullPermissionsValue()
-          : normalizeLegacyPermissionsForStorage(person.permissions),
+          : permissionsForAccountRole(accessRole, accessRole === "finance"
+            ? normalizePermissionsForStorage(person.permissions)
+            : normalizeLegacyPermissionsForStorage(person.permissions)),
       };
     });
     const nextOrders = backfillOrderContactPersonnelIds(nextPersonnel, state.orders);
@@ -10272,6 +10278,8 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "finance", "create");
       const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
       if (scope.requested === ALL_SITE_ID) throw new Error("导入收款账单前请选择具体场地");
       const paymentMethod = configuredPaymentMethod(state.systemSettings, body.paymentMethodId);
@@ -10416,10 +10424,11 @@ async function handleApi(req, res, url) {
       const action = String(body.action ?? "link");
       if (!['link', 'unlink'].includes(action)) throw new Error("不支持的账单关联操作");
       const operator = authenticatedOperator(req);
-      const financeActor = hasModulePermission(req.auth?.account, "finance", "update");
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedMutationAuth(req, state);
+      const financeActor = hasModulePermission(req.auth?.account, "finance", "update");
       const statementResult = await client.query(
         `SELECT * FROM finance_payment_statements WHERE id = $1 AND state_id = $2 FOR UPDATE`,
         [String(body.statementId ?? ""), stateId]
@@ -10555,6 +10564,8 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "finance", permissionAction);
       const transferId = String(body.id ?? body.transfer?.id ?? "").trim();
       const existingResult = transferId
         ? await client.query(
@@ -10707,6 +10718,8 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "finance", "update");
       const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
       if (scope.requested === ALL_SITE_ID) throw new Error("关联订单前请选择具体场地");
       const settlement = await client.query(
@@ -10860,6 +10873,8 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "finance", "create");
       const scope = financeSiteScope(state, req.auth?.account, body.siteId ?? DEFAULT_SITE_ID);
       if (scope.requested === ALL_SITE_ID) throw new Error("导入抖店账单前请选择具体场地");
       const duplicateBatch = await client.query(
@@ -11503,7 +11518,7 @@ async function handleApi(req, res, url) {
       if (isPersonnelResigned(target)) throw new Error("离职账号不能修改权限");
       const nextPermissions = target.accessRole === "admin"
         ? fullPermissionsValue()
-        : normalizePermissionsForStorage(body.permissions);
+        : permissionsForAccountRole(target.accessRole, normalizePermissionsForStorage(body.permissions));
       const nextPersonnel = personnel.map((person) =>
         String(person?.id ?? "") === targetId ? { ...person, permissions: nextPermissions } : person
       );

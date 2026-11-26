@@ -983,7 +983,7 @@ export function PersonalCenterView() {
                     <ReadonlyItem label="入职日期">{profile.employment.hireDate}</ReadonlyItem>
                     <ReadonlyItem label="所属工作区域">{workSiteNames}</ReadonlyItem>
                     <ReadonlyItem label="登录账号">{profile.account.username || state.user?.username}</ReadonlyItem>
-                    <ReadonlyItem label="账号角色">{profile.account.accessRole === "admin" ? "管理员" : "普通账号"}</ReadonlyItem>
+                    <ReadonlyItem label="账号角色">{profile.account.accessRole === "admin" ? "管理员" : profile.account.accessRole === "finance" ? "财务" : "普通账号"}</ReadonlyItem>
                     <ReadonlyItem label="账号状态">{profile.account.accountEnabled === false ? "已停用" : "已启用"}</ReadonlyItem>
                   </div>
                 </Card>

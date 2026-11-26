@@ -188,7 +188,7 @@ export function normalizePersonnelSelfProfileResult(value: unknown): {
       personnelId: text(accountSource.personnelId),
       username: text(accountSource.username),
       accountEnabled: accountSource.accountEnabled !== false,
-      accessRole: accountSource.accessRole === "admin" ? "admin" : "staff",
+      accessRole: accountSource.accessRole === "admin" ? "admin" : accountSource.accessRole === "finance" ? "finance" : "staff",
     },
     profileRevision: text(profileSource.profileRevision || result.profileRevision),
     missingFields: stringArray(editableSource.missingFields ?? profileSource.missingFields),

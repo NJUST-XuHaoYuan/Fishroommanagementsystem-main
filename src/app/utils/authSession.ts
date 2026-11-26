@@ -26,7 +26,7 @@ function readSession(): AuthSession | null {
     const session = JSON.parse(raw) as Partial<AuthSession>;
     if (
       typeof session.username !== "string" ||
-      (session.role !== "admin" && session.role !== "staff") ||
+      (session.role !== "admin" && session.role !== "staff" && session.role !== "finance") ||
       typeof session.expiresAt !== "number"
     ) {
       clearAuthSession();

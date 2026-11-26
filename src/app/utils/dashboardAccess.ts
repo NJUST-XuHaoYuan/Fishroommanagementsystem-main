@@ -2,7 +2,7 @@ import type { ViewKey } from "../components/Layout";
 import type { User } from "../store";
 
 export function canAccessDashboard(user: User): boolean {
-  return user?.role === "admin" || user?.role === "staff";
+  return user?.role === "admin" || user?.role === "staff" || user?.role === "finance";
 }
 
 /** The business dashboard stays separate from the staff member's personal home. */

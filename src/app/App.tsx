@@ -304,7 +304,7 @@ function normalizeAuthAccountPermissionSummary(
   const personnelId = String(source.personnelId ?? "").trim();
   const username = String(source.username ?? "").trim();
   if (!personnelId || !username || username !== expectedUsername) return undefined;
-  const accessRole = source.accessRole === "admin" ? "admin" : source.accessRole === "staff" ? "staff" : null;
+  const accessRole = source.accessRole === "admin" ? "admin" : source.accessRole === "finance" ? "finance" : source.accessRole === "staff" ? "staff" : null;
   if (!accessRole) return undefined;
   return {
     personnelId,
@@ -319,7 +319,7 @@ function userFromAuthMeResponse(result: any, fallbackUser: User): User {
   if (!result?.user) return null;
   const username = String(result.user.username ?? fallbackUser?.username ?? "").trim();
   if (!username) return null;
-  const role = result.user.role === "admin" ? "admin" : "staff";
+  const role = result.user.role === "admin" ? "admin" : result.user.role === "finance" ? "finance" : "staff";
   const visibleSiteIds = Array.isArray(result.user.visibleSiteIds)
     ? result.user.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean)
     : fallbackUser?.visibleSiteIds;
@@ -439,7 +439,7 @@ function normalizePersistedState(data: any, currentUser: User): Store {
         const name = String(person.name ?? person.username ?? "");
         const username = String(person.username ?? "");
         const resigned = person.employmentStatus === "resigned" || Boolean(person.resignedAt);
-        const accessRole = person.accessRole === "admin" || person.accessRole === "staff"
+        const accessRole = person.accessRole === "admin" || person.accessRole === "staff" || person.accessRole === "finance"
           ? person.accessRole
           : username === "admin" ? "admin" : "staff";
         return {
@@ -1726,7 +1726,7 @@ function AdminApp() {
       if (result.token && result.user) {
         const currentUser = stateRef.current.user;
         const returnedUsername = String(result.user.username ?? "").trim();
-        const returnedRole = result.user.role === "admin" ? "admin" : "staff";
+        const returnedRole = result.user.role === "admin" ? "admin" : result.user.role === "finance" ? "finance" : "staff";
         const retainedAccount = currentUser?.account && returnedUsername
           ? {
               ...currentUser.account,
@@ -1888,7 +1888,7 @@ function AdminApp() {
       })
       .then((result) => {
         const restoredUser = userFromAuthMeResponse(result, sessionUser);
-        if (!restoredUser || (restoredUser.role === "staff" && !restoredUser.account?.accountEnabled)) {
+        if (!restoredUser || (restoredUser.role !== "admin" && !restoredUser.account?.accountEnabled)) {
           throw new Error("Authenticated account permission summary is missing");
         }
         setStateBase(() => normalizePersistedState(EMPTY_PERSISTED_STATE, restoredUser));

@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
-import { ACTION_LABELS, normalizePermissions, PERMISSION_MODULES } from "../utils/permissions";
+import { ACTION_LABELS, permissionsForRole, PERMISSION_MODULES } from "../utils/permissions";
 import { toast } from "sonner";
 import { Search } from "lucide-react";
 import { confirmWrite } from "../utils/writeConfirm";
@@ -50,6 +50,7 @@ function accountSearchText(person: Personnel): string {
     person.username,
     person.department,
     person.role,
+    person.accessRole === "finance" ? "财务" : person.accessRole === "admin" ? "管理员" : "普通账号",
     isPersonnelAccountEnabled(person) ? "启用" : "停用",
     isPersonnelResigned(person) ? "离职" : "在职",
   ].filter(Boolean).join(" ").toLowerCase();
@@ -79,11 +80,14 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
   const selectedResigned = isPersonnelResigned(selected);
   const selectedAccountEnabled = Boolean(selected && isPersonnelAccountEnabled(selected));
   const savedPermissions = useMemo(
-    () => normalizePermissions(selected?.permissions),
-    [selected?.permissions]
+    () => permissionsForRole(selected?.accessRole ?? "staff", selected?.permissions),
+    [selected?.permissions, selected?.accessRole]
   );
   const permissions = draftPermissions ?? savedPermissions;
   const canEditPermissions = Boolean(selected && !selectedResigned && selected.accessRole !== "admin");
+  const canEditModuleAction = (module: keyof PermissionSet, action: PermissionAction) => canEditPermissions &&
+    (module !== "finance" || (selected?.accessRole === "finance" && action === "delete"));
+  const canEditModule = (module: keyof PermissionSet) => ACTIONS.some(action => canEditModuleAction(module, action));
   const hasUnsavedChanges = Boolean(
     canEditPermissions && !permissionsEqual(permissions, savedPermissions)
   );
@@ -122,7 +126,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
   };
 
   const updatePermission = (moduleKey: keyof PermissionSet, action: PermissionAction, checked: boolean) => {
-    if (!selected) return;
+    if (!selected || !canEditModuleAction(moduleKey, action)) return;
     if (selectedResigned) {
       toast.info("离职人员的账号不能再授权");
       return;
@@ -157,7 +161,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
     for (const mod of PERMISSION_MODULES) {
       next[mod.key] = { create: checked, update: checked, delete: checked };
     }
-    setDraftPermissions(next);
+    setDraftPermissions(permissionsForRole(selected.accessRole, next));
   };
 
   const resetDraft = () => {
@@ -184,13 +188,13 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
   };
 
   const applyModule = (moduleKey: keyof PermissionSet, checked: boolean) => {
-    if (!canEditPermissions) return;
+    if (!selected || !canEditModule(moduleKey)) return;
     setDraftPermissions((current) => {
       const next = copyPermissions(current ?? savedPermissions);
-      return {
-        ...next,
-        [moduleKey]: { create: checked, update: checked, delete: checked },
-      };
+      for (const action of ACTIONS) {
+        if (canEditModuleAction(moduleKey, action)) next[moduleKey][action] = checked;
+      }
+      return next;
     });
   };
 
@@ -199,6 +203,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
     setDraftPermissions((current) => {
       const next = copyPermissions(current ?? savedPermissions);
       for (const mod of PERMISSION_MODULES) {
+        if (!canEditModuleAction(mod.key, action)) continue;
         next[mod.key] = {
           ...next[mod.key],
           [action]: checked,
@@ -217,7 +222,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
   const renderAccountBadges = (person: Personnel) => (
     <span className="flex shrink-0 flex-wrap items-center justify-end gap-1">
       <Badge variant={person.accessRole === "admin" ? "default" : "secondary"} className="text-xs">
-        {person.accessRole === "admin" ? "管理员" : "普通账号"}
+        {person.accessRole === "admin" ? "管理员" : person.accessRole === "finance" ? "财务" : "普通账号"}
       </Badge>
       {!isPersonnelAccountEnabled(person) && (
         <Badge variant="outline" className="border-amber-300 text-xs text-amber-700">已停用</Badge>
@@ -343,6 +348,9 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                     ? `账号当前已停用，所配权限暂不生效；当前已选 ${permissionCount}/${totalPermissionCount} 项。`
                     : `先勾选需要的权限，再一次保存。当前已选 ${permissionCount}/${totalPermissionCount} 项。`}
                 </p>
+                {selected?.accessRole !== "admin" && <p className="mt-2 text-xs leading-5 text-muted-foreground">{selected?.accessRole === "finance"
+                  ? "财务岗位自动拥有财务登记与核验权限，删除权限需单独授权；其他模块按下方配置。"
+                  : "付款凭证与收退款由财务核验。如需承担财务工作，请先到人员管理将账号角色设为“财务”。"}</p>}
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" onClick={() => applyAll(true)} disabled={!canEditPermissions}>
@@ -418,14 +426,14 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <div className="font-medium">{mod.label}</div>
-                              <div className="text-xs text-muted-foreground">{mod.group}</div>
+                              <div className="text-xs text-muted-foreground">{mod.key === "finance" ? "财务岗位专属" : mod.group}</div>
                             </div>
                             <Button
                               type="button"
                               size="sm"
                               variant="ghost"
                               className="h-8 px-2 text-xs"
-                              disabled={!canEditPermissions}
+                              disabled={!canEditModule(mod.key)}
                               onClick={() => applyModule(mod.key, !rowChecked)}
                             >
                               {rowChecked ? "清空本行" : "全选本行"}
@@ -439,7 +447,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                               <label
                                 htmlFor={checkboxId}
                                 className={`inline-flex min-h-11 min-w-11 items-center justify-center ${
-                                  canEditPermissions ? "cursor-pointer" : "cursor-not-allowed"
+                                  canEditModuleAction(mod.key, action) ? "cursor-pointer" : "cursor-not-allowed"
                                 }`}
                               >
                                 <Checkbox
@@ -447,7 +455,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                                   className="min-h-4!"
                                   aria-label={`${mod.label}：${ACTION_LABELS[action]}`}
                                   checked={Boolean(selected && (selected.accessRole === "admin" || permissions[mod.key][action]))}
-                                  disabled={!canEditPermissions}
+                                  disabled={!canEditModuleAction(mod.key, action)}
                                   onCheckedChange={(value) => updatePermission(mod.key, action, value === true)}
                                 />
                               </label>
@@ -469,13 +477,13 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <h4 id={`permission-card-${mod.key}`} className="text-sm font-semibold">{mod.label}</h4>
-                        <p className="text-xs text-muted-foreground">{mod.group}</p>
+                        <p className="text-xs text-muted-foreground">{mod.key === "finance" ? "财务岗位专属" : mod.group}</p>
                       </div>
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
-                        disabled={!canEditPermissions}
+                        disabled={!canEditModule(mod.key)}
                         onClick={() => applyModule(mod.key, !rowChecked)}
                       >
                         {rowChecked ? "清空" : "全选"}
@@ -489,7 +497,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                             key={action}
                             htmlFor={checkboxId}
                             className={`flex min-h-11 items-center justify-between gap-4 rounded-lg border px-3 py-2 text-sm ${
-                              canEditPermissions ? "cursor-pointer" : "cursor-not-allowed opacity-70"
+                              canEditModuleAction(mod.key, action) ? "cursor-pointer" : "cursor-not-allowed opacity-70"
                             }`}
                           >
                             <span>{ACTION_LABELS[action]}</span>
@@ -498,7 +506,7 @@ export function PermissionsView({ embedded = false }: { embedded?: boolean } = {
                               className="min-h-4!"
                               aria-label={`${mod.label}：${ACTION_LABELS[action]}`}
                               checked={Boolean(selected && (selected.accessRole === "admin" || permissions[mod.key][action]))}
-                              disabled={!canEditPermissions}
+                              disabled={!canEditModuleAction(mod.key, action)}
                               onCheckedChange={(value) => updatePermission(mod.key, action, value === true)}
                             />
                           </label>

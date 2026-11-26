@@ -1,3 +1,4 @@
+import { usePermission } from "../utils/permissions";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -560,6 +561,7 @@ export function NotificationNavBadge({ unreadCount }: { unreadCount: number }) {
 
 export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId: string) => void }) {
   const { state, setState, setActiveSiteId } = useStore();
+  const financePermission = usePermission("finance");
   const viewerRef = useRef(state.user);
   viewerRef.current = state.user;
   const notificationRequestSequence = useRef(0);
@@ -1334,7 +1336,7 @@ export function NotificationCenterView({ onOpenOrder }: { onOpenOrder: (orderId:
                         </Button>
                       )}
                       {notification.type === "credit_sale_confirmation" && <p className="text-xs text-muted-foreground">旧赊销审批已停用。未被到账或付款凭证覆盖的金额，发货时自动记录赊销。</p>}
-                      {notification.type === "payment_proof" && notification.orderId && <Button type="button" className="min-h-11" variant={pending ? "default" : "outline"} onClick={() => { setProofNotification(notification); void markRead(notification); }}><FileUser className="size-4" />{pending && notification.notificationRole === "approver" ? "查看凭证并核验" : "查看付款凭证"}</Button>}
+                      {notification.type === "payment_proof" && notification.orderId && <Button type="button" className="min-h-11" variant={pending ? "default" : "outline"} onClick={() => { setProofNotification(notification); void markRead(notification); }}><FileUser className="size-4" />{pending && notification.notificationRole === "approver" && financePermission.canUpdate ? "查看凭证并核验" : "查看付款凭证"}</Button>}
                       {pending && notification.type === "stock_approval" && notification.canApprove === true && (
                         <>
                           <Button

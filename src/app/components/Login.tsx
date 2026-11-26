@@ -33,7 +33,7 @@ export function Login() {
       }
       const user = {
         username: String(result.user.username ?? ""),
-        role: result.user.role === "admin" ? "admin" as const : "staff" as const,
+        role: result.user.role === "admin" ? "admin" as const : result.user.role === "finance" ? "finance" as const : "staff" as const,
         ...(Array.isArray(result.user.visibleSiteIds) && result.user.visibleSiteIds.length > 0
           ? { visibleSiteIds: result.user.visibleSiteIds.map((item: unknown) => String(item ?? "").trim()).filter(Boolean) }
           : {}),

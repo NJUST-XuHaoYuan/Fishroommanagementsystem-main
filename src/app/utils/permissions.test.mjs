@@ -21,6 +21,7 @@ registerHooks({
 const {
   canRegisterMaintenanceLoss,
   permissionStateForUser,
+  permissionsForRole,
   requireMaintenanceLossPermissions,
 } = await import("./permissions.ts");
 
@@ -46,14 +47,14 @@ test("staff permissions come from the auth account summary without personnel sta
       username: "staff-a",
       accessRole: "staff",
       accountEnabled: true,
-      permissions: permissionsWith("finance", "update"),
+      permissions: permissionsWith("orders", "update"),
     },
   });
 
   assert.equal(result.isAdmin, false);
-  assert.equal(result.permissions.finance.update, true);
+  assert.equal(result.permissions.finance.update, false);
   assert.equal(result.permissions.finance.create, false);
-  assert.equal(result.permissions.orders.update, false);
+  assert.equal(result.permissions.orders.update, true);
 });
 
 test("staff permissions fail closed when the summary is missing, disabled, or mismatched", () => {
@@ -133,4 +134,39 @@ test("maintenance loss submit gate checks both permission modules", () => {
   );
   assert.equal(denied, false);
   assert.equal(lossCreateChecked, false);
+});
+
+
+test("finance is a scoped non-admin role with registration and verification but no deletion by default", () => {
+  const result = permissionStateForUser({
+    username: "finance-a", role: "finance", visibleSiteIds: ["nanjing"],
+    account: { username: "finance-a", accessRole: "finance", accountEnabled: true, permissions: {} },
+  });
+  assert.equal(result.isAdmin, false);
+  assert.deepEqual(result.permissions.finance, { create: true, update: true, delete: false });
+  assert.equal(result.permissions.accounts.update, false);
+  assert.equal(result.permissions.orders.update, false);
+  assert.equal(result.permissions.daily.update, false);
+  assert.equal(permissionsForRole("finance", permissionsWith("finance", "delete")).finance.delete, true);
+});
+
+test("legacy staff finance permissions cannot grant verification or finance module access", () => {
+  for (const action of ["create", "update", "delete"]) {
+    const result = permissionStateForUser({
+      username: "staff-a", role: "staff",
+      account: { username: "staff-a", accessRole: "staff", accountEnabled: true, permissions: permissionsWith("finance", action) },
+    });
+    assert.deepEqual(result.permissions.finance, { create: false, update: false, delete: false });
+  }
+});
+
+test("finance role never grants capabilities with a missing, disabled, or stale account summary", () => {
+  for (const account of [undefined,
+    { username: "finance-a", accessRole: "finance", accountEnabled: false, permissions: {} },
+    { username: "finance-a", accessRole: "staff", accountEnabled: true, permissions: {} },
+    { username: "other-user", accessRole: "finance", accountEnabled: true, permissions: {} },
+  ]) {
+    assert.deepEqual(permissionStateForUser({ username: "finance-a", role: "finance", account }).permissions.finance,
+      { create: false, update: false, delete: false });
+  }
 });

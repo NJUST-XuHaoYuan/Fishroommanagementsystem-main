@@ -36,3 +36,11 @@ test("the dashboard restriction preserves all existing non-dashboard navigation"
     assert.equal(resolveDashboardView(view, admin), view);
   }
 });
+
+
+test("finance retains its personal home without gaining the administrator dashboard", () => {
+  const finance = { username: "finance-a", role: "finance" };
+  assert.equal(canAccessDashboard(finance), true);
+  assert.equal(canAccessAdminDashboard(finance), false);
+  assert.equal(resolveDashboardView("dashboard", finance), "dashboard");
+});

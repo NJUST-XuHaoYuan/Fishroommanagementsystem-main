@@ -322,7 +322,7 @@ test("concurrent finance approval commits one payment; current account and owner
   const results = await Promise.all([s.review(claim), s.review(claim)]);
   assert.ok(results.some(r => r.response.status === 200)); assert.equal((await s.readPersistedState()).orders[0].payments.length, 1);
   const d = await s.detail("finance-reviewer"); ok(d);
-  await s.patchTestPersonnel("finance-reviewer", { permissions: {} });
+  await s.patchTestPersonnel("finance-reviewer", { accessRole: "staff", permissions: {} });
   denied(await s.request("/api/orders/payment-proof/review", { orderId: "proof-order", claimId: claim.id, expectedVersion: claim.version,
     reviewToken: d.body.reviewToken, decision: "reject", reason: "不应接受已撤权操作" }, "finance-reviewer"));
   await s.patchTestPersonnel("pricing-editor", { visibleSiteIds: ["jiangyin"] });

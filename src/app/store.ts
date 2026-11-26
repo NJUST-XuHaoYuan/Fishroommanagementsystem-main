@@ -5,7 +5,7 @@ import { copyPublicCatalogPolicy } from "./utils/publicCatalogPolicy";
 
 export type { PublicCatalogPolicy } from "./utils/publicCatalogPolicy";
 
-export type Role = "admin" | "staff";
+export type Role = "admin" | "staff" | "finance";
 
 export type User = {
   username: string;

@@ -7,7 +7,7 @@ export function paymentProofFixture() {
   const state = fixture.state;
   const owner = state.personnel.find(person => person.id === "pricing-editor");
   owner.permissions = { orders: { create: true, update: true, delete: false } };
-  state.personnel.push({ ...structuredClone(owner), id: "finance-reviewer", username: "finance-reviewer", name: "财务核验测试员",
+  state.personnel.push({ ...structuredClone(owner), id: "finance-reviewer", username: "finance-reviewer", name: "财务核验测试员", accessRole: "finance",
     permissions: { finance: { create: true, update: true, delete: true } } });
   state.personnel.push({ ...structuredClone(owner), id: "other-owner", username: "other-owner", name: "其他订单负责人" });
   state.customers = [{ id: "proof-customer", name: "付款凭证合成客户", wechat: "synthetic-proof" }];

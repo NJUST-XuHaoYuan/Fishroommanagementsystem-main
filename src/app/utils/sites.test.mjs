@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ALL_SITE_ID, stockMatchesSite } from "./sites.ts";
+import { ALL_SITE_ID, stockMatchesSite, visibleSitesForUser } from "./sites.ts";
 
 const tankGroups = [{
   id: "group-nanjing",
@@ -36,4 +36,11 @@ test("all-site scope includes stock regardless of tank mapping", () => {
     stockMatchesSite({ siteId: "jiangyin", subTankId: "tank-nanjing" }, ALL_SITE_ID, tankGroups),
     true,
   );
+});
+
+
+test("finance visibility stays limited to explicitly assigned sites", () => {
+  const user = { username: "finance-a", role: "finance", visibleSiteIds: ["nanjing"] };
+  assert.deepEqual(visibleSitesForUser(user).map(site => site.id), ["nanjing"]);
+  assert.deepEqual(visibleSitesForUser({ ...user, visibleSiteIds: [] }), []);
 });

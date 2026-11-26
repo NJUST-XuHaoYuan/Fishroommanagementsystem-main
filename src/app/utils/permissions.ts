@@ -1,6 +1,6 @@
 import { toast } from "sonner";
 import { emptyPermissions, fullPermissions, useStore } from "../store";
-import type { PermissionAction, PermissionModule, PermissionSet, User } from "../store";
+import type { PermissionAction, PermissionModule, PermissionSet, Role, User } from "../store";
 
 export const PERMISSION_MODULES: { key: PermissionModule; label: string; group: string }[] = [
   { key: "species", label: "物种管理", group: "品名管理" },
@@ -38,6 +38,17 @@ export function normalizePermissions(permissions?: Partial<PermissionSet>): Perm
   return normalized;
 }
 
+/** Finance registration and verification belong to the finance role, not legacy permission bits. */
+export function permissionsForRole(role: Role, permissions?: Partial<PermissionSet>): PermissionSet {
+  if (role === "admin") return fullPermissions();
+  const normalized = normalizePermissions(permissions);
+  normalized.accounts = emptyPermissions().accounts;
+  normalized.finance = role === "finance"
+    ? { create: true, update: true, delete: normalized.finance.delete }
+    : emptyPermissions().finance;
+  return normalized;
+}
+
 /**
  * Derive frontend capabilities exclusively from the authenticated account summary.
  * Staff permissions fail closed when the summary is absent, disabled, or does not
@@ -54,7 +65,7 @@ export function permissionStateForUser(user: User): {
   const enabled = account?.accountEnabled === true &&
     account.username === user.username &&
     account.accessRole === user.role;
-  const permissions = enabled ? normalizePermissions(account.permissions) : emptyPermissions();
+  const permissions = enabled ? permissionsForRole(user.role, account.permissions) : emptyPermissions();
   // Personnel/account administration is server-side admin-only even if legacy
   // records happen to contain an accounts permission bit for a staff account.
   permissions.accounts = emptyPermissions().accounts;

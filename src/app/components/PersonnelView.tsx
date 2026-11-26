@@ -48,10 +48,12 @@ import { usePrivatePersonnelAttachmentPreview } from "./PrivatePersonnelAttachme
 import { confirmWrite } from "../utils/writeConfirm";
 import { getSites, normalizeVisibleSiteIds } from "../utils/sites";
 import { authJsonHeaders } from "../utils/authSession";
+import { permissionsForRole } from "../utils/permissions";
 
 const ACCESS_ROLE_LABEL: Record<Role, string> = {
   admin: "管理员",
   staff: "普通账号",
+  finance: "财务",
 };
 
 const EDUCATION_LEVEL_LABEL: Record<string, string> = {
@@ -390,7 +392,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
         ? emptyPermissions()
         : editing.accessRole === "admin"
         ? fullPermissions()
-        : editing.permissions ?? emptyPermissions(),
+        : permissionsForRole(editing.accessRole, editing.permissions),
       role: normalizedText(editing.role),
       notes: normalizedText(editing.notes),
     };
@@ -415,7 +417,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
       if (!next.username) return toast.error("请填写登录账号");
       if (!existingHasAccount && !next.password) return toast.error("新账号必须设置初始密码");
       if (next.password && next.password.length < 6) return toast.error("登录密码至少 6 位");
-      if (next.accountEnabled !== false && next.accessRole === "staff" && visibleSiteIds.length === 0) {
+      if (next.accountEnabled !== false && next.accessRole !== "admin" && visibleSiteIds.length === 0) {
         return toast.error("请至少选择一个账号可见区域");
       }
       if ((state.personnel ?? []).some((person) => person.id !== next.id && person.username === next.username)) {
@@ -423,7 +425,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
       }
     }
     if (existing?.username === state.user?.username && next.accessRole !== "admin") {
-      return toast.error("不能把当前管理员改为普通账号");
+      return toast.error("不能更改当前登录管理员的账号角色");
     }
     if (existing?.username === state.user?.username && next.accountEnabled === false) {
       return toast.error("不能停用当前登录账号");
@@ -1086,6 +1088,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
                           setEditing({
                             ...editing,
                             accessRole,
+                            permissions: permissionsForRole(accessRole, { ...editing.permissions, finance: { create: false, update: false, delete: accessRole === editing.accessRole && editing.permissions?.finance?.delete === true } }),
                             visibleSiteIds: accessRole === "admin"
                               ? allSiteIds
                               : selectedVisibleSiteIds(editing),
@@ -1098,8 +1101,10 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
                         <SelectContent>
                           <SelectItem value="admin">管理员</SelectItem>
                           <SelectItem value="staff">普通账号</SelectItem>
+                          <SelectItem value="finance">财务</SelectItem>
                         </SelectContent>
                       </Select>
+                      {editing.accessRole === "finance" && <p className="text-xs leading-5 text-muted-foreground">自动拥有财务登记与核验权限，其他操作按权限配置；仅可处理下方授权区域的数据。</p>}
                     </div>
                     <div className="grid gap-2 sm:col-span-2 lg:col-span-3">
                       <label
@@ -1156,7 +1161,7 @@ export function PersonnelView({ embedded = false }: { embedded?: boolean } = {})
                         })}
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        管理员默认全部区域可见；新普通账号默认没有业务操作权限，请保存后到“账号与权限”配置。
+                        管理员默认全部区域可见；财务与普通账号需选择可见区域。其他操作权限可保存后到“账号与权限”配置。
                       </p>
                     </div>
                   </div>
