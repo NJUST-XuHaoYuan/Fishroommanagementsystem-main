@@ -1,0 +1,9 @@
+**
+!server/
+!server/**
+!deploy/
+!deploy/local-test/
+!deploy/local-test/**
+!deploy/cloud-test/
+!deploy/cloud-test/backend.Dockerfile
+!deploy/cloud-test/backend.Dockerfile.dockerignore

@@ -12,6 +12,8 @@ import { createGzip } from "node:zlib";
 import pg from "pg";
 import COS from "cos-nodejs-sdk-v5";
 import { createMiniProgramAuth } from "./miniprogram-auth.mjs";
+import { createCloudTestRequestGuard, validateCloudTestEnvironment } from "./cloud-test-access.mjs";
+import { createCloudTestMediaResolver } from "./cloud-test-media.mjs";
 import {
   canFastRemuxWechatVideo,
   normalizeVideoTranscodePreset,
@@ -344,6 +346,8 @@ import {
 } from "./personnel-private-attachments.mjs";
 
 const execFileAsync = promisify(execFile);
+const cloudTestEnabled = validateCloudTestEnvironment(process.env);
+const resolveCloudTestMedia = createCloudTestMediaResolver({ path: process.env.FISHROOM_CLOUD_TEST_MEDIA_MAP || "/run/cloud-test-media/media-map.json" });
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const dataDir = join(root, ".data");
@@ -9005,7 +9009,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  if (!isPublicApiRoute(req, url)) {
+  if (!isPublicApiRoute(req, url) && !req.auth) {
     const auth = await authenticateApiRequest(req);
     if (!auth) {
       sendJson(req, res, 401, { ok: false, error: "Authentication required" });
@@ -11786,6 +11790,19 @@ async function handleApi(req, res, url) {
       releaseTranscodeSlot?.();
       releaseVideoUploadSlot?.();
       if (videoTempDir) await rm(videoTempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    return;
+  }
+
+  if (cloudTestEnabled && req.method === "GET" && ["/api/media/cos", "/api/media/cos-url"].includes(url.pathname)) {
+    try {
+      const media = await resolveCloudTestMedia(String(url.searchParams.get("url") ?? ""));
+      if (url.pathname === "/api/media/cos") {
+        res.writeHead(302, { Location: media.url, "Cache-Control": "no-store, private" });
+        res.end();
+      } else sendJson(req, res, 200, media, { "Cache-Control": "no-store, private" });
+    } catch (error) {
+      sendJson(req, res, error.statusCode || 503, { error: error.statusCode ? error.message : "测试环境历史媒体暂不可用" }, { "Cache-Control": "no-store, private" });
     }
     return;
   }
@@ -17462,6 +17479,16 @@ function scheduleAutomaticOrderTransitions() {
   console.log(`[auto-orders] next run at ${nextRunAt} (04:00 Asia/Shanghai)`);
 }
 
+const guardCloudTestRequest = createCloudTestRequestGuard({
+  enabled: cloudTestEnabled,
+  authenticate: async req => {
+    if (!bearerTokenFromRequest(req)) return null;
+    await ensureSchema();
+    return authenticateApiRequest(req);
+  },
+  sendJson,
+});
+
 const server = createServer(async (req, res) => {
   req._requestStartedAt = process.hrtime.bigint();
   const socketBytesAtStart = Number(res.socket?.bytesWritten ?? 0);
@@ -17484,6 +17511,7 @@ const server = createServer(async (req, res) => {
   });
   const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   try {
+    if (await guardCloudTestRequest(req, res, url)) return;
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
       return;

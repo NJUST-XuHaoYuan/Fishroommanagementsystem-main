@@ -1,0 +1,9 @@
+**
+!dist/
+!dist/**
+!deploy/
+!deploy/frontend-server.mjs
+!deploy/cloud-test/
+!deploy/cloud-test/mark-cloud-test-html.mjs
+!deploy/cloud-test/frontend.Dockerfile
+!deploy/cloud-test/frontend.Dockerfile.dockerignore

@@ -1,0 +1,137 @@
+name: fishroom-cloud-test
+
+x-logging: &test-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  frontend:
+    image: fishroom-cloud-test-frontend:${RELEASE_REVISION:?RELEASE_REVISION is required}
+    container_name: fishroom-cloud-test-frontend
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/cloud-test/frontend.Dockerfile
+      args:
+        BASE_IMAGE: ${CLOUD_TEST_FRONTEND_BASE_IMAGE:?Use the verified cached frontend image}
+        TEST_RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION is required}
+        TEST_RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT is required}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 80
+      BACKEND_URL: http://backend:8787
+    ports:
+      - "127.0.0.1:8797:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [cloud-test, cloud-test-web]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    logging: *test-logging
+    restart: unless-stopped
+
+  backend:
+    image: fishroom-cloud-test-backend:${RELEASE_REVISION:?RELEASE_REVISION is required}
+    container_name: fishroom-cloud-test-backend
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/cloud-test/backend.Dockerfile
+      args:
+        BASE_IMAGE: ${CLOUD_TEST_BACKEND_BASE_IMAGE:?Use the verified cached backend image}
+        TEST_RELEASE_REVISION: ${RELEASE_REVISION:?RELEASE_REVISION is required}
+        TEST_RELEASE_BUILT_AT: ${RELEASE_BUILT_AT:?RELEASE_BUILT_AT is required}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      NODE_ENV: production
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?Generate an independent test session secret}
+      PERSONNEL_DATA_KEYRING_JSON: ${PERSONNEL_DATA_KEYRING_JSON:?Copied encrypted data needs its keyring}
+      AUTH_COOKIE_SECURE: "true"
+      PGHOST: database
+      PGPORT: 5432
+      PGDATABASE: fishroom_test
+      PGUSER: fishroom_test
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Generate an independent test database password}
+      DATABASE_URL: ""
+      UPLOAD_DIR: /app/uploads
+      FISHROOM_CLOUD_TEST: "true"
+      FISHROOM_CLOUD_TEST_MEDIA_MAP: /run/cloud-test-media/media-map.json
+      FISHROOM_DISABLE_BACKGROUND_TASKS: "true"
+      ALLOW_DEFAULT_CREDENTIALS: "false"
+      VIDEO_TRANSCODE_THREADS: "1"
+      VIDEO_TRANSCODE_CONCURRENCY: "1"
+      VIDEO_TRANSCODE_MAX_PENDING: "2"
+      VIDEO_TRANSCODE_MAX_EDGE: "1920"
+      VIDEO_UPLOAD_CONCURRENCY: "1"
+      VIDEO_UPLOAD_MAX_PENDING: "2"
+      VIDEO_PREVIEW_CONCURRENCY: "1"
+      VIDEO_PREVIEW_MAX_PENDING: "2"
+      COS_SECRET_ID: ""
+      COS_SECRET_KEY: ""
+      COS_BUCKET: ""
+      COS_REGION: ""
+      COS_PUBLIC_BASE_URL: ""
+      COS_PREFIX: ""
+      FEISHU_WEBHOOK_URL: ""
+      FEISHU_WEBHOOK_SECRET: ""
+      FEISHU_APP_ID: ""
+      FEISHU_APP_SECRET: ""
+      FEISHU_VERIFICATION_TOKEN: ""
+      FEISHU_DEFAULT_SITE_ID: ""
+      WECHAT_MINIPROGRAM_APP_ID: ""
+      WECHAT_MINIPROGRAM_APP_SECRET: ""
+      WECHAT_MINIPROGRAM_IDENTITY_SECRET: ""
+      AI_API_KEY: ""
+      OPENAI_API_KEY: ""
+      AI_API_BASE_URL: ""
+      OPENAI_BASE_URL: ""
+    volumes:
+      - ${CLOUD_TEST_UPLOADS_DIR:?Use an independent absolute test upload path}:/app/uploads
+      - ${CLOUD_TEST_MEDIA_DIR:?Use the private signed-media map directory}:/run/cloud-test-media:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [cloud-test]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 150
+    logging: *test-logging
+    restart: unless-stopped
+
+  database:
+    image: ${CLOUD_TEST_DATABASE_IMAGE:?Use the verified cached PostgreSQL image}
+    container_name: fishroom-cloud-test-database
+    pull_policy: never
+    environment:
+      POSTGRES_DB: fishroom_test
+      POSTGRES_USER: fishroom_test
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Generate an independent test database password}
+    volumes:
+      - cloud-test-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fishroom_test -d fishroom_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [cloud-test]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 100
+    logging: *test-logging
+    restart: unless-stopped
+
+volumes:
+  cloud-test-postgres:
+    name: fishroom-cloud-test-postgres
+
+networks:
+  cloud-test:
+    name: fishroom-cloud-test-network
+    internal: true
+  cloud-test-web:
+    name: fishroom-cloud-test-web
