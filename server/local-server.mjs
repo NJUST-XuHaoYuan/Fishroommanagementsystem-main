@@ -14,6 +14,7 @@ import COS from "cos-nodejs-sdk-v5";
 import { createMiniProgramAuth } from "./miniprogram-auth.mjs";
 import { createCloudTestRequestGuard, validateCloudTestEnvironment } from "./cloud-test-access.mjs";
 import { createCloudTestMediaResolver } from "./cloud-test-media.mjs";
+import { inspectPreservedVideoFile, preserveOriginalVideoRequested } from "./preserved-video-upload.mjs";
 import {
   canFastRemuxWechatVideo,
   normalizeVideoTranscodePreset,
@@ -11687,6 +11688,7 @@ async function handleApi(req, res, url) {
       const mime = normalizeUploadMime(req.headers["content-type"], req.headers["x-file-name"]);
       const isImage = isSupportedImageMime(mime);
       const isVideo = SUPPORTED_VIDEO_MIMES.has(mime);
+      const preserveOriginal = preserveOriginalVideoRequested(req.headers["x-preserve-original"], isVideo);
       mediaKind = isVideo ? "video" : (isImage ? "image" : "media");
       if (!isImage && !isVideo) {
         sendJson(req, res, 400, { ok: false, error: "只支持上传图片或视频文件" });
@@ -11698,6 +11700,7 @@ async function handleApi(req, res, url) {
       let storedMime = mime;
       let storedBytes = 0;
       let processingMode = "original";
+      let videoMetadata = null;
       let receiveFinishedAt = startedAt;
       let processFinishedAt = startedAt;
 
@@ -11707,7 +11710,17 @@ async function handleApi(req, res, url) {
         const inputPath = join(videoTempDir, `input${extensionForMime(mime)}`);
         receivedBytes = await readRawBodyToFile(req, inputPath, maxBytes);
         receiveFinishedAt = Date.now();
-        if (receivedBytes > 0 && TRANSCODE_VIDEO_UPLOADS) {
+        if (receivedBytes > 0 && preserveOriginal) {
+          releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
+          videoMetadata = await inspectPreservedVideoFile(inputPath, mime, {
+            ffprobePath: FFPROBE_PATH, ffmpegPath: FFMPEG_PATH, timeoutMs: VIDEO_TRANSCODE_TIMEOUT_MS,
+          });
+          processingMode = "original-preserved";
+          processFinishedAt = Date.now();
+          storedBytes = receivedBytes;
+          mediaUrl = await storeOriginalMediaFile(inputPath, storedMime);
+          videoDerivativeSourcePath = inputPath;
+        } else if (receivedBytes > 0 && TRANSCODE_VIDEO_UPLOADS) {
           releaseTranscodeSlot = await videoTranscodeLimiter.acquire();
           const processed = await prepareWechatVideoFile(inputPath, join(videoTempDir, "wechat.mp4"));
           storedMime = "video/mp4";
@@ -11761,6 +11774,8 @@ async function handleApi(req, res, url) {
         processingMode,
         storage: cosReady() ? "cos" : "local",
         ...(isVideo ? {
+          originalPreserved: preserveOriginal,
+          ...(videoMetadata ? { videoMetadata } : {}),
           derivativeStatus: posterUrl && previewUrl && playbackUrl ? "processing" : "unavailable",
           posterUrl,
           previewUrl,
@@ -11790,6 +11805,24 @@ async function handleApi(req, res, url) {
       releaseTranscodeSlot?.();
       releaseVideoUploadSlot?.();
       if (videoTempDir) await rm(videoTempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    return;
+  }
+
+  // Internal playback fallback stays authenticated; cloud test never needs to open public media routes.
+  if (url.pathname === "/api/media/video-playback" && ["GET", "HEAD"].includes(req.method)) {
+    try {
+      const source = String(url.searchParams.get("url") ?? "").trim();
+      if (!videoDerivativeSourceDescriptor(source)) throw httpError(400, "视频来源无效");
+      const paths = await ensureVideoPlayback(source);
+      if (!req.aborted && !res.destroyed) {
+        await sendVideoDerivativeFile(req, res, paths.playbackPath, VIDEO_DERIVATIVE_KINDS.playback, "no-store, private");
+      }
+    } catch (error) {
+      if (req.aborted || res.destroyed) return;
+      if (res.headersSent) { res.destroy(); return; }
+      const status = [400, 404, 413, 415, 503].includes(error?.statusCode) ? error.statusCode : 502;
+      sendJson(req, res, status, { error: status === 404 ? "原视频不存在" : status === 400 ? "视频来源无效" : "兼容视频暂不可用，请稍后重试" }, { "Cache-Control": "no-store, private" });
     }
     return;
   }

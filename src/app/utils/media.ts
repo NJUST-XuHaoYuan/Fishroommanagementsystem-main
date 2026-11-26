@@ -130,6 +130,8 @@ type MediaUploadProgress = {
 
 type MediaUploadOptions = {
   onProgress?: (progress: MediaUploadProgress) => void;
+  /** Keep the video bytes supplied by the device; compatible playback is generated separately. */
+  preserveOriginal?: boolean;
 };
 
 export async function uploadOriginalMedia(file: File, options: MediaUploadOptions = {}): Promise<string> {
@@ -150,6 +152,7 @@ export async function uploadOriginalMedia(file: File, options: MediaUploadOption
     for (const [key, value] of Object.entries(authHeaders())) request.setRequestHeader(key, value);
     request.setRequestHeader("Content-Type", mime);
     request.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+    if (options.preserveOriginal && mime.startsWith("video/")) request.setRequestHeader("X-Preserve-Original", "1");
     request.timeout = mime.startsWith("video/") ? 10 * 60 * 1000 : 2 * 60 * 1000;
     request.upload.onprogress = (event) => {
       const total = event.lengthComputable && event.total > 0 ? event.total : file.size;

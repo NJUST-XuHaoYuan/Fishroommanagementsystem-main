@@ -10,6 +10,7 @@ import {
 } from "../utils/media";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { MediaPreviewTrigger } from "./MediaPreviewDialog";
+import { MobileVideoCaptureDialog } from "./MobileVideoCaptureDialog";
 import { Button } from "./ui/button";
 
 export type MobileMaintenanceMediaValue = { photos: string[]; videos: string[] };
@@ -25,33 +26,35 @@ const MAX_ATTACHMENTS = 8;
 /** Keep this component mounted and keyed to its record draft while an upload is in progress. */
 export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange, disabled = false }: Props) {
   const photoInput = useRef<HTMLInputElement>(null);
-  const videoInput = useRef<HTMLInputElement>(null);
   const albumInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const pending = useRef(false);
   const latest = useRef({ photos, videos, onChange, onBusyChange });
   latest.current = { photos, videos, onChange, onBusyChange };
   const [busy, setBusy] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const count = photos.length + videos.length;
-  const unavailable = disabled || busy;
+  const unavailable = disabled || busy || cameraOpen;
+
+  useEffect(() => { latest.current.onBusyChange(busy || cameraOpen); }, [busy, cameraOpen]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       // The shared uploader cannot abort its request; discard late results after unmount.
-      if (pending.current) latest.current.onBusyChange(false);
+      latest.current.onBusyChange(false);
     };
   }, []);
 
   const upload = async (files: File[], expected?: "image" | "video") => {
-    if (disabled || pending.current || files.length === 0) return;
+    if (disabled || pending.current || files.length === 0) return false;
     const room = MAX_ATTACHMENTS - latest.current.photos.length - latest.current.videos.length;
     if (files.length > room) {
       const message = room > 0 ? `本次还可以添加 ${room} 个附件，请重新选择。` : "每条记录最多添加 8 个附件。";
-      setError(message); toast.error(message); return;
+      setError(message); toast.error(message); return false;
     }
     // Validate the entire selection before uploading, so a rejected selection changes nothing.
     for (const file of files) {
@@ -61,14 +64,13 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
         ? `“${file.name}”不是支持的${expected === "image" ? "照片" : expected === "video" ? "视频" : "照片或视频"}。`
         : file.size === 0 ? `“${file.name}”是空文件，请重新拍摄或选择。`
           : file.size > limit ? `“${file.name}”超过${kind === "video" ? "视频 300MB" : "照片 50MB"}上限，请选择较短的视频或较小的文件。` : "";
-      if (message) { setError(message); toast.error(message); return; }
+      if (message) { setError(message); toast.error(message); return false; }
     }
 
     const sessionKey = mediaAuthSessionKey();
     const isCurrent = () => mounted.current && mediaAuthSessionKey() === sessionKey;
     pending.current = true;
     setBusy(true); setError("");
-    latest.current.onBusyChange(true);
     const failures: string[] = [];
     let added = 0;
     try {
@@ -80,6 +82,7 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
         try {
           // Send the browser-provided File directly. Do not canvas-resize, compress, or re-encode it.
           const url = await uploadOriginalMedia(file, {
+            preserveOriginal: kind === "video",
             onProgress: ({ phase, percent }) => {
               if (!isCurrent()) return;
               setStatus(`${index + 1}/${files.length} · ${phase === "processing" ? `${label}处理中，请稍候…` : `${label}上传 ${percent}%`}`);
@@ -104,10 +107,11 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
         }
         if (added) toast.success(`已添加 ${added} 个附件，保存记录后生效。`);
       }
+      return isCurrent() && added === files.length;
     } finally {
       pending.current = false;
       if (mounted.current) {
-        setBusy(false); setStatus(""); latest.current.onBusyChange(false);
+        setBusy(false); setStatus("");
       }
     }
   };
@@ -135,14 +139,14 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
       <span className="text-sm text-muted-foreground">{count}/{MAX_ATTACHMENTS}</span>
     </div>
     <input ref={photoInput} type="file" accept="image/*" capture="environment" className="hidden" disabled={unavailable} onChange={event => picked(event, "image")} aria-label="使用手机相机拍照" />
-    <input ref={videoInput} type="file" accept="video/*" capture="environment" className="hidden" disabled={unavailable} onChange={event => picked(event, "video")} aria-label="使用手机相机拍视频" />
-    <input ref={albumInput} type="file" accept="image/*,video/*" multiple className="hidden" disabled={unavailable} onChange={event => picked(event)} aria-label="从相册选择照片或视频" />
+    <input ref={albumInput} type="file" accept="image/*,video/*" multiple className="hidden" disabled={disabled || busy} onChange={event => picked(event)} aria-label="从相册选择照片或视频" />
     <div className="grid grid-cols-2 gap-3">
       <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => photoInput.current?.click()}><Camera className="size-5" />拍照片</Button>
-      <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => videoInput.current?.click()}><Video className="size-5" />拍视频</Button>
+      <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => setCameraOpen(true)}><Video className="size-5" />拍视频</Button>
     </div>
     <Button type="button" variant="ghost" className="min-h-11 w-full gap-2" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => albumInput.current?.click()}><Images className="size-4" />从相册选择</Button>
-    <p className="text-sm leading-6 text-muted-foreground">若微信未打开系统相机，可先用系统相机拍好，再从相册选择原文件。</p>
+    <p className="text-sm leading-6 text-muted-foreground">直接打开后摄录制，自动检测可用画质；视频按原文件上传。</p>
+    {cameraOpen && <MobileVideoCaptureDialog onClose={() => setCameraOpen(false)} onChooseAlbum={() => { setCameraOpen(false); albumInput.current?.click(); }} onUse={file => upload([file], "video")} uploadStatus={status} />}
     {busy && <div role="status" className="flex items-center gap-2 rounded-md bg-muted p-3 text-sm"><Loader2 className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />{status || "正在上传，请稍候…"}</div>}
     {error && <p role="alert" className="whitespace-pre-wrap break-words text-sm leading-6 text-destructive">{error}</p>}
     {count > 0 && <div className="grid grid-cols-2 gap-3">

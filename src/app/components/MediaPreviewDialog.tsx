@@ -49,7 +49,7 @@ function PreviewMedia({ item, originalSize, onReady, onError }: {
     };
   }, []);
   return <div ref={containerRef} className="min-w-0">
-    {item.type === "video" ? <MediaVideo src={item.src} controls playsInline preload="metadata" autoPlay={false} onLoadedMetadata={onReady} onCanPlay={onReady} onError={onError} className="mx-auto max-h-[62dvh] w-full bg-black object-contain" aria-label={item.title || "视频预览"} /> :
+    {item.type === "video" ? <MediaVideo src={item.src} allowCompatibilityFallback controls playsInline preload="metadata" autoPlay={false} onLoadedMetadata={onReady} onCanPlay={onReady} onError={onError} className="mx-auto max-h-[62dvh] w-full bg-black object-contain" aria-label={item.title || "视频预览"} /> :
       <div tabIndex={0} aria-label={originalSize ? "原尺寸图片，可滚动查看" : "图片预览"} className="max-h-[62dvh] overflow-auto overscroll-contain">
         <img src={resolvedImage} alt={item.title || "照片预览"} onLoad={onReady} onError={onError} className={originalSize ? "mx-auto h-auto max-w-none" : "mx-auto block max-h-[62dvh] max-w-full object-contain"} />
       </div>}
