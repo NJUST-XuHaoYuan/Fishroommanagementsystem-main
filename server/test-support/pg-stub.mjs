@@ -375,11 +375,18 @@ function runQuery(query, values = []) {
       } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
         state = structuredClone(state);
         if (/WHEN 'create' THEN COALESCE\(data -> 'logs'/.test(sql)) {
-          const [, id, storedLog, operation, maxLogs, mode, bioUpdates] = values;
+          const [, id, storedLog, mode] = values;
           const log = JSON.parse(storedLog);
           state.logs = mode === "create" ? [...(state.logs ?? []), log] : mode === "update" ? (state.logs ?? []).map(item => item.id === id ? log : item) : (state.logs ?? []).filter(item => item.id !== id);
-          state.bioRecords = [...(state.bioRecords ?? []).filter(record => !(record.sourceType === "dailyLog" && record.sourceLogId === id)), ...JSON.parse(bioUpdates)];
-          state.operationLogs = [JSON.parse(operation), ...(state.operationLogs ?? []).slice(0, maxLogs)];
+          return result([], 1);
+        }
+        if (/CASE WHEN \$3::boolean THEN/.test(sql) && /bio_row.item ->> 'sourceLogId'/.test(sql)) {
+          const [, id, removeExisting, bioUpdates] = values;
+          state.bioRecords = [...(state.bioRecords ?? []).filter(record => !removeExisting || !(record.sourceType === "dailyLog" && record.sourceLogId === id)), ...JSON.parse(bioUpdates)];
+          return result([], 1);
+        }
+        if (/SELECT \$2::jsonb AS entry/.test(sql) && /operation_row.ordinality <= \$3/.test(sql)) {
+          state.operationLogs = [JSON.parse(values[1]), ...(state.operationLogs ?? []).slice(0, values[2])];
           return result([], 1);
         }
         for (const match of sql.matchAll(/'\{([A-Za-z][A-Za-z0-9]*)\}',\s*\$(\d+)::jsonb,\s*true/gi)) state[match[1]] = JSON.parse(values[Number(match[2]) - 1]);

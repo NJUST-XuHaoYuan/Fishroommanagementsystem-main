@@ -16844,69 +16844,77 @@ async function handleApi(req, res, url) {
             action: plan.mode === "delete" ? "删除记录" : plan.mode === "update" ? "修改记录" : "添加记录",
             detail: `${plan.operationDetail}${plan.log ? `，同步 ${bioRecordUpdates.length} 条鱼` : ""}`,
           };
+          // Keep each large JSONB rewrite in a separate statement (same transaction).
+          // Nested jsonb_set + jsonb_agg retained several expanded copies of all
+          // fish history at once and exceeded 2 GB with 100k+ history records.
           await client.query(
             `UPDATE app_state
              SET data = jsonb_set(
-               jsonb_set(
-                 jsonb_set(
-                   data,
-                   '{logs}',
-                   CASE $6::text
-                   WHEN 'create' THEN COALESCE(data -> 'logs', '[]'::jsonb) || jsonb_build_array($3::jsonb)
-                   WHEN 'update' THEN (
-                     SELECT COALESCE(jsonb_agg(
-                       CASE WHEN btrim(COALESCE(log_row.log_item ->> 'id', '')) = $2 THEN $3::jsonb ELSE log_row.log_item END
-                       ORDER BY log_row.ordinality
-                     ), '[]'::jsonb)
-                     FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
-                       WITH ORDINALITY AS log_row(log_item, ordinality)
-                   )
-                   ELSE (
-                     SELECT COALESCE(jsonb_agg(log_row.log_item ORDER BY log_row.ordinality), '[]'::jsonb)
-                     FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
-                       WITH ORDINALITY AS log_row(log_item, ordinality)
-                     WHERE btrim(COALESCE(log_row.log_item ->> 'id', '')) <> $2
-                   )
-                   END,
-                   true
-                 ),
+               data,
+               '{logs}',
+               CASE $4::text
+               WHEN 'create' THEN COALESCE(data -> 'logs', '[]'::jsonb) || jsonb_build_array($3::jsonb)
+               WHEN 'update' THEN (
+                 SELECT COALESCE(json_agg(
+                   CASE WHEN btrim(COALESCE(log_row.log_item ->> 'id', '')) = $2 THEN $3::jsonb ELSE log_row.log_item END
+                   ORDER BY log_row.ordinality
+                 ), '[]'::json)::jsonb
+                 FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
+                   WITH ORDINALITY AS log_row(log_item, ordinality)
+               )
+               ELSE (
+                 SELECT COALESCE(json_agg(log_row.log_item ORDER BY log_row.ordinality), '[]'::json)::jsonb
+                 FROM jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb))
+                   WITH ORDINALITY AS log_row(log_item, ordinality)
+                 WHERE btrim(COALESCE(log_row.log_item ->> 'id', '')) <> $2
+               )
+               END,
+               true
+             ), updated_at = now()
+             WHERE id = $1`,
+            [stateId, targetId, JSON.stringify(storedLog), plan.mode]
+          );
+          if (existingBioRecords.length > 0 || bioRecordUpdates.length > 0) {
+            await client.query(
+              `UPDATE app_state
+               SET data = jsonb_set(
+                 data,
                  '{bioRecords}',
-                 COALESCE((
-                   SELECT jsonb_agg(bio_row.item ORDER BY bio_row.ordinality)
+                 CASE WHEN $3::boolean THEN (
+                   SELECT COALESCE(json_agg(bio_row.item ORDER BY bio_row.ordinality), '[]'::json)::jsonb
                    FROM jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb))
                      WITH ORDINALITY AS bio_row(item, ordinality)
                    WHERE NOT (
                      COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
                      AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
                    )
-                 ), '[]'::jsonb) || $7::jsonb,
+                 ) ELSE COALESCE(data -> 'bioRecords', '[]'::jsonb) END || $4::jsonb,
                  true
-               ),
+               ), updated_at = now()
+               WHERE id = $1`,
+              [stateId, targetId, existingBioRecords.length > 0, JSON.stringify(bioRecordUpdates)]
+            );
+          }
+          await client.query(
+            `UPDATE app_state
+             SET data = jsonb_set(
+               data,
                '{operationLogs}',
                (
-                 SELECT COALESCE(jsonb_agg(entries.entry ORDER BY entries.position), '[]'::jsonb)
+                 SELECT COALESCE(json_agg(entries.entry ORDER BY entries.position), '[]'::json)::jsonb
                  FROM (
-                   SELECT $4::jsonb AS entry, 0::bigint AS position
+                   SELECT $2::jsonb AS entry, 0::bigint AS position
                    UNION ALL
                    SELECT operation_row.operation_item, operation_row.ordinality
                    FROM jsonb_array_elements(COALESCE(data -> 'operationLogs', '[]'::jsonb))
                      WITH ORDINALITY AS operation_row(operation_item, ordinality)
-                   WHERE operation_row.ordinality <= $5
+                   WHERE operation_row.ordinality <= $3
                  ) AS entries
                ),
                true
-             ),
-             updated_at = now()
+             ), updated_at = now()
              WHERE id = $1`,
-            [
-              stateId,
-              targetId,
-              JSON.stringify(storedLog),
-              JSON.stringify(operationLog),
-              Math.max(0, MAX_OPERATION_LOGS - 1),
-              plan.mode,
-              JSON.stringify(bioRecordUpdates),
-            ]
+            [stateId, JSON.stringify(operationLog), Math.max(0, MAX_OPERATION_LOGS - 1)]
           );
           await client.query("COMMIT");
           sendJson(req, res, 200, {

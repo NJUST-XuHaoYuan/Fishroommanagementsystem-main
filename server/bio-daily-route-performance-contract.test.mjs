@@ -34,6 +34,23 @@ test("daily-log save locks projected keys and incrementally preserves fish timel
   assert.match(block, /deletedBioRecordIds/);
 });
 
+test("daily-log mutations release large JSONB temporaries between statements and append new sync records", () => {
+  const block = routeBlock("/api/daily-logs/save");
+  const updateStatements = [...block.matchAll(/`UPDATE app_state[\s\S]*?WHERE id = \$1`/g)].map(match => match[0]);
+  assert.equal(updateStatements.length, 3, "log, fish history and audit writes use separate statements inside one transaction");
+  assert.ok(block.indexOf('await client.query("BEGIN")') < block.indexOf(updateStatements[0]));
+  assert.ok(block.lastIndexOf('await client.query("COMMIT")') > block.indexOf(updateStatements[2]));
+  for (const statement of updateStatements) {
+    assert.equal((statement.match(/jsonb_set\(/g) ?? []).length, 1, "do not retain multiple expanded whole-state JSONB values");
+    assert.doesNotMatch(statement, /jsonb_agg\(/, "large array rebuilds use streaming JSON text aggregation before conversion");
+  }
+  const bioStatement = updateStatements[1];
+  assert.match(bioStatement, /CASE WHEN \$3::boolean THEN/);
+  assert.match(bioStatement, /ELSE COALESCE\(data -> 'bioRecords', '\[\]'::jsonb\) END \|\| \$4::jsonb/);
+  assert.match(block, /existingBioRecords.length > 0, JSON.stringify\(bioRecordUpdates\)/);
+  assert.match(block, /if \(existingBioRecords.length > 0 \|\| bioRecordUpdates.length > 0\)/);
+});
+
 test("bio-record save never materializes full stock, history, order, shipment or audit arrays in Node", () => {
   const block = routeBlock("/api/bio-records/save");
   const lockIndex = block.indexOf("SELECT 1 FROM app_state WHERE id = $1 FOR UPDATE");

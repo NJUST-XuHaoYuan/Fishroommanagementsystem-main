@@ -68,3 +68,23 @@ test("personal history is site-and-owner scoped, excludes synchronized duplicate
  assert.equal((await s.request("/api/mobile-maintenance/history?siteId=jiangyin",{token:s.tokens.editor})).response.status,403);
  await s.patchTestPersonnel("pricing-editor",{accountEnabled:false}); assert.equal((await s.history()).response.status,401);
 });
+
+
+test("editing and deleting a tank log preserve unrelated history and remove its synchronized records", async t => {
+ const s=await setup(t);ok(await s.bio("follower","unrelated-manual"));
+ ok(await s.log(log("preserved")));ok(await s.log(log("changed")));
+ const before=await s.readPersistedState();
+ const preserved=before.bioRecords.filter(r=>r.sourceLogId!=="changed");
+ ok(await s.log(log("changed",{notes:"第二次维护内容"}),"admin",{createOnly:false}));
+ let state=await s.readPersistedState();
+ assert.deepEqual(state.bioRecords.filter(r=>r.sourceLogId!=="changed"),preserved);
+ const changed=state.bioRecords.filter(r=>r.sourceLogId==="changed");
+ assert.equal(changed.length,before.bioRecords.filter(r=>r.sourceLogId==="changed").length);
+ assert.ok(changed.every(r=>r.text.includes("第二次维护内容")));
+ ok(await s.request("/api/daily-logs/save",{token:s.tokens.admin,body:{deleteId:"changed"}}));
+ state=await s.readPersistedState();
+ assert.deepEqual(state.bioRecords,preserved);
+ assert.equal(state.logs.some(r=>r.id==="changed"),false);
+ assert.equal(state.logs.some(r=>r.id==="preserved"),true);
+ assert.equal(state.operationLogs[0].action,"删除记录");
+});
