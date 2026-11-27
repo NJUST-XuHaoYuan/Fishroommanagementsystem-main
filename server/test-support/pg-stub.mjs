@@ -208,6 +208,7 @@ function appStateRow(sql, values = []) {
     if (/\bAS\s+stock_price_protected\b/i.test(sql)) row.stock_price_protected = ordered((status) => status !== "cancelled");
     if (/\bAS\s+stock_product\b/i.test(sql)) row.stock_product = list(state.products).find((product) => product.id === item?.productId) ?? null;
   }
+  if (/\bAS\s+matching_water_records\b/i.test(sql)) row.matching_water_records = (state.waterQualityRecords ?? []).filter(record => String(record.id ?? "").trim() === String(values[1]));
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\bSELECT\s+jsonb_build_object\([\s\S]*?\)\s+AS\s+data\s+FROM\s+app_state\b/i.test(sql)) {
     row.data = Object.fromEntries([...sql.matchAll(/'([A-Za-z]+)',\s*COALESCE\(data\s*->\s*'\1'/g)]
@@ -240,6 +241,7 @@ function appStateRow(sql, values = []) {
   for (const [stateKey, alias] of [
     ["speciesCategoryMajorMap", "species_category_major_map"],
     ["publicCatalogPolicy", "public_catalog_policy"],
+    ["systemSettings", "system_settings"],
   ]) {
     const projection = new RegExp(`data\\s*->\\s*'${stateKey}'\\s+AS\\s+${alias}\\b`, "i");
     if (projection.test(sql)) row[alias] = state[stateKey] && typeof state[stateKey] === "object"
@@ -359,7 +361,14 @@ function runQuery(query, values = []) {
       const item = (state.stock ?? []).find(stock => stock.id === entry.stockItemId);
       return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId);
     }).map(entry => ({ kind: "fish", entry }));
-    return result([...tank, ...fish].sort((a, b) => b.entry.date.localeCompare(a.entry.date) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit));
+    const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => (entry.createdBy || entry.operator) === username &&
+      (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!subTankId || entry.subTankId === subTankId)).map(entry => ({ kind: "water", entry })) : [];
+    const timestamp = row => { const value = row.kind === "water" ? row.entry.measuredAt : row.entry.date; return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}+08:00`); };
+    if (/record_rank/.test(sql)) {
+      const valid = row => /^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[T ]([01][0-9]|2[0-3]):[0-5][0-9]/.test(row.entry.measuredAt || row.entry.date);
+      return result([tank, fish, water].flatMap(records => records.sort((a, b) => Number(valid(b)) - Number(valid(a)) || String(b.entry.measuredAt || b.entry.date).localeCompare(String(a.entry.measuredAt || a.entry.date)) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit)));
+    }
+    return result([...tank, ...fish, ...water].sort((a, b) => timestamp(b) - timestamp(a) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit));
   }
   if (/\bpicker_records\s+AS\s+MATERIALIZED\b/i.test(sql)) return result(catalogPickerPreviewRows(values));
   if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
@@ -374,6 +383,12 @@ function runQuery(query, values = []) {
         state = JSON.parse(values[1]);
       } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
         state = structuredClone(state);
+        if (/WHEN 'create' THEN COALESCE\(data -> 'waterQualityRecords'/.test(sql)) {
+          const [, id, stored, mode] = values; const record = JSON.parse(stored);
+          state.waterQualityRecords = mode === "create" ? [...(state.waterQualityRecords ?? []), record] : mode === "update"
+            ? (state.waterQualityRecords ?? []).map(item => item.id === id ? record : item) : (state.waterQualityRecords ?? []).filter(item => item.id !== id);
+          return result([], 1);
+        }
         if (/WHEN 'create' THEN COALESCE\(data -> 'logs'/.test(sql)) {
           const [, id, storedLog, mode] = values;
           const log = JSON.parse(storedLog);

@@ -30,6 +30,7 @@ import { PersonalCenterView } from "./components/PersonalCenterView";
 import { PaymentMethodsView } from "./components/PaymentMethodsView";
 import { ShippingCarriersView } from "./components/ShippingCarriersView";
 import { WaterQualitySettingsView } from "./components/WaterQualitySettingsView";
+import { mergeWaterQualityRecordSave, type WaterQualityRecordSaveChange } from "./store";
 import { CategorySettingsView } from "./components/CategorySettingsView";
 import { NotificationCenterView } from "./components/NotificationCenter";
 import { Toaster } from "./components/ui/sonner";
@@ -658,6 +659,8 @@ function AdminApp() {
   const lastSavedState = useRef<PersistedStore | null>(null);
   const persistQueue = useRef<Promise<void>>(Promise.resolve());
   const stateRef = useRef(state);
+  const waterQualitySiteRef = useRef(activeSiteId);
+  waterQualitySiteRef.current = activeSiteId;
   const saveStatusRef = useRef(saveStatus);
   const refreshInProgress = useRef(false);
   const versionCheckInProgress = useRef(false);
@@ -1531,6 +1534,7 @@ function AdminApp() {
     assignments: WaterQualityTankGroupAssignment[];
   }): Promise<boolean> => {
     const mutationSession = beginMutation();
+    const requestedSite = waterQualitySiteRef.current;
     try {
       const response = await fetch(`${API}/water-quality/settings/save`, {
         method: "POST",
@@ -1539,13 +1543,17 @@ function AdminApp() {
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      if (!isMutationSessionCurrent(mutationSession)) return false;
+      if (requestedSite !== waterQualitySiteRef.current) { settleMutation(mutationSession, "idle"); return false; }
       setStateForMutation(mutationSession, (current) => {
+        if (requestedSite !== waterQualitySiteRef.current) return current;
         const next = {
           ...current,
           systemSettings: result.systemSettings && typeof result.systemSettings === "object"
             ? { ...current.systemSettings, ...result.systemSettings }
             : current.systemSettings,
-          tankGroups: Array.isArray(result.tankGroups) ? result.tankGroups : current.tankGroups,
+          tankGroups: Array.isArray(result.tankGroups) ? current.tankGroups.map(group =>
+            result.tankGroups.find((incoming: TankGroup) => incoming.id === group.id) ?? group) : current.tankGroups,
           operationLogs: result.operationLog
             ? withServerOperationLog(result.operationLog, current.operationLogs)
             : current.operationLogs,
@@ -1562,11 +1570,9 @@ function AdminApp() {
     }
   };
 
-  const saveWaterQualityRecord = async (change: {
-    record?: WaterQualityRecord;
-    deleteId?: string;
-  }): Promise<boolean> => {
+  const saveWaterQualityRecord = async (change: WaterQualityRecordSaveChange): Promise<boolean> => {
     const mutationSession = beginMutation();
+    const requestedSite = waterQualitySiteRef.current;
     try {
       const response = await fetch(`${API}/water-quality-records/save`, {
         method: "POST",
@@ -1575,12 +1581,13 @@ function AdminApp() {
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      if (!isMutationSessionCurrent(mutationSession)) return false;
+      if (requestedSite !== waterQualitySiteRef.current) { settleMutation(mutationSession, "idle"); return false; }
       setStateForMutation(mutationSession, (current) => {
+        if (requestedSite !== waterQualitySiteRef.current) return current;
         const next = {
           ...current,
-          waterQualityRecords: Array.isArray(result.waterQualityRecords)
-            ? result.waterQualityRecords
-            : current.waterQualityRecords,
+          waterQualityRecords: mergeWaterQualityRecordSave(current.waterQualityRecords, result, change),
           operationLogs: result.operationLog
             ? withServerOperationLog(result.operationLog, current.operationLogs)
             : current.operationLogs,

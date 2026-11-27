@@ -58,7 +58,7 @@ function groupForLog(tankGroups, log) {
   return matches[0] ?? null;
 }
 
-function media(value, label) {
+export function normalizeMaintenanceMedia(value, label) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > 30) throw new DailyLogSaveError(`${label}格式不正确或超过30个`);
   return value.map(item => {
@@ -97,8 +97,8 @@ function normalizedLog(log, { id, group, operator, now, current }) {
     action,
     operator: normalizedOperator,
     notes: text(log?.notes),
-    photos: media(Object.hasOwn(log, "photos") ? log.photos : current?.photos, "照片"),
-    videos: media(Object.hasOwn(log, "videos") ? log.videos : current?.videos, "视频"),
+    photos: normalizeMaintenanceMedia(Object.hasOwn(log, "photos") ? log.photos : current?.photos, "照片"),
+    videos: normalizeMaintenanceMedia(Object.hasOwn(log, "videos") ? log.videos : current?.videos, "视频"),
     createdBy: text(current?.createdBy || current?.operator) || normalizedOperator,
   };
 }

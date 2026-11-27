@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DailyLog,
   normalizeWaterQualityParameters,
@@ -7,6 +7,7 @@ import {
   waterQualityParameterIdsForGroup,
   WaterQualityMeasurement,
   WaterQualityRecord,
+  WaterQualityParameterSetting,
 } from "../store";
 import { usePermission } from "../utils/permissions";
 import { confirmWrite } from "../utils/writeConfirm";
@@ -27,12 +28,17 @@ import { ClipboardList, FlaskConical, Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner";
 import { formatBioRecordTime, isoToDatetimeLocal, normalizeBioRecordTime, nowDatetimeLocal } from "../utils/localDateTime";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
+import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 
 type WaterRecordDraft = {
   id: string;
+  newId?: string;
+  original?: WaterQualityRecord;
   tankGroupId: string;
   measuredAt: string;
   values: Record<string, string>;
+  methods: Record<string, string>;
   notes: string;
 };
 
@@ -61,10 +67,27 @@ function formatMeasuredAt(value: string) {
   return local ? local.replace("T", " ") : "—";
 }
 
-function formatMeasurement(measurement: WaterQualityMeasurement) {
+export function formatMeasurement(measurement: WaterQualityMeasurement) {
   const precision = Math.max(0, Math.min(4, Math.trunc(Number(measurement.precision ?? 0))));
   const value = Number(measurement.value);
-  return `${measurement.parameterName || measurement.parameterId} ${Number.isFinite(value) ? value.toFixed(precision) : "—"} ${measurement.unit}`;
+  return `${measurement.parameterName || measurement.parameterId} ${Number.isFinite(value) ? value.toFixed(precision) : "—"} ${measurement.unit}${measurement.testMethod ? ` · ${measurement.testMethod}` : ""}`;
+}
+
+/** A renamed or deleted setting must never overwrite a historical measurement. */
+export function waterQualityDraftParameters(parameters: WaterQualityParameterSetting[], configuredIds: string[], record?: WaterQualityRecord) {
+  const configured = new Map(parameters.map(parameter => [parameter.id, parameter]));
+  const history = new Map((record?.values ?? []).map(measurement => [measurement.parameterId, measurement]));
+  return [...new Set([...configuredIds, ...history.keys()])].flatMap(id => {
+    const current = configured.get(id), previous = history.get(id);
+    if (!previous) return current ? [current] : [];
+    return [{ id, name: previous.parameterName, unit: previous.unit, precision: previous.precision,
+      testMethods: [...new Set([...(current?.testMethods ?? []), ...(previous.testMethod ? [previous.testMethod] : [])])] }];
+  });
+}
+
+function WaterRecordMedia({ record }: { record: WaterQualityRecord }) {
+  if (!record.photos?.length && !record.videos?.length) return null;
+  return <div className="mt-2 flex flex-wrap gap-2">{(record.photos ?? []).map((src, index) => <MediaPreviewTrigger key={`photo-${src}`} src={src} mediaType="image" title="水质记录照片" ariaLabel={`预览水质照片 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">照片 {index + 1}</MediaPreviewTrigger>)}{(record.videos ?? []).map((src, index) => <MediaPreviewTrigger key={`video-${src}`} src={src} mediaType="video" title="水质记录视频" ariaLabel={`预览水质视频 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">视频 {index + 1}</MediaPreviewTrigger>)}</div>;
 }
 
 export function WaterQualityRecordsPanel({
@@ -78,7 +101,13 @@ export function WaterQualityRecordsPanel({
   maintenanceSaving = false,
   viewMode = "page",
 }: WaterQualityRecordsPanelProps = {}) {
-  const { state, saveWaterQualityRecord } = useStore();
+  const { state, activeSiteId, saveWaterQualityRecord } = useStore();
+  const context = `${activeSiteId}:${state.user?.username || ""}:${state.user?.role || ""}:${captureNewCustomerSession()?.key || ""}`;
+  const currentContext = useRef(context); currentContext.current = context;
+  const viewer = useRef(state.user); viewer.current = state.user;
+  const mounted = useRef(true);
+  const saveLock = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const permission = usePermission("daily");
   const parameters = useMemo(
     () => normalizeWaterQualityParameters(state.systemSettings),
@@ -96,6 +125,7 @@ export function WaterQualityRecordsPanel({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [draft, setDraft] = useState<WaterRecordDraft | null>(null);
   const [saving, setSaving] = useState(false);
+  useEffect(() => { setDraft(null); setDialogOpen(false); }, [context]);
   const today = nowDatetimeLocal().slice(0, 10);
   const now = nowDatetimeLocal();
 
@@ -103,10 +133,10 @@ export function WaterQualityRecordsPanel({
     () => new Map(state.tankGroups.map((group) => [group.id, group])),
     [state.tankGroups]
   );
-  const parameterById = useMemo(
-    () => new Map(parameters.map((parameter) => [parameter.id, parameter])),
-    [parameters]
-  );
+  const recordScope = (record: Pick<WaterQualityRecord, "tankGroupId" | "subTankId">) => {
+    const group = groupById.get(record.tankGroupId);
+    return `${group?.name ?? "已删除缸组"} / ${record.subTankId ? group?.subTanks.find(tank => tank.id === record.subTankId)?.name || "已删除子缸" : "整组"}`;
+  };
   const filteredRecords = useMemo<UnifiedTankRecord[]>(() => {
     const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.map((record) => ({
       kind: "water",
@@ -144,32 +174,19 @@ export function WaterQualityRecordsPanel({
     if (!draft?.tankGroupId) return [];
     const group = groupById.get(draft.tankGroupId);
     const configuredIds = waterQualityParameterIdsForGroup(group, parameters);
-    const editingRecord = draft.id
-      ? state.waterQualityRecords.find((record) => record.id === draft.id)
-      : null;
-    const historical = new Map((editingRecord?.values ?? []).map((measurement) => [
-      measurement.parameterId,
-      {
-        id: measurement.parameterId,
-        name: measurement.parameterName,
-        unit: measurement.unit,
-        precision: measurement.precision,
-      },
-    ]));
-    return [...new Set([...configuredIds, ...historical.keys()])].flatMap((id) => {
-      const parameter = parameterById.get(id) ?? historical.get(id);
-      return parameter ? [parameter] : [];
-    });
-  }, [draft?.id, draft?.tankGroupId, groupById, parameterById, parameters, state.waterQualityRecords]);
+    return waterQualityDraftParameters(parameters, configuredIds, draft.original);
+  }, [draft?.original, draft?.tankGroupId, groupById, parameters]);
 
   const openNewRecord = (tankGroupId?: string) => {
     if (!permission.requirePermission("create")) return;
     const selectedGroupId = tankGroupId || (groupFilter !== "all" ? groupFilter : state.tankGroups.length === 1 ? state.tankGroups[0].id : "");
     setDraft({
       id: "",
+      newId: `water-${uid()}`,
       tankGroupId: selectedGroupId,
       measuredAt: nowDatetimeLocal(),
       values: {},
+      methods: {},
       notes: "",
     });
     setDialogOpen(true);
@@ -179,22 +196,25 @@ export function WaterQualityRecordsPanel({
     if (!permission.requirePermission("update")) return;
     setDraft({
       id: record.id,
+      original: record,
       tankGroupId: record.tankGroupId,
       measuredAt: isoToDatetimeLocal(record.measuredAt),
       values: Object.fromEntries(record.values.map((measurement) => [
         measurement.parameterId,
         String(measurement.value),
       ])),
+      methods: Object.fromEntries(record.values.map(measurement => [measurement.parameterId, measurement.testMethod || ""])),
       notes: record.notes,
     });
     setDialogOpen(true);
   };
 
   const saveRecord = async () => {
-    if (!draft || saving) return;
+    if (!draft || saveLock.current || !permission.requirePermission(draft.id ? "update" : "create")) return;
     if (!draft.tankGroupId) return toast.error("请选择缸组");
     if (!draft.measuredAt) return toast.error("请选择测量时间");
-    if (draft.measuredAt > now) return toast.error("测量时间不能晚于当前时间");
+    if (!Number.isFinite(Date.parse(draft.measuredAt))) return toast.error("请选择有效测量时间");
+    if (draft.measuredAt > nowDatetimeLocal()) return toast.error("测量时间不能晚于当前时间");
     const values = draftParameters.flatMap((parameter) => {
       const rawValue = String(draft.values[parameter.id] ?? "").trim();
       if (!rawValue) return [];
@@ -207,10 +227,14 @@ export function WaterQualityRecordsPanel({
     });
     if (invalidParameter) return toast.error(`请填写「${invalidParameter.name}」的有效数值`);
     if (values.length === 0) return toast.error("请至少填写一项水质测量值");
+    const invalidMethod = draftParameters.find(parameter => draft.methods[parameter.id] && !parameter.testMethods.includes(draft.methods[parameter.id]));
+    if (invalidMethod) return toast.error(`「${invalidMethod.name}」的测试方法已变化，请重新选择`);
     const action = draft.id ? "修改" : "新增";
     if (!confirmWrite(action, `${action}一条缸组水质测量记录。`)) return;
     const record: WaterQualityRecord = {
-      id: draft.id || `water-${uid()}`,
+      ...draft.original,
+      id: draft.id || draft.newId || `water-${uid()}`,
+      siteId: draft.original?.siteId || groupById.get(draft.tankGroupId)?.siteId,
       tankGroupId: draft.tankGroupId,
       measuredAt: new Date(draft.measuredAt).toISOString(),
       values: values.map(({ parameterId, value }) => {
@@ -221,28 +245,38 @@ export function WaterQualityRecordsPanel({
           parameterName: parameter.name,
           unit: parameter.unit,
           precision: parameter.precision,
+          testMethod: draft.methods[parameterId] || "",
         };
       }),
       operator: state.user?.username ?? "",
       notes: draft.notes.trim(),
     };
-    setSaving(true);
-    const ok = await saveWaterQualityRecord({ record });
-    setSaving(false);
-    if (!ok) return toast.error("水质记录保存失败，请重试");
-    setDialogOpen(false);
-    setDraft(null);
-    toast.success("水质记录已保存");
+    const session = captureNewCustomerSession();
+    const current = () => mounted.current && currentContext.current === context && isNewCustomerSessionCurrent(session, viewer.current);
+    if (!current()) return toast.error("登录状态已变化，请重新打开记录。");
+    saveLock.current = true; setSaving(true);
+    try {
+      const ok = await saveWaterQualityRecord({ record, ...(!draft.id ? { createOnly: true } : {}) });
+      if (!current()) return;
+      if (!ok) return toast.error("水质记录保存失败，请重试");
+      setDialogOpen(false); setDraft(null);
+      toast.success("水质记录已保存");
+    } finally { saveLock.current = false; if (mounted.current) setSaving(false); }
   };
 
   const deleteRecord = async (record: WaterQualityRecord) => {
-    if (!permission.requirePermission("delete")) return;
+    if (saveLock.current || !permission.requirePermission("delete")) return;
     if (!confirmWrite("删除", `删除 ${formatMeasuredAt(record.measuredAt)} 的水质记录。`)) return;
-    setSaving(true);
-    const ok = await saveWaterQualityRecord({ deleteId: record.id });
-    setSaving(false);
-    if (!ok) return toast.error("水质记录删除失败，请重试");
-    toast.success("水质记录已删除");
+    const session = captureNewCustomerSession();
+    const current = () => mounted.current && currentContext.current === context && isNewCustomerSessionCurrent(session, viewer.current);
+    if (!current()) return toast.error("登录状态已变化，请重新打开记录。");
+    saveLock.current = true; setSaving(true);
+    try {
+      const ok = await saveWaterQualityRecord({ deleteId: record.id });
+      if (!current()) return;
+      if (!ok) return toast.error("水质记录删除失败，请重试");
+      toast.success("水质记录已删除");
+    } finally { saveLock.current = false; if (mounted.current) setSaving(false); }
   };
 
   const hasFilter = groupFilter !== "all" || recordTypeFilter !== "all" || Boolean(startDate) || Boolean(endDate);
@@ -380,6 +414,7 @@ export function WaterQualityRecordsPanel({
                   <span className="text-xs text-muted-foreground">
                     {item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}
                   </span>
+                  {item.kind === "water" && <span className="text-xs text-muted-foreground">{recordScope(item.record)}</span>}
                 </div>
                 {canManage && (
                   <div className="flex shrink-0 gap-2 sm:justify-end">
@@ -425,6 +460,7 @@ export function WaterQualityRecordsPanel({
               {(item.kind === "water" ? item.record.notes : item.log.notes) && (
                 <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
               )}
+              {item.kind === "water" && <WaterRecordMedia record={item.record} />}
             </div>
           ))}
         </div>
@@ -451,7 +487,7 @@ export function WaterQualityRecordsPanel({
                 <td className="px-4 py-3 text-sm tabular-nums">
                   {item.kind === "water" ? formatMeasuredAt(item.record.measuredAt) : formatBioRecordTime(item.log.date)}
                 </td>
-                <td className="px-4 py-3 text-sm font-medium">{groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</td>
+                <td className="px-4 py-3 text-sm font-medium">{item.kind === "water" ? recordScope(item.record) : groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</td>
                 <td className="px-4 py-3">
                   <Badge variant="secondary" className={item.kind === "water" ? "gap-1 bg-cyan-50 text-cyan-800" : "gap-1"}>
                     {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
@@ -470,6 +506,7 @@ export function WaterQualityRecordsPanel({
                   ) : (
                     <div className="text-sm font-medium">{item.log.action || "未填写操作"}</div>
                   )}
+                  {item.kind === "water" && <WaterRecordMedia record={item.record} />}
                 </td>
                 <td className="px-4 py-3 text-sm">{item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}</td>
                 <td className="px-4 py-3 text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes || "—" : item.log.notes || "—"}</td>
@@ -518,7 +555,7 @@ export function WaterQualityRecordsPanel({
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
-                  <div className="truncate text-sm font-semibold">{groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</div>
+                  <div className="text-sm font-semibold">{item.kind === "water" ? recordScope(item.record) : groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</div>
                   <Badge variant="secondary" className={item.kind === "water" ? "shrink-0 gap-1 bg-cyan-50 text-cyan-800" : "shrink-0 gap-1"}>
                     {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
                     {item.kind === "water" ? "水质" : "养护"}
@@ -551,6 +588,7 @@ export function WaterQualityRecordsPanel({
                     <div className="mt-0.5 text-sm font-semibold">
                       {Number(measurement.value).toFixed(Math.max(0, Math.min(4, Math.trunc(Number(measurement.precision ?? 0)))))} <span className="text-xs font-normal text-muted-foreground">{measurement.unit}</span>
                     </div>
+                    {measurement.testMethod && <div className="mt-1 break-words text-xs text-muted-foreground">{measurement.testMethod}</div>}
                   </div>
                 ))}
               </div>
@@ -560,6 +598,7 @@ export function WaterQualityRecordsPanel({
             {(item.kind === "water" ? item.record.notes : item.log.notes) && (
               <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
             )}
+            {item.kind === "water" && <WaterRecordMedia record={item.record} />}
           </div>
         ))}
       </div>
@@ -567,10 +606,11 @@ export function WaterQualityRecordsPanel({
       )}
 
       <Dialog open={dialogOpen} onOpenChange={(open) => {
+        if (saveLock.current) return;
         setDialogOpen(open);
         if (!open) setDraft(null);
       }}>
-        <DialogContent aria-describedby={undefined} className="max-h-[88vh] max-w-2xl overflow-y-auto">
+        <DialogContent aria-describedby={undefined} className="max-h-[88vh] max-w-2xl overflow-y-auto" onEscapeKeyDown={event => { if (saveLock.current) event.preventDefault(); }} onPointerDownOutside={event => { if (saveLock.current) event.preventDefault(); }}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FlaskConical className="size-5 text-cyan-700" />
@@ -578,14 +618,15 @@ export function WaterQualityRecordsPanel({
             </DialogTitle>
           </DialogHeader>
           {draft && (
-            <div className="grid gap-4 py-2">
+            <fieldset disabled={saving} className="grid min-w-0 gap-4 py-2">
+              {draft.original && <p className="text-sm text-muted-foreground">记录范围：{recordScope(draft.original)}。已有测量沿用当时的名称、单位和小数位数。</p>}
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label>缸组<span className="ml-0.5 text-red-500">*</span></Label>
                   <Select
                     value={draft.tankGroupId}
                     disabled={Boolean(draft.id) || isTankView}
-                    onValueChange={(tankGroupId) => setDraft({ ...draft, tankGroupId, values: {} })}
+                    onValueChange={(tankGroupId) => setDraft({ ...draft, tankGroupId, values: {}, methods: {} })}
                   >
                     <SelectTrigger><SelectValue placeholder="请选择缸组" /></SelectTrigger>
                     <SelectContent>
@@ -631,6 +672,7 @@ export function WaterQualityRecordsPanel({
                           />
                           <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{parameter.unit}</span>
                         </div>
+                        {parameter.testMethods.length > 0 && <label className="grid gap-1.5 text-xs text-muted-foreground">测试方法（选填）<select aria-label={`${parameter.name}测试方法`} className="fishroom-control min-h-11 w-full rounded-md border bg-background px-3 text-sm text-foreground" value={draft.methods[parameter.id] || ""} onChange={event => setDraft({ ...draft, methods: { ...draft.methods, [parameter.id]: event.target.value } })}><option value="">未选择</option>{parameter.testMethods.map(method => <option key={method} value={method}>{method}</option>)}</select></label>}
                       </div>
                     );
                   })}
@@ -641,7 +683,8 @@ export function WaterQualityRecordsPanel({
                 <Label>备注</Label>
                 <Textarea rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
               </div>
-            </div>
+              {draft.original && <WaterRecordMedia record={draft.original} />}
+            </fieldset>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>取消</Button>

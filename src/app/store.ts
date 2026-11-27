@@ -390,20 +390,23 @@ export type WaterQualityParameterSetting = {
   unit: string;
   /** 小数点后保留位数，范围 0-4。 */
   precision: number;
+  /** 测试方法选填；不配置时不预置试剂或仪器。 */
+  testMethods: string[];
 };
 
 export const DEFAULT_WATER_QUALITY_PARAMETERS: WaterQualityParameterSetting[] = [
-  { id: "temperature", name: "温度", unit: "°C", precision: 1 },
-  { id: "salinity", name: "盐度", unit: "ppt", precision: 1 },
-  { id: "ph", name: "pH", unit: "pH", precision: 2 },
-  { id: "ammonia", name: "氨氮", unit: "mg/L", precision: 3 },
-  { id: "nitrite", name: "亚硝酸盐", unit: "mg/L", precision: 3 },
-  { id: "nitrate", name: "硝酸盐", unit: "mg/L", precision: 1 },
-  { id: "phosphate", name: "磷酸盐", unit: "mg/L", precision: 3 },
-  { id: "alkalinity", name: "碱度", unit: "dKH", precision: 1 },
-  { id: "calcium", name: "钙", unit: "mg/L", precision: 0 },
-  { id: "magnesium", name: "镁", unit: "mg/L", precision: 0 },
-  { id: "dissolved-oxygen", name: "溶解氧", unit: "mg/L", precision: 1 },
+  { id: "salinity", name: "盐度", unit: "ppt", precision: 1, testMethods: [] },
+  { id: "temperature", name: "温度", unit: "°C", precision: 1, testMethods: [] },
+  { id: "ph", name: "pH", unit: "pH", precision: 2, testMethods: [] },
+  { id: "dissolved-oxygen", name: "溶解氧", unit: "mg/L", precision: 1, testMethods: [] },
+  { id: "orp", name: "ORP", unit: "mV", precision: 0, testMethods: [] },
+  { id: "ammonia", name: "氨氮", unit: "PPM", precision: 3, testMethods: [] },
+  { id: "nitrite", name: "亚硝酸盐", unit: "mg/L", precision: 3, testMethods: [] },
+  { id: "nitrate", name: "硝酸盐", unit: "mg/L", precision: 1, testMethods: [] },
+  { id: "calcium", name: "钙", unit: "mg/L", precision: 0, testMethods: [] },
+  { id: "magnesium", name: "镁", unit: "mg/L", precision: 0, testMethods: [] },
+  { id: "alkalinity", name: "KH", unit: "dKH", precision: 1, testMethods: [] },
+  { id: "phosphate", name: "磷酸盐", unit: "mg/L", precision: 3, testMethods: [] },
 ];
 
 export const DEFAULT_FISH_WATER_QUALITY_PARAMETER_IDS = [
@@ -422,6 +425,7 @@ export type WaterQualityMeasurement = {
   parameterName: string;
   unit: string;
   precision: number;
+  testMethod?: string;
 };
 
 export type WaterQualityRecord = {
@@ -429,10 +433,34 @@ export type WaterQualityRecord = {
   siteId?: string;
   measuredAt: string;
   tankGroupId: string;
+  subTankId?: string;
   values: WaterQualityMeasurement[];
   operator: string;
   notes: string;
+  photos?: string[];
+  videos?: string[];
+  createdBy?: string;
 };
+
+export type WaterQualityRecordSaveChange = { record?: WaterQualityRecord; deleteId?: string; createOnly?: boolean };
+
+/** Save responses may contain a partial site history. Only the requested record
+ * is authoritative; replacing a whole array can erase another loaded scope. */
+export function mergeWaterQualityRecordSave(current: WaterQualityRecord[], result: {
+  changedRecord?: WaterQualityRecord; deletedRecordId?: string; waterQualityRecords?: WaterQualityRecord[];
+}, change: WaterQualityRecordSaveChange): WaterQualityRecord[] {
+  const targetId = change.deleteId || change.record?.id;
+  if (!targetId) return current;
+  if (change.deleteId) {
+    if (result.deletedRecordId === targetId || Array.isArray(result.waterQualityRecords) && !result.waterQualityRecords.some(record => record.id === targetId)) {
+      return current.filter(record => record.id !== targetId);
+    }
+    return current;
+  }
+  const saved = result.changedRecord?.id === targetId ? result.changedRecord
+    : result.waterQualityRecords?.find(record => record.id === targetId);
+  return saved ? [saved, ...current.filter(record => record.id !== targetId)] : current;
+}
 
 export type WaterQualityTankGroupAssignment = {
   groupId: string;
@@ -1103,8 +1131,17 @@ export function normalizeWaterQualityParameters(settings?: SystemSettings | null
       name,
       unit,
       precision: Math.max(0, Math.min(4, Math.trunc(Number(parameter?.precision ?? 0)))),
+      testMethods: [...new Set((Array.isArray(parameter?.testMethods) ? parameter.testMethods : []).map(method => String(method).trim()).filter(Boolean))],
     }];
   });
+}
+
+export function waterQualityTestMethodsError(methods: string[]): string {
+  const names = methods.map(method => method.trim()).filter(Boolean);
+  if (names.length > 20) return "测试方法最多设置20项";
+  if (names.some(method => method.length > 80)) return "每个测试方法不能超过80字";
+  if (new Set(names.map(method => method.toLocaleLowerCase("zh-CN"))).size !== names.length) return "测试方法不能重复（不区分大小写）";
+  return "";
 }
 
 export function waterQualityParameterIdsForGroup(
@@ -1222,7 +1259,7 @@ export type StoreContextType = {
     parameters: WaterQualityParameterSetting[];
     assignments: WaterQualityTankGroupAssignment[];
   }) => Promise<boolean>;
-  saveWaterQualityRecord: (change: { record?: WaterQualityRecord; deleteId?: string }) => Promise<boolean>;
+  saveWaterQualityRecord: (change: WaterQualityRecordSaveChange) => Promise<boolean>;
   saveShipmentOutbound: (change: {
     orderId: string;
     selectedItemIds: string[];

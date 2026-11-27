@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   normalizeWaterQualityParameters,
   uid,
   useStore,
   waterQualityParameterIdsForGroup,
+  waterQualityTestMethodsError,
   WaterQualityParameterSetting,
 } from "../store";
 import { confirmWrite } from "../utils/writeConfirm";
@@ -11,6 +12,8 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import {
   Check,
@@ -27,11 +30,17 @@ import { toast } from "sonner";
 type SettingsSection = "parameters" | "groups";
 
 function copyParameters(parameters: WaterQualityParameterSetting[]) {
-  return parameters.map((parameter) => ({ ...parameter }));
+  return parameters.map((parameter) => ({ ...parameter, testMethods: [...parameter.testMethods] }));
 }
 
 export function WaterQualitySettingsView() {
-  const { state, saveWaterQualitySettings } = useStore();
+  const { state, activeSiteId, saveWaterQualitySettings } = useStore();
+  const context = `${activeSiteId}:${state.user?.username || ""}:${state.user?.role || ""}:${captureNewCustomerSession()?.key || ""}`;
+  const currentContext = useRef(context); currentContext.current = context;
+  const viewer = useRef(state.user); viewer.current = state.user;
+  const mounted = useRef(true);
+  const saveLock = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const savedParameters = useMemo(
     () => normalizeWaterQualityParameters(state.systemSettings),
     [state.systemSettings]
@@ -52,7 +61,7 @@ export function WaterQualitySettingsView() {
   useEffect(() => {
     setParameters(copyParameters(savedParameters));
     setAssignments(savedAssignments);
-  }, [savedParameters, savedAssignments]);
+  }, [savedParameters, savedAssignments, context]);
 
   useEffect(() => {
     if (state.tankGroups.some((group) => group.id === selectedGroupId)) return;
@@ -83,6 +92,7 @@ export function WaterQualitySettingsView() {
       name: "",
       unit: "mg/L",
       precision: 1,
+      testMethods: [],
     }]);
   };
 
@@ -108,13 +118,14 @@ export function WaterQualitySettingsView() {
   };
 
   const save = async () => {
-    if (state.user?.role !== "admin" || saving) return;
+    if (state.user?.role !== "admin" || saveLock.current) return;
     if (parameters.length === 0) return toast.error("请至少保留一个水质参数");
     const normalized = parameters.map((parameter) => ({
       ...parameter,
       name: parameter.name.trim(),
       unit: parameter.unit.trim(),
       precision: Math.trunc(Number(parameter.precision)),
+      testMethods: parameter.testMethods.map(method => method.trim()).filter(Boolean),
     }));
     const missingName = normalized.find((parameter) => !parameter.name);
     if (missingName) return toast.error("请填写水质参数名称");
@@ -128,19 +139,29 @@ export function WaterQualitySettingsView() {
       normalized.findIndex((candidate) => candidate.name.toLocaleLowerCase("zh-CN") === parameter.name.toLocaleLowerCase("zh-CN")) !== index
     );
     if (duplicateName) return toast.error(`水质参数名称不能重复：${duplicateName.name}`);
+    for (const parameter of normalized) {
+      const methodError = waterQualityTestMethodsError(parameter.testMethods);
+      if (methodError) return toast.error(`「${parameter.name}」${methodError}`);
+    }
     if (!confirmWrite("修改", "保存水质参数和各缸组关注项配置。")) return;
+    const session = captureNewCustomerSession();
+    const current = () => mounted.current && currentContext.current === context && isNewCustomerSessionCurrent(session, viewer.current);
+    if (!current()) return toast.error("登录状态已变化，请重新打开配置。");
+    saveLock.current = true;
     setSaving(true);
-    const ok = await saveWaterQualitySettings({
-      parameters: normalized,
-      assignments: state.tankGroups.map((group) => ({
-        groupId: group.id,
-        parameterIds: assignments[group.id] ?? [],
-      })),
-    });
-    setSaving(false);
-    if (!ok) return toast.error("水质参数配置保存失败，请重试");
-    setParameters(copyParameters(normalized));
-    toast.success("水质参数配置已保存");
+    try {
+      const ok = await saveWaterQualitySettings({
+        parameters: normalized,
+        assignments: state.tankGroups.map((group) => ({
+          groupId: group.id,
+          parameterIds: assignments[group.id] ?? [],
+        })),
+      });
+      if (!current()) return;
+      if (!ok) return toast.error("水质参数配置保存失败，请重试");
+      setParameters(copyParameters(normalized));
+      toast.success("水质参数配置已保存");
+    } finally { saveLock.current = false; if (mounted.current) setSaving(false); }
   };
 
   if (state.user?.role !== "admin") {
@@ -148,7 +169,7 @@ export function WaterQualitySettingsView() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3 sm:p-6">
+    <fieldset disabled={saving} className="m-0 flex h-full min-h-0 min-w-0 flex-col overflow-y-auto border-0 p-3 sm:p-6">
       <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -204,7 +225,7 @@ export function WaterQualitySettingsView() {
             <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
               <div>
                 <h2 className="text-base font-semibold">参数项目</h2>
-                <p className="mt-0.5 text-xs text-muted-foreground">名称、单位和小数位数会作为测量记录的显示规则</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">修改只影响后续测量；删除参数也会保留历史记录。测试方法选填，每行一个，最多20项。</p>
               </div>
               <Badge variant="secondary">{parameters.length} 项</Badge>
             </div>
@@ -212,9 +233,10 @@ export function WaterQualitySettingsView() {
               <table className="w-full table-fixed text-sm">
                 <thead className="bg-muted/50 text-left">
                   <tr>
-                    <th className="w-[38%] px-4 py-3 font-semibold">参数名称</th>
-                    <th className="w-[32%] px-4 py-3 font-semibold">单位</th>
-                    <th className="w-40 px-4 py-3 font-semibold">小数位数</th>
+                    <th className="w-[22%] px-4 py-3 font-semibold">参数名称</th>
+                    <th className="w-[16%] px-4 py-3 font-semibold">单位</th>
+                    <th className="w-28 px-4 py-3 font-semibold">小数位数</th>
+                    <th className="px-4 py-3 font-semibold">可选测试方法</th>
                     <th className="w-20 px-4 py-3 text-center font-semibold">操作</th>
                   </tr>
                 </thead>
@@ -222,14 +244,15 @@ export function WaterQualitySettingsView() {
                   {parameters.map((parameter) => (
                     <tr key={parameter.id}>
                       <td className="px-4 py-3">
-                        <Input value={parameter.name} onChange={(event) => updateParameter(parameter.id, { name: event.target.value })} placeholder="例如：温度" />
+                        <Input aria-label={`${parameter.name || "新参数"}名称`} disabled={saving} value={parameter.name} onChange={(event) => updateParameter(parameter.id, { name: event.target.value })} placeholder="例如：温度" />
                       </td>
                       <td className="px-4 py-3">
-                        <Input value={parameter.unit} onChange={(event) => updateParameter(parameter.id, { unit: event.target.value })} placeholder="例如：mg/L" />
+                        <Input aria-label={`${parameter.name || "新参数"}单位`} disabled={saving} value={parameter.unit} onChange={(event) => updateParameter(parameter.id, { unit: event.target.value })} placeholder="例如：mg/L" />
                       </td>
                       <td className="px-4 py-3">
-                        <Input type="number" min={0} max={4} step={1} value={parameter.precision} onChange={(event) => updateParameter(parameter.id, { precision: Number(event.target.value) })} />
+                        <Input aria-label={`${parameter.name || "新参数"}小数位数`} disabled={saving} type="number" min={0} max={4} step={1} value={parameter.precision} onChange={(event) => updateParameter(parameter.id, { precision: Number(event.target.value) })} />
                       </td>
+                      <td className="px-4 py-3"><Textarea aria-label={`${parameter.name || "新参数"}可选测试方法`} disabled={saving} rows={2} value={parameter.testMethods.join("\n")} onChange={event => updateParameter(parameter.id, { testMethods: event.target.value.split("\n") })} placeholder="选填，每行一个方法" /></td>
                       <td className="px-4 py-3 text-center">
                         <Button type="button" variant="ghost" size="icon" onClick={() => removeParameter(parameter.id)} disabled={parameters.length <= 1 || saving} title="删除参数">
                           <Trash2 className="size-4" />
@@ -251,6 +274,7 @@ export function WaterQualitySettingsView() {
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
+                  <label className="col-span-2 grid gap-1.5 text-sm">可选测试方法<Textarea aria-label={`${parameter.name || "新参数"}可选测试方法`} disabled={saving} rows={2} value={parameter.testMethods.join("\n")} onChange={event => updateParameter(parameter.id, { testMethods: event.target.value.split("\n") })} placeholder="选填，每行一个方法" /></label>
                 </div>
               ))}
             </div>
@@ -344,6 +368,6 @@ export function WaterQualitySettingsView() {
           </section>
         )}
       </div>
-    </div>
+    </fieldset>
   );
 }
