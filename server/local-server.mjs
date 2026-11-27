@@ -6,7 +6,7 @@ import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import pg from "pg";
@@ -17155,7 +17155,9 @@ async function handleApi(req, res, url) {
           if (body.createOnly === true && current) {
             const keys = ["measuredAt", "tankGroupId", "subTankId", "values", "notes", "photos", "videos"];
             const empty = key => ["values", "photos", "videos"].includes(key) ? [] : "";
-            const same = keys.every(key => JSON.stringify(current[key] ?? empty(key)) === JSON.stringify(changedRecord[key] ?? empty(key)));
+            // PostgreSQL jsonb reorders object keys; retry equality must compare
+            // measurement content while retaining the order of value/media arrays.
+            const same = keys.every(key => isDeepStrictEqual(current[key] ?? empty(key), changedRecord[key] ?? empty(key)));
             if (!same || String(current.createdBy || current.operator) !== operator) throw httpError(409, "该记录编号已使用且内容不同，请刷新后重新记录");
             await client.query("COMMIT");
             sendJson(req, res, 200, { ok: true, idempotent: true, siteId, tankGroupId: groupId, changedRecord: current });

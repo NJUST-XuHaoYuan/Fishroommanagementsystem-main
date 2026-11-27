@@ -62,6 +62,29 @@ test('create-only retry uses create permission, checks original author/content a
   denied(await s.save(record('', {})));
 });
 
+test('create-only retry accepts jsonb-reordered measurement keys but rejects changed values and array order', async t => {
+  const input = record('jsonb-retry', {
+    values: [{ parameterId: 'ph', value: '8.12', testMethod: '测试笔' }, { parameterId: 'orp', value: -100, testMethod: '仪器' }],
+    photos: ['/uploads/first.jpg', '/uploads/second.jpg'],
+  });
+  // Seed a committed row as jsonb would return it: object key order differs
+  // from the normalizer's insertion order, but array order stays unchanged.
+  const persistedValues = [
+    { unit: 'pH', value: 8.12, precision: 2, testMethod: '测试笔', parameterId: 'ph', parameterName: 'pH' },
+    { unit: 'mV', value: -100, precision: 0, testMethod: '仪器', parameterId: 'orp', parameterName: 'ORP' },
+  ];
+  const s = await setup(t, state => {
+    state.waterQualityRecords = [{ ...input, values: persistedValues, measuredAt: '2026-11-01T02:00:00.000Z', operator: 'pricing-editor', createdBy: 'pricing-editor' }];
+  });
+  const before = await s.readPersistedState();
+  const retry = await s.save(input); ok(retry); assert.equal(retry.body.idempotent, true);
+  assert.deepEqual(retry.body.changedRecord.values, persistedValues);
+  assert.equal((await s.save({ ...input, values: [...input.values].reverse() })).response.status, 409);
+  assert.equal((await s.save({ ...input, values: [{ ...input.values[0], value: 8.13 }, input.values[1]] })).response.status, 409);
+  assert.equal((await s.save({ ...input, photos: [...input.photos].reverse() })).response.status, 409);
+  assert.deepEqual(await s.readPersistedState(), before);
+});
+
 test('sub-tank ownership, site authorization and live account revocation are enforced before writes', async t => {
   const s = await setup(t); const before = await s.readPersistedState();
   assert.equal((await s.save(record('wrong-tank', { subTankId: 'tank-j' }))).response.status, 404);
