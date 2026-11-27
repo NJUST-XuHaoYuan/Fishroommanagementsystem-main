@@ -14,8 +14,11 @@ import {
 import { authJsonHeaders } from "../utils/authSession";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { OrderPaymentProofPanel } from "./OrderPaymentProofPanel";
+import { PaymentCorrectionDialog, PaymentCorrectionHistory } from "./PaymentCorrectionDialog";
+import type { CorrectablePayment, PaymentCorrection } from "../utils/paymentCorrection";
 import { PaymentProofQueue } from "./PaymentProofQueue";
 import type { PaymentProofDetail } from "../utils/orderPaymentProof";
+import { paymentProofReviewChoice } from "../utils/paymentProofReviewChoice";
 import { uploadOriginalMedia } from "../utils/media";
 import {
   isPlatformOrderSource,
@@ -78,7 +81,7 @@ const PAYMENT_LABELS: Record<PaymentType, string> = {
   other: "其他",
 };
 
-type FinancePayment = PaymentRecord & {
+type FinancePayment = CorrectablePayment & {
   account?: string;
 };
 
@@ -149,6 +152,7 @@ type FinanceOrderRow = {
   commissionReviewMessage?: string;
   items: FinanceOrderItem[];
   payments: FinancePayment[];
+  paymentCorrections?: PaymentCorrection[];
 };
 
 type FinanceTransaction = FinancePayment & {
@@ -561,10 +565,19 @@ function OrderFinanceDialog({
 }) {
   const { state } = useStore();
   const permission = usePermission("finance");
-  const [editingPaymentId, setEditingPaymentId] = useState("");
   const [paymentFormOpen, setPaymentFormOpen] = useState(false);
   const [savingPayment, setSavingPayment] = useState(false);
   const [verifyingPaymentId, setVerifyingPaymentId] = useState("");
+  const [proofDetail, setProofDetail] = useState<PaymentProofDetail | null>(null);
+  const [proofRefreshKey, setProofRefreshKey] = useState(0);
+  const [correctingPayment, setCorrectingPayment] = useState<FinancePayment | null>(null);
+  const proofPanelRef = useRef<HTMLDivElement>(null);
+  const pendingProofCount = proofDetail?.claims.filter(claim => claim.status === "pending").length || 0;
+  const hasPendingProofForPayment = (payment: FinancePayment) => Boolean(proofDetail?.claims.some(claim => claim.status === "pending" && paymentProofReviewChoice(claim, [payment]).eligible.length > 0));
+  const focusPaymentProofs = () => {
+    proofPanelRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+    proofPanelRef.current?.focus({ preventScroll: true });
+  };
   const [draft, setDraft] = useState<PaymentDraft>({
     id: "",
     type: "balance",
@@ -580,10 +593,10 @@ function OrderFinanceDialog({
   });
 
   useEffect(() => {
-    if (!open || !order) return;
     setPaymentFormOpen(false);
-    setEditingPaymentId("");
-  }, [open, order?.id]);
+    setCorrectingPayment(null);
+    setProofDetail(null);
+  }, [open, order?.id, state.user?.username]);
 
   const availablePaymentMethods = configuredPaymentMethods(state.systemSettings);
   const orderPaymentAccount = String(order?.paymentAccount ?? "").trim();
@@ -617,7 +630,6 @@ function OrderFinanceDialog({
 
   const resetPaymentForm = () => {
     const paymentMethod = defaultPaymentMethod();
-    setEditingPaymentId("");
     setDraft({
       id: "",
       type: "balance",
@@ -637,7 +649,6 @@ function OrderFinanceDialog({
   const startAddPayment = () => {
     if (!permission.requirePermission("create")) return;
     const paymentMethod = defaultPaymentMethod();
-    setEditingPaymentId("");
     setDraft({
       id: "",
       type: "balance",
@@ -654,36 +665,17 @@ function OrderFinanceDialog({
     setPaymentFormOpen(true);
   };
 
-  const startEditPayment = (payment: FinancePayment) => {
-    if (!permission.requirePermission("update")) return;
-    setEditingPaymentId(payment.id);
-    setDraft({
-      id: payment.id,
-      type: payment.type,
-      amount: payment.amount,
-      time: payment.time,
-      paymentMethodId: payment.paymentMethodId || historicalFinancePaymentMethodId(`payment-${payment.id}`),
-      paymentMethodName: payment.paymentMethodName || paymentChannelLabel(payment.channel ?? order?.paymentChannel ?? ""),
-      channel: payment.channel ?? order?.paymentChannel ?? "",
-      account: payment.account ?? "",
-      externalTransactionNo: payment.externalTransactionNo ?? "",
-      proof: [...(payment.proof ?? [])],
-      notes: payment.notes ?? "",
-    });
-    setPaymentFormOpen(true);
-  };
-
   const savePayment = async () => {
     if (!order || savingPayment) return;
-    const action = editingPaymentId ? "update" : "add";
-    if (!permission.requirePermission(editingPaymentId ? "update" : "create")) return;
+    const action = "add";
+    if (!permission.requirePermission("create")) return;
     if (!Number.isFinite(draft.amount) || draft.amount <= 0) {
       toast.error("请输入有效的资金金额");
       return;
     }
     if (!draft.paymentMethodId || !draft.channel) return toast.error("请选择付款方式");
     if (!draft.account.trim()) return toast.error("请填写资金账户");
-    if (!confirmWrite(editingPaymentId ? "修改" : "新增", `保存订单 ${order.orderNo} 的${PAYMENT_LABELS[draft.type]}记录。`)) return;
+    if (!confirmWrite("新增", `保存订单 ${order.orderNo} 的${PAYMENT_LABELS[draft.type]}记录。`)) return;
     setSavingPayment(true);
     try {
       await requestJson("/api/orders/payment", {
@@ -694,7 +686,7 @@ function OrderFinanceDialog({
           payment: {
             ...draft,
             paymentMethodId: draft.paymentMethodId.startsWith("historical-finance-") ? "" : draft.paymentMethodId,
-            id: editingPaymentId || uid(),
+            id: uid(),
             amount: Number(draft.amount),
           },
         }),
@@ -706,25 +698,6 @@ function OrderFinanceDialog({
       toast.error(error instanceof Error ? error.message : "资金流水保存失败");
     } finally {
       setSavingPayment(false);
-    }
-  };
-
-  const deletePayment = async (payment: FinancePayment) => {
-    if (!order || !permission.requirePermission("delete")) return;
-    if (!confirmWrite("删除", `删除订单 ${order.orderNo} 的${PAYMENT_LABELS[payment.type]} ${money(payment.amount)}。`)) return;
-    try {
-      await requestJson("/api/orders/payment", {
-        method: "POST",
-        body: JSON.stringify({
-          orderId: order.id,
-          action: "delete",
-          paymentId: payment.id,
-        }),
-      });
-      await onRefresh();
-      toast.success("资金流水已删除");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "资金流水删除失败");
     }
   };
 
@@ -768,6 +741,7 @@ function OrderFinanceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         aria-describedby={undefined}
+        onOpenAutoFocus={event => { if (proofPanelRef.current) { event.preventDefault(); proofPanelRef.current.focus({ preventScroll: true }); } }}
         className="h-[92dvh] max-h-[92dvh] gap-0 overflow-hidden p-0 sm:w-[96vw] sm:max-w-[1440px]"
       >
         <DialogHeader className="border-b px-4 py-3 pr-12 sm:px-6 sm:pr-14">
@@ -805,7 +779,7 @@ function OrderFinanceDialog({
 
             <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1.35fr)_minmax(390px,0.65fr)]">
               <div className="min-w-0 lg:overflow-y-auto">
-                <div className="border-b px-4 py-4 sm:px-6"><OrderPaymentProofPanel key={`finance-proof:${order.id}:${state.user?.username}`} orderId={order.id} reviewOnly onApplied={() => onRefresh()} /></div>
+                <div ref={proofPanelRef} tabIndex={-1} aria-label="待核验付款凭证" className="border-b px-4 py-4 focus-visible:outline-2 focus-visible:outline-offset-[-2px] sm:px-6"><OrderPaymentProofPanel key={`finance-proof:${order.id}:${state.user?.username}:${proofRefreshKey}`} orderId={order.id} reviewOnly onDetailChange={setProofDetail} onApplied={() => onRefresh()} /></div>
                 <section className="border-b px-4 py-4 sm:px-6">
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
@@ -974,20 +948,20 @@ function OrderFinanceDialog({
                 {permission.isAdmin && <OrderCommissionDetails order={order} />}
 
                 <section className="px-4 py-4 sm:px-5">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold">资金流水</h3>
-                      <p className="mt-1 text-xs text-muted-foreground">优先从收款账单自动带入；这里只补录现金或特殊资金记录。</p>
-                    </div>
-                    {!paymentFormOpen && permission.canCreate && (
-                      <Button size="sm" variant="outline" onClick={startAddPayment}>
-                        <Plus className="size-4" /> 补录流水
-                      </Button>
-                    )}
+                  <div className="mb-3">
+                    <h3 className="text-sm font-semibold">已登记资金流水</h3>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">付款凭证核验通过后自动入账，在这里查看和更正。</p>
                   </div>
+                  {pendingProofCount > 0 && <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">
+                    <p className="font-medium">{pendingProofCount} 笔付款凭证待核验</p>
+                    <p className="text-xs">已上传凭证的收款，直接核验即可，无需再次补录。</p>
+                    <Button variant="outline" className="mt-2 min-h-11 bg-background" onClick={focusPaymentProofs}><FileCheck2 className="size-4" />去核验付款凭证</Button>
+                  </div>}
+                  {!paymentFormOpen && permission.canCreate && <Button variant="ghost" className="mb-3 min-h-11 text-sm text-muted-foreground" onClick={startAddPayment}><Plus className="size-4" />手工补录其他收支</Button>}
 
                   {paymentFormOpen && (
                     <div className="mb-4 grid gap-3 rounded-md border bg-background p-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                      <p className="text-xs leading-5 text-muted-foreground sm:col-span-2 lg:col-span-1 xl:col-span-2">仅补录尚未登记的收支；已有付款凭证的同一笔收款，请直接核验凭证。</p>
                       <div className="grid gap-1.5">
                         <Label>类型</Label>
                         <Select
@@ -1080,7 +1054,7 @@ function OrderFinanceDialog({
                         <Button variant="outline" size="sm" onClick={resetPaymentForm}>取消</Button>
                         <Button size="sm" onClick={savePayment} disabled={savingPayment}>
                           {savingPayment && <Loader2 className="size-4 animate-spin" />}
-                          {editingPaymentId ? "保存修改" : "保存流水"}
+                          保存补录并待核验
                         </Button>
                       </div>
                     </div>
@@ -1088,7 +1062,7 @@ function OrderFinanceDialog({
 
                   <div className="divide-y rounded-md border bg-background">
                     {order.payments.length === 0 ? (
-                      <div className="px-4 py-8 text-center text-sm text-muted-foreground">暂无手工资金流水</div>
+                      <div className="px-4 py-8 text-center text-sm text-muted-foreground">暂无已登记流水</div>
                     ) : (
                       [...order.payments]
                         .sort((left, right) => String(right.time).localeCompare(String(left.time)))
@@ -1138,31 +1112,25 @@ function OrderFinanceDialog({
                                   ))}
                                 </div>
                               )}
-                              {payment.paymentProofClaimId && <p className="mt-2 text-xs leading-5 text-muted-foreground">凭证核验收款已锁定；退款请单独登记。图片与核验记录见本单付款凭证区。</p>}
+                              {permission.canUpdate && payment.correctionBlockReason && !payment.canVoid && !payment.canCorrect && <p className="mt-2 text-xs leading-5 text-muted-foreground">{payment.correctionBlockReason}</p>}
+                              {payment.paymentProofClaimId && <p className="mt-2 text-xs leading-5 text-muted-foreground">图片与核验记录见付款凭证区。核验有误可更正并退回负责人；实际退款请单独登记。</p>}
                             </div>
                             <div className="flex shrink-0 items-center gap-1 self-end">
-                              {payment.verificationStatus === "pending" && permission.canUpdate && (
+                              {payment.verificationStatus === "pending" && permission.canUpdate && hasPendingProofForPayment(payment) && <Button size="sm" variant="outline" className="min-h-11" onClick={focusPaymentProofs}>核验对应凭证</Button>}
+                              {payment.verificationStatus === "pending" && permission.canUpdate && !payment.paymentProofClaimId && !hasPendingProofForPayment(payment) && (
                                 <Button
                                   size="sm"
                                   variant="outline"
                                   className="h-8"
                                   onClick={() => void verifyPayment(payment)}
-                                  disabled={verifyingPaymentId === payment.id}
+                                  disabled={verifyingPaymentId === payment.id || !proofDetail}
                                 >
                                   {verifyingPaymentId === payment.id && <Loader2 className="size-3.5 animate-spin" />}
-                                  核销
+                                  核验通过
                                 </Button>
                               )}
-                              {permission.canUpdate && !payment.paymentProofClaimId && payment.recordSource !== "statement" && !payment.statementId && (
-                                <Button size="icon" variant="ghost" className="size-8" onClick={() => startEditPayment(payment)} title="修改流水">
-                                  <Pencil className="size-3.5" />
-                                </Button>
-                              )}
-                              {permission.canDelete && !payment.paymentProofClaimId && payment.recordSource !== "statement" && !payment.statementId && (
-                                <Button size="icon" variant="ghost" className="size-8 text-rose-600" onClick={() => deletePayment(payment)} title="删除流水">
-                                  <Trash2 className="size-3.5" />
-                                </Button>
-                              )}
+                              {permission.canUpdate && payment.canVoid && <Button size="sm" variant="ghost" className="min-h-11 text-destructive" onClick={() => setCorrectingPayment(payment)}>撤销登记</Button>}
+                              {permission.canUpdate && payment.canCorrect && <Button size="sm" variant="ghost" className="min-h-11" onClick={() => setCorrectingPayment(payment)}><Pencil className="size-3.5" />更正</Button>}
                               {permission.canUpdate && payment.statementId && payment.verificationStatus === "pending" && (
                                 <Button size="sm" variant="ghost" className="h-8 text-rose-700" onClick={() => void unlinkStatementPayment(payment)}>解除关联</Button>
                               )}
@@ -1171,6 +1139,7 @@ function OrderFinanceDialog({
                         ))
                     )}
                   </div>
+                  <PaymentCorrectionHistory corrections={order.paymentCorrections} />
                 </section>
               </div>
             </div>
@@ -1180,6 +1149,7 @@ function OrderFinanceDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
         </DialogFooter>
       </DialogContent>
+      {order && <PaymentCorrectionDialog orderId={order.id} orderNo={order.orderNo} completed={order.orderStatus === "completed"} payment={open ? correctingPayment : null} onClose={() => setCorrectingPayment(null)} onApplied={async () => { await onRefresh(); setProofRefreshKey(key => key + 1); }} />}
     </Dialog>
   );
 }

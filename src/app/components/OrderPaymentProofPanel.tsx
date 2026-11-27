@@ -7,6 +7,7 @@ import { usePermission } from "../utils/permissions";
 import { captureNewCustomerSession, isNewCustomerSessionCurrent, type NewCustomerEvidenceAttachment, type NewCustomerSession } from "../utils/newCustomerEvidence";
 import { paymentProofDraftAllocation, getShippingSettlementSummary } from "../utils/shippingSettlement";
 import type { PaymentProofClaim, PaymentProofDetail } from "../utils/orderPaymentProof";
+import { paymentProofReviewChoice } from "../utils/paymentProofReviewChoice";
 import { validatePaymentProofDraft, type PaymentProofDraftField, type PaymentProofDraftIssue } from "../utils/paymentProofDraftValidation";
 import { NewCustomerEvidenceGallery, NewCustomerEvidenceUploader } from "./NewCustomerEvidence";
 import { Button } from "./ui/button";
@@ -170,14 +171,15 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   const fieldErrorId = (field: PaymentProofDraftField) => `${fieldId}-${field}-error`;
   const review = (claim: PaymentProofClaim, decision: "approve" | "reject") => {
     if (!detail?.canReview || !financePermission.canUpdate) return setError("付款凭证由财务岗位或管理员核验。");
-    const selected = reviewChoice[claim.id]; const reason = reasons[claim.id]?.trim();
-    if (decision === "approve" && !selected) return setError("请先选择关联现有收款流水，或明确选择新增一笔收款。");
+    const choice = paymentProofReviewChoice(claim, detail.eligiblePayments, reviewChoice[claim.id]);
+    const selected = choice.value; const reason = reasons[claim.id]?.trim();
+    if (decision === "approve" && !selected) return setError(choice.mode === "unavailable" ? "原收款流水已变化，请刷新凭证后重新核对。" : "找到多笔同金额、同账户流水，请选择这张凭证对应的一笔。");
     if (decision === "reject" && !reason) return setError("请填写驳回原因，方便订单负责人补充正确凭证。");
     void write("review", { orderId, claimId: claim.id, expectedVersion: claim.version, reviewToken: detail?.reviewToken, decision, reason: reason || "", ...(decision === "approve" && selected !== "new" ? { existingPaymentId: selected } : {}) });
   };
 
   return <section aria-label="订单付款凭证" aria-busy={loading || busy || uploading} className={presentation === "cashier" ? "min-w-0 space-y-3 border-t pt-4" : "min-w-0 space-y-3 rounded-lg border bg-card p-3 sm:p-4"}>
-    <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold sm:text-base">{presentation === "cashier" ? "收款登记与凭证核验" : "付款凭证与财务核验"}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">负责人按每笔实付提交图片和金额。财务核验前不计入确认到账或提成；未覆盖金额发货时自动记赊销。</p></div><Button type="button" variant="ghost" className="min-h-11" disabled={busy || uploading || loading} onClick={() => { setError(""); void load(); }} aria-label="刷新付款凭证"><RefreshCw className="size-4" /></Button></div>
+    <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold sm:text-base">{presentation === "cashier" ? "收款登记与凭证核验" : "付款凭证与财务核验"}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{reviewOnly ? "核对图片、金额和真实到账后，点击核验通过；无需另行补录同一笔收款。" : "负责人登记实付金额和图片，财务核验真实到账。"}</p></div><Button type="button" variant="ghost" className="min-h-11" disabled={busy || uploading || loading} onClick={() => { setError(""); void load(); }} aria-label="刷新付款凭证"><RefreshCw className="size-4" /></Button></div>
     {(!formOpen || !detail?.canSubmit || loading || privateOnly || reviewOnly) && error && <p role="alert" className="break-words rounded-md border border-destructive/40 px-3 py-2 text-sm text-destructive">{error}</p>}
     {submittedAmount !== null && <div ref={submittedRef}><PaymentProofSubmissionFeedback submittedAmount={submittedAmount} /></div>}
     {loading ? <p role="status" className="py-3 text-sm text-muted-foreground">正在加载付款凭证…</p> : privateOnly ? <p className="text-sm leading-6 text-muted-foreground">付款图片仅由当前订单负责人、管理员及有财务核验权限的人员查看。</p> : !detail ? <Button type="button" variant="outline" className="min-h-11" onClick={() => void load()}>重新加载</Button> : <>
@@ -185,7 +187,8 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
       {detail.claims.length === 0 && <p className="text-sm text-muted-foreground">尚未上传付款凭证。无凭证也可发货，未确认到账的部分会自动登记赊销。</p>}
       {presentation === "cashier" && !selectedClaimId && detail.claims.length > 0 && !formOpen && <p className="text-sm text-muted-foreground">点击上方收支记录，可查看该笔凭证和核验详情。</p>}
       <div className="space-y-3">{detail.claims.filter(claim => presentation !== "cashier" || claim.id === selectedClaimId).map(claim => {
-        const eligible = detail.eligiblePayments.filter(payment => (!claim.matchingPaymentId || payment.id === claim.matchingPaymentId) && payment.type !== "refund" && Math.abs(Number(payment.amount) - claim.amount) < 0.005 && payment.channel === claim.channel && payment.account === claim.account);
+        const choice = paymentProofReviewChoice(claim, detail.eligiblePayments, reviewChoice[claim.id]);
+        const eligible = choice.eligible;
         return <article key={claim.id} className="min-w-0 space-y-3 rounded-md border p-3">
           <div className="flex flex-wrap items-center justify-between gap-2"><div className="text-sm font-semibold">{claim.purpose === "shipping_fee" ? "运费收款 · " : ""}{currency(claim.amount)} <span className="ml-1 text-xs font-normal text-muted-foreground">{claim.paymentMethodName || claim.channel}</span></div><Badge variant="outline">{{ pending: "凭证待核验", approved: "核验通过", rejected: "已驳回" }[claim.status]}</Badge></div>
           <p className="break-words text-xs leading-5 text-muted-foreground">付款时间：{String(claim.time || "").replace("T", " ")} · 收款账户：{claim.account} · 提交人：{claim.submittedBy}{claim.externalTransactionNo ? ` · 流水号：${claim.externalTransactionNo}` : ""}</p>
@@ -196,9 +199,12 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
           {claim.reviewedBy && <p className="text-xs text-muted-foreground">核验人：{claim.reviewedBy} · {String(claim.reviewedAt || "").replace("T", " ")}</p>}
           {claim.status === "rejected" && detail.canSubmit && !reviewOnly && <Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => { setDraft({ purpose: claim.purpose || "order", claimId: claim.id, expectedVersion: claim.version, amount: String(claim.amount), time: claim.time.slice(0, 16), paymentMethodId: claim.paymentMethodId, externalTransactionNo: claim.externalTransactionNo || "", notes: claim.notes || "", attachments: [] }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}>补充正确凭证并重提</Button>}
           {claim.status === "pending" && detail.canReview && financePermission.canUpdate && <div className="space-y-3 border-t pt-3">
-            <label className="grid gap-1.5 text-sm"><span>核验后关联的收款流水</span><select aria-label={`核验流水 ${claim.id}`} value={reviewChoice[claim.id] || ""} disabled={busy || uploading} className="fishroom-control min-h-11 w-full min-w-0 rounded-md border bg-background px-3 text-sm" onChange={event => setReviewChoice(current => ({ ...current, [claim.id]: event.target.value }))}><option value="">请选择，避免同笔到账重复计收</option>{eligible.map(payment => <option key={payment.id} value={payment.id}>{payment.time} · {currency(payment.amount)} · {payment.externalTransactionNo || payment.id} · {payment.verificationStatus === "pending" ? "待核销" : "已核销"}</option>)}<option value="new" disabled={eligible.length > 0}>无对应现有流水，新增并确认到账</option></select></label>
+            {choice.mode === "new" && <p className="rounded-md bg-muted/40 p-3 text-sm leading-6"><strong className="block font-medium">核验通过后自动生成收款流水</strong><span className="text-muted-foreground">本笔尚无对应流水，核验后确认到账 {currency(claim.amount)}。</span></p>}
+            {choice.mode === "existing" && <div className="rounded-md bg-muted/40 p-3 text-sm leading-6"><p className="font-medium">已匹配现有收款，核验后不会重复入账</p><p className="break-words text-xs text-muted-foreground">{String(eligible[0].time).replace("T", " ")} · {currency(eligible[0].amount)} · {eligible[0].externalTransactionNo || eligible[0].id} · {eligible[0].verificationStatus === "pending" ? "待核验" : "已核验"}</p></div>}
+            {choice.mode === "unavailable" && <p role="alert" className="text-sm text-destructive">原收款流水已变化，请刷新凭证后重新核对。</p>}
+            {choice.mode === "choose" && <label className="grid gap-1.5 text-sm"><span>找到多笔同金额流水，请选择对应的一笔</span><select aria-label={`核验流水 ${claim.id}`} value={choice.value} disabled={busy || uploading} className="fishroom-control min-h-11 w-full min-w-0 rounded-md border bg-background px-3 text-sm" onChange={event => setReviewChoice(current => ({ ...current, [claim.id]: event.target.value }))}><option value="">请选择对应流水</option>{eligible.map(payment => <option key={payment.id} value={payment.id}>{payment.time} · {currency(payment.amount)} · {payment.externalTransactionNo || payment.id} · {payment.verificationStatus === "pending" ? "待核验" : "已核验"}</option>)}</select><span className="text-xs text-muted-foreground">关联原流水，避免同一笔到账重复计收。</span></label>}
             <label className="grid gap-1.5 text-sm"><span>核验说明／驳回原因</span><Textarea aria-label={`核验说明 ${claim.id}`} rows={2} disabled={busy} value={reasons[claim.id] || ""} onChange={event => setReasons(current => ({ ...current, [claim.id]: event.target.value }))} placeholder="驳回时必填；通过前请核对图片与真实到账" /></label>
-            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => review(claim, "reject")}><X className="size-4" />驳回凭证</Button><Button type="button" className="min-h-11" disabled={busy || uploading} onClick={() => review(claim, "approve")}><FileCheck2 className="size-4" />核验通过</Button></div>
+            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => review(claim, "reject")}><X className="size-4" />驳回凭证</Button><Button type="button" className="min-h-11" disabled={busy || uploading || choice.mode === "unavailable" || (choice.mode === "choose" && !choice.value)} onClick={() => review(claim, "approve")}><FileCheck2 className="size-4" />核验通过</Button></div>
           </div>}
         </article>;
       })}</div>

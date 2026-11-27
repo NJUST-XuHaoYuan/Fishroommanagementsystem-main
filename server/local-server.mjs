@@ -95,6 +95,8 @@ import { createMaintenanceWorkbenchHandler } from "./maintenance-workbench.mjs";
 import { createMobileMaintenanceHistoryHandler } from "./mobile-maintenance-history.mjs";
 import { createOrderFollowupHandler } from "./order-followups.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
+import { paymentCorrectionCapabilities, assertPaymentCorrectionsUnchanged, planPaymentCorrection } from "./payment-correction-rules.mjs";
+import { creditSaleOrderOwner } from "./credit-sale-approval-rules.mjs";
 import { PAYMENT_EVIDENCE_DIRECTORY, PAYMENT_EVIDENCE_MAX_BYTES, isPaymentEvidencePath, resolveEvidenceForSubmission as resolveShippingRefundEvidence, paymentEvidenceMetadata, paymentEvidencePath, decryptPaymentEvidence } from "./payment-evidence.mjs";
 import { usesOrderCashier, cashierMethodAllowedForOrder, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
 import { hasShippingSettlement, shippingSettlementSummary, registeredOrderCashSummary, planShippingRefund, validateShippingReceipt, validateOrderRefundAllocation, isShippingRefund } from "./shipping-settlement.mjs";
@@ -5608,7 +5610,10 @@ function buildFinanceOverview(
       settlementCount: platformSettlements.length,
       ...commission,
       items,
+      paymentCorrections: Array.isArray(order?.paymentCorrections) ? order.paymentCorrections : [],
       payments: (Array.isArray(order?.payments) ? order.payments : []).map((payment) => ({
+        ...paymentCorrectionCapabilities(order, payment, calcAmountDueForOrder(order, shipments)),
+        paymentProofClaimId: String(payment?.paymentProofClaimId ?? ""),
         id: String(payment?.id ?? ""),
         time: String(payment?.time ?? ""),
         type: String(payment?.type ?? "other"),
@@ -6009,6 +6014,7 @@ function normalizeOrderMutationInput(state = {}, body = {}, currentOrder = null,
   if (currentOrder) assertNewCustomerCustomerUnchanged(currentOrder, { customerId });
   assertOrderSalesMetadataUnchanged(currentOrder, body);
   if (Object.prototype.hasOwnProperty.call(body, "paymentClaims")) assertPaymentClaimsUnchanged(currentOrder, body);
+  if (Object.prototype.hasOwnProperty.call(body, "paymentCorrections")) assertPaymentCorrectionsUnchanged(currentOrder, body);
   const platformOrderNo = isPlatformOrder
     ? String(body.platformOrderNo ?? body.douyinOrderNo ?? platformOrderNoForOrder(currentOrder)).trim()
     : "";
@@ -6659,6 +6665,8 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
     assertOrderOwnerAssignmentUnchanged(currentOrder, nextOrder);
     assertPaymentClaimsUnchanged(currentOrder, nextOrder);
+    assertPaymentCorrectionsUnchanged(currentOrder, nextOrder);
+    if (stableJson(currentOrder.payments ?? []) !== stableJson(nextOrder.payments ?? [])) throw httpError(409, "资金记录请通过财务专用登记、撤销或更正入口操作", "PAYMENT_CORRECTION_DEDICATED_REQUIRED");
     assertOrderSalesMetadataUnchanged(currentOrder, nextOrder, { partial: false });
     if (currentOrder.shippingSettlementTiming !== nextOrder.shippingSettlementTiming) throw httpError(409, "运费结算方式必须通过订单编辑入口修改", "SHIPPING_SETTLEMENT_DEDICATED_REQUIRED");
     const currentPaymentById = new Map((currentOrder.payments ?? []).map(payment => [String(payment.id), payment]));
@@ -13684,6 +13692,53 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/orders/payment-correction" && req.method === "POST") {
+    const client = await pool.connect();
+    try {
+      const body = JSON.parse(await readBody(req));
+      await client.query("BEGIN");
+      const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
+      const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      requireModulePermissionForAuth(req, "finance", "update");
+      const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      const operator = authenticatedOperator(req);
+      const plan = planPaymentCorrection(state, order, body, {
+        amountDue: calcAmountDueForOrder(order, state.shipments), operator, now: nowDatetimeInChina(),
+        createId: uid, normalizePayment: normalizePaymentRecord,
+      });
+      let nextState = state;
+      let operationLog;
+      if (!plan.repeated) {
+        const affected = new Set(plan.correction.affectedClaimIds);
+        let notifications = currentStationNotifications(state).map(notice => notice.type === "payment_proof" && affected.has(notice.claimId) && notice.status === "pending"
+          ? { ...notice, status: "completed", resolvedAt: new Date().toISOString(), resolution: "rejected" } : notice);
+        const owner = creditSaleOrderOwner(state.personnel, order);
+        if (owner) for (const claimId of affected) notifications.unshift({
+          id: uid("notice"), type: "payment_proof", status: "completed", notificationRole: "requester", resolution: "rejected",
+          title: "收款记录已更正，请补正付款凭证", message: `订单「${order.orderNo}」；原因：${plan.correction.reason}`,
+          createdAt: new Date().toISOString(), createdBy: operator, readAt: "", recipientUsername: owner.username,
+          recipientName: owner.name || owner.username, siteId: order.siteId, orderId: order.id, orderNo: order.orderNo, claimId,
+        });
+        operationLog = { id: uid("log"), time: new Date().toISOString(), operator, module: "财务管理",
+          action: plan.correction.action === "void" ? "撤销登记" : "更正流水",
+          detail: `订单「${order.orderNo}」${plan.correction.action === "void" ? "撤销" : "更正"}资金记录 ¥${Number(plan.correction.originalPayment.amount).toFixed(2)}；原因：${plan.correction.reason}${plan.reopened ? "；订单恢复未完成" : ""}` };
+        nextState = { ...state, orders: orders.map(item => item.id === order.id ? plan.order : item), notifications,
+          operationLogs: pushOperationLog(state.operationLogs, operationLog) };
+        nextState = await commissionStateForMutation(client, state, nextState);
+        await client.query("UPDATE app_state SET data = $2::jsonb, updated_at = now() WHERE id = $1", [stateId, JSON.stringify(nextState)]);
+      }
+      await client.query("COMMIT");
+      const visible = siteVisibilityFilteredState(nextState, req.auth.account);
+      sendJson(req, res, 200, { ok: true, order: plan.order, orders: visible.orders, operationLog,
+        correction: plan.correction, reopened: plan.reopened, proofResubmissionRequired: plan.proofResubmissionRequired });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      sendJson(req, res, error.statusCode || 400, { ok: false, ...(error.code ? { code: error.code } : {}), error: error.message });
+    } finally { client.release(); }
+    return;
+  }
+
   if (url.pathname === "/api/orders/payment" && req.method === "POST") {
     const client = await pool.connect();
     try {
@@ -13707,6 +13762,8 @@ async function handleApi(req, res, url) {
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
       const orderId = String(currentOrder.id ?? "");
+
+      if (["update", "delete"].includes(action)) throw httpError(409, "请使用撤销登记或更正流水，保留原记录和操作原因", "PAYMENT_CORRECTION_DEDICATED_REQUIRED");
 
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
       let nextPayments = currentPayments;
@@ -14289,6 +14346,7 @@ async function handleApi(req, res, url) {
       const requestedOrderId = String(body.orderId ?? "").trim();
       const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
       const orderId = String(order.id ?? "");
+      if (Array.isArray(order.paymentCorrections) && order.paymentCorrections.length > 0) throw httpError(409, "该订单留有资金撤销或更正记录，必须保留以供核对，不能删除", "PAYMENT_CORRECTION_AUDIT_RETAINED");
       if (Array.isArray(order.payments) && order.payments.length > 0) throw new Error("该订单已有收款记录，不能删除");
       if ((state.shipments ?? []).some((shipment) => String(shipment.orderId) === orderId && shipment.transferDispatch)) {
         throw httpError(409, "订单包含在途直接出库记录，请先取消出库；已签收的发货记录不能删除");

@@ -67,10 +67,19 @@ test("refund metadata cannot be forged by order, generic state, or finance edits
   denied(await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...payment, refundStage: "after_shipment" } }));
   denied(await s.write("/api/orders/payment", { orderId: order.id, action: "add", payment: { id: "forged", type: "refund", amount: 10, refundStage: "before_shipment" } }));
   assert.deepEqual(await s.readPersistedState(), before);
-  const edited = await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...payment, time: "2026-11-19T15:00:00", notes: "财务补充说明" } }); ok(edited);
-  assert.equal(edited.body.order.payments.at(-1).refundOccurredAt, "2026-11-19T11:00:00");
+  ok(await s.write("/api/orders/payment", { orderId: order.id, action: "verify", paymentId: payment.id }));
+  const overview = await s.read("/api/finance/overview?siteId=nanjing"); ok(overview);
+  const token = overview.body.orders.find(item => item.id === order.id).payments.find(item => item.id === payment.id).correctionToken;
+  const edited = await s.write("/api/orders/payment-correction", { orderId: order.id, paymentId: payment.id, action: "correct", mode: "replace",
+    clientMutationId: "refund-date-correction", expectedToken: token, reason: "更正流水登记时间，保留业务发生日",
+    payment: { ...payment, time: "2026-11-19T15:00:00", notes: "财务补充说明", refundStage: "forged", refundOccurredAt: "1900-01-01" } }); ok(edited);
+  const corrected = edited.body.order.payments.at(-1);
+  assert.equal(corrected.refundOccurredAt, "2026-11-19T11:00:00"); assert.equal(corrected.refundStage, payment.refundStage);
+  assert.equal(corrected.time, "2026-11-19T15:00:00"); assert.notEqual(corrected.id, payment.id); assert.equal(corrected.verificationStatus, "pending");
+  assert.deepEqual(corrected.refundItems, payment.refundItems);
   assert.deepEqual(edited.body.order.salesAmountSnapshot, before.orders[0].salesAmountSnapshot);
-  const verified = await s.write("/api/orders/payment", { orderId: order.id, action: "verify", paymentId: payment.id }); ok(verified);
+  assert.equal(edited.body.order.paymentCorrections[0].originalPayment.refundOccurredAt, "2026-11-19T11:00:00");
+  const verified = await s.write("/api/orders/payment", { orderId: order.id, action: "verify", paymentId: corrected.id }); ok(verified);
   assert.equal(verified.body.order.payments.at(-1).refundOccurredAt, "2026-11-19T11:00:00");
 });
 
@@ -93,15 +102,17 @@ test("refund statement linking and unlinking retain the original business date a
   assert.equal(unlinked.refundStage, original.refundStage); assert.deepEqual(unlinked.refundItems, original.refundItems);
 });
 
-test("converting a finance entry into a refund captures server stage and generic creation cannot bypass it", async t => {
+test("a receipt cannot be rewritten as a refund; separate actual refund captures server stage and generic creation cannot bypass it", async t => {
   const s = await setup(t);
   const receipt = await s.write("/api/orders/payment", { orderId: "proof-order", action: "add", payment: { id: "convert", type: "balance", amount: 10, time: "2026-11-18T11:00:00", paymentMethodId: "pm-wechat", channel: "wechat", account: "合成微信收款账户" } }); ok(receipt);
   const order = receipt.body.order;
   const forged = { ...order, payments: [...order.payments, { id: "generic-refund", type: "refund", amount: 10, time: "2026-11-19T12:00:00" }] };
   denied(await s.write("/api/state/patch", { patch: { orders: [forged] }, basePatch: { orders: [order] } }));
-  const converted = await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...order.payments[0], type: "refund", time: "2026-11-19T12:00:00" } }); ok(converted);
-  assert.equal(converted.body.order.payments[0].refundStage, "before_shipment");
-  assert.equal(converted.body.order.payments[0].refundOccurredAt, "2026-11-19T12:00:00");
+  denied(await s.write("/api/orders/payment", { orderId: order.id, action: "update", payment: { ...order.payments[0], type: "refund", time: "2026-11-19T12:00:00" } }));
+  const refund = await s.write("/api/orders/refund", { orderId: order.id, amount: 10, time: "2026-11-19T12:00:00", paymentMethodId: "pm-wechat" }); ok(refund);
+  assert.equal(refund.body.order.payments[0].type, "balance");
+  assert.equal(refund.body.order.payments.at(-1).refundStage, "before_shipment");
+  assert.equal(refund.body.order.payments.at(-1).refundOccurredAt, "2026-11-19T12:00:00");
 });
 
 test("each real reship appends effective replacement prices, keeps old events and rejects a duplicate original fish", async t => {
