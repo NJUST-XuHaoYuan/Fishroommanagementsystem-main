@@ -127,3 +127,36 @@ test('generic settings writes cannot bypass parameter validation and unchanged n
   const unchanged = await s.request('/api/state/patch', { patch: { systemSettings: { ...before.systemSettings, unrelatedSetting: 'changed' } }, basePatch: { systemSettings: before.systemSettings } }, 'admin'); ok(unchanged);
   const after = await s.readPersistedState(); assert.deepEqual(after.systemSettings.waterQualityParameters, before.systemSettings.waterQualityParameters); assert.equal(after.systemSettings.unrelatedSetting, 'changed');
 });
+
+test('generic settings omission or forged migration version cannot erase the water catalog or its migration marker', async t => {
+  const s = await setup(t, state => { state.systemSettings.waterQualityCatalogVersion = 1; });
+  const before = await s.readPersistedState();
+  for (const settings of [{ unrelatedSetting: 'first' }, { unrelatedSetting: 'second', waterQualityCatalogVersion: 0 }]) {
+    ok(await s.request('/api/state/patch', { patch: { systemSettings: settings }, basePatch: { systemSettings: before.systemSettings } }, 'admin'));
+    const after = await s.readPersistedState();
+    assert.deepEqual(after.systemSettings.waterQualityParameters, before.systemSettings.waterQualityParameters);
+    assert.equal(after.systemSettings.waterQualityCatalogVersion, 1);
+    assert.equal(after.systemSettings.unrelatedSetting, settings.unrelatedSetting);
+    assert.deepEqual(after.waterQualityRecords, before.waterQualityRecords);
+    assert.deepEqual(after.logs, before.logs);
+  }
+  const current = await s.readPersistedState();
+  const staleCatalog = current.systemSettings.waterQualityParameters.map(({ testMethods, ...parameter }) => parameter);
+  const rejected = await s.request('/api/state/patch', { patch: { systemSettings: { ...current.systemSettings, waterQualityParameters: staleCatalog } } }, 'admin');
+  assert.equal(rejected.response.status, 409);
+  assert.deepEqual(await s.readPersistedState(), current);
+});
+
+test('legacy clients omitting empty test methods may save other settings without rewriting the stored catalog', async t => {
+  const s = await setup(t, state => {
+    state.systemSettings.waterQualityCatalogVersion = 1;
+    state.systemSettings.waterQualityParameters = parameters.map(parameter => ({ ...parameter, testMethods: [] }));
+  });
+  const before = await s.readPersistedState();
+  const legacyCatalog = before.systemSettings.waterQualityParameters.map(({ testMethods, ...parameter }) => parameter);
+  ok(await s.request('/api/state/patch', { patch: { systemSettings: { unrelatedSetting: 'legacy client saved', waterQualityParameters: legacyCatalog } } }, 'admin'));
+  const after = await s.readPersistedState();
+  assert.deepEqual(after.systemSettings.waterQualityParameters, before.systemSettings.waterQualityParameters);
+  assert.equal(after.systemSettings.waterQualityCatalogVersion, 1);
+  assert.equal(after.systemSettings.unrelatedSetting, 'legacy client saved');
+});

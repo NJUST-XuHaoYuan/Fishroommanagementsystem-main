@@ -15304,6 +15304,25 @@ async function handleApi(req, res, url) {
 	          return { ...shipment, actualShippingFee };
 	        });
 	      }
+          if (rawPatch.systemSettings) {
+            if (Object.hasOwn(rawPatch.systemSettings, "waterQualityParameters")) {
+              const checkedParameters = validateWaterQualityParameters(rawPatch.systemSettings.waterQualityParameters);
+              if (stableJson(normalizeWaterQualityParameters(current.systemSettings?.waterQualityParameters)) !== stableJson(checkedParameters)) {
+                throw httpError(409, "水质参数配置必须通过水质配置专用入口修改", "WATER_QUALITY_SETTINGS_DEDICATED_REQUIRED");
+              }
+            }
+            // Generic settings use object replacement. Always retain these
+            // dedicated/server-owned fields, including for older clients that
+            // omit them or have not learned the one-time migration marker.
+            rawPatch.systemSettings = { ...rawPatch.systemSettings };
+            for (const key of ["waterQualityParameters", "waterQualityCatalogVersion"]) {
+              if (Object.hasOwn(current.systemSettings ?? {}, key)) {
+                rawPatch.systemSettings[key] = current.systemSettings[key];
+              } else {
+                delete rawPatch.systemSettings[key];
+              }
+            }
+          }
 	      const validationState = buildStatePatch(current, rawPatch, basePatch, [], req);
 
           if (Object.prototype.hasOwnProperty.call(rawPatch, "products")) {
@@ -15317,13 +15336,6 @@ async function handleApi(req, res, url) {
             }
           }
 
-          if (rawPatch.systemSettings && Object.hasOwn(rawPatch.systemSettings, "waterQualityParameters")) {
-            const checkedParameters = validateWaterQualityParameters(rawPatch.systemSettings.waterQualityParameters);
-            if (stableJson(normalizeWaterQualityParameters(current.systemSettings?.waterQualityParameters)) !== stableJson(checkedParameters)) {
-              throw httpError(409, "水质参数配置必须通过水质配置专用入口修改", "WATER_QUALITY_SETTINGS_DEDICATED_REQUIRED");
-            }
-            rawPatch.systemSettings = { ...rawPatch.systemSettings, waterQualityParameters: checkedParameters };
-          }
 	      validateStatePatchActions(req, current, validationState, Object.keys(rawPatch));
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));

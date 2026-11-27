@@ -1475,7 +1475,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                       <span className="min-w-0 text-xs">
                         <span className="mr-1.5 font-semibold text-slate-700">最新水质</span>
                         {latestWaterRecord ? (
-                          <span className="text-slate-600">{isoToDatetimeLocal(latestWaterRecord.measuredAt).replace("T", " ")} · {formatWaterSummary(latestWaterRecord.values)}</span>
+                          <span className="text-slate-600">{isoToDatetimeLocal(latestWaterRecord.measuredAt).replace("T", " ")} · {latestWaterRecord.subTankId ? g.subTanks.find(tank => tank.id === latestWaterRecord.subTankId)?.name || "已删除子缸" : "整组"} · {formatWaterSummary(latestWaterRecord.values)}</span>
                         ) : (
                           <span className="text-muted-foreground">暂无记录</span>
                         )}
