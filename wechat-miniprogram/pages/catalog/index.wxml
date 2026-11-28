@@ -59,6 +59,17 @@
     </view>
   </view>
 
+  <view wx:if="{{serviceWechatId}}" class="catalog-service">
+    <view class="catalog-service-row">
+      <text class="catalog-service-label">客服微信</text>
+      <text class="catalog-service-id" user-select="{{true}}">{{serviceWechatId}}</text>
+      <button class="catalog-service-copy" size="mini" hover-class="catalog-service-copy-hover"
+        disabled="{{copyingServiceWechat}}" aria-label="复制客服微信号 {{serviceWechatId}}"
+        bindtap="onCopyServiceWechat">{{copyingServiceWechat ? '复制中' : '复制'}}</button>
+    </view>
+    <view wx:if="{{serviceCopyMessage}}" class="catalog-service-feedback" aria-role="status">{{serviceCopyMessage}}</view>
+  </view>
+
   <view wx:if="{{loading}}" class="catalog-loading">
     <view class="skeleton loading-heading"></view>
     <view class="skeleton loading-grid"></view>

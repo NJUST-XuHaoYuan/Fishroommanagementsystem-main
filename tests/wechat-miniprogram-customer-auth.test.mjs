@@ -77,5 +77,16 @@ test("native contact stays available to guests; detail sends current product con
   assert.match(detail, /disabled="\{\{refreshing \|\| !contactCard\}\}"/);
   const account = await readFile(new URL("pages/account/index.js", root), "utf8");
   assert.match(account, /wx\.showModal/);
-  assert.match(account, /marineforest2024/);
+  const config = await readFile(new URL("utils/config.js", root), "utf8");
+  const configContext = { module: { exports: {} } };
+  vm.runInNewContext(config, configContext);
+  let page;
+  let copied;
+  vm.runInNewContext(account, {
+    require: (id) => id === "../../utils/config" ? configContext.module.exports : {},
+    Page: (definition) => { page = definition; },
+    wx: { setClipboardData: ({ data }) => { copied = data; } }
+  });
+  page.onCopyServiceAccount();
+  assert.equal(copied, "marineforest2024");
 });

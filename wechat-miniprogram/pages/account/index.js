@@ -1,9 +1,9 @@
 const auth = require("../../utils/customer-auth");
-const { showCustomerTools } = require("../../utils/config");
+const { showCustomerTools, serviceWechatId } = require("../../utils/config");
 const { returnToParent } = require("../../utils/navigation");
 
 Page({
-  data: { showCustomerTools, customer: null, checking: true, busy: false, accepted: false, error: "" },
+  data: { showCustomerTools, serviceWechatId, customer: null, checking: true, busy: false, accepted: false, error: "" },
   onShow() { this.refreshAccount(); },
   onBackTap() { returnToParent("pages/catalog/index"); },
   async refreshAccount() {
@@ -15,7 +15,7 @@ Page({
   },
   onConsentChange(event) { this.setData({ accepted: event.detail.value.includes("privacy") }); },
   onPrivacyTap() { wx.navigateTo({ url: "/pages/privacy/index" }); },
-  onCopyServiceAccount() { wx.setClipboardData({ data: "marineforest2024" }); },
+  onCopyServiceAccount() { wx.setClipboardData({ data: this.data.serviceWechatId }); },
   async onLoginTap() {
     if (this.data.busy || this.data.checking) return;
     this.setData({ busy: true, error: "" });

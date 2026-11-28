@@ -7,6 +7,54 @@ page,
   border-bottom: 0;
 }
 
+.catalog-service {
+  margin: 0 16px;
+}
+
+.catalog-service-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+
+.catalog-service-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.catalog-service-id {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.catalog-page .catalog-service-copy {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 6px;
+  color: var(--brand-dark);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 44px;
+}
+
+.catalog-page .catalog-service-copy-hover {
+  background: var(--brand-soft);
+}
+
+.catalog-service-feedback {
+  padding-bottom: 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .major-list {
   display: flex;
   flex-direction: column;

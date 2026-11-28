@@ -23,7 +23,7 @@
       <image class="utility-icon" src="/assets/message-circle.svg" aria-hidden="true" /><text>咨询客服</text><text class="row-arrow" aria-hidden="true">›</text>
     </button>
     <view wx:if="{{showCustomerTools}}" class="account-row service-account">
-      <view><view class="service-label">客服微信</view><text class="service-id">marineforest2024</text></view>
+      <view><view class="service-label">客服微信</view><text class="service-id">{{serviceWechatId}}</text></view>
       <button class="account-copy" size="mini" bindtap="onCopyServiceAccount">复制</button>
     </view>
     <button class="account-row" bindtap="onPrivacyTap"><text>隐私说明</text><text class="row-arrow">›</text></button>

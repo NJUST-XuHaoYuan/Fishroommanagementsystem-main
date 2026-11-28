@@ -1,5 +1,5 @@
 const { fetchCatalog } = require("../../utils/api");
-const { showCustomerTools } = require("../../utils/config");
+const { showCustomerTools, serviceWechatId } = require("../../utils/config");
 const { buildViewModel, filterProducts } = require("../../utils/catalog");
 const { getNavigationMetrics } = require("../../utils/navigation");
 const { handleCardImageError } = require("../../utils/card-video-preview");
@@ -19,6 +19,9 @@ function decodeKeyword(value) {
 Page({
   data: {
     showCustomerTools,
+    serviceWechatId,
+    copyingServiceWechat: false,
+    serviceCopyMessage: "",
     loading: true,
     refreshing: false,
     error: "",
@@ -192,6 +195,17 @@ Page({
 
   onAccountTap() {
     wx.navigateTo({ url: "/pages/account/index" });
+  },
+
+  onCopyServiceWechat() {
+    if (this.data.copyingServiceWechat || !this.data.serviceWechatId) return;
+    this.setData({ copyingServiceWechat: true, serviceCopyMessage: "" });
+    wx.setClipboardData({
+      data: this.data.serviceWechatId,
+      success: () => this.setData({ serviceCopyMessage: "已复制，请到微信「添加朋友」中搜索" }),
+      fail: () => this.setData({ serviceCopyMessage: "复制失败，可长按微信号手动复制" }),
+      complete: () => this.setData({ copyingServiceWechat: false })
+    });
   },
 
   onShareAppMessage() {
