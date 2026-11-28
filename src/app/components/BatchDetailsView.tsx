@@ -23,6 +23,8 @@ type FishSummary = {
   status: string;
   statusLabel: string;
   inDate?: string;
+  isArrivalLoss?: boolean;
+  arrivalLossDate?: string;
   initialTankName?: string;
   currentTankName?: string;
   currentSiteName?: string;
@@ -180,8 +182,8 @@ export function FishRow({ fish, batchId, siteId, onOpenOrder }: { fish: FishSumm
         <span className={`shrink-0 rounded-md border px-2 py-1 text-xs font-medium ${tone}`}>{fish.statusLabel}</span>
       </div>
       <dl className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 text-sm lg:grid-cols-4">
-        <div><dt className="text-xs text-muted-foreground">入库时间</dt><dd className="mt-1 tabular-nums">{batchRecordDate(fish.inDate)}</dd></div>
-        <div><dt className="text-xs text-muted-foreground">初始入缸</dt><dd className="mt-1 break-words">{fish.initialTankName || "未记录"}</dd></div>
+        <div><dt className="text-xs text-muted-foreground">{fish.isArrivalLoss ? "到货死亡时间" : "入库时间"}</dt><dd className="mt-1 tabular-nums">{batchRecordDate(fish.isArrivalLoss ? fish.arrivalLossDate : fish.inDate)}</dd></div>
+        <div><dt className="text-xs text-muted-foreground">初始入缸</dt><dd className="mt-1 break-words">{fish.isArrivalLoss ? "未入缸" : fish.initialTankName || "未记录"}</dd></div>
         <div><dt className="text-xs text-muted-foreground">{fish.status === "inTransit" ? "当前位置" : fish.status === "inStock" ? "当前缸位" : "档案缸位"}</dt>
           <dd className="mt-1 break-words">{fish.status === "inTransit" ? "移缸在途，尚未签收入缸" : [fish.currentSiteName, fish.currentTankName].filter(Boolean).join(" · ") || (fish.status === "restricted" ? "无权查看" : "未记录")}</dd></div>
         <div><dt className="text-xs text-muted-foreground">{fish.status === "lost" ? "死亡 / 损耗时间" : "关联订单"}</dt>

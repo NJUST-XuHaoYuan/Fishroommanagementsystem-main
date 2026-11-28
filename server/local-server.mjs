@@ -24,6 +24,9 @@ import {
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import { assertOrderBusinessMutationOwner, isOrderBusinessMutationOwner } from "./order-mutation-ownership.mjs";
 import { createPurchaseBatchHandler, assertPurchaseBatchCostingPatch } from "./purchase-batch-api.mjs";
+import { createBatchReceivingHandler } from "./purchase-batch-receiving-api.mjs";
+import { preserveReceivingStockIdentity, assertGenericReceivingStockPatch } from "./purchase-batch-receiving-rules.mjs";
+import { refreshBatchStockCounts as calculateBatchStockCounts, batchStockCounts } from "./batch-stock-counts.mjs";
 import { assertCanUploadNewCustomerEvidence, assertNewCustomerCustomerUnchanged, canViewNewCustomerEvidence, newCustomerApprovalDetail, newCustomerApprovalVersion, newCustomerCustomerManagementBlock, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
 import {
   NEW_CUSTOMER_EVIDENCE_DIRECTORY, NEW_CUSTOMER_EVIDENCE_MAX_BYTES, NEW_CUSTOMER_EVIDENCE_DRAFT_TTL,
@@ -1087,13 +1090,7 @@ function validateGenericStatePatchSiteScope(req, current = {}, next = {}, change
 }
 
 function refreshBatchStockCounts(batches = [], stock = []) {
-  if (!Array.isArray(batches)) return batches;
-  const stockList = Array.isArray(stock) ? stock : [];
-  return batches.map((batch) => ({
-    ...batch,
-    stockedCount: stockList.filter((item) => item?.batchId === batch.id).length,
-    lossCount: stockList.filter((item) => item?.batchId === batch.id && item?.lost).length,
-  }));
+  return calculateBatchStockCounts(batches, stock);
 }
 
 function preserveMissingById(currentItems, incomingItems, label) {
@@ -4275,7 +4272,7 @@ function normalizeStockItem(item) {
   if (!normalized.productId || !normalized.batchId || !normalized.subTankId || !normalized.inDate) {
     throw new Error("Stock item productId, batchId, subTankId and inDate are required");
   }
-  if (!(normalized.basePrice > 0)) {
+  if (!(normalized.basePrice > 0) && !(normalized.procurementSource && normalized.priceMode === "product" && normalized.basePrice === 0)) {
     throw new Error("Stock item basePrice must be greater than 0");
   }
   return normalized;
@@ -4308,7 +4305,7 @@ function applyStockMutationToState(state = {}, change = {}, operator = "system",
   let upsertItems = (Array.isArray(change?.upsert) ? change.upsert : []).map((item) => {
     const stockId = String(item?.id ?? "").trim();
     const existing = pricingExistingById.get(stockId);
-    const protectedItem = preserveServerOwnedTankTransfer(item, existing);
+    const protectedItem = preserveReceivingStockIdentity(preserveServerOwnedTankTransfer(item, existing), existing);
     return normalizeStockItem(normalizeStockPricing(
       protectedItem,
       pricingProductById.get(String(item?.productId ?? "").trim()),
@@ -8906,6 +8903,12 @@ const handlePurchaseBatchApi = createPurchaseBatchHandler({
   maxOperationLogs: MAX_OPERATION_LOGS,
 });
 
+const handleBatchReceivingApi = createBatchReceivingHandler({
+  pool, stateId, readBody, sendJson, refreshAuth: refreshLockedOrderMutationAuth,
+  requireSite: requireVisibleSiteForAuth, requirePermission: requireModulePermissionForAuth,
+  hasPermission: hasModulePermission, normalizeSiteId, todayInChina, maxOperationLogs: MAX_OPERATION_LOGS,
+});
+
 async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
@@ -12725,6 +12728,7 @@ async function handleApi(req, res, url) {
   }
 
   if (await handlePurchaseBatchApi(req, res, url)) return;
+  if (await handleBatchReceivingApi(req, res, url)) return;
   if (await handleTankGroupLegacyHistoryApi(req, res, url)) return;
   if (await stockLossService.handleReason(req, res, url)) return;
   if (await handleMobileMaintenanceHistoryApi(req, res, url)) return;
@@ -15183,8 +15187,7 @@ async function handleApi(req, res, url) {
       const nextBatches = (Array.isArray(state.batches) ? state.batches : []).map((batch) =>
         mergedBatchIds.has(String(batch.id)) ? {
           ...batch,
-          stockedCount: nextStock.filter((item) => String(item.batchId) === String(batch.id)).length,
-          lossCount: nextStock.filter((item) => String(item.batchId) === String(batch.id) && item.lost).length,
+          ...batchStockCounts(batch, nextStock),
         } : batch);
       const operationLog = {
         id: uid("log"),
@@ -15395,6 +15398,7 @@ async function handleApi(req, res, url) {
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
           assertPurchaseBatchCostingPatch(current, validationState, Object.keys(rawPatch));
+          assertGenericReceivingStockPatch(current, validationState, Object.keys(rawPatch));
 	      validateGenericStatePatchSiteScope(req, current, validationState, Object.keys(rawPatch));
 	      const patch = await externalizeDataUrls(rawPatch);
 	      if (Object.prototype.hasOwnProperty.call(patch, "batches") && Array.isArray(patch.batches)) {
@@ -15908,6 +15912,18 @@ async function handleApi(req, res, url) {
 	          return !requestedId || !existingIds.has(requestedId);
 	        });
 	        const hasUpdates = rawUpsertIds.some((id) => existingIds.has(id));
+          if (hasCreates) {
+            const draft = adjustmentContext?.hasExactSelection && inventoryAdjustmentDraftForUser(state, operator);
+            const draftMatches = draft && draft.id === adjustmentContext.draftId && draft.siteId === adjustmentContext.siteId;
+            if (!draftMatches) throw httpError(409, "新增鱼只请先在采购批次登记采购清单，再从批次办理入缸或到货死亡", "BATCH_RECEIVING_REQUIRED");
+            const sourceKey = item => stableJson([item.batchId,item.productId,item.subTankId,item.inDate,item.status]);
+            const requestedCounts = new Map();
+            for (const item of rawUpsert) requestedCounts.set(sourceKey(item), (requestedCounts.get(sourceKey(item)) || 0) + 1);
+            const draftCounts = new Map();
+            for (const item of Array.isArray(draft.additions) ? draft.additions : []) draftCounts.set(sourceKey(item), (draftCounts.get(sourceKey(item)) || 0) + Number(item.quantity || 0));
+            if (stableJson([...requestedCounts].sort()) !== stableJson([...draftCounts].sort()) || stableJson([...rawDeleteIds].sort()) !== stableJson([...(draft.removeStockIds || [])].sort())) throw httpError(409, "盘库调整与已保存的草稿不一致，请保存草稿后重试", "INVENTORY_ADJUSTMENT_DRAFT_CONFLICT");
+          }
+
 	        if (rawDeleteIds.length > 0) requireModulePermissionForAuth(req, "stockIn", "delete");
 	        if (hasCreates) requireModulePermissionForAuth(req, "stockIn", "create");
 	        if (hasUpdates) requireModulePermissionForAuth(req, "stockIn", "update");

@@ -400,6 +400,7 @@ test("reports each batch's earliest valid stock-in date without exposing stock r
       { ...stockItem("s1", "b1"), inDate: "2026-08-12" },
       { ...stockItem("s2", "b1"), inDate: "2026-08-03T10:30:00+08:00" },
       { ...stockItem("s3", "b1"), inDate: "invalid" },
+      { ...stockItem("arrival-dead", "b1"), inDate: "2026-08-01", lost: true, entryDisposition: "arrival_dead", neverEnteredTank: true },
       { ...stockItem("s4", "missing"), inDate: "2026-01-01" },
     ],
   });

@@ -8,6 +8,48 @@ const fresh = () => structuredClone(batchDetailsFixture.state);
 const admin = { batchId: "batch-nj", siteId: "nanjing", visibleSiteIds: ["nanjing", "jiangyin"], isAdmin: true, page: 1, pageSize: 100 };
 const staff = { ...admin, visibleSiteIds: ["nanjing"], isAdmin: false };
 
+test("arrival death retains a visible fish history without inventing stock-in or an unknown tank", () => {
+  const state = fresh();
+  const fish = { ...state.stock[0], id: "arrival-dead", lost: true, subTankId: "", inDate: "2026-11-28", lossDate: "2026-11-28", entryDisposition: "arrival_dead", neverEnteredTank: true };
+  state.stock = [fish];
+  state.approvalRequests = [];
+  state.lossRecords = [{ id: "arrival-loss", stockItemId: fish.id, date: fish.lossDate, siteId: "nanjing", reason: "到货死亡", proofPhotos: ["/uploads/arrival.jpg"], operator: "接货人" }];
+  state.bioRecords = [];
+  const preserved = preserveStockEntrySnapshot({ item: fish, tankGroups: state.tankGroups });
+  assert.equal(preserved.entrySnapshot, undefined);
+  const detail = buildPurchaseBatchDetail(state, { ...admin, tankKey: "arrivalDead" });
+  const row = detail.items[0];
+  assert.equal(row.status, "lost");
+  assert.equal(row.statusLabel, "到货死亡 · 未入缸");
+  assert.equal(row.inDate, "");
+  assert.equal(row.initialTankName, "");
+  assert.equal(row.arrivalLossDate, fish.lossDate);
+  assert.equal(row.currentTankName, "未入缸");
+  assert.deepEqual(row.warnings, []);
+  assert.equal(detail.tanks.find(tank => tank.key === "arrivalDead").tankName, "到货死亡 · 未入缸");
+  const history = buildPurchaseBatchFishHistory(state, { ...admin, stockItemId: fish.id });
+  assert.equal(history.events.some(event => event.type === "stockIn"), false);
+  assert.equal(history.events.find(event => event.type === "loss").title, "到货死亡（未入缸）");
+  assert.equal(parseBatchDetailQuery(new URLSearchParams("batchId=batch-nj&siteId=nanjing&tankKey=arrivalDead")).tankKey, "arrivalDead");
+});
+
+test("immutable receipts retain deleted fish membership even without old approval or order snapshots", () => {
+  const state = fresh();
+  state.batches[0].receiving = { schemaVersion: 1, receipts: [{ date: "2026-11-28", reason: "到货死亡",
+    entries: [{ productId: "product-tang", stockItemIds: ["removed-received"], lossStockItemIds: ["removed-arrival"], subTankId: "tank-n1" }] }] };
+  const detail = buildPurchaseBatchDetail(state, admin);
+  const received = detail.items.find(fish => fish.stockItemId === "removed-received");
+  const dead = detail.items.find(fish => fish.stockItemId === "removed-arrival");
+  assert.equal(received.status, "removed");
+  assert.equal(received.inDate, "2026-11-28");
+  assert.equal(received.initialTankName, "");
+  assert.equal(dead.status, "removed");
+  assert.equal(dead.isArrivalLoss, true);
+  assert.equal(dead.inDate, "");
+  const history = buildPurchaseBatchFishHistory(state, { ...admin, stockItemId: "removed-arrival" });
+  assert.equal(history.events.some(event => event.type === "stockIn"), false);
+});
+
 test("new entry snapshots use authoritative tanks and ignore client-provided historical facts", () => {
   const state = fresh();
   const item = { ...state.stock[0], entrySnapshot: { version: 1, tankName: "forged", operator: "forged" } };

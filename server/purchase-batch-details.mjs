@@ -1,5 +1,6 @@
 import { paymentVerificationStatus, verifiedPaymentTotals } from "./payment-utils.mjs";
 import { buildBatchStockValuations, batchStockUnavailableIds } from "./batch-stock-valuations.mjs";
+import { isArrivalDeadStock } from "./batch-stock-counts.mjs";
 
 const array = (value) => Array.isArray(value) ? value : [];
 const text = (value) => String(value ?? "").trim();
@@ -33,6 +34,13 @@ WITH source AS MATERIALIZED (
     WHERE item ->> 'batchId' = $2
   UNION
   SELECT change ->> 'stockItemId' FROM approved_changes
+  UNION
+  SELECT ids.stock_id FROM source,
+    LATERAL jsonb_array_elements(COALESCE(data -> 'batches', '[]'::jsonb)) AS batches(batch),
+    LATERAL jsonb_array_elements(COALESCE(batch -> 'receiving' -> 'receipts', '[]'::jsonb)) AS receipts(receipt),
+    LATERAL jsonb_array_elements(COALESCE(receipt -> 'entries', '[]'::jsonb)) AS entries(entry),
+    LATERAL jsonb_array_elements_text(COALESCE(entry -> 'stockItemIds', '[]'::jsonb) || COALESCE(entry -> 'lossStockItemIds', '[]'::jsonb)) AS ids(stock_id)
+    WHERE batch ->> 'id' = $2 AND batch -> 'receiving' ->> 'schemaVersion' = '1'
   UNION
   SELECT item ->> 'stockItemId' FROM source,
     LATERAL jsonb_array_elements(COALESCE(data -> 'orders', '[]'::jsonb)) AS orders(order_item),
@@ -152,7 +160,7 @@ export function parseBatchDetailQuery(params, { history = false, orderDetail = f
   const status = text(params.get("status")) || "all";
   if (!["all", "inStock", "inTransit", "sold", "lost", "removed", "restricted"].includes(status)) fail("库存状态筛选无效");
   const tankKey = text(params.get("tankKey"));
-  if (tankKey.length > 600 || (tankKey && !["restricted", "removed", "inTransit", "unknown"].includes(tankKey) && !/^tank:[^:]+:[^:]+$/.test(tankKey))) fail("缸位筛选无效");
+  if (tankKey.length > 600 || (tankKey && !["restricted", "removed", "inTransit", "arrivalDead", "unknown"].includes(tankKey) && !/^tank:[^:]+:[^:]+$/.test(tankKey))) fail("缸位筛选无效");
   return { batchId, siteId, stockItemId, orderId, page, pageSize, search, status, tankKey };
 }
 
@@ -191,6 +199,7 @@ export function preserveStockEntrySnapshot({ item, existing, tankGroups = [], si
     if (existing.entrySnapshot && typeof existing.entrySnapshot === "object") next.entrySnapshot = existing.entrySnapshot;
     return next;
   }
+  if (isArrivalDeadStock(item)) return next;
   const locations = locationIndex({ tankGroups, sites });
   const tank = locations.tanks.get(id(item?.subTankId));
   if (!tank) fail("初始入库缸位不存在", 409);
@@ -241,6 +250,23 @@ function contextFor(state, options) {
       const key = id(item?.stockItemId);
       if (!key || allStockById.has(key) || candidateById.has(key) || id(item?.batchId) !== options.batchId) continue;
       candidateById.set(key, { id: key, batchId: options.batchId, productId: id(item.productId), code: text(item.fishCode), siteId: options.siteId, _removed: true });
+    }
+  }
+  if (batch.receiving?.schemaVersion === 1) {
+    for (const receipt of array(batch.receiving.receipts)) {
+      for (const entry of array(receipt?.entries)) {
+        const arrivedDead = new Set(array(entry?.lossStockItemIds).map(id));
+        for (const key of new Set([...array(entry?.stockItemIds), ...arrivedDead].map(id))) {
+          if (!key || allStockById.has(key) || candidateById.has(key)) continue;
+          // The receipt proves batch membership and disposition, not the name of
+          // a tank at that time. Never recreate the original location from today's tanks.
+          const arrivalDead = arrivedDead.has(key);
+          candidateById.set(key, { id: key, batchId: options.batchId, productId: id(entry.productId), siteId: options.siteId,
+            inDate: text(receipt.date), subTankId: "", _removed: true, lost: arrivalDead,
+            entryDisposition: arrivalDead ? "arrival_dead" : "stocked", neverEnteredTank: arrivalDead,
+            ...(arrivalDead ? { lossDate: text(receipt.date), lossReason: text(receipt.reason) } : {}) });
+        }
+      }
     }
   }
   const visibleOrders = [...orderById.values()].filter((order) => visible.has(text(order?.siteId) || defaultSite));
@@ -316,23 +342,26 @@ function rowForFish(context, item, evidence = evidenceForFish(context, item)) {
   const species = context.species.get(id(product.speciesId)) ?? {};
   const { key, current, currentVisible, bio, losses, entry, entryLocation, entryVisible, sales } = evidence;
   const inTransit = item?.tankTransfer?.status === "in_transit";
-  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost ? "lost" : inTransit ? "inTransit" : context.unavailableStockIds.has(key) ? "sold" : "inStock";
+  const arrivalDead = isArrivalDeadStock(item);
+  const status = !currentVisible ? "restricted" : item._removed ? "removed" : item.lost || arrivalDead ? "lost" : inTransit ? "inTransit" : context.unavailableStockIds.has(key) ? "sold" : "inStock";
   const warnings = [];
-  if (!entry || !entryVisible || !entryLocation.tankName) warnings.push("未留存可核实的初始入库缸位；当前缸位不代表初始缸位");
+  if (!arrivalDead && (!entry || !entryVisible || !entryLocation.tankName)) warnings.push("未留存可核实的初始入库缸位；当前缸位不代表初始缸位");
   if (!currentVisible) warnings.push("该鱼当前信息及部分历史不在账户可见范围内，已隐藏");
   else if (evidence.hasHiddenHistory) warnings.push("部分历史记录归属未知或不在账户可见范围内，已隐藏");
   if (currentVisible && item.sold && sales.length === 0) warnings.push("已售标记缺少可查看的原订单关联，不能推算成交时间和价格");
   if (item._removed) warnings.push("原库存记录已删除，仅展示留存快照及可核实关联");
   if (!id(item.productId) || !context.products.has(id(item.productId))) warnings.push("商品档案已缺失，无法补全未保存的商品信息");
   const latestLoss = [...losses].sort((a, b) => compareHistoryDate(b.date, a.date))[0];
-  const tankKey = !currentVisible ? "restricted" : item._removed ? "removed" : inTransit ? "inTransit" : !current.subTankId ? "unknown"
+  const tankKey = !currentVisible ? "restricted" : item._removed ? "removed" : arrivalDead ? "arrivalDead" : inTransit ? "inTransit" : !current.subTankId ? "unknown"
     : `tank:${encodeURIComponent(current.siteId)}:${encodeURIComponent(current.subTankId)}`;
   return {
     stockItemId: key, code: text(item.code), productName: text(product.name) || text(item.productName) || "商品档案缺失",
     speciesName: text(species.name) || text(item.speciesName), size: text(product.size) || text(item.size), origin: text(product.origin) || text(item.origin),
-    status, statusLabel: { inStock: "在库", inTransit: "移缸在途", sold: "已售", lost: "已损耗", removed: "记录已删除", restricted: "记录受限" }[status],
-    inDate: text(entry?.inDate) || text(item.inDate), initialTankName: entryVisible ? entryLocation.tankName : "",
-    currentTankName: currentVisible && !item._removed && !inTransit ? current.tankName : "", currentSiteName: currentVisible && !item._removed && !inTransit ? current.siteName : "",
+    status, statusLabel: arrivalDead && status === "lost" ? "到货死亡 · 未入缸" : { inStock: "在库", inTransit: "移缸在途", sold: "已售", lost: "已损耗", removed: "记录已删除", restricted: "记录受限" }[status],
+    isArrivalLoss: currentVisible && arrivalDead,
+    arrivalLossDate: currentVisible && arrivalDead ? text(item.lossDate || item.inDate) : "",
+    inDate: arrivalDead ? "" : text(entry?.inDate) || text(item.inDate), initialTankName: arrivalDead ? "" : entryVisible ? entryLocation.tankName : "",
+    currentTankName: currentVisible && arrivalDead ? "未入缸" : currentVisible && !item._removed && !inTransit ? current.tankName : "", currentSiteName: currentVisible && !item._removed && !inTransit ? current.siteName : "",
     currentSubTankId: currentVisible && !item._removed && !inTransit ? current.subTankId : "", tankKey,
     sales, lossDate: date(latestLoss?.date) || (currentVisible && !(context.lossByStock.get(key) ?? []).length ? date(item.lossDate) : ""), recordCount: bio.length, bioRecordCount: bio.length, warnings,
   };
@@ -355,7 +384,7 @@ export function buildPurchaseBatchDetail(state, options) {
     if (!tankGroups.has(row.tankKey)) tankGroups.set(row.tankKey, {
       key: row.tankKey,
       siteName: row.tankKey.startsWith("tank:") ? row.currentSiteName : "",
-      tankName: row.tankKey.startsWith("tank:") ? row.currentTankName : ({ restricted: "记录受限", removed: "记录已删除", inTransit: "移缸在途", unknown: "缸位未记录" })[row.tankKey],
+      tankName: row.tankKey.startsWith("tank:") ? row.currentTankName : ({ restricted: "记录受限", removed: "记录已删除", inTransit: "移缸在途", arrivalDead: "到货死亡 · 未入缸", unknown: "缸位未记录" })[row.tankKey],
       total: 0, inStock: 0, inTransit: 0, sold: 0, lost: 0, removed: 0, restricted: 0,
     });
     const group = tankGroups.get(row.tankKey);
@@ -471,7 +500,7 @@ export function buildPurchaseBatchFishHistory(state, options) {
   const fish = rowForFish(context, item, evidence);
   const events = [];
   const add = (event) => events.push({ text: "", siteName: "", tankName: "", operator: "", photos: [], videos: [], ...event });
-  add({ id: `stock-in:${fish.stockItemId}`, type: "stockIn", date: fish.inDate, title: "入库", text: fish.initialTankName ? `初始入库：${fish.initialTankName}` : "未留存可核实的初始缸位", siteName: evidence.entryVisible ? evidence.entryLocation.siteName : "", tankName: fish.initialTankName, operator: evidence.entryVisible ? text(evidence.entry?.operator) : "" });
+  if (!isArrivalDeadStock(item)) add({ id: `stock-in:${fish.stockItemId}`, type: "stockIn", date: fish.inDate, title: "入库", text: fish.initialTankName ? `初始入库：${fish.initialTankName}` : "未留存可核实的初始缸位", siteName: evidence.entryVisible ? evidence.entryLocation.siteName : "", tankName: fish.initialTankName, operator: evidence.entryVisible ? text(evidence.entry?.operator) : "" });
   for (const record of evidence.bio) {
     const recordLocation = context.locations.historical(record);
     const isMove = ["stockMove", "stockTransferIssued", "stockTransferReceived", "stockTransferDispatched", "stockTransferDispatchCancelled"].includes(record.sourceType) || /^移缸(?:签发|签收)?[：:]/.test(text(record.text));
@@ -520,10 +549,10 @@ export function buildPurchaseBatchFishHistory(state, options) {
     if (shipment.status === "damaged") add({ ...common, id: `shipment:${shipment.id}:damaged`, date: date(shipment.damagedAt), title: "物流报损", text: shipment.damageResolution === "reship" ? "报损后补发" : shipment.damageResolution === "refund" ? "报损后退款；整单或多鱼退款金额不作为本鱼单价" : "物流报损", photos: safeMedia(shipment.damageProof) });
   }
   for (const loss of evidence.losses) {
-    add({ id: `loss:${loss.id}`, type: "loss", date: date(loss.date), title: "损耗", text: text(loss.reason), ...context.locations.historical(loss), operator: text(loss.operator), photos: safeMedia(loss.proofPhotos) });
+    add({ id: `loss:${loss.id}`, type: "loss", date: date(loss.date), title: isArrivalDeadStock(item) ? "到货死亡（未入缸）" : "损耗", text: text(loss.reason), ...context.locations.historical(loss), ...(isArrivalDeadStock(item) ? { tankName: "未入缸" } : {}), operator: text(loss.operator), photos: safeMedia(loss.proofPhotos) });
   }
   if (evidence.currentVisible && item.lost && !(context.lossByStock.get(fish.stockItemId) ?? []).length) {
-    add({ id: `loss:legacy:${fish.stockItemId}`, type: "loss", date: date(item.lossDate), title: "损耗（库存留存信息）", text: `${text(item.lossReason)}${item.lossReason ? "。" : ""}未留存独立损耗事件，发生缸位无法核实`, photos: safeMedia(item.lossProof) });
+    add({ id: `loss:legacy:${fish.stockItemId}`, type: "loss", date: date(item.lossDate), title: isArrivalDeadStock(item) ? "到货死亡（未入缸）" : "损耗（库存留存信息）", text: `${text(item.lossReason)}${item.lossReason ? "。" : ""}${isArrivalDeadStock(item) ? "未入缸；到货时登记死亡" : "未留存独立损耗事件，发生缸位无法核实"}`, photos: safeMedia(item.lossProof) });
   }
   for (const { request, change } of evidence.changes) {
     if (change.operation === "add") continue;

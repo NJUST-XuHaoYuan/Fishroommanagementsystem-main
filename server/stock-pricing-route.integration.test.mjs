@@ -24,6 +24,17 @@ const stockWrite = (server, items, before = {}, role = "admin") => server.reques
   token: server.tokens[role], body: { upsert: items, deleteIds: [],
     expectedOperations: Object.fromEntries(items.map((item) => [item.id, before[item.id] ? "update" : "create"])), expectedBefore: before },
 });
+async function stocktakeWrite(server, items, role = "admin") {
+  const saved = await server.request("/api/stock/adjustment-draft", { token: server.tokens[role], body: { draft: {
+    siteId: items[0].siteId, removeStockIds: [], additions: items.map(item => ({ ...item, quantity: 1 })),
+  } } });
+  if (saved.response.status !== 200) return saved;
+  return server.request("/api/stock/save", { token: server.tokens[role], body: { upsert: items, deleteIds: [],
+    expectedOperations: Object.fromEntries(items.map(item => [item.id, "create"])), expectedBefore: {},
+    adjustmentContext: { kind: "inventory_adjustment", draftId: saved.body.draft.id, siteId: items[0].siteId,
+      removeStockIds: [], additionStockIds: items.map(item => item.id) },
+  } });
+}
 const newFish = (id, extra = {}) => ({ ...stockPricingFixture.state.stock[0], id, code: id, ...extra });
 const assertPricing = (state, id, price, mode) => {
   const item = byId(state, id); assert.ok(item, id);
@@ -211,18 +222,18 @@ test("releasing an order resumes only product-priced fish at the current product
   assert.deepEqual(state.orders, before.orders.filter((order) => order.id !== "ORDER-RELEASE"));
 });
 
-test("new stock resolves the product price server-side, distinguishes manual equal prices, and rejects stale inventory updates", async (t) => {
+test("stocktake additions resolve the product price server-side, distinguish manual equal prices, and reject stale inventory updates", async (t) => {
   const s = await setup(t); const before = await s.state(); ok(await s.upsert(200));
-  const result = await stockWrite(s, [newFish("new-follow", { basePrice: 999 }), newFish("new-manual", { basePrice: 200, priceMode: "manual", priceOverridden: true })]); ok(result);
+  const result = await stocktakeWrite(s, [newFish("new-follow", { basePrice: 999 }), newFish("new-manual", { basePrice: 200, priceMode: "manual", priceOverridden: true })]); ok(result);
   assertPricing(await s.state(), "new-follow", 200, "product"); assertPricing(await s.state(), "new-manual", 200, "manual");
   assertPricing(await s.state(), "sold", 100, "product");
   assert.equal(byId(await s.state(), "sold").sold, true, "an unrelated stock insertion must not release a historical sold flag");
-  const newLegacy = await stockWrite(s, [newFish("new-legacy", { basePrice: 999, priceMode: "legacy" })]); assert.equal(newLegacy.response.status, 400);
+  const newLegacy = await stocktakeWrite(s, [newFish("new-legacy", { basePrice: 999, priceMode: "legacy" })]); assert.equal(newLegacy.response.status, 400);
   const oldSnapshot = byId(before, "follower");
   const stale = await stockWrite(s, [{ ...oldSnapshot, notes: "旧库存编辑页" }], { follower: oldSnapshot });
   assert.equal(stale.response.status, 409, JSON.stringify(stale.body));
   ok(await s.upsert(300, 200)); assertPricing(await s.state(), "new-follow", 300, "product"); assertPricing(await s.state(), "new-manual", 200, "manual");
-  const hidden = await stockWrite(s, [newFish("new-hidden", { siteId: "jiangyin", subTankId: "tank-j", batchId: "batch-j" })], {}, "editor");
+  const hidden = await stocktakeWrite(s, [newFish("new-hidden", { siteId: "jiangyin", subTankId: "tank-j", batchId: "batch-j" })], "editor");
   assert.ok([400, 403].includes(hidden.response.status), JSON.stringify(hidden.body));
   assert.equal(byId(await s.state(), "new-hidden"), undefined);
 });
@@ -263,7 +274,7 @@ test("mode-only stock changes appear in approval details and preserve manual int
 test("a product price change while follow-priced new stock awaits approval rejects approval without creating stock or changing pending state", async (t) => {
   const fixture = structuredClone(stockPricingFixture); fixture.state.batches[0].createdAt = "2026-09-01T00:00:00+08:00";
   const s = await setup(t, fixture);
-  const submitted = await stockWrite(s, [newFish("approval-follow")], {}, "editor"); ok(submitted);
+  const submitted = await stocktakeWrite(s, [newFish("approval-follow")], "editor"); ok(submitted);
   assert.equal(submitted.body.pendingApproval, true);
   const requestId = submitted.body.approvalRequestId;
   ok(await s.upsert(200)); const before = await s.readPersistedState();

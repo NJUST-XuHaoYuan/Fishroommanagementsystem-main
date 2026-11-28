@@ -4,6 +4,7 @@ import {
 } from "./finance-utils.mjs";
 import { isPaymentVerified } from "./payment-utils.mjs";
 import { shipmentsHavePendingActualShippingFee } from "./shipment-rules.mjs";
+import { isArrivalDeadStock } from "./batch-stock-counts.mjs";
 
 function finiteNumber(value) {
   const number = Number(value ?? 0);
@@ -195,6 +196,7 @@ export function buildBatchRevenueMetrics({
       .filter(([id]) => Boolean(id))
   );
   for (const stockItem of stockById.values()) {
+    if (isArrivalDeadStock(stockItem)) continue;
     const metric = metrics.get(String(stockItem?.batchId ?? "").trim());
     const inDate = String(stockItem?.inDate ?? "").trim().slice(0, 10);
     if (!metric || !/^\d{4}-\d{2}-\d{2}$/.test(inDate)) continue;

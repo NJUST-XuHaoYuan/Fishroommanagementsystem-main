@@ -23,6 +23,7 @@ import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { batchOrderIdentityKey } from "../utils/batchOrderDialog";
 import { usePermission } from "../utils/permissions";
+import { isArrivalDeadStock } from "../../../server/batch-stock-counts.mjs";
 
 type SearchOption = {
   value: string;
@@ -172,6 +173,7 @@ type LossRow = StockLossRecord & {
   subTankName: string;
   tankLocation: string;
   inDate: string;
+  isArrivalLoss: boolean;
   basePrice: number;
   photos: string[];
   productSearch: string;
@@ -338,11 +340,12 @@ export function LossRecordsView() {
           batchNotes: b?.notes ?? "",
           batchBioFee: b?.bioFee ?? 0,
           batchShippingFee: b?.shippingFee ?? 0,
-          tankName: tank.tankName,
+          tankName: isArrivalDeadStock(item) ? "到货死亡 · 未入缸" : tank.tankName,
           tankGroupName: tank.tankGroupName,
           subTankName: tank.subTankName,
           tankLocation: tank.tankLocation,
-          inDate: item?.inDate ?? "",
+          inDate: isArrivalDeadStock(item) ? "" : item?.inDate ?? "",
+          isArrivalLoss: isArrivalDeadStock(item),
           basePrice: item?.basePrice ?? 0,
           photos,
           productSearch,
@@ -726,7 +729,7 @@ export function LossRecordsView() {
                 </div>
                 <div>
                   <div className="text-xs text-muted-foreground">入库日期</div>
-                  <div>{viewing.inDate || "-"}</div>
+                  <div>{viewing.isArrivalLoss ? "未入缸" : viewing.inDate || "-"}</div>
                 </div>
                 <div>
                   <div className="text-xs text-muted-foreground">销售默认价</div>

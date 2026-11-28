@@ -30,6 +30,7 @@ import { orderSourceLabel } from "../utils/orderSources";
 import { InventoryAdjustmentDialog } from "./InventoryAdjustmentDialog";
 import { buildSpeciesStockGroups } from "../utils/speciesStockGroups";
 import { SpeciesStockProductRow } from "./SpeciesStockProductRow";
+import { BatchReceivingDialog } from "./BatchReceivingDialog";
 import { StockTransferPoolButton } from "./StockTransferDialog";
 
 type StockViewMode = "tank" | "species";
@@ -286,7 +287,9 @@ function BatchCombobox({
 }
 
 export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
-  const { state, saveStockChange } = useStore();
+  const { state, activeSiteId, saveStockChange } = useStore();
+  const [receiving, setReceiving] = useState<{ subTankId: string } | null>(null);
+  useEffect(() => { setReceiving(null); }, [activeSiteId, state.user?.username]);
   const permission = usePermission("stockIn");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -455,7 +458,11 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
   };
 
   const openDialog = (item: StockItem, subTankMode = false) => {
-    if (!item.id && !permission.requirePermission("create")) return;
+    if (!item.id) {
+      if (!permission.requirePermission("create")) return;
+      setReceiving({ subTankId: item.subTankId || "" });
+      return;
+    }
     if (item.id && !permission.canUpdate) {
       if (!permission.requirePermission("delete")) return;
       if (stockCannotDelete(item)) {
@@ -771,6 +778,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
 
   return (
     <div className="flex flex-col gap-4">
+      {receiving && <BatchReceivingDialog key={`${activeSiteId}:${state.user?.username}:${receiving.subTankId}`} initialSubTankId={receiving.subTankId} onClose={() => setReceiving(null)} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
           <h2>库存明细</h2>
@@ -778,6 +786,7 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
         </div>
 	        <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
 	          <StockTransferPoolButton refreshKey={state.stock} />
+              {permission.canCreate && <Button size="sm" onClick={() => setReceiving({ subTankId: "" })}>从批次入库</Button>}
 	          {(permission.canCreate || permission.canDelete) && <InventoryAdjustmentDialog />}
 	          <ToggleGroup
             type="single"
@@ -1269,20 +1278,17 @@ export function StockInView({ allOrders, onOpenOrder }: StockInViewProps = {}) {
             <div className="grid gap-4 py-2">
               <div className="grid gap-2">
                 <Label><span className="text-red-500">*</span> 商品</Label>
-	                <ProductCombobox
-	                  products={state.products.filter((item) => !isProductArchived(item) || item.id === editing.productId)}
-	                  value={editing.productId}
-	                  onChange={changeProduct}
-	                />
+                {editing.procurementSource ? <Input value={product(editing.productId)?.name || editing.productId} readOnly aria-readonly="true" className="bg-muted" /> : <ProductCombobox
+                  products={state.products.filter((item) => !isProductArchived(item) || item.id === editing.productId)}
+                  value={editing.productId} onChange={changeProduct} />}
+
               </div>
 
               <div className="grid gap-2">
                 <Label><span className="text-red-500">*</span> 采购批次</Label>
-                <BatchCombobox
-                  batches={state.batches}
-                  value={editing.batchId}
-                  onChange={changeBatch}
-                />
+                {editing.procurementSource ? <><Input value={batch(editing.batchId)?.batchNo || editing.batchId} readOnly aria-readonly="true" className="bg-muted" /><p className="text-xs text-muted-foreground">采购批次和商品来自接收清单，不能在库存中更换。</p></> : <BatchCombobox
+                  batches={state.batches} value={editing.batchId} onChange={changeBatch} />}
+
               </div>
 
               {editing.id && (

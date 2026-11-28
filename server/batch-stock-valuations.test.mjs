@@ -24,6 +24,15 @@ test("uses current follower price, explicit manual price and retained loss price
   assert.deepEqual(state, before);
 });
 
+test("arrival deaths without a tank use their frozen sale value once in losses, never as unsold stock", () => {
+  const state = fixture({ stock: [fish("arrival", { subTankId: "", lost: true, entryDisposition: "arrival_dead", neverEnteredTank: true, basePrice: 77.7 }), fish("live")],
+    lossRecords: [{ stockItemId: "arrival" }, { stockItemId: "arrival" }] });
+  const result = metric(state);
+  assert.deepEqual(result.lost, { count: 1, estimatedSaleValue: 77.7, unpricedCount: 0 });
+  assert.deepEqual(result.unsold, { count: 1, estimatedSaleValue: 100.1, unpricedCount: 0 });
+  assert.deepEqual(result.bySpecies[0].lost, result.lost);
+});
+
 test("occupancy excludes active orders and outbound shipments, but not cancelled orders or removed lines", () => {
   const state = fixture({ stock: ["reserved", "cancelled", "released", "preparing", "outbound", "pickup", "sold", "old-sold", "damaged", "restored"].map((key) => fish(key, key === "sold" ? { sold: true } : key === "old-sold" ? { status: "sold" } : {})),
     orders: [{ status: "confirmed", items: [{ stockItemId: "reserved" }, { stockItemId: "released", inventoryRemovedAt: "2026-01-01" }] }, { status: "cancelled", items: [{ stockItemId: "cancelled" }] }],

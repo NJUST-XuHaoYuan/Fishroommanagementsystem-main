@@ -169,6 +169,8 @@ export type PurchaseBatch = {
   /** 服务端确认的全费用采购成本；历史批次无此字段时沿用原两项费用。 */
   totalCost?: number;
   costingRevision?: number;
+  receiving?: { schemaVersion: 1; revision: number; receipts: import("./utils/batchReceiving").BatchReceipt[] };
+  arrivalLossCount?: number;
   procurement?: import("./utils/purchaseBatchTypes").PurchaseProcurement;
   stockedCount: number;
   lossCount: number;
@@ -245,6 +247,10 @@ export type StockItem = {
   siteId?: string;
   productId: string;
   batchId: string;
+  /** 接收入库后固定的采购及装箱来源，不随移缸或后续损耗变化。 */
+  procurementSource?: { receiptId: string; lineId: string; boxId: string; itemId: string; ordinal: number };
+  entryDisposition?: "stocked" | "arrival_dead";
+  neverEnteredTank?: boolean;
   subTankId: string;
   status: StockStatus;
   tankTransfer?: StockTankTransfer;

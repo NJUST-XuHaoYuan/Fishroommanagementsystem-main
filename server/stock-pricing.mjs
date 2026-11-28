@@ -149,7 +149,10 @@ export function normalizeStockPricing(item = {}, product = {}, { existing, previ
     }
     return withMode({ ...item, basePrice: existing.basePrice }, existingMode);
   }
-  const basePrice = mode === "product" ? positivePrice(product.defaultPrice, "商品默认价")
+  // A received purchase can arrive before its retail price is configured.
+  // Keep those existing product-priced records editable without inventing a sale price.
+  const unpricedReceipt = existing?.procurementSource && mode === "product" && Number(product.defaultPrice || 0) === 0;
+  const basePrice = unpricedReceipt ? 0 : mode === "product" ? positivePrice(product.defaultPrice, "商品默认价")
     : positivePrice(has(item, "basePrice") ? item.basePrice : existing?.basePrice, "单条售价");
   return withMode({ ...item, basePrice }, mode);
 }

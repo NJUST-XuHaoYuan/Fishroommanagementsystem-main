@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {receiptEntries,receiptInteger,receiptSourceKey,validateReceiptDraft} from './batchReceiving.ts';
+const permissions={canStock:true,canLoss:true};
+const source=(id='a',pending=10)=>({boxId:'box',itemId:id,lineId:'line',boxNo:'1',productId:'p',productName:'黄金吊',size:'S',origin:'印尼',orderedQuantity:10,stockedQuantity:0,lostQuantity:0,pendingQuantity:pending});
+const drafts=(row,stocked,lost,subTankId='tank')=>({[receiptSourceKey(row)]:{stocked:String(stocked),lost:String(lost),groupId:'group',subTankId}});
+test('partial receiving submits exact live and death counts, leaving remainder in batch',()=>{const row=source();const draft=drafts(row,3,2);assert.equal(validateReceiptDraft([row],draft,['/uploads/dead.jpg'],permissions),'');assert.deepEqual(receiptEntries([row],draft),[{boxId:'box',itemId:'a',stockedQuantity:3,lostQuantity:2,subTankId:'tank'}]);});
+test('counts reject decimals, negatives and oversubscription across live plus dead',()=>{const row=source();for(const value of ['-1','1.5','1e2','9007199254740992'])assert.equal(receiptInteger(value),null);assert.equal(receiptInteger(''),0);assert.match(validateReceiptDraft([row],drafts(row,8,3),['/uploads/dead.jpg'],permissions),/最多还能处理 10/);});
+test('arrival death requires photo but no destination or reason',()=>{const row=source();assert.match(validateReceiptDraft([row],drafts(row,0,2,''),[],permissions),/上传照片/);assert.equal(validateReceiptDraft([row],drafts(row,0,2,''),['/uploads/dead.jpg'],permissions),'');assert.deepEqual(receiptEntries([row],drafts(row,0,2,'')),[{boxId:'box',itemId:'a',stockedQuantity:0,lostQuantity:2}]);});
+test('live fish must have target; permissions apply independently',()=>{const row=source();assert.match(validateReceiptDraft([row],drafts(row,1,0,''),[],permissions),/位置/);assert.match(validateReceiptDraft([row],drafts(row,1,0),[],{...permissions,canStock:false}),/入库权限/);assert.match(validateReceiptDraft([row],drafts(row,0,1),['p'],{...permissions,canLoss:false}),/报损权限/);});
+test('deselected sources and zero rows never submit stale drafts',()=>{const a=source(),b=source('b');const draft={...drafts(a,2,0),...drafts(b,3,1)};assert.equal(receiptEntries([a],draft).length,1);assert.equal(receiptEntries([a],draft)[0].itemId,'a');assert.deepEqual(receiptEntries([a],drafts(a,0,0)),[]);});
+test('stale remaining quantities revalidate and large requests must split',()=>{const row=source('a',1);assert.match(validateReceiptDraft([row],drafts(row,2,0),[],permissions),/最多还能处理 1/);const big=source('a',501);assert.match(validateReceiptDraft([big],drafts(big,501,0),[],permissions),/500/);});
+
+test('source keys cannot collide when server IDs contain separators',()=>{assert.notEqual(receiptSourceKey({boxId:'a:b',itemId:'c'}),receiptSourceKey({boxId:'a',itemId:'b:c'}));});

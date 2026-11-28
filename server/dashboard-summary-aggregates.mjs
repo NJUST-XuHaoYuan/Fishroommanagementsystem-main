@@ -2,6 +2,7 @@ import { dashboardDatePart, buildDashboardSalesMetrics } from "./dashboard-sales
 export { buildDashboardSalesMetrics } from "./dashboard-sales-metrics.mjs";
 import { lossPricingSnapshot } from "./stock-loss-price.mjs";
 import { isStockInTransfer } from "./stock-transfer-rules.mjs";
+import { batchStockCounts, isArrivalDeadStock } from "./batch-stock-counts.mjs";
 
 function array(value) {
   return Array.isArray(value) ? value : [];
@@ -300,6 +301,7 @@ export function buildDashboardLossSeries({
   const fishStock = [];
   const fishStockCountByBatchId = new Map();
   for (const item of array(stock)) {
+    if (isArrivalDeadStock(item)) continue;
     if (!matchesScope(lossSiteByStockId.get(String(item?.id ?? "")) || stockSiteId(item))) continue;
     const product = productById.get(String(item?.productId ?? ""));
     const itemSpecies = product ? speciesById.get(String(product?.speciesId ?? "")) : undefined;
@@ -336,8 +338,9 @@ export function buildDashboardLossSeries({
     const date = compactDate(batch?.arrivalDate);
     if (!dateSet.has(date)) continue;
     const batchId = String(batch?.id ?? "");
-    const reportedStockedCount = Number(batch?.stockedCount);
-    const reportedLossCount = Number(batch?.lossCount);
+    const receivingCounts = batch?.receiving?.schemaVersion === 1 ? batchStockCounts(batch, stock) : null;
+    const reportedStockedCount = Number(receivingCounts?.stockedCount ?? batch?.stockedCount);
+    const reportedLossCount = Number(receivingCounts?.lossCount ?? batch?.lossCount);
     const summary = {
       id: batchId,
       batchNo: String(batch?.batchNo ?? ""),
@@ -349,6 +352,7 @@ export function buildDashboardLossSeries({
       lossCount: Number.isFinite(reportedLossCount) && reportedLossCount > 0
         ? reportedLossCount
         : (lossStockIdsByBatchId.get(batchId)?.size ?? 0),
+      ...(receivingCounts ? { arrivalLossCount: receivingCounts.arrivalLossCount } : {}),
       bioFee: Number(batch?.bioFee || 0),
       shippingFee: Number(batch?.shippingFee || 0),
       ...(Number.isFinite(batch?.totalCost) ? { totalCost: batch.totalCost } : {}),
@@ -389,7 +393,8 @@ export function buildDashboardLossSeries({
         origin: String(product?.origin ?? ""),
         siteId: row.siteId,
         siteName: String(record?.siteName ?? "").trim() || siteNameById.get(row.siteId) || ({ nanjing: "南京", jiangyin: "江阴" })[row.siteId] || row.siteId || "未知场地",
-        tankName: String(record?.tankName ?? "").trim() || snapshotTankName || eventTankName || currentTankName || "未知缸位",
+        tankName: isArrivalDeadStock(stockItem) ? "到货死亡 · 未入缸" : String(record?.tankName ?? "").trim() || snapshotTankName || eventTankName || currentTankName || "未知缸位",
+        isArrivalLoss: isArrivalDeadStock(stockItem),
         batchNo: String(batch?.batchNo ?? ""),
         supplier: String(batch?.supplier ?? ""),
         arrivalDate: String(batch?.arrivalDate ?? ""),
@@ -402,13 +407,17 @@ export function buildDashboardLossSeries({
       };
     });
     const lostCount = lossDetails.length;
+    const arrivalLostCount = lossDetails.filter((row) => row.isArrivalLoss).length;
+    const inventoryLostCount = lostCount - arrivalLostCount;
     const estimatedValue = money(lossDetails.reduce((sum, row) => sum + Number(row.estimatedValue || 0), 0));
     return {
       date,
       label: date.slice(5).replace("-", "/"),
       lostCount,
+      arrivalLostCount,
+      inventoryLostCount,
       stockBase,
-      lossRate: stockBase > 0 ? lostCount / stockBase * 100 : 0,
+      lossRate: stockBase > 0 ? inventoryLostCount / stockBase * 100 : 0,
       estimatedValue,
       lossDetails,
       batchArrivals: batchesByDate.get(date) ?? [],

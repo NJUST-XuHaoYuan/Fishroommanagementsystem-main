@@ -14,6 +14,7 @@ import { isPlatformOrderSource, platformOrderDisplayName } from "../utils/orderS
 import { getBillableShippingFee } from "../utils/orderFees";
 import { buildDashboardSalesMetrics } from "../../../server/dashboard-sales-metrics.mjs";
 import { healthyFishInventoryMetrics } from "../../../server/dashboard-healthy-fish-value.mjs";
+import { batchStockCounts, isArrivalDeadStock } from "../../../server/batch-stock-counts.mjs";
 import { resolveDashboardDateRange } from "../../../server/dashboard-date-range.mjs";
 import { DashboardDateFilter, DashboardSalespersonFilter, type DashboardDateRange } from "./DashboardFilters";
 import { dashboardSalespersonSelection, rankDashboardSalespeople } from "../utils/dashboardSalespeople";
@@ -121,6 +122,7 @@ type DailyLossDetail = {
   pricingSnapshot?: LossPricingSnapshot;
   canEditPrice?: boolean;
   isPriceMissing?: boolean;
+  isArrivalLoss?: boolean;
 };
 
 type DailyBatchArrival = {
@@ -130,6 +132,7 @@ type DailyBatchArrival = {
   arrivalDate: string;
   stockedCount: number;
   lossCount: number;
+  arrivalLossCount?: number;
   bioFee: number;
   shippingFee: number;
   totalCost?: number;
@@ -139,6 +142,8 @@ type DailyLossPoint = {
   date: string;
   label: string;
   lostCount: number;
+  arrivalLostCount?: number;
+  inventoryLostCount?: number;
   stockBase: number;
   lossRate: number;
   estimatedValue: number;
@@ -1251,7 +1256,7 @@ function AdminDashboard() {
   const fishStock = dashboardStock.filter((item) => {
     const product = productById.get(item.productId);
     const itemSpecies = product ? speciesById.get(product.speciesId) : undefined;
-    return isFishInventoryItem(product, itemSpecies);
+    return !isArrivalDeadStock(item) && isFishInventoryItem(product, itemSpecies);
   });
   let dailyLossData: DailyLossPoint[] = dailyDates.map((date) => {
     const seenLossIds = new Set<string>();
@@ -1271,6 +1276,8 @@ function AdminDashboard() {
       return true;
     }).length;
     const lostCount = rowsForDate.length;
+    const arrivalLostCount = rowsForDate.filter((row) => isArrivalDeadStock(row.stockItem)).length;
+    const inventoryLostCount = lostCount - arrivalLostCount;
     const lossDetails = rowsForDate.map((row) => {
       const stockItem = row.stockItem;
       const batch = stockItem ? batchById.get(stockItem.batchId) : undefined;
@@ -1281,7 +1288,8 @@ function AdminDashboard() {
         speciesName: row.species?.name ?? "",
         size: row.product?.size ?? "",
         origin: row.product?.origin ?? "",
-        tankName: tankNameForLoss(row.record, stockItem),
+        tankName: isArrivalDeadStock(stockItem) ? "到货死亡 · 未入缸" : tankNameForLoss(row.record, stockItem),
+        isArrivalLoss: isArrivalDeadStock(stockItem),
         batchNo: batch?.batchNo ?? "",
         supplier: batch?.supplier ?? "",
         arrivalDate: batch?.arrivalDate ?? "",
@@ -1293,6 +1301,7 @@ function AdminDashboard() {
     const batchArrivals = dashboardBatches
       .filter((batch) => String(batch.arrivalDate ?? "").slice(0, 10) === date)
       .map<DailyBatchArrival>((batch: PurchaseBatch) => {
+        const receivingCounts = batch.receiving?.schemaVersion === 1 ? batchStockCounts(batch, dashboardStock) : null;
         const batchStock = fishStock.filter((item) => item.batchId === batch.id);
         const lostStockIds = new Set(lossRows
           .filter((row) => row.stockItem?.batchId === batch.id)
@@ -1303,8 +1312,9 @@ function AdminDashboard() {
           batchNo: batch.batchNo,
           supplier: batch.supplier,
           arrivalDate: batch.arrivalDate,
-          stockedCount: Number(batch.stockedCount || 0) || batchStock.length,
-          lossCount: Number(batch.lossCount || 0) || lostStockIds.size,
+          stockedCount: receivingCounts?.stockedCount ?? (Number(batch.stockedCount || 0) || batchStock.length),
+          lossCount: receivingCounts?.lossCount ?? (Number(batch.lossCount || 0) || lostStockIds.size),
+          ...(receivingCounts ? { arrivalLossCount: receivingCounts.arrivalLossCount } : {}),
           bioFee: Number(batch.bioFee || 0),
           shippingFee: Number(batch.shippingFee || 0),
           ...(Number.isFinite(batch.totalCost) ? { totalCost: batch.totalCost } : {}),
@@ -1314,8 +1324,10 @@ function AdminDashboard() {
       date,
       label: shortDateLabel(date),
       lostCount,
+      arrivalLostCount,
+      inventoryLostCount,
       stockBase,
-      lossRate: stockBase > 0 ? lostCount / stockBase * 100 : 0,
+      lossRate: stockBase > 0 ? inventoryLostCount / stockBase * 100 : 0,
       estimatedValue: rowsForDate.reduce((sum, row) => sum + Number(row.estimatedValue || 0), 0),
       lossDetails,
       batchArrivals,
@@ -2727,6 +2739,7 @@ function AdminDashboard() {
                 <div className="mt-1 text-muted-foreground">
                   当日库存基数：{hoveredLossPoint.stockBase} 条
                 </div>
+                {!!hoveredLossPoint.arrivalLostCount && <div className="mt-1 text-muted-foreground">其中到货死亡 {hoveredLossPoint.arrivalLostCount} 条，未入缸，不计库存占比</div>}
                 {(hoveredLossPoint.batchArrivals?.length ?? 0) > 0 && (
                   <div className="mt-1 text-indigo-700">
                     当日到货：{hoveredLossPoint.batchArrivals?.length ?? 0} 批
@@ -2960,6 +2973,7 @@ function AdminDashboard() {
                   <div className="text-xl font-semibold text-indigo-700">{selectedLossPoint.batchArrivals?.length ?? 0} 批</div>
                 </div>
               </div>
+              {!!selectedLossPoint.arrivalLostCount && <p className="text-sm text-muted-foreground">含到货死亡 {selectedLossPoint.arrivalLostCount} 条。库存占比只计算入缸后的损耗，到货死亡不计入库存基数。</p>}
               <section className="space-y-2">
                 <h4 className="text-sm font-semibold">当天到货批次</h4>
                 {(selectedLossPoint.batchArrivals ?? []).length > 0 ? (

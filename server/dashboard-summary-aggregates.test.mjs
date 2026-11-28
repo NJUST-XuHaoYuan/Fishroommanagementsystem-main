@@ -27,6 +27,32 @@ test("batch arrivals retain complete confirmed procurement costs while legacy ba
   assert.equal(legacy.bioFee + legacy.shippingFee, 230);
 });
 
+test("arrival deaths are visible loss events but never contribute stock-in or tank inventory to the daily loss rate", () => {
+  const result = buildDashboardLossSeries({
+    dates: ["2026-11-27", "2026-11-28"],
+    stock: [
+      { id: "arrival-dead", batchId: "b", productId: "p", siteId: "nanjing", inDate: "2026-11-27", lossDate: "2026-11-27", lost: true, entryDisposition: "arrival_dead", neverEnteredTank: true, subTankId: "", basePrice: 200 },
+      { id: "tank-loss", batchId: "b", productId: "p", siteId: "nanjing", inDate: "2026-11-27", lossDate: "2026-11-27", lost: true, basePrice: 100 },
+      { id: "live", batchId: "b", productId: "p", siteId: "nanjing", inDate: "2026-11-27" },
+    ],
+    products: [{ id: "p", speciesId: "s" }], species: [{ id: "s" }],
+    batches: [{ id: "b", siteId: "nanjing", arrivalDate: "2026-11-27", stockedCount: 999, lossCount: 999,
+      receiving: { schemaVersion: 1, receipts: [{ entries: [{ stockItemIds: ["tank-loss", "live", "removed"], lossStockItemIds: ["arrival-dead"] }] }] } }],
+    lossRecords: [{ id: "arrival-loss", stockItemId: "arrival-dead", date: "2026-11-27", siteId: "nanjing" }],
+  });
+  assert.equal(result[0].lostCount, 2);
+  assert.equal(result[0].arrivalLostCount, 1);
+  assert.equal(result[0].inventoryLostCount, 1);
+  assert.equal(result[0].stockBase, 2);
+  assert.equal(result[0].lossRate, 50);
+  assert.equal(result[0].estimatedValue, 300);
+  assert.equal(result[0].lossDetails.find(row => row.stockItemId === "arrival-dead").tankName, "到货死亡 · 未入缸");
+  assert.equal(result[0].batchArrivals[0].stockedCount, 3);
+  assert.equal(result[0].batchArrivals[0].lossCount, 2);
+  assert.equal(result[0].batchArrivals[0].arrivalLossCount, 1);
+  assert.equal(result[1].stockBase, 1);
+});
+
 test("finance compatibility series uses original snapshots and registered receipts, without finance callbacks", () => {
   const chartDates = dates(730);
   const orders = [

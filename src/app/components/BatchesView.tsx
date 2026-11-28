@@ -19,6 +19,7 @@ import { confirmWrite } from "../utils/writeConfirm";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { authJsonHeaders } from "../utils/authSession";
+import { BatchReceivingDialog } from "./BatchReceivingDialog";
 import { BatchDetailsView } from "./BatchDetailsView";
 import { BatchInfoSection } from "./BatchInfoSection";
 import { PurchaseBatchEditor, type PurchaseBatchEditorSave } from "./PurchaseBatchEditor";
@@ -108,11 +109,14 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
   const [revenueRetry, setRevenueRetry] = useState(0);
   const [revenueDiagnostics, setRevenueDiagnostics] = useState<BatchRevenueResponse["diagnostics"]>();
   const permission = usePermission("batches");
+  const receivingPermission = usePermission("stockIn");
+  const [receivingBatchId, setReceivingBatchId] = useState("");
+  const canReceive = receivingPermission.canCreate;
 
   const contextKey = `${activeSiteId}|${state.user?.username || ""}|${state.user?.role || ""}|${captureNewCustomerSession()?.key || ""}|${permission.canUpdate}|${permission.canCreate}`;
   const contextRef = useRef(contextKey);
   contextRef.current = contextKey;
-  useEffect(() => { setOpen(false); setEditing(null); setPurchaseEditing(null); setDel(null); setSaveError(""); }, [contextKey]);
+  useEffect(() => { setOpen(false); setEditing(null); setPurchaseEditing(null); setDel(null); setSaveError(""); setReceivingBatchId(""); }, [contextKey]);
   const beginEdit = (batch: PurchaseBatch, procurement = false) => {
     newBatchId.current = batch.id || uid();
     baselineLossCount.current = batch.lossCount;
@@ -279,11 +283,12 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
       {detailVisible && requestedDetail ? <BatchDetailsView key={`${requestedDetail.siteId}:${requestedDetail.batchId}`}
         batchId={requestedDetail.batchId} siteId={requestedDetail.siteId} onBack={() => openFishDetails(null)}
         batchIdentity={selectedBatch}
-        batchInfo={selectedBatch && <BatchInfoSection batch={selectedBatch}
+        batchInfo={selectedBatch && <><BatchInfoSection batch={selectedBatch}
           revenue={revenueAvailable ? salesStats(selectedBatch.id) : null}
           loading={revenueLoading} error={revenueError} onRetry={() => setRevenueRetry(value => value + 1)}
           onEdit={permission.canUpdate ? () => beginEdit(selectedBatch) : undefined}
-          onProcurement={permission.canUpdate ? () => beginEdit(selectedBatch, true) : undefined} />}
+          onProcurement={permission.canUpdate ? () => beginEdit(selectedBatch, true) : undefined} />
+          {canReceive && <div className="mt-4 flex items-center gap-3"><Button onClick={() => setReceivingBatchId(selectedBatch.id)}>接收入库</Button><span className="text-sm text-muted-foreground">从采购清单处理入缸或到货死亡，也可查看接收记录。</span></div>}</>}
       /> : <>
       <div>
         <h2>采购批次管理</h2>
@@ -419,6 +424,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         }}
         actions={(row) => (
           <div className="inline-flex min-w-30 flex-nowrap justify-end gap-2 whitespace-nowrap" onDoubleClick={(event) => event.stopPropagation()}>
+            {canReceive && <Button size="sm" className="shrink-0" onClick={() => setReceivingBatchId(row.id)}>接收入库</Button>}
             <Button size="sm" variant="outline" className="shrink-0" onClick={() => openFishDetails({ batchId: row.id, siteId: activeSiteId })}>查看详情</Button>
             {(permission.canUpdate || permission.canDelete) && <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -435,6 +441,8 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
       />
 
       </>}
+
+      {receivingBatchId && <BatchReceivingDialog key={`${contextKey}:${receivingBatchId}`} initialBatchId={receivingBatchId} onClose={() => setReceivingBatchId("")} onSaved={() => setRevenueRetry(value => value + 1)} onEditBatch={permission.canUpdate ? id => { const batch = state.batches.find(item => item.id === id); if (batch) beginEdit(batch, true); } : undefined} />}
 
       {purchaseEditing && <PurchaseBatchEditor key={`${contextKey}:${purchaseEditing.id || "new"}`} batch={purchaseEditing} products={state.products}
         arrivalDateMax={purchaseEditing.id && earliestStockInDate(purchaseEditing.id) && earliestStockInDate(purchaseEditing.id)! < today ? earliestStockInDate(purchaseEditing.id)! : today}

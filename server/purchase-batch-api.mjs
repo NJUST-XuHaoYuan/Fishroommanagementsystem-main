@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { assertReceivedProcurementUnchanged } from "./purchase-batch-receiving-rules.mjs";
 import { preparePurchaseProcurement } from "./purchase-batch-costing-rules.mjs";
 
 const list = value => Array.isArray(value) ? value : [];
@@ -7,7 +8,7 @@ const text = value => typeof value === "string" ? value.trim() : "";
 const fail = (message, statusCode = 400, code = "BATCH_COSTING_INVALID") => { throw Object.assign(new Error(message), { statusCode, code }); };
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const fields = ["batchNo", "supplier", "arrivalDate", "notes", "lossCount", "lossProof", "bioFee", "shippingFee"];
-const protectedFields = ["procurement", "costingRevision", "totalCost", "costingMutations"];
+const protectedFields = ["procurement", "costingRevision", "totalCost", "costingMutations", "receiving"];
 function required(value, label, max = 120) {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max) fail(`${label}不能为空，且不能超过 ${max} 字`);
   return value.trim();
@@ -31,13 +32,15 @@ function digest(value) {
 export function assertPurchaseBatchCostingPatch(current, next, changedKeys = []) {
   if (!changedKeys.includes("batches")) return;
   const before = new Map(list(current.batches).map(batch => [batch.id, batch]));
+  const nextIds = new Set(list(next.batches).map(batch => batch.id));
+  if (list(current.batches).some(batch => batch.receiving?.receipts?.length && !nextIds.has(batch.id))) fail("已有接收记录的批次不能删除", 409, "BATCH_RECEIVING_SOURCE_LOCKED");
   for (const batch of list(next.batches)) {
     const old = before.get(batch.id);
     if (protectedFields.some(key => !isDeepStrictEqual(old?.[key], batch[key]))) fail("采购清单、装箱与分摊结果须通过采购批次专用页面保存，请刷新后重试", 409, "BATCH_COSTING_DEDICATED_REQUIRED");
     // Legacy rows also need the dedicated revision check. Otherwise an older
     // client can change a revision-0 batch behind an already-open editor and
     // that editor can silently overwrite it on its first dedicated save.
-    const strip = record => Object.fromEntries(Object.entries(record).filter(([key]) => changedKeys.includes("stock") && ["stockedCount", "lossCount"].includes(key) ? false : true));
+    const strip = record => Object.fromEntries(Object.entries(record).filter(([key]) => changedKeys.includes("stock") && ["stockedCount", "lossCount", "arrivalLossCount"].includes(key) ? false : true));
     if (!old || !isDeepStrictEqual(strip(old), strip(batch))) fail("批次新增和资料修改须通过采购批次专用页面保存，请刷新后重试", 409, "BATCH_COSTING_DEDICATED_REQUIRED");
   }
 }
@@ -104,13 +107,14 @@ export function createPurchaseBatchHandler({ pool, stateId, readBody, sendJson, 
       }
       if (current && text(current.batchNo) !== batchNo) fail("已有批次号不能修改");
       if (state.batches.some(batch => batch.id !== batchId && normalizeSiteId(batch.siteId) === siteId && text(batch.batchNo) === batchNo)) fail("该场地已有相同批次号，请更换批次号", 409, "BATCH_NUMBER_CONFLICT");
-      const earliest = list(row.purchase_batch_stock).map(stock => text(stock.inDate)).filter(Boolean).sort()[0];
-      if (earliest && arrivalDate > earliest) fail("到货日期不能晚于该批次最早入库日期");
+      const earliest = [...list(row.purchase_batch_stock).map(stock => text(stock.inDate)), ...list(current?.receiving?.receipts).map(receipt => text(receipt.date))].filter(Boolean).sort()[0];
+      if (earliest && arrivalDate > earliest) fail("到货日期不能晚于该批次最早接收或入库日期");
       if (input.mode === "legacy" && (!current || current.procurement)) fail("采购明细批次须通过采购清单页面保存", 409);
       if (current?.procurement?.status === "confirmed" && input.mode !== "confirm") fail("已确认的批次须保存并重新分摊，不能退回草稿", 409, "BATCH_COSTING_CONFIRMED_REQUIRED");
       const now = new Date().toISOString();
       const next = { ...(current ?? {}), id: batchId, siteId, batchNo, supplier, arrivalDate,
         notes: basic.notes ?? current?.notes ?? "", createdAt: current ? current.createdAt : now,
+        ...(!current ? { receiving: { schemaVersion: 1, revision: 0, receipts: [] } } : {}),
         lossCount: basic.lossCount ?? current?.lossCount ?? 0,
         lossProof: own(basic, "lossProof") ? media.lossProof : current?.lossProof ?? [],
         stockedCount: current?.stockedCount ?? 0, commissionMultiplier: 100, costingRevision: revision + 1 };
@@ -131,6 +135,8 @@ export function createPurchaseBatchHandler({ pool, stateId, readBody, sendJson, 
           else delete next.totalCost;
         }
       }
+      assertReceivedProcurementUnchanged(current, next);
+      if ((!current || current.receiving?.schemaVersion === 1) && own(basic, "lossCount") && basic.lossCount !== Number(current?.lossCount || 0)) fail("已接收批次的损耗数量由单鱼损耗记录计算，不能直接修改汇总数量", 409, "BATCH_RECEIVING_SOURCE_LOCKED");
       next.costingMutations = [...list(current?.costingMutations), { id: mutationId, digest: requestDigest, operator: actor, revision: next.costingRevision, time: now }].slice(-50);
       const amount = batch => Number.isFinite(batch?.totalCost) ? batch.totalCost : Number(batch?.bioFee || 0) + Number(batch?.shippingFee || 0);
       const details = input.mode === "confirm" ? `采购 ${next.procurement.allocation.totals.quantity} 条，${next.procurement.boxes.length} 箱；采购成本 ¥${amount(current).toFixed(2)} → ¥${amount(next).toFixed(2)}；费用 ${JSON.stringify(next.procurement.fees)}；税金权重 ${next.procurement.lines.map(line => `${line.productName}(${line.id}) ${line.taxWeightPercent}%`).join("、")}`

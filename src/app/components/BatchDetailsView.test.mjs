@@ -50,6 +50,18 @@ test("status filter and tank totals have a separate in-transit bucket", () => {
   assert.doesNotMatch(html, /在库 |已售 |损耗 /);
 });
 
+test("arrival death fish UI shows the death date and never claims it was stocked into a tank", () => {
+  const state = structuredClone(batchDetailsFixture.state);
+  state.stock = [{ ...state.stock[0], id: "arrival-dead", subTankId: "", lost: true, inDate: "2026-11-28", lossDate: "2026-11-28", entryDisposition: "arrival_dead", neverEnteredTank: true }];
+  const result = buildPurchaseBatchDetail(state, { batchId: "batch-nj", siteId: "nanjing", visibleSiteIds: ["nanjing"], isAdmin: true, page: 1, pageSize: 100 });
+  const fish = result.items.find(row => row.stockItemId === "arrival-dead");
+  const html = renderToStaticMarkup(createElement(ui.FishRow, { fish, batchId: "batch-nj", siteId: "nanjing" }));
+  assert.match(html, /到货死亡时间/);
+  assert.match(html, /未入缸/);
+  assert.match(html, /2026-11-28/);
+  assert.doesNotMatch(html, /入库时间|未留存可核实的初始入库缸位/);
+});
+
 test("missing historical location and restricted records do not become in-transit by inference", () => {
   const base = { stockItemId: "fish", productName: "黄金吊", status: "restricted", statusLabel: "记录受限", sales: [], recordCount: 0, warnings: [], currentTankName: "" };
   const restricted = renderToStaticMarkup(createElement(ui.FishRow, { fish: base, batchId: "batch", siteId: "nanjing" }));

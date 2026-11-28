@@ -1,4 +1,5 @@
 import { resolveStockPriceMode, stockPricingProtectedIds } from "./stock-pricing.mjs";
+import { isArrivalDeadStock } from "./batch-stock-counts.mjs";
 
 const array = (value) => Array.isArray(value) ? value : [];
 const text = (value) => String(value ?? "").trim();
@@ -105,11 +106,12 @@ export function buildBatchStockValuations(input = {}) {
       metric.restrictedCount += 1;
       continue;
     }
-    if (item._removed || (!item.lost && unavailable.has(stockId))) {
+    const lost = item.lost || isArrivalDeadStock(item);
+    if (item._removed || (!lost && unavailable.has(stockId))) {
       metric.excludedCount += 1;
       continue;
     }
-    const kind = item.lost ? "lost" : "unsold";
+    const kind = lost ? "lost" : "unsold";
     const productId = text(item.productId);
     const product = products.get(productId);
     const speciesId = text(product?.speciesId);
