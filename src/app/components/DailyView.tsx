@@ -1879,7 +1879,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                                   ? "物流"
                                   : ev.sourceType === "dailyLog"
                                     ? "缸组养护"
-                                    : ev.sourceType === "shipmentCancellation" ? "取消出库回缸核对" : stockTransferRecordLabel(ev.sourceType) || "观察/治疗记录"}
+                                    : ev.sourceType === "stockLoss" ? "损耗记录" : ev.sourceType === "shipmentCancellation" ? "取消出库回缸核对" : stockTransferRecordLabel(ev.sourceType) || "观察/治疗记录"}
                           </span>
                         </div>
                         <span className="text-xs tabular-nums text-muted-foreground">{formatBioRecordTime(ev.date)}</span>
@@ -1994,7 +1994,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
                               ))}
                             </div>
                           )}
-                          {ev.sourceType !== "dailyLog" && ev.sourceType !== "shipmentCancellation" && !stockTransferRecordLabel(ev.sourceType) && (permission.canUpdate || permission.canDelete) && (
+                          {ev.sourceType !== "dailyLog" && ev.sourceType !== "stockLoss" && ev.sourceType !== "shipmentCancellation" && !stockTransferRecordLabel(ev.sourceType) && (permission.canUpdate || permission.canDelete) && (
                             editingRecordId === ev.id ? (
                               <div className="mt-3 grid gap-3 border-t pt-3">
                                 <div className="grid gap-1.5">

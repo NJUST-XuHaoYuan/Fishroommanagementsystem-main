@@ -21,6 +21,7 @@ test("requires bio records, personnel, stock and tank topology to use dedicated 
   assert.throws(() => assertGenericStatePatchKeyAllowed("stock"), /库存记录必须通过库存或日常维护专用接口/);
   assert.throws(() => assertGenericStatePatchKeyAllowed("tankGroups"), /缸组.*缸位.*专用接口/);
   assert.throws(() => assertGenericStatePatchKeyAllowed("waterQualityRecords"), /水质记录必须通过专用接口/);
+  assert.throws(() => assertGenericStatePatchKeyAllowed("lossRecords"), /损耗记录必须通过报损或原因补充专用接口/);
   assert.equal(assertGenericStatePatchKeyAllowed("orders"), "orders");
 });
 

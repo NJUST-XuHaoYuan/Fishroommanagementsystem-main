@@ -4,6 +4,7 @@ import { DataTable } from "./common";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Textarea } from "./ui/textarea";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import {
@@ -179,7 +180,8 @@ type LossRow = StockLossRecord & {
 };
 
 export function LossRecordsView() {
-  const { state, activeSiteId } = useStore();
+  const { state, activeSiteId, saveLossReason } = useStore();
+  const lossPermission = usePermission("lossRecords");
   const dailyPermission = usePermission("daily");
   const inventoryPermission = usePermission("stockIn");
   const canReadStatusHistory = [dailyPermission, inventoryPermission].some(permission => permission.canCreate || permission.canUpdate || permission.canDelete);
@@ -353,6 +355,36 @@ export function LossRecordsView() {
 
   const viewing = selection?.identity === identity && selection.siteId === activeSiteId
     ? rows.find(row => row.id === selection.id) ?? null : null;
+
+  const [reasonEditor, setReasonEditor] = useState<{ recordId: string; expectedReason: string; draft: string } | null>(null);
+  const [reasonSaving, setReasonSaving] = useState(false);
+  const reasonPending = useRef(false);
+  const reasonScope = `${identity}:${activeSiteId}:${selection?.id ?? ""}`;
+  const reasonScopeRef = useRef(reasonScope);
+  reasonScopeRef.current = reasonScope;
+  useEffect(() => { setReasonEditor(null); }, [reasonScope]);
+  useEffect(() => () => { reasonScopeRef.current = "unmounted"; }, []);
+  const canEditReason = Boolean(viewing && state.lossRecords.some(record => record.id === viewing.id) && (
+    lossPermission.canUpdate || (dailyPermission.canUpdate && viewing.operator === state.user?.username)
+  ));
+  const submitReason = async () => {
+    if (!reasonEditor || !viewing || !canEditReason || reasonPending.current) return;
+    const reason = reasonEditor.draft.trim();
+    if (!reason) { toast.error("请填写损耗原因"); return; }
+    const scope = reasonScopeRef.current;
+    reasonPending.current = true;
+    setReasonSaving(true);
+    try {
+      const result = await saveLossReason({ recordId: reasonEditor.recordId, reason, expectedReason: reasonEditor.expectedReason });
+      if (reasonScopeRef.current !== scope) return;
+      if (!result.ok) { toast.error(result.error || "原因保存失败，请重试"); return; }
+      setReasonEditor(null);
+      toast.success("损耗原因已保存");
+    } finally {
+      reasonPending.current = false;
+      if (reasonScopeRef.current !== "unmounted") setReasonSaving(false);
+    }
+  };
 
   const productOptions = useMemo(() => {
     const products = state.products.filter((p) => speciesId === "all" || p.speciesId === speciesId);
@@ -609,7 +641,7 @@ export function LossRecordsView() {
           {
             key: "reason",
             title: "原因",
-            render: (row) => row.reason || <span className="text-muted-foreground">未填写</span>,
+            render: (row) => row.reason || <span className="text-amber-700">待补原因</span>,
           },
           {
             key: "photos",
@@ -703,8 +735,25 @@ export function LossRecordsView() {
               </div>
 
               <div className="rounded-lg border p-4 text-sm">
-                <div className="mb-2 text-xs text-muted-foreground">损耗原因</div>
-                <div className="whitespace-pre-wrap">{viewing.reason || "未填写"}</div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <Label htmlFor="loss-record-reason">损耗原因</Label>
+                  {canEditReason && !reasonEditor && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setReasonEditor({ recordId: viewing.id, expectedReason: viewing.reason || "", draft: viewing.reason || "" })}>
+                      {viewing.reason?.trim() ? "修改原因" : "补充原因"}
+                    </Button>
+                  )}
+                </div>
+                {reasonEditor?.recordId === viewing.id ? (
+                  <div className="space-y-3">
+                    <Textarea id="loss-record-reason" value={reasonEditor.draft} maxLength={2000} disabled={reasonSaving}
+                      placeholder="填写损耗原因" onChange={event => setReasonEditor(current => current ? { ...current, draft: event.target.value } : null)} />
+                    <div className="flex justify-end gap-2">
+                      <Button type="button" variant="outline" disabled={reasonSaving} onClick={() => setReasonEditor(null)}>取消</Button>
+                      <Button type="button" disabled={reasonSaving || !reasonEditor.draft.trim()} onClick={() => void submitReason()}>{reasonSaving ? "保存中…" : "保存原因"}</Button>
+                    </div>
+                  </div>
+                ) : <div className="whitespace-pre-wrap">{viewing.reason?.trim() || "待补原因"}</div>}
+                {viewing.reasonUpdatedAt && <div className="mt-2 text-xs text-muted-foreground">最近补改：{viewing.reasonUpdatedBy} · {new Date(viewing.reasonUpdatedAt).toLocaleString("zh-CN", { hour12: false })}</div>}
               </div>
 
               <div className="rounded-lg border p-4">

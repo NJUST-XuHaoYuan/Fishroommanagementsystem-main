@@ -15,6 +15,7 @@ import { stockTransferRecordLabel } from "./StockTransferDialog";
 const PAGE_SIZE = 20;
 
 export function maintenanceHistorySourceLabel(sourceType?: string): string {
+  if (sourceType === "stockLoss") return "损耗记录";
   if (sourceType === "dailyLog") return "缸组养护";
   if (sourceType === "shipmentCancellation") return "取消出库回缸核对";
   return stockTransferRecordLabel(sourceType) || (sourceType && sourceType !== "manual" ? `其他记录（${sourceType}）` : "单鱼记录");

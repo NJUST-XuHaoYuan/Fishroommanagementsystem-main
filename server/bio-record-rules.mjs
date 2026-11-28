@@ -12,6 +12,7 @@ const STOCK_PRICE_MAX = 10_000_000;
 const STOCK_STATUSES = new Set(["healthy", "feeding", "sick"]);
 const SYSTEM_BIO_RECORD_SOURCE_TYPES = new Set([
   "dailyLog",
+  "stockLoss",
   "stockMove",
   "stockTransferIssued",
   "stockTransferReceived",

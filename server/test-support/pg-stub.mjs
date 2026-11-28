@@ -216,6 +216,13 @@ function appStateRow(sql, values = []) {
     if (/\bAS\s+stock_product\b/i.test(sql)) row.stock_product = list(state.products).find((product) => product.id === item?.productId) ?? null;
   }
   if (/\bAS\s+matching_water_records\b/i.test(sql)) row.matching_water_records = (state.waterQualityRecords ?? []).filter(record => String(record.id ?? "").trim() === String(values[1]));
+  if (/\bAS loss_mutation_logs\b/.test(sql)) row.loss_mutation_logs = (state.operationLogs ?? []).filter(record => record.operator === values[1] && record.clientMutationId === values[2]);
+  if (/\bAS loss_matching_records\b/.test(sql)) row.loss_matching_records = (state.lossRecords ?? []).filter(record => values[3].includes(record.stockItemId));
+  if (/\bAS loss_linked_bio_records\b/.test(sql)) row.loss_linked_bio_records = (state.bioRecords ?? []).filter(record => values[1].includes(record.id));
+  if (/\bAS loss_reason_targets\b/.test(sql)) row.loss_reason_targets = (state.lossRecords ?? []).map((record,index)=>({record,index})).filter(item=>item.record.id===values[1]);
+  if (/\bAS loss_reason_stock\b/.test(sql)) row.loss_reason_stock = (state.stock ?? []).map((record,index)=>({record,index})).filter(item=>item.record.id===values[1]);
+  if (/\bAS loss_reason_bio\b/.test(sql)) row.loss_reason_bio = (state.bioRecords ?? []).map((record,index)=>({record,index})).filter(item=>values[2] && item.record.id===values[2]);
+  if (/\bAS loss_reason_count\b/.test(sql)) row.loss_reason_count = (state.lossRecords ?? []).filter(record=>record.stockItemId===values[1]).length;
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\bSELECT\s+jsonb_build_object\([\s\S]*?\)\s+AS\s+data\s+FROM\s+app_state\b/i.test(sql)) {
     row.data = Object.fromEntries([...sql.matchAll(/'([A-Za-z]+)',\s*COALESCE\(data\s*->\s*'\1'/g)]
@@ -362,7 +369,7 @@ function runQuery(query, values = []) {
     return result(scoped);
   }
   if (/\bown_records AS/.test(sql)) {
-    const [, username, siteId, subTankId, limit, tankGroupId = "", sharedActions = []] = values;
+    const [, username, siteId, subTankId, limit, tankGroupId = "", sharedActions = [], kind = "", reasonStatus = ""] = values;
     const groupForSub = id => (state.tankGroups ?? []).find(group => (group.subTanks ?? []).some(tank => tank.id === id))?.id;
     const tank = (state.logs ?? []).filter(entry => (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId &&
       (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId)) === tankGroupId) &&
@@ -374,12 +381,16 @@ function runQuery(query, values = []) {
     }).map(entry => ({ kind: "fish", entry }));
     const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => (entry.createdBy || entry.operator) === username &&
       (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!tankGroupId || entry.tankGroupId === tankGroupId)).map(entry => ({ kind: "water", entry })) : [];
-    const timestamp = row => { const value = row.kind === "water" ? row.entry.measuredAt : row.entry.date; return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}+08:00`); };
+    const loss = kind === "loss" ? (state.lossRecords ?? []).filter(entry => entry.operator === username && (entry.siteId || (state.tankGroups ?? []).find(group=>group.id===entry.tankGroupId)?.siteId || "nanjing") === siteId &&
+      (!subTankId || entry.subTankId === subTankId) && (!tankGroupId || entry.tankGroupId === tankGroupId) && (!reasonStatus || !String(entry.reason ?? "").trim())).map(entry=>({kind:"loss",entry})) : [];
+    const collections = kind === "loss" ? [loss] : [tank, fish, water];
+    const entryDate = row => row.entry.measuredAt || row.entry.createdAt || row.entry.date;
+    const timestamp = row => { const value = entryDate(row); return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}+08:00`); };
     if (/record_rank/.test(sql)) {
-      const valid = row => /^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[T ]([01][0-9]|2[0-3]):[0-5][0-9]/.test(row.entry.measuredAt || row.entry.date);
-      return result([tank, fish, water].flatMap(records => records.sort((a, b) => Number(valid(b)) - Number(valid(a)) || String(b.entry.measuredAt || b.entry.date).localeCompare(String(a.entry.measuredAt || a.entry.date)) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit)));
+      const valid = row => /^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])([T ]([01][0-9]|2[0-3]):[0-5][0-9])?/.test(entryDate(row));
+      return result(collections.flatMap(records => records.sort((a, b) => Number(valid(b)) - Number(valid(a)) || String(entryDate(b)).localeCompare(String(entryDate(a))) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit)));
     }
-    return result([...tank, ...fish, ...water].sort((a, b) => timestamp(b) - timestamp(a) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit));
+    return result(collections.flat().sort((a, b) => timestamp(b) - timestamp(a) || b.entry.id.localeCompare(a.entry.id)).slice(0, limit));
   }
   if (/\bpicker_records\s+AS\s+MATERIALIZED\b/i.test(sql)) return result(catalogPickerPreviewRows(values));
   if (/^\s*(?:SELECT|WITH)\b/i.test(sql) && /\bFROM\s+app_state\b/i.test(sql)) {
@@ -394,6 +405,10 @@ function runQuery(query, values = []) {
         state = JSON.parse(values[1]);
       } else if (/\bUPDATE\s+app_state\s+SET\s+data\s*=\s*jsonb_set/i.test(sql)) {
         state = structuredClone(state);
+        const indexedLossWrite = sql.match(/ARRAY\['(stock|lossRecords|bioRecords)',\$2::text\],\$3::jsonb,false/);
+        if (indexedLossWrite) { state[indexedLossWrite[1]][Number(values[1])] = JSON.parse(values[2]); return result([],1); }
+        const lossAppend = sql.match(/'\{(bioRecords|lossRecords)\}',COALESCE\(data -> '\1','\[\]'::jsonb\) \|\| \$2::jsonb,true/);
+        if (lossAppend) { state[lossAppend[1]]=[...(state[lossAppend[1]]??[]),...JSON.parse(values[1])]; return result([],1); }
         if (/WHEN 'create' THEN COALESCE\(data -> 'waterQualityRecords'/.test(sql)) {
           const [, id, stored, mode] = values; const record = JSON.parse(stored);
           state.waterQualityRecords = mode === "create" ? [...(state.waterQualityRecords ?? []), record] : mode === "update"

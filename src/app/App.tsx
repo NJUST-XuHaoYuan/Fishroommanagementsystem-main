@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { toast } from "sonner";
 import { StoreContext, initialState, DEFAULT_FISH_LIST_FOOTER_TEXT, DEFAULT_ORDER_PACKAGING_FEE, DEFAULT_PAYMENT_METHOD_SETTINGS, DEFAULT_SHIPPING_CARRIER_SETTINGS, DEFAULT_WATER_QUALITY_PARAMETERS, BioRecordSaveChange, BioRecordSaveResult, DailyLog, MaintenanceSaveChange, MaintenanceSaveResult, OperationLog, PaymentRecord, PermissionSet, Personnel, Product, ProductDeleteResult, StockChangeRequest, StockChangeResult, StockItem, Store, TankGroup, SubTank, User, WaterQualityParameterSetting, WaterQualityRecord, WaterQualityTankGroupAssignment, isPersonnelAccountEnabled, normalizePaymentMethodSettings, normalizeShippingCarrierSettings, normalizeSpeciesCategoryMajorMap, normalizeWaterQualityParameters, waterQualityParameterIdsForGroup, uid } from "./store";
-import type { AuthAccountPermissionSummary } from "./store";
+import type { AuthAccountPermissionSummary, LossReasonSaveChange } from "./store";
 import { Login } from "./components/Login";
 import { PublicCatalogPage } from "./components/PublicCatalogPage";
 import { LogoLoader } from "./components/LogoLoader";
@@ -1302,9 +1302,15 @@ function AdminApp() {
 		        );
 		        console.error("Failed to save maintenance action:", failure.error);
 		        settleMutation(mutationSession, "error", 3000);
+            if (change.mode === "loss" && failure.code === "MAINTENANCE_STALE" && isMutationSessionCurrent(mutationSession)) {
+              await loadStateKeys(["stock", "shipments"], { force: true });
+            }
 		        return failure;
 		      }
 
+          if (!isMutationSessionCurrent(mutationSession)) {
+            return { ok: false, error: "当前页面已变化，请重新打开记录确认保存结果", conflict: true };
+          }
 	      setStateForMutation(mutationSession, (current) => {
 	        const next = {
 	          ...current,
@@ -1339,6 +1345,49 @@ function AdminApp() {
 		      );
 		    }
 	  };
+
+  const saveLossReason = async (change: LossReasonSaveChange): Promise<MaintenanceSaveResult> => {
+    clearTimeout(saveTimer.current);
+    if (saveAbort.current) {
+      saveAbort.current.abort();
+      saveAbort.current = null;
+    }
+    const mutationSession = beginMutation();
+    try {
+      const response = await fetch(`${API}/stock-loss-records/reason`, {
+        method: "POST",
+        headers: authJsonHeaders(),
+        body: JSON.stringify(change),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!isMutationSessionCurrent(mutationSession)) {
+        return { ok: false, error: "当前页面已变化，请重新打开记录确认保存结果", conflict: true };
+      }
+      if (!response.ok || !result.ok) {
+        settleMutation(mutationSession, "error", 3000);
+        return maintenanceSaveFailure(result.error || `HTTP ${response.status}`, response.status, result.code);
+      }
+      setStateForMutation(mutationSession, (current) => {
+        const next = {
+          ...current,
+          stock: Array.isArray(result.stockUpdates) ? mergeIdUpdates(current.stock, result.stockUpdates) : current.stock,
+          lossRecords: Array.isArray(result.lossRecordUpdates) ? mergeIdUpdates(current.lossRecords, result.lossRecordUpdates) : current.lossRecords,
+          bioRecords: Array.isArray(result.bioRecordUpdates) ? mergeIdUpdates(current.bioRecords, result.bioRecordUpdates) : current.bioRecords,
+          operationLogs: result.operationLog
+            ? [result.operationLog, ...(current.operationLogs ?? [])].filter((log, index, all) =>
+                all.findIndex((item) => item.id === log.id) === index).slice(0, MAX_OPERATION_LOGS)
+            : current.operationLogs,
+        };
+        lastSavedState.current = withoutUser(next);
+        return next;
+      });
+      settleMutation(mutationSession, "saved", 2000);
+      return { ok: true, lossRecord: result.lossRecordUpdates?.find((record: { id: string }) => record.id === change.recordId) };
+    } catch (error) {
+      settleMutation(mutationSession, "error", 3000);
+      return maintenanceSaveFailure(error instanceof Error ? error.message : "原因保存失败，请重试");
+    }
+  };
 
   const saveBioRecordChange = async (change: BioRecordSaveChange): Promise<BioRecordSaveResult> => {
     if (bioSaveInFlight.current) {
@@ -2281,7 +2330,7 @@ function AdminApp() {
   }
 
 	  return (
-			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, deleteProduct, saveStockChange, saveMaintenanceAction, saveBioRecordChange, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
+			    <StoreContext.Provider value={{ state: visibleState, activeSiteId, setActiveSiteId, setState, savePatch, saveProduct, deleteProduct, saveStockChange, saveMaintenanceAction, saveLossReason, saveBioRecordChange, saveTankGroupChange, saveDailyLog, saveWaterQualitySettings, saveWaterQualityRecord, saveShipmentOutbound, saveOrderPaymentChange, savePersonnelAccount, resignPersonnelAccount, deletePersonnelAccount, savePersonnelPermissions, changePersonnelPassword, saveStateTransform }}>
       {isPublicSite ? (
         <PublicCatalogPage />
       ) : !state.user ? (

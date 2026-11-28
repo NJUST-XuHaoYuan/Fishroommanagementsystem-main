@@ -19,12 +19,13 @@ type Props = MobileMaintenanceMediaValue & {
   onChange: (value: MobileMaintenanceMediaValue) => void;
   onBusyChange: (busy: boolean) => void;
   disabled?: boolean;
+  photosOnly?: boolean;
 };
 
 const MAX_ATTACHMENTS = 8;
 
 /** Keep this component mounted and keyed to its record draft while an upload is in progress. */
-export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange, disabled = false }: Props) {
+export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange, disabled = false, photosOnly = false }: Props) {
   const photoInput = useRef<HTMLInputElement>(null);
   const albumInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -35,7 +36,7 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
   const [cameraOpen, setCameraOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const count = photos.length + videos.length;
+  const count = photos.length + (photosOnly ? 0 : videos.length);
   const unavailable = disabled || busy || cameraOpen;
 
   useEffect(() => { latest.current.onBusyChange(busy || cameraOpen); }, [busy, cameraOpen]);
@@ -51,6 +52,7 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
 
   const upload = async (files: File[], expected?: "image" | "video") => {
     if (disabled || pending.current || files.length === 0) return false;
+    if (photosOnly) expected = "image";
     const room = MAX_ATTACHMENTS - latest.current.photos.length - latest.current.videos.length;
     if (files.length > room) {
       const message = room > 0 ? `本次还可以添加 ${room} 个附件，请重新选择。` : "每条记录最多添加 8 个附件。";
@@ -133,20 +135,20 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
     setError("");
   };
 
-  return <section className="space-y-3" aria-label="照片和视频">
+  return <section className="space-y-3" aria-label={photosOnly ? "报损照片" : "照片和视频"}>
     <div className="flex items-center justify-between gap-3">
-      <h3 className="text-base font-medium">照片和视频</h3>
+      <h3 className="text-base font-medium">{photosOnly ? "报损照片（必填）" : "照片和视频"}</h3>
       <span className="text-sm text-muted-foreground">{count}/{MAX_ATTACHMENTS}</span>
     </div>
     <input ref={photoInput} type="file" accept="image/*" capture="environment" className="hidden" disabled={unavailable} onChange={event => picked(event, "image")} aria-label="使用手机相机拍照" />
-    <input ref={albumInput} type="file" accept="image/*,video/*" multiple className="hidden" disabled={disabled || busy} onChange={event => picked(event)} aria-label="从相册选择照片或视频" />
-    <div className="grid grid-cols-2 gap-3">
-      <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => photoInput.current?.click()}><Camera className="size-5" />拍照片</Button>
-      <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => setCameraOpen(true)}><Video className="size-5" />拍视频</Button>
+    <input ref={albumInput} type="file" accept={photosOnly ? "image/*" : "image/*,video/*"} multiple className="hidden" disabled={disabled || busy} onChange={event => picked(event)} aria-label={photosOnly ? "从相册选择照片" : "从相册选择照片或视频"} />
+    <div className={photosOnly ? "grid gap-3" : "grid grid-cols-2 gap-3"}>
+      <Button type="button" variant={photosOnly ? "default" : "outline"} className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => photoInput.current?.click()}><Camera className="size-5" />拍照片</Button>
+      {!photosOnly && <Button type="button" variant="outline" className="min-h-14 gap-2 text-base" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => setCameraOpen(true)}><Video className="size-5" />拍视频</Button>}
     </div>
     <Button type="button" variant="ghost" className="min-h-11 w-full gap-2" disabled={unavailable || count >= MAX_ATTACHMENTS} onClick={() => albumInput.current?.click()}><Images className="size-4" />从相册选择</Button>
-    <p className="text-sm leading-6 text-muted-foreground">直接打开后摄录制，自动检测可用画质；视频按原文件上传。</p>
-    {cameraOpen && <MobileVideoCaptureDialog onClose={() => setCameraOpen(false)} onChooseAlbum={() => { setCameraOpen(false); albumInput.current?.click(); }} onUse={file => upload([file], "video")} uploadStatus={status} />}
+    <p className="text-sm leading-6 text-muted-foreground">{photosOnly ? "请拍清楚本次报损的鱼；照片保存后可在报损记录中查看。" : "直接打开后摄录制，自动检测可用画质；视频按原文件上传。"}</p>
+    {!photosOnly && cameraOpen && <MobileVideoCaptureDialog onClose={() => setCameraOpen(false)} onChooseAlbum={() => { setCameraOpen(false); albumInput.current?.click(); }} onUse={file => upload([file], "video")} uploadStatus={status} />}
     {busy && <div role="status" className="flex items-center gap-2 rounded-md bg-muted p-3 text-sm"><Loader2 className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />{status || "正在上传，请稍候…"}</div>}
     {error && <p role="alert" className="whitespace-pre-wrap break-words text-sm leading-6 text-destructive">{error}</p>}
     {count > 0 && <div className="grid grid-cols-2 gap-3">
@@ -156,7 +158,7 @@ export function MobileMaintenanceMedia({ photos, videos, onChange, onBusyChange,
         </MediaPreviewTrigger>
         <Button type="button" variant="ghost" className="min-h-11 w-full gap-1 rounded-none text-destructive" disabled={unavailable} onClick={() => remove("image", index)} aria-label={`移除照片 ${index + 1}`}><Trash2 className="size-4" />移除</Button>
       </div>)}
-      {videos.map((src, index) => <div key={`video:${index}:${src}`} className="overflow-hidden rounded-lg border">
+      {!photosOnly && videos.map((src, index) => <div key={`video:${index}:${src}`} className="overflow-hidden rounded-lg border">
         <MediaPreviewTrigger src={src} mediaType="video" title={`视频 ${index + 1}`} allowDownload={false} ariaLabel={`预览视频 ${index + 1}`} className="flex h-28 w-full flex-col items-center justify-center gap-2 rounded-none bg-muted">
           <Play className="size-6" /><span className="text-sm">视频 {index + 1}</span>
         </MediaPreviewTrigger>

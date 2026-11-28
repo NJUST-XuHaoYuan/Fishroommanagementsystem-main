@@ -29,11 +29,13 @@ export const PLAIN_OBJECT_STATE_KEYS = new Set([
   "publicCatalogPolicy",
 ]);
 
-export const DEDICATED_STATE_PATCH_KEYS = new Set(["personnel", "bioRecords", "stock", "tankGroups", "waterQualityRecords"]);
+export const DEDICATED_STATE_PATCH_KEYS = new Set(["personnel", "bioRecords", "stock", "tankGroups", "waterQualityRecords", "lossRecords"]);
 
 export function assertGenericStatePatchKeyAllowed(key) {
   if (!DEDICATED_STATE_PATCH_KEYS.has(key)) return key;
-  const message = key === "waterQualityRecords"
+  const message = key === "lossRecords"
+    ? "损耗记录必须通过报损或原因补充专用接口修改"
+    : key === "waterQualityRecords"
     ? "水质记录必须通过专用接口修改"
     : key === "bioRecords"
     ? "生物记录必须通过专用接口修改"

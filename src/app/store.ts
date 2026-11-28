@@ -273,6 +273,7 @@ export type BioRecord = {
   /** dailyLog 表示由缸组养护日志同步进来的系统记录。 */
   sourceType?: "dailyLog" | "manual" | string;
   sourceLogId?: string;
+  sourceLossRecordId?: string;
   tankGroupId?: string;
   tankGroupName?: string;
   subTankId?: string;
@@ -308,6 +309,7 @@ export type BioRecordSaveResult = {
 
 export type MaintenanceSaveResult = {
   ok: boolean;
+  lossRecord?: StockLossRecord;
   error?: string;
   code?: string;
   conflict?: boolean;
@@ -560,6 +562,12 @@ export type StockChangeResult = {
   };
 };
 
+export type LossReasonSaveChange = {
+  recordId: string;
+  reason: string;
+  expectedReason: string;
+};
+
 export type StockLossRecord = {
   id: string;
   siteId?: string;
@@ -568,6 +576,12 @@ export type StockLossRecord = {
   reason: string;
   proofPhotos: string[];
   operator: string;
+  createdAt?: string;
+  sourceBioRecordId?: string;
+  reasonUpdatedBy?: string;
+  reasonUpdatedAt?: string;
+  fishCode?: string;
+  productName?: string;
   /** 损耗发生时的缸位快照，避免后续移缸/删缸后记录显示为未知。 */
   subTankId?: string;
   tankGroupId?: string;
@@ -1252,6 +1266,7 @@ export type StoreContextType = {
   saveProduct: (product: Product, expectedDefaultPrice?: number) => Promise<boolean>;
   deleteProduct: (productId: string) => Promise<ProductDeleteResult>;
   saveStockChange: (change: StockChangeRequest) => Promise<StockChangeResult>;
+  saveLossReason: (change: LossReasonSaveChange) => Promise<MaintenanceSaveResult>;
   saveMaintenanceAction: (change: MaintenanceSaveChange) => Promise<MaintenanceSaveResult>;
   saveBioRecordChange: (change: BioRecordSaveChange) => Promise<BioRecordSaveResult>;
   saveTankGroupChange: (change: {
@@ -1499,6 +1514,7 @@ export const StoreContext = createContext<StoreContextType>({
   saveProduct: async () => false,
   deleteProduct: async () => ({ ok: false, error: "删除商品功能尚未初始化" }),
   saveStockChange: async () => ({ ok: false }),
+  saveLossReason: async () => ({ ok: false, error: "损耗原因保存功能尚未初始化" }),
   saveMaintenanceAction: async () => ({ ok: false, error: "维护保存功能尚未初始化" }),
   saveBioRecordChange: async () => ({ ok: false, error: "生物记录保存功能尚未初始化" }),
   saveTankGroupChange: async () => false,

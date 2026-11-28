@@ -93,6 +93,7 @@ import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
 import { createMaintenanceWorkbenchHandler } from "./maintenance-workbench.mjs";
 import { createMobileMaintenanceHistoryHandler } from "./mobile-maintenance-history.mjs";
+import { createStockLossService } from "./stock-loss-records.mjs";
 import { createOrderFollowupHandler } from "./order-followups.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
 import { paymentCorrectionCapabilities, assertPaymentCorrectionsUnchanged, planPaymentCorrection } from "./payment-correction-rules.mjs";
@@ -8861,6 +8862,15 @@ const handleMobileMaintenanceHistoryApi = createMobileMaintenanceHistoryHandler(
   requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission,
 });
 
+const stockLossService = createStockLossService({
+  pool, stateId, readBody, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
+  requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission, requirePermission: requireModulePermissionForAuth,
+  operatorFor: authenticatedOperator, createId: uid, findTank: findSubTank, normalizeSite: normalizeSiteId,
+  shippedIdsFor: shippedOutStockIds, isInTank: isPhysicallyInTank, refreshBatches: refreshBatchStockCounts,
+  findOrder: findActiveOrderForStock, sanitizeDelta: sanitizedMaintenanceDeltaForAuth,
+  today: todayInChina, nowLocal: nowDatetimeInChina, maxOperationLogs: MAX_OPERATION_LOGS,
+});
+
 const handleMaintenanceWorkbenchApi = createMaintenanceWorkbenchHandler({
   pool, stateId, readBody, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
   requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission, nowInChina: nowDatetimeInChina,
@@ -12691,6 +12701,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await stockLossService.handleReason(req, res, url)) return;
   if (await handleMobileMaintenanceHistoryApi(req, res, url)) return;
   if (await handleMaintenanceWorkbenchApi(req, res, url)) return;
   if (await handleOrderFollowupApi(req, res, url)) return;
@@ -16101,6 +16112,7 @@ async function handleApi(req, res, url) {
 	      const client = await pool.connect();
 	      try {
 	        const responseBody = await withMaintenanceTransaction(client, async () => {
+          if (mode === "loss") return stockLossService.saveLoss({ client, req, preparedMutation });
 	        const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
 	        const state = rows[0]?.data ?? {};
 		        refreshLockedMaintenanceMutationAuth(req, state);
@@ -16427,73 +16439,6 @@ async function handleApi(req, res, url) {
 	            module: "日常管理",
 	            action: "修改记录",
 	            detail: `批量设置状态 ${targetItems.length} 条为「${statusLabels[nextStatus]}」`,
-	          };
-	        } else if (mode === "loss") {
-	          const requestedLossIds = itemIds.map((id) => String(id));
-	          const idSet = new Set(requestedLossIds);
-	          if (idSet.size === 0) throw new Error("请选择要损耗的鱼");
-		          const losingItems = stock.filter((item) => idSet.has(String(item.id)));
-		          if (losingItems.length !== idSet.size) throw new Error("部分库存鱼不存在或已被删除");
-		          requireVisibleStockItems(losingItems);
-	          const shippedIds = shippedOutStockIds(state);
-	          const invalidItem = losingItems.find((item) => !isPhysicallyInTank(item, shippedIds));
-	          if (invalidItem) throw new Error("已损耗、已发货或移缸在途的鱼不能登记损耗");
-	          const date = String(lossDate ?? "").trim();
-	          if (!date) throw new Error("请选择损耗日期");
-	          const invalidDateItem = losingItems.find((item) => item.inDate && date < item.inDate);
-	          if (invalidDateItem) throw new Error("损耗日期不能早于入库日期");
-	          const today = todayInChina();
-	          if (date > today) throw new Error("损耗日期不能晚于今天");
-	          const proof = Array.isArray(lossProof) ? lossProof : [];
-	          if (proof.length === 0) throw new Error("请上传损耗照片凭证");
-	          const reason = String(lossReason ?? "").trim();
-	          const lossBioRecords = losingItems.map((item) => {
-	            const relatedOrder = findActiveOrderForStock(state, item.id);
-	            const text = `损耗${reason ? `：${reason}` : ""}${relatedOrder ? `。关联订单：${relatedOrder.orderNo}，请在订单详情中退商品并按实际情况填写退款金额` : ""}`;
-		            return { id: uid("bio"), siteId: stockSiteId(item), stockItemId: item.id, date, text, photos: proof, videos: [], sourceType: "manual", operator };
-	          });
-	          const lossRecordRows = losingItems.map((item) => {
-	            const sourceTank = findSubTank(state, item.subTankId);
-	            const sourceTankName = sourceTank
-	              ? `${sourceTank.group.name} / ${sourceTank.subTank.name}`
-	              : `已删除缸位（${item.subTankId || "无缸位ID"}）`;
-	            return {
-	              id: uid("loss"),
-		              siteId: stockSiteId(item),
-	              stockItemId: item.id,
-	              date,
-	              reason,
-	              proofPhotos: proof,
-	              operator,
-	              subTankId: item.subTankId,
-	              tankGroupId: sourceTank?.group?.id ?? "",
-	              tankGroupName: sourceTank?.group?.name ?? "",
-	              subTankName: sourceTank?.subTank?.name ?? "",
-	              tankLocation: sourceTank?.group?.location ?? "",
-	              tankName: sourceTankName,
-	            };
-	          });
-	          nextStock = stock.map((item) =>
-	            idSet.has(String(item.id))
-	              ? { ...item, lost: true, lossDate: date, lossReason: reason, lossProof: proof }
-	              : item
-	          );
-	          nextBatches = refreshBatchStockCounts(state.batches, nextStock);
-	          nextBioRecords = [...bioRecords, ...lossBioRecords];
-		          nextLossRecords = [...lossRecords, ...lossRecordRows];
-		          stockUpdates = nextStock.filter((item) => idSet.has(String(item.id)));
-		          const affectedBatchIds = new Set(losingItems.map((item) => String(item.batchId ?? "")));
-		          batchUpdates = (Array.isArray(nextBatches) ? nextBatches : [])
-		            .filter((batch) => affectedBatchIds.has(String(batch?.id ?? "")));
-		          bioRecordUpdates = lossBioRecords;
-		          lossRecordUpdates = lossRecordRows;
-	          operationLog = {
-	            id: uid("log"),
-	            time: new Date().toISOString(),
-	            operator,
-	            module: "日常管理",
-	            action: "删除记录",
-	            detail: `登记损耗 ${losingItems.length} 条${reason ? `：${reason}` : ""}`,
 	          };
 	        } else {
 	          throw new Error("Unsupported maintenance save mode");

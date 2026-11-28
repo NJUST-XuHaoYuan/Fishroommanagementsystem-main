@@ -76,7 +76,7 @@ test("maps batch maintenance modes to all permissions they mutate", () => {
 });
 
 test("system generated maintenance and transfer records are immutable in fish details", () => {
-  for (const sourceType of ["dailyLog", "stockMove", "stockTransferIssued", "stockTransferReceived"]) {
+  for (const sourceType of ["dailyLog", "stockLoss", "stockMove", "stockTransferIssued", "stockTransferReceived"]) {
     const current = {
       ...inputRecord,
       id: `system-${sourceType}`,
