@@ -1,3 +1,4 @@
+import { legacyRoomIds } from "../utils/legacyRoomHistory";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DailyLog,
@@ -139,8 +140,9 @@ export function WaterQualityRecordsPanel({
     const source = sourceId ? group?.subTanks.find(tank => tank.id === sourceId)?.name || "已删除子缸" : "";
     return `${group?.name ?? "已删除缸组"} / 共用水体${source ? `（原登记位置：${source}）` : ""}`;
   };
+  const archivedRoomIds = useMemo(() => legacyRoomIds(state.tankGroups), [state.tankGroups]);
   const filteredRecords = useMemo<UnifiedTankRecord[]>(() => {
-    const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.map((record) => ({
+    const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.filter(record => !archivedRoomIds.has(record.tankGroupId)).map((record) => ({
       kind: "water",
       id: record.id,
       tankGroupId: record.tankGroupId,
@@ -149,7 +151,7 @@ export function WaterQualityRecordsPanel({
     }));
     const logRecords: UnifiedTankRecord[] = maintenanceLogs.flatMap((log) => {
       const tankGroupId = getMaintenanceGroupId(log);
-      if (!tankGroupId) return [];
+      if (!tankGroupId || archivedRoomIds.has(tankGroupId)) return [];
       return [{
         kind: "maintenance" as const,
         id: log.id,
@@ -170,7 +172,7 @@ export function WaterQualityRecordsPanel({
         return true;
       })
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [state.waterQualityRecords, maintenanceLogs, getMaintenanceGroupId, groupFilter, recordTypeFilter, startDate, endDate]);
+  }, [archivedRoomIds, state.waterQualityRecords, maintenanceLogs, getMaintenanceGroupId, groupFilter, recordTypeFilter, startDate, endDate]);
 
   const draftParameters = useMemo(() => {
     if (!draft?.tankGroupId) return [];

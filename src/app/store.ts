@@ -143,6 +143,9 @@ export type SubTank = {
 
 export type TankGroup = {
   id: string;
+  /** 仅由迁移写入的原房间历史引用，不代表当前水体。 */
+  legacyRoomId?: string;
+  legacyRoomName?: string;
   siteId?: string;
   name: string;
   location: string;

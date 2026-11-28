@@ -49,10 +49,16 @@ export function createMobileMaintenanceHistoryHandler({ pool, stateId, sendJson,
         selectedGroupId = text(matches[0].id);
       }
       const rows = (await client.query(`WITH source AS MATERIALIZED (SELECT data FROM app_state WHERE id = $1),
+        legacy_room_ids AS MATERIALIZED (
+          SELECT DISTINCT grp ->> 'legacyRoomId' AS id FROM source,
+            LATERAL jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS current_groups(grp)
+          WHERE COALESCE(grp ->> 'legacyRoomId', '') <> ''
+        ),
         own_records AS (
           SELECT 'tank' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb)) AS log_rows(entry)
           WHERE $8::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
+            AND COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT grp ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
               WHERE grp ->> 'id' = entry ->> 'tankGroupId' LIMIT 1), 'nanjing') = $3
@@ -84,6 +90,7 @@ export function createMobileMaintenanceHistoryHandler({ pool, stateId, sendJson,
           SELECT 'water' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'waterQualityRecords', '[]'::jsonb)) AS water_rows(entry)
           WHERE $8::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
+            AND COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT grp ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
               WHERE grp ->> 'id' = entry ->> 'tankGroupId' LIMIT 1), 'nanjing') = $3

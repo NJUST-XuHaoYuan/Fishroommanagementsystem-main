@@ -33,6 +33,7 @@ import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { StockOrderReleaseDetails, StockOrderReleaseLoadState, stockOrderReleaseTimelineEvents, useStockOrderReleaseHistory, type StockOrderReleaseEvent } from "./StockOrderReleaseHistory";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
+import { LegacyRoomHistoryButton } from "./LegacyRoomHistory";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { StockTransferDialog, StockTransferPoolButton, notifyStockTransfersChanged, stockTransferRecordLabel, type StockTransferTarget } from "./StockTransferDialog";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
@@ -1710,6 +1711,7 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
               <div className="text-left text-sm text-muted-foreground">{viewRecordGroup.location}</div>
             )}
           </DialogHeader>
+          {viewRecordGroupId && <div><LegacyRoomHistoryButton tankGroupId={viewRecordGroupId} className="min-h-11" /></div>}
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             {viewRecordGroupId && (
               <WaterQualityRecordsPanel

@@ -93,6 +93,7 @@ import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
 import { cleanupPaymentEvidenceDrafts, createPaymentProofHandler } from "./payment-proof-api.mjs";
 import { createMaintenanceWorkbenchHandler } from "./maintenance-workbench.mjs";
 import { createMobileMaintenanceHistoryHandler } from "./mobile-maintenance-history.mjs";
+import { createTankGroupLegacyHistoryHandler, isLegacyRoomId } from "./tank-group-legacy-history.mjs";
 import { createStockLossService } from "./stock-loss-records.mjs";
 import { createOrderFollowupHandler } from "./order-followups.mjs";
 import { canSubmitPaymentProof, assertPaymentClaimsUnchanged, paymentEvidenceShipmentSnapshot, paymentClaims, linkablePaymentProofPayments } from "./payment-proof-rules.mjs";
@@ -4196,7 +4197,7 @@ function inTransitSourceReferenceCount(state, subTankIds) {
     .length;
 }
 
-function normalizeTankGroup(group, existingSubTanks = []) {
+function normalizeTankGroup(group, existingSubTanks = [], existingGroup = null) {
   const normalized = {
     id: String(group?.id || uid("group")),
     siteId: normalizeSiteId(group?.siteId),
@@ -4206,6 +4207,7 @@ function normalizeTankGroup(group, existingSubTanks = []) {
       ? [...new Set(group.waterQualityParameterIds.map(String).filter(Boolean))]
       : undefined,
     subTanks: existingSubTanks,
+    ...(existingGroup?.legacyRoomId ? { legacyRoomId: existingGroup.legacyRoomId, legacyRoomName: existingGroup.legacyRoomName ?? "" } : {}),
   };
   if (group?.rows !== undefined) normalized.rows = Number(group.rows);
   if (group?.cols !== undefined) normalized.cols = Number(group.cols);
@@ -8054,6 +8056,7 @@ async function backfillDailyLogBioRecords() {
     let nextBioRecords = bioRecords;
     let changed = false;
     const nextLogs = logs.map((log) => {
+      if (isLegacyRoomId(state.tankGroups, log?.tankGroupId)) return log;
       if (Array.isArray(log?.syncedStockItemIds)) return log;
       const tankGroupId = dailyLogGroupId(state, log);
       if (!tankGroupId || !log?.date || !log?.action || !log?.operator) return log;
@@ -8858,6 +8861,11 @@ const handlePaymentProofApi = createPaymentProofHandler({
 });
 
 const handleMobileMaintenanceHistoryApi = createMobileMaintenanceHistoryHandler({
+  pool, stateId, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
+  requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission,
+});
+
+const handleTankGroupLegacyHistoryApi = createTankGroupLegacyHistoryHandler({
   pool, stateId, sendJson, refreshAuth: refreshLockedMaintenanceMutationAuth,
   requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission,
 });
@@ -12701,6 +12709,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await handleTankGroupLegacyHistoryApi(req, res, url)) return;
   if (await stockLossService.handleReason(req, res, url)) return;
   if (await handleMobileMaintenanceHistoryApi(req, res, url)) return;
   if (await handleMaintenanceWorkbenchApi(req, res, url)) return;
@@ -16575,8 +16584,11 @@ async function handleApi(req, res, url) {
 	        if (mode === "upsertGroup") {
 	          const rawGroup = group && typeof group === "object" ? group : {};
 	          const existing = rawGroup.id ? tankGroups.find((item) => item.id === rawGroup.id) : null;
+	          if (!existing && isLegacyRoomId(tankGroups, rawGroup.id)) {
+	            throw httpError(409, "该房间的缸位结构已调整，请刷新页面后操作，不能重新创建原房间", "TANK_GROUP_RESTRUCTURED");
+	          }
 	          const existingSubTanks = existing?.subTanks ?? (Array.isArray(rawGroup.subTanks) ? rawGroup.subTanks.map(normalizeSubTank) : []);
-	          const normalizedGroup = normalizeTankGroup(rawGroup, existingSubTanks);
+	          const normalizedGroup = normalizeTankGroup(rawGroup, existingSubTanks, existing);
 	          const duplicate = tankGroups.find((item) =>
 	            item.id !== normalizedGroup.id &&
 	            normalizeSiteId(item.siteId) === normalizedGroup.siteId &&
@@ -16609,6 +16621,9 @@ async function handleApi(req, res, url) {
 	          const targetId = String(groupId ?? "");
 	          const target = tankGroups.find((item) => item.id === targetId);
 	          if (!target) throw new Error("缸组不存在或已被删除");
+	          if (target.legacyRoomId && !tankGroups.some(item => item.id !== target.id && item.legacyRoomId === target.legacyRoomId && normalizeSiteId(item.siteId) === normalizeSiteId(target.siteId))) {
+	            throw httpError(409, "这是原房间历史的最后一个查看入口，请先保留其他关联缸组再删除", "LEGACY_ROOM_LAST_REFERENCE");
+	          }
 	          const subTankIds = Array.isArray(target.subTanks) ? target.subTanks.map((item) => item.id) : [];
 	          const activeCount = activeStockCountForSubTanks(state, subTankIds);
 	          if (activeCount > 0) throw new Error(`该缸组还有 ${activeCount} 条在缸库存，不能删除`);
@@ -16761,6 +16776,9 @@ async function handleApi(req, res, url) {
             requireVisibleSiteForAuth(req, projectedState, plan.currentSiteId, "不能修改未授权场地的养护日志");
           }
           requireVisibleSiteForAuth(req, projectedState, plan.siteId, "不能修改未授权场地的养护日志");
+          if (isLegacyRoomId(projectedState.tankGroups, plan.current?.tankGroupId) || isLegacyRoomId(projectedState.tankGroups, plan.log?.tankGroupId)) {
+            throw httpError(409, "原房间养护记录仅供历史查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
+          }
           if (plan.mode === "update" && plan.currentSiteId !== plan.siteId) {
             const error = new Error("不能通过修改养护日志变更所属场地");
             error.statusCode = 409;
@@ -17117,6 +17135,9 @@ async function handleApi(req, res, url) {
           const currentGroup = current ? state.tankGroups.find(group => String(group.id) === String(current.tankGroupId)) : null;
           if (current) requireVisibleSiteForAuth(req, state, normalizeSiteId(current.siteId ?? currentGroup?.siteId), "不能操作未授权场地的水质记录");
           const groupId = String(input?.tankGroupId ?? current?.tankGroupId ?? "").trim();
+          if (isLegacyRoomId(state.tankGroups, current?.tankGroupId) || isLegacyRoomId(state.tankGroups, groupId)) {
+            throw httpError(409, "原房间水质记录仅供历史查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
+          }
           const groups = state.tankGroups.filter(group => String(group.id) === groupId);
           if (!deleteId && groups.length !== 1) throw httpError(404, "缸组不存在或编号重复");
           const group = groups[0] ?? currentGroup;

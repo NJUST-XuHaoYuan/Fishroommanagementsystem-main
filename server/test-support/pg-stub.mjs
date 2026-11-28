@@ -223,6 +223,11 @@ function appStateRow(sql, values = []) {
   if (/\bAS loss_reason_stock\b/.test(sql)) row.loss_reason_stock = (state.stock ?? []).map((record,index)=>({record,index})).filter(item=>item.record.id===values[1]);
   if (/\bAS loss_reason_bio\b/.test(sql)) row.loss_reason_bio = (state.bioRecords ?? []).map((record,index)=>({record,index})).filter(item=>values[2] && item.record.id===values[2]);
   if (/\bAS loss_reason_count\b/.test(sql)) row.loss_reason_count = (state.lossRecords ?? []).filter(record=>record.stockItemId===values[1]).length;
+  for (const [alias, key, time] of [["legacy_room_logs", "logs", "date"], ["legacy_room_water_records", "waterQualityRecords", "measuredAt"]]) {
+    if (!sql.includes(`AS ${alias}`)) continue;
+    row[alias] = (state[key] ?? []).filter(record => record.tankGroupId === values[1] && (record.siteId || values[3]) === values[2])
+      .sort((a, b) => String(b[time] ?? "").localeCompare(String(a[time] ?? "")) || String(b.id).localeCompare(String(a.id))).slice(0, values[4]);
+  }
   if (/\bSELECT\s+data\s+FROM\s+app_state\b/i.test(sql)) row.data = state;
   if (/\bSELECT\s+jsonb_build_object\([\s\S]*?\)\s+AS\s+data\s+FROM\s+app_state\b/i.test(sql)) {
     row.data = Object.fromEntries([...sql.matchAll(/'([A-Za-z]+)',\s*COALESCE\(data\s*->\s*'\1'/g)]
@@ -371,7 +376,8 @@ function runQuery(query, values = []) {
   if (/\bown_records AS/.test(sql)) {
     const [, username, siteId, subTankId, limit, tankGroupId = "", sharedActions = [], kind = "", reasonStatus = ""] = values;
     const groupForSub = id => (state.tankGroups ?? []).find(group => (group.subTanks ?? []).some(tank => tank.id === id))?.id;
-    const tank = (state.logs ?? []).filter(entry => (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId &&
+    const legacyIds = new Set((state.tankGroups ?? []).map(group => group.legacyRoomId).filter(Boolean));
+    const tank = (state.logs ?? []).filter(entry => !legacyIds.has(entry.tankGroupId) && (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId &&
       (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId)) === tankGroupId) &&
       (!subTankId || entry.subTankId === subTankId || entry.scope === "group" || sharedActions.includes(String(entry.action ?? "").trim()) || !entry.subTankId)).map(entry => ({ kind: "tank", entry }));
     const fish = (state.bioRecords ?? []).filter(entry => {
@@ -379,7 +385,7 @@ function runQuery(query, values = []) {
       return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId) &&
         (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId || item?.subTankId)) === tankGroupId);
     }).map(entry => ({ kind: "fish", entry }));
-    const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => (entry.createdBy || entry.operator) === username &&
+    const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => !legacyIds.has(entry.tankGroupId) && (entry.createdBy || entry.operator) === username &&
       (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!tankGroupId || entry.tankGroupId === tankGroupId)).map(entry => ({ kind: "water", entry })) : [];
     const loss = kind === "loss" ? (state.lossRecords ?? []).filter(entry => entry.operator === username && (entry.siteId || (state.tankGroups ?? []).find(group=>group.id===entry.tankGroupId)?.siteId || "nanjing") === siteId &&
       (!subTankId || entry.subTankId === subTankId) && (!tankGroupId || entry.tankGroupId === tankGroupId) && (!reasonStatus || !String(entry.reason ?? "").trim())).map(entry=>({kind:"loss",entry})) : [];

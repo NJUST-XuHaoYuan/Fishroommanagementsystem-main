@@ -18,6 +18,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dial
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { MobileMaintenanceMedia } from "./MobileMaintenanceMedia";
+import { LegacyRoomHistoryButton } from "./LegacyRoomHistory";
+import { legacyRoomIds } from "../utils/legacyRoomHistory";
 import "./mobile-maintenance.css";
 
 type Step = "lossList" | "lossPhoto" | "lossConfirm" | "lossResult" | "lossHistory" | "lossDetail" | "lossReason" | "groupAction" | "sub" | "action" | "tankType" | "waterParameter" | "waterForm" | "fishList" | "fishAction" | "form" | "confirm" | "history" | "detail" | "discard";
@@ -159,7 +161,8 @@ export function MobileMaintenanceWorkbench() {
         const payload = await response.json();
         if (!response.ok || !payload.ok) throw new Error(payload.error || "记录加载失败，请重试。");
         if (!current()) return;
-        const logRows: History[] = (Array.isArray(payload.logs) ? payload.logs : []).map((log: DailyLog) => {
+        const archivedRoomIds = legacyRoomIds(state.tankGroups);
+        const logRows: History[] = (Array.isArray(payload.logs) ? payload.logs : []).filter((log: DailyLog) => !archivedRoomIds.has(log.tankGroupId || "")).map((log: DailyLog) => {
           const tg = state.tankGroups.find(value => value.id === log.tankGroupId);
           const st = tg?.subTanks.find(value => value.id === log.subTankId);
           const sharedWater = isMobileSharedWaterLog(log);
@@ -174,7 +177,7 @@ export function MobileMaintenanceWorkbench() {
           const recordedLocation = record.tankLocation || [record.tankGroupName || recordedGroup?.name, record.subTankName || recordedSub?.name].filter(Boolean).join(" / ") || "历史缸位";
           return { id: `fish:${record.id}`, kind: "fish", operator: record.operator || "", date: mobileMaintenanceHistoryTime(record.date), title: record.text?.match(/^【(.+?)】/)?.[1] || "鱼只记录", text: record.text, location: recordedLocation, fishLabel: item ? fishLabel(item) : `鱼只 ${record.stockItemId}`, photos: record.photos || [], videos: record.videos || [] };
         });
-        const waterRows: History[] = (Array.isArray(payload.waterQualityRecords) ? payload.waterQualityRecords : []).map((record: WaterQualityRecord) => {
+        const waterRows: History[] = (Array.isArray(payload.waterQualityRecords) ? payload.waterQualityRecords : []).filter((record: WaterQualityRecord) => !archivedRoomIds.has(record.tankGroupId)).map((record: WaterQualityRecord) => {
           const tg = state.tankGroups.find(value => value.id === record.tankGroupId);
           const sourceId = record.recordedFromSubTankId || record.subTankId;
           const st = tg?.subTanks.find(value => value.id === sourceId);
@@ -350,11 +353,11 @@ export function MobileMaintenanceWorkbench() {
       <button className="mm-action primary" disabled={!permission.canCreate || !group} onClick={() => { setSubId(""); setDraft({ ...freshDraft("group"), kind: "水质" }); move("waterParameter"); }}><FlaskConical /><span><strong>测水质</strong><small>选择参数，填写测量结果</small></span><ChevronRight /></button>
       <button className="mm-action" disabled={!permission.canCreate || !group} onClick={() => { setSubId(""); setDraft({ ...freshDraft("group"), kind: "下药" }); move("form"); }}><Droplets /><span><strong>水体下药</strong><small>记录整个缸组的药品与用量</small></span><ChevronRight /></button>
       <button className="mm-action mm-sub-entry" disabled={!group} onClick={() => { setSubId(""); setDraft(freshDraft()); move("sub"); }}><Fish /><span><strong>子缸和单鱼维护</strong><small>先选格子，再喂食、观察或记录单鱼</small></span><ChevronRight /></button>
-    </div><div className="mm-section-title"><h3>我在这个缸组的记录</h3><button aria-label="刷新我的维护记录" onClick={() => setHistoryVersion(value => value + 1)}><RefreshCw /></button></div>{historyRows}</>;
+    </div><div className="mm-section-title"><h3>我在这个缸组的记录</h3><button aria-label="刷新我的维护记录" onClick={() => setHistoryVersion(value => value + 1)}><RefreshCw /></button></div>{historyRows}{group && <LegacyRoomHistoryButton tankGroupId={group.id} className="mt-4 min-h-11 w-full" />}</>;
   } else if (step === "sub") {
     content = <>{currentStrip}<h2>站在哪个子缸前？</h2><p className="mm-lead">选好位置，再选择要做的事。</p><div className="mm-sub-grid">{group?.subTanks.map(tank => <button key={tank.id} onClick={() => { setSubId(tank.id); setDraft(freshDraft()); setHistoryAll(false); move("action"); }}><strong>{tank.name}</strong><span>{state.stock.filter(item => item.subTankId === tank.id && isPhysicallyInTank(item, outIds)).length} 条在缸鱼</span></button>)}</div>{!group?.subTanks.length && <p className="mm-empty">这个缸组还没有子缸，请先在缸组管理中配置。</p>}</>;
   } else if (step === "action") {
-    title = "当前子缸"; content = <><div className="mm-location-focus"><span>{siteName(state, activeSiteId)} · {group?.name}</span><strong>{sub?.name || "子缸已移除"}</strong><button onClick={() => move("sub")}>更换缸位</button></div><h2>在这个缸做什么？</h2><div className="mm-actions"><button className="mm-action primary" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft()); move("tankType"); }}><ClipboardList /><span><strong>记录这个子缸的维护</strong><small>喂食、换水、观察等</small></span><ChevronRight /></button><button className="mm-action" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft("fish")); setFishSearch(""); move("fishList"); }}><Fish /><span><strong>记录单鱼 / 拍照视频</strong><small>观察、治疗，或拍下鱼的状态</small></span><ChevronRight /></button>{canReportLoss && <button className="mm-action mm-loss-entry" onClick={startLoss}><AlertTriangle /><span><strong>报损</strong><small>选鱼、拍照，原因可事后补</small></span><ChevronRight /></button>}</div><div className="mm-section-title"><h3>子缸与共用水体记录</h3><button aria-label="刷新我的维护记录" onClick={() => setHistoryVersion(value => value + 1)}><RefreshCw /></button></div>{historyRows}</>;
+    title = "当前子缸"; content = <><div className="mm-location-focus"><span>{siteName(state, activeSiteId)} · {group?.name}</span><strong>{sub?.name || "子缸已移除"}</strong><button onClick={() => move("sub")}>更换缸位</button></div><h2>在这个缸做什么？</h2><div className="mm-actions"><button className="mm-action primary" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft()); move("tankType"); }}><ClipboardList /><span><strong>记录这个子缸的维护</strong><small>喂食、换水、观察等</small></span><ChevronRight /></button><button className="mm-action" disabled={!permission.canCreate || !sub} onClick={() => { setDraft(freshDraft("fish")); setFishSearch(""); move("fishList"); }}><Fish /><span><strong>记录单鱼 / 拍照视频</strong><small>观察、治疗，或拍下鱼的状态</small></span><ChevronRight /></button>{canReportLoss && <button className="mm-action mm-loss-entry" onClick={startLoss}><AlertTriangle /><span><strong>报损</strong><small>选鱼、拍照，原因可事后补</small></span><ChevronRight /></button>}</div><div className="mm-section-title"><h3>子缸与共用水体记录</h3><button aria-label="刷新我的维护记录" onClick={() => setHistoryVersion(value => value + 1)}><RefreshCw /></button></div>{historyRows}{group && <LegacyRoomHistoryButton tankGroupId={group.id} className="mt-4 min-h-11 w-full" />}</>;
   } else if (step === "tankType") {
     title = "记录缸位维护"; progress = "1 / 3"; content = <>{currentStrip}<h2>这次做了什么？</h2><p className="mm-lead">选择这个子缸的维护类型。</p><div className="mm-type-grid">{types.map(({ label, Icon }) => <button key={label} aria-pressed={draft.kind === label} onClick={() => { setDraft(value => ({ ...value, kind: label })); move("form"); }}><Icon /><strong>{label}</strong></button>)}</div><button className="mm-scope-link" onClick={() => leave("groupAction")}>测水质或向水体下药，请到缸组登记<ChevronRight /></button></>;
   } else if (step === "waterParameter") {
