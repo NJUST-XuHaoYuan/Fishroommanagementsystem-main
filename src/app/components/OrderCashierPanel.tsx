@@ -3,6 +3,8 @@ import { ArrowDownLeft, ArrowUpRight, CheckCircle2, ChevronDown, ChevronRight, W
 import { useStore, type Order, type Shipment, type Store } from "../store";
 import { orderCashierEntries, orderCashierTotals, type CashierEntry } from "../utils/orderCashier";
 import type { PaymentProofDetail } from "../utils/orderPaymentProof";
+import { orderBusinessContext } from "../utils/orderBusinessOwnership";
+import { captureNewCustomerSession } from "../utils/newCustomerEvidence";
 import type { NewCustomerSession } from "../utils/newCustomerEvidence";
 import { OrderPaymentProofPanel, type PaymentProofOpenRequest } from "./OrderPaymentProofPanel";
 import { getShippingSettlementSummary } from "../utils/shippingSettlement";
@@ -29,7 +31,7 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
   children?: ReactNode;
 }) {
   const { state } = useStore();
-  const contextKey = JSON.stringify([order.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const contextKey = orderBusinessContext(state.user, order, canUpdate, captureNewCustomerSession()?.key);
   const [proofState, setProofState] = useState<{ context: string; detail: PaymentProofDetail | null } | null>(null);
   const proofDetail = proofState?.context === contextKey && proofState.detail?.orderId === order.id ? proofState.detail : null;
   const [openRequest, setOpenRequest] = useState<PaymentProofOpenRequest>();
@@ -76,7 +78,7 @@ export function OrderCashierPanel({ order, shipments, amountDue, canUpdate, refu
       </div>}
     </div>
 
-    <OrderPaymentProofPanel key={`cashier-proof:${contextKey}`} orderId={order.id} onApplied={onApplied} openRequest={openRequest} presentation="cashier" selectedClaimId={selected?.claim?.id} onDetailChange={onDetailChange} />
+    <OrderPaymentProofPanel key={`cashier-proof:${contextKey}`} orderId={order.id} allowSubmit={canUpdate} onApplied={onApplied} openRequest={openRequest} presentation="cashier" selectedClaimId={selected?.claim?.id} onDetailChange={onDetailChange} />
 
     <OrderShippingSettlementPanel key={`cashier-freight:${contextKey}`} order={order} shipments={shipments} canUpdate={canUpdate} onApplied={onApplied} onRecordActualFee={onRecordActualFee} refundOpenRequest={shippingRefundRequest} amountDue={amountDue} />
 

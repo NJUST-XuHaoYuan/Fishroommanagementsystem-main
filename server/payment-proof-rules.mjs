@@ -2,8 +2,7 @@ import { createHash } from "node:crypto";
 import { usesOrderCashier, orderCashierPaymentMethods, resolveOrderCashierMethod } from "./order-cashier-rules.mjs";
 import { hasShippingSettlement, shippingSettlementSummary, allocateShippingProof, paymentShippingAmount, registeredOrderCashSummary } from "./shipping-settlement.mjs";
 import { isPaymentVerified, resolvePaymentMethodSnapshot, verifiedPaymentTotals } from "./payment-utils.mjs";
-import { creditSaleOrderOwner } from "./credit-sale-approval-rules.mjs";
-import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
+import { isOrderBusinessMutationOwner } from "./order-mutation-ownership.mjs";
 import { normalizePaymentEvidenceIds, resolveEvidenceForSubmission, paymentEvidenceMetadata } from "./payment-evidence.mjs";
 
 const list = value => Array.isArray(value) ? value : [];
@@ -33,8 +32,7 @@ export function paymentEvidenceShipmentSnapshot(shipment, order, amountDue, stag
 }
 
 export function canSubmitPaymentProof(state, order, account) {
-  return isPersonnelAccountEnabled(account) && order.status !== "cancelled" &&
-    (account.accessRole === "admin" || text(creditSaleOrderOwner(state.personnel, order)?.id) === text(account.id));
+  return order.status !== "cancelled" && isOrderBusinessMutationOwner(state, order, account);
 }
 
 export function assertPaymentClaimsUnchanged(before, after) {

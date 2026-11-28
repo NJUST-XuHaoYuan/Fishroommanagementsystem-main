@@ -133,7 +133,7 @@ test("order and shipment mutations retain their exact business dependencies", ()
   );
   assert.deepEqual(
     planGenericStatePatchReadKeys(["shipments"]),
-    ["systemSettings", "sites", "stock", "orders", "shipments"],
+    ["systemSettings", "sites", "personnel", "stock", "orders", "shipments"],
   );
 });
 

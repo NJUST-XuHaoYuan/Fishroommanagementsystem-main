@@ -152,15 +152,20 @@ test("pending keeps commission with current owner; acceptance transfers once and
   ok(await s.decide()); assert.deepEqual((await s.readPersistedState()).commissionLedgerV1, journal);
 });
 
-test("generic completion persists closed assignment and notices together, not only a recalculated commission ledger", async (t) => {
+test("completion uses its dedicated financial gate and persists closed assignment with its notices", async (t) => {
   const data = fixture();
   data.state.orders[0].shippingFeeMode = "collect";
+  data.state.orders[0].payments = [{ id: "verified-receipt", type: "balance", amount: 123.45,
+    time: "2026-11-01T09:00:00+08:00", verificationStatus: "verified", channel: "douyin", account: "test-account" }];
   data.state.shipments = [{ id: "shipment", orderId: "ORDER-PENDING", siteId: "nanjing", status: "delivered", shipMethod: "express",
     deliveredAt: new Date().toISOString(), itemStockIds: ["ordered-pending"], actualShippingFee: 0, packingProof: ["one", "two"] }];
   const s = await setup(t, data); ok(await s.assign()); const order = await s.read();
-  const completed = await s.request("/api/state/patch", { token: s.tokens["pricing-admin"], body: {
+  const blocked = await s.request("/api/state/patch", { token: s.tokens["pricing-admin"], body: {
     basePatch: { orders: [order] }, patch: { orders: [{ ...order, status: "completed" }] },
-  } }); ok(completed);
+  } });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.code, "ORDER_COMPLETION_DEDICATED_REQUIRED");
+  const completed = await s.request("/api/orders/complete", { token: s.tokens["pricing-admin"], body: { orderId: order.id } }); ok(completed);
   const after = await s.readPersistedState(); assert.equal(after.orders[0].ownerAssignment.status, "cancelled");
   assert.ok(after.notifications.every((n) => n.status === "completed"));
   assert.equal((await s.decide()).response.status, 409);

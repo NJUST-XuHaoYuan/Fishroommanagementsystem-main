@@ -45,7 +45,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
   const orderRef = useRef(order.id); orderRef.current = order.id;
   const viewer = useRef(state.user); viewer.current = state.user;
   const detailSession = useRef<NewCustomerSession | null>(null);
-  const identity = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const identity = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds, state.user?.account, captureNewCustomerSession()?.key, order.contactPersonnelId, order.contactPerson, canUpdate]);
   const dataKey = JSON.stringify([order.id, order.status, order.shippingFee, order.shippingSettlementTiming, amountDue, order.items, order.payments, order.paymentClaims,
     shipments.filter(shipment => shipment.orderId === order.id).map(shipment => [shipment.id, shipment.status, shipment.actualShippingFee, shipment.actualShippingFeeRecordedAt])]);
   const onBusyChange = useCallback((value: boolean) => setUploading(value), []);
@@ -133,7 +133,7 @@ export function OrderShippingSettlementPanel({ order, shipments, canUpdate, onAp
     <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
       <div className="text-sm font-medium">{summary.toRefund > 0 ? `待退运费差额 ${currency(summary.toRefund)}` : summary.toCollect > 0 ? "待收运费已包含在整单待收金额中" : summary.finalized ? summary.status === "settled" ? "运费已结清" : "运费收退已登记，待财务核验" : "实际运费待确定"}</div>
       <div className="flex flex-wrap gap-2">
-        {onRecordActualFee && !summary.finalized && <Button type="button" variant="outline" className="min-h-11" disabled={!canUpdate || saving || uploading} onClick={onRecordActualFee}>补录实际运费</Button>}
+        {onRecordActualFee && !summary.finalized && <Button type="button" variant="outline" className="min-h-11" disabled={saving || uploading} onClick={onRecordActualFee}>补录实际运费</Button>}
         {summary.toRefund > 0 && !refundOpen && <span className="text-xs text-muted-foreground">请从上方“登记退款”选择退运费差额</span>}
       </div>
     </div>

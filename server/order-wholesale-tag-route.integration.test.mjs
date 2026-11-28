@@ -43,10 +43,10 @@ async function setup(t, data = fixture()) {
   return { ...server, tokens, readOrder, mark };
 }
 
-test("authorized staff marks and unmarks every order status without changing any business field or unrelated state", async (t) => {
+test("the authorized order owner marks and unmarks every order status without changing any business field or unrelated state", async (t) => {
   const data = fixture();
   for (const status of ["pending", "confirmed", "shipped", "delivered", "completed", "cancelled", "damaged"]) {
-    data.state.orders.push({ ...structuredClone(data.state.orders[0]), id: `status-${status}`, status });
+    data.state.orders.push({ ...structuredClone(data.state.orders.find(order => order.id === "ORDER-PENDING")), id: `status-${status}`, status });
   }
   const s = await setup(t, data);
   const before = await s.readPersistedState();

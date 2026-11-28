@@ -68,6 +68,7 @@ import { visibleSitesForUser } from "../utils/sites";
 import { buildPublicSelectionCode } from "../utils/publicSelectionCode";
 import { rankOrderSearchRows } from "../utils/orderSearch";
 import { paymentClaimsForOrderScope } from "../utils/personalOrderWorkspace";
+import { canManageOrderBusiness, isMyOrder, orderBusinessContext } from "../utils/orderBusinessOwnership";
 import { beijingOrderCalendar, matchesPlannedShipmentRange } from "../utils/order-date-filters";
 import {
   isAddressOrderSource,
@@ -2194,8 +2195,8 @@ function ShipmentActionDialog({
   saving?: boolean;
   onOpenChange: (o: boolean) => void;
   onDelivered: (shipment: Shipment) => void;
-  onDamage: (shipment: Shipment) => void;
-  onCancelShipment: (shipment: Shipment) => void;
+  onDamage?: (shipment: Shipment) => void;
+  onCancelShipment?: (shipment: Shipment) => void;
   onConfirmShipment: (shipment: Shipment, packingProof: string[]) => void;
   onSaveActualShippingFee: (shipment: Shipment, actualShippingFee: number) => boolean | Promise<boolean>;
 }) {
@@ -2325,12 +2326,12 @@ function ShipmentActionDialog({
             </div>
 
             <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
-              已出库的鱼已经不在缸内显示；如果出库点错，可以在真正发货前取消出库。
+              已出库的鱼已经不在缸内显示；如果出库点错，{onCancelShipment ? "可以在真正发货前取消出库。" : "请联系订单负责人或管理员取消出库。"}
               {shipment.transferDispatch && " 在途直接出库的鱼取消后恢复移缸在途，不会自动回到原缸。"}
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button
+            {onCancelShipment && <Button
               variant="outline"
               className="text-amber-700 border-amber-200 hover:bg-amber-50"
               onClick={() => onCancelShipment(shipment)}
@@ -2338,7 +2339,7 @@ function ShipmentActionDialog({
             >
               <RotateCcw className="size-4 mr-1" />
               取消出库
-            </Button>
+            </Button>}
             <Button className="min-h-11" onClick={confirmShipment} disabled={actionLocked || !editableOrder || Boolean(shipmentFulfillmentState(shipment)?.shippingTimePending)}>
               <Truck className="size-4 mr-1" />
               {saving ? "保存中..." : shipment.shipMethod === "pickup" ? "确认自提" : "确认发货"}
@@ -2378,10 +2379,11 @@ function ShipmentActionDialog({
             onClick={() => onDelivered(shipment)} disabled={actionLocked || Boolean(shipmentFulfillmentState(shipment)?.pending)}>
             <CheckCircle className="size-5 shrink-0" aria-hidden="true" /><span><span className="block font-medium">客户已正常收货</span><span className="mt-1 block text-xs font-normal opacity-90">确认后，将这批鱼标记为已签收</span></span>
           </Button>
-          <Button type="button" variant="outline" className="h-auto min-h-14 justify-start gap-3 whitespace-normal px-4 py-3 text-left"
+          {onDamage && <Button type="button" variant="outline" className="h-auto min-h-14 justify-start gap-3 whitespace-normal px-4 py-3 text-left"
             onClick={() => onDamage(shipment)} disabled={actionLocked}>
             <AlertTriangle className="size-5 shrink-0 text-destructive" aria-hidden="true" /><span><span className="block font-medium">收到的鱼有损耗</span><span className="mt-1 block text-xs font-normal text-muted-foreground">选择受损鱼只，减免货款或安排补发；实际退款在收银台登记</span></span>
-          </Button>
+          </Button>}
+          {!onDamage && <p className="text-xs leading-5 text-muted-foreground">如需取消出库或处理损耗，请联系订单负责人或管理员。</p>}
         </div>}
 
       </DialogContent>
@@ -4291,6 +4293,16 @@ function OrderDetailDialog({
 }) {
   const { state, setState, saveStateTransform } = useStore();
   const permission = usePermission("orders");
+  const businessOwner = canManageOrderBusiness(state.user, state.personnel ?? [], order);
+  const canUpdateBusiness = permission.canUpdate && businessOwner;
+  const requireBusinessUpdate = () => {
+    if (!permission.requirePermission("update")) return false;
+    if (businessOwner) return true;
+    toast.error("只有当前订单负责人或管理员可以修改此订单");
+    return false;
+  };
+  const businessContextKey = orderBusinessContext(state.user, order, canUpdateBusiness, captureNewCustomerSession()?.key);
+  const businessContextRef = useRef(businessContextKey); businessContextRef.current = businessContextKey;
   const today = todayDateString();
   const accessibleStock = allStock ?? state.stock;
   const accessibleTankGroups = allTankGroups ?? state.tankGroups;
@@ -4356,7 +4368,7 @@ function OrderDetailDialog({
   const openShipmentFee = (shipment: Shipment) => { setShipmentActionMode("fee"); setShipmentAction(shipment); };
   const [cancelShipmentTarget, setCancelShipmentTarget] = useState<Shipment | null>(null);
   const [fulfillmentCorrectionTarget, setFulfillmentCorrectionTarget] = useState<Shipment | null>(null);
-  const cancelShipmentContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const cancelShipmentContextKey = businessContextKey;
   useEffect(() => { setCancelShipmentTarget(null); }, [cancelShipmentContextKey]);
   useEffect(() => { setFulfillmentCorrectionTarget(null); }, [cancelShipmentContextKey, open]);
   const [shipmentConfirmSaving, setShipmentConfirmSaving] = useState(false);
@@ -4370,10 +4382,15 @@ function OrderDetailDialog({
   const refundSaveLock = useRef(false);
   const [completionSaving, setCompletionSaving] = useState(false);
   const completionSaveLock = useRef(false);
-  const refundContextKey = JSON.stringify([order?.id, state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const refundContextKey = businessContextKey;
   const refundContextRef = useRef(refundContextKey);
   refundContextRef.current = refundContextKey;
   useEffect(() => { setRefundOpen(false); setRefundSaving(false); setCompletionSaving(false); }, [refundContextKey]);
+  useEffect(() => {
+    setEditMode(false); setEditForm(null); setPickerOpen(false); setEditSaving(false);
+    setReturnItem(null); setReturnSaving(false); setDamageShipment(null);
+    setRefundOpen(false); setCancelShipmentTarget(null);
+  }, [businessContextKey]);
   const personnel = state.personnel ?? [];
   const defaultContactPersonnel = getDefaultContactPersonnel(personnel, state.user?.username);
   const ownerCandidates = useOrderOwnerCandidates(order?.siteId, state.user, open && editMode, personnel, order?.contactPersonnelId || resolveOrderContactPersonnel(personnel, order || {})?.id);
@@ -4422,7 +4439,7 @@ function OrderDetailDialog({
   }, [open]);
 
   const enterEdit = () => {
-    if (!order) return;
+    if (!order || !requireBusinessUpdate()) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     const sourceMethods = paymentMethodsForOrderSource(availablePaymentMethods, order.source);
     const configuredOrderMethod = order.paymentMethodId
@@ -4479,7 +4496,7 @@ function OrderDetailDialog({
 
   const saveEdit = async () => {
     if (!order || !editForm || editSaveLock.current) return;
-    if (!permission.requirePermission("update")) return;
+    if (!requireBusinessUpdate()) return;
     if (order.status === "completed") return toast.error("已完成订单不能再编辑");
     if (editForm.date > today) return toast.error("下单日期不能晚于今天");
     if (!editForm.source.trim()) return toast.error("请选择订单来源");
@@ -4503,6 +4520,7 @@ function OrderDetailDialog({
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) return toast.error("登录状态已变化，请重新登录。");
     editSaveLock.current = true; setEditSaving(true);
+    const requestContext = businessContextKey;
     let pendingOwner = "";
     try {
       const result = await postOrderApi("orders/update", {
@@ -4540,8 +4558,8 @@ function OrderDetailDialog({
         })),
         operator: state.user?.username ?? "system",
       });
-      if (!isNewCustomerSessionCurrent(session)) return;
-      applyOrderApiResult(setState, result, { session: session! });
+      if (!isNewCustomerSessionCurrent(session) || businessContextRef.current !== requestContext) return;
+      applyOrderApiResult(setState, result, { session: session!, shouldApply: () => businessContextRef.current === requestContext });
       pendingOwner = result.order?.ownerAssignment?.status === "pending" ? result.order.ownerAssignment.toName : "";
     } catch (error) {
       if (isNewCustomerSessionCurrent(session)) toast.error(error instanceof Error ? error.message : "保存失败，请重试");
@@ -4720,13 +4738,13 @@ function OrderDetailDialog({
   ];
   const canShip = !!order && shippableUnshippedItems.length > 0
     && order.status !== "cancelled" && order.status !== "completed";
-  const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && permission.canUpdate;
+  const canReturnOrderItem = !!order && order.status !== "cancelled" && order.status !== "completed" && canUpdateBusiness;
   const returnStock = returnItem ? getAccessibleStockItem(returnItem.stockItemId) : undefined;
   const returnProduct = returnItem ? getProduct(returnItem.productId) : undefined;
 
   const openReturnItem = (item: OrderItem) => {
     if (!order) return;
-    if (!permission.requirePermission("update")) return;
+    if (!requireBusinessUpdate()) return;
     if (item.inventoryRemovedAt) return toast.error("该商品的库存记录已删除，订单历史仅供查看");
     if (order.status === "completed") return toast.error("已完成订单不能退商品");
     if (order.status === "cancelled") return toast.error("已取消订单不能退商品");
@@ -4736,7 +4754,7 @@ function OrderDetailDialog({
 
   const submitReturnItem = async () => {
     if (!order || !returnItem) return false;
-    if (!permission.requirePermission("update")) return false;
+    if (!requireBusinessUpdate()) return false;
     if (returnSaving) return false;
     if (order.status === "completed") { toast.error("已完成订单不能退商品"); return false; }
     if (order.status === "cancelled") { toast.error("已取消订单不能退商品"); return false; }
@@ -4761,8 +4779,8 @@ function OrderDetailDialog({
   };
 
   const submitOrderRefund = async (draft: OrderRefundDraft) => {
-    if (!order || refundSaveLock.current || !permission.requirePermission("update")) return false;
-    if (!canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)) throw new Error("当前订单不可登记退款，请检查订单状态和修改权限");
+    if (!order || refundSaveLock.current || !requireBusinessUpdate()) return false;
+    if (!canRegisterOrderRefund(order, hasActuallyShipped, canUpdateBusiness)) throw new Error("当前订单不可登记退款，请检查订单状态和修改权限");
     const session = captureNewCustomerSession();
     if (!isNewCustomerSessionCurrent(session, state.user)) throw new Error("登录状态已变化，请重新登录后操作");
     const requestContext = refundContextKey;
@@ -4789,7 +4807,7 @@ function OrderDetailDialog({
   };
 
   const completeOrder = async (): Promise<boolean> => {
-    if (!order || completionSaveLock.current || !permission.requirePermission("update")) return false;
+    if (!order || completionSaveLock.current || !requireBusinessUpdate()) return false;
     const unmetCheck = completionChecks.find((check) => !check.complete);
     if (unmetCheck) { toast.error(unmetCheck.detail || unmetCheck.label); return false; }
     const session = captureNewCustomerSession();
@@ -4889,7 +4907,7 @@ function OrderDetailDialog({
 
   const cancelShipment = (shipment: Shipment) => {
     if (!order) return;
-    if (!permission.requirePermission("update")) return;
+    if (!requireBusinessUpdate()) return;
     if (shipmentConfirmSaving) return;
     if (["completed", "cancelled"].includes(order.status)) return toast.error("已完成或已取消订单不能取消发货");
     if (shipment.status !== "outbound" && shipment.status !== "shipped") return toast.error("只有已出库或运输中的发货单可以取消");
@@ -4900,7 +4918,7 @@ function OrderDetailDialog({
 
   const reportShipmentDamage = async (shipment: Shipment, result: DamageResult) => {
     if (!order) return false;
-    if (!permission.requirePermission("update")) return false;
+    if (!requireBusinessUpdate()) return false;
     if (shipment.shipMethod === "pickup") { toast.error("上门自取订单不可报损"); return false; }
     if (!confirmWrite("修改", result.resolution === "refund" ? "将记录发货报损并调减应收。实际退钱需在收银台另行登记。" : "将发货单报损并选择库存鱼补发。")) return false;
     try {
@@ -5114,6 +5132,10 @@ function OrderDetailDialog({
               {editMode && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">编辑中</span>}
             </div>
           </DialogHeader>
+          {!canUpdateBusiness && <div role="note" className="shrink-0 rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+            <span className="font-medium text-foreground">订单信息只读 · 当前负责人：{order.contactPerson || state.personnel?.find(person => person.id === order.contactPersonnelId)?.name || "未明确"}</span>
+            <p>{businessOwner ? "当前账号没有订单修改权限。" : "订单内容、收退款及售后由当前负责人或管理员处理。"}{permission.canUpdate && "你仍可在物流运输中代为出库、发货、签收及补录运费。"}</p>
+          </div>}
 
           <Tabs value={detailTab} onValueChange={setDetailTab} className="flex min-h-0 flex-1 flex-col gap-3">
             <TabsList aria-label="订单详情栏目" className="grid h-11 w-full shrink-0 grid-cols-4 rounded-lg">
@@ -5432,11 +5454,12 @@ function OrderDetailDialog({
               key={order.id}
               order={order}
               viewer={state.user}
-              canUpdate={permission.canUpdate}
+              canUpdate={canUpdateBusiness}
               onOrderUpdated={(updatedOrder, session) => setState((current) => mergeWholesaleOrderTagForSession(current, updatedOrder, session))}
             />
 
             <OrderAcquisitionTag
+              key={`acquisition:${businessContextKey}`}
               order={order}
               onCustomerLinked={(change, session) => setState(current => mergeNewCustomerLink(current, change, session))}
               onOrderUpdated={(updatedOrder, session) => setState((current) => !isNewCustomerSessionCurrent(session, current.user) ? current : ({
@@ -5448,13 +5471,13 @@ function OrderDetailDialog({
 </div></details>}
               </TabsContent>
               <TabsContent value="cashier" forceMount hidden={detailTab !== "cashier"} style={detailTab !== "cashier" ? { display: "none" } : undefined} className="m-0 space-y-5">
-                <OrderCashierPanel key={`cashier:${order.id}:${state.user?.username}`} order={order} shipments={state.shipments} amountDue={amountDue} canUpdate={permission.canUpdate} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, permission.canUpdate)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
+                <OrderCashierPanel key={`cashier:${businessContextKey}`} order={order} shipments={state.shipments} amountDue={amountDue} canUpdate={canUpdateBusiness} refundAvailable={canRegisterOrderRefund(order, hasActuallyShipped, canUpdateBusiness)} refundSaving={refundSaving} onRefund={() => setRefundOpen(true)}
                   onApplied={(result, session) => applyOrderApiResult(setState, result, { session })}
-                  onRecordActualFee={orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); openShipmentFee(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
+                  onRecordActualFee={permission.canUpdate && orderShipments.some((shipment) => shipmentHasPendingActualShippingFee(order, shipment)) && !["completed", "cancelled"].includes(order.status) ? () => { setDetailTab("logistics"); openShipmentFee(orderShipments.find((shipment) => shipmentHasPendingActualShippingFee(order, shipment))!); } : undefined}>
                   {!editMode && feeContent}
                 </OrderCashierPanel>
               </TabsContent>
-              <TabsContent value="followup" className="m-0 space-y-5">{order.status !== "completed" && <p className="text-sm text-muted-foreground">订单完成后可新增回访，已有回访记录仍可查看。</p>}<OrderFollowupPanel orderId={order.id} siteId={order.siteId || "nanjing"} allowCreate={order.status === "completed"} onSaved={onFollowupSaved} /></TabsContent>
+              <TabsContent value="followup" className="m-0 space-y-5">{order.status !== "completed" && <p className="text-sm text-muted-foreground">订单完成后可新增回访，已有回访记录仍可查看。</p>}<OrderFollowupPanel orderId={order.id} siteId={order.siteId || "nanjing"} key={`followup:${businessContextKey}`} allowCreate={canUpdateBusiness && order.status === "completed"} onSaved={onFollowupSaved} /></TabsContent>
               <TabsContent value="logistics" className="m-0 space-y-5">
 
               <section aria-label="物流安排" className="space-y-3 rounded-lg border p-4">
@@ -5576,7 +5599,7 @@ function OrderDetailDialog({
                     subTankName={subTankName}
                     onShipmentAction={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? openShipmentProgress : undefined}
                     onEditShipmentFee={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? openShipmentFee : undefined}
-                    onCancelShipment={permission.canUpdate && !["completed", "cancelled"].includes(order.status) ? cancelShipment : undefined}
+                    onCancelShipment={canUpdateBusiness && !["completed", "cancelled"].includes(order.status) ? cancelShipment : undefined}
                     onCorrectFulfillment={state.user?.role === "admin" ? setFulfillmentCorrectionTarget : undefined}
                     onReturnItem={openReturnItem}
                     canReturnItem={canReturnOrderItem}
@@ -5589,7 +5612,7 @@ function OrderDetailDialog({
             </div>
           </Tabs>
 
-          {(editMode || (permission.canUpdate && order.status !== "cancelled" && order.status !== "completed")) && <DialogFooter className="flex-wrap items-center gap-2 pt-2 border-t">
+          {(editMode || ((canUpdateBusiness || (detailTab === "logistics" && permission.canUpdate && unshippedItems.length > 0)) && order.status !== "cancelled" && order.status !== "completed")) && <DialogFooter className="flex-wrap items-center gap-2 pt-2 border-t">
             {editMode ? (
               <>
                 <Button variant="ghost" onClick={cancelEdit} disabled={editSaving}>取消编辑</Button>
@@ -5598,7 +5621,7 @@ function OrderDetailDialog({
               </>
             ) : (
 	              <>
-			                {detailTab === "info" && permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && order.status !== "damaged" && (
+			                {detailTab === "info" && canUpdateBusiness && order.status !== "cancelled" && order.status !== "completed" && order.status !== "damaged" && (
 			                  <Button size="sm" variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50" onClick={enterEdit}>
 	                    编辑订单
                   </Button>
@@ -5640,7 +5663,7 @@ function OrderDetailDialog({
                     </Button>
                   </div>
                 )}
-                {permission.canUpdate && order.status !== "cancelled" && order.status !== "completed" && (
+                {canUpdateBusiness && order.status !== "cancelled" && order.status !== "completed" && (
                   <div className="sm:ml-auto">
                     <OrderCompletionActions
                       key={refundContextKey}
@@ -5694,12 +5717,12 @@ function OrderDetailDialog({
           }
         }}
         onDelivered={markShipmentDelivered}
-        onDamage={(shipment) => {
+        onDamage={canUpdateBusiness ? (shipment) => {
           shipmentFeeRequestSequence.current += 1;
           setShipmentAction(null);
           setDamageShipment(shipment);
-        }}
-        onCancelShipment={cancelShipment}
+        } : undefined}
+        onCancelShipment={canUpdateBusiness ? cancelShipment : undefined}
         onConfirmShipment={confirmOutboundShipment}
         onSaveActualShippingFee={saveShipmentActualShippingFee}
       />
@@ -5708,7 +5731,7 @@ function OrderDetailDialog({
         key={`${cancelShipmentContextKey}:${cancelShipmentTarget.id}`}
         shipmentId={cancelShipmentTarget.id}
         viewer={state.user}
-        canUpdate={permission.canUpdate}
+        canUpdate={canUpdateBusiness}
         onClose={() => setCancelShipmentTarget(null)}
         onApplied={(result, session) => {
           applyOrderApiResult(setState, result, { session, requireExistingShipmentId: cancelShipmentTarget.id });
@@ -7043,7 +7066,9 @@ function PaymentClaimDialog({
   onOpenChange: (open: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
-  const { setState } = useStore();
+  const { state, setState } = useStore();
+  const permission = usePermission("orders");
+  const canClaimOrder = (orderId: string) => permission.canUpdate && canManageOrderBusiness(state.user, state.personnel ?? [], state.orders.find(order => order.id === orderId));
   const [savingKey, setSavingKey] = useState("");
   const [cashAmounts, setCashAmounts] = useState<Record<string, number>>({});
 
@@ -7053,6 +7078,7 @@ function PaymentClaimDialog({
   }, [data.cashOrders, open]);
 
   const claimStatement = async (statement: OwnerPaymentCandidate, orderId: string) => {
+    if (savingKey || !canClaimOrder(orderId)) return toast.error("只能认领自己负责的订单，或由管理员处理");
     const order = statement.candidates.find((candidate) => candidate.orderId === orderId);
     if (!order || !confirmWrite("认领", `确认流水 ${statement.externalTransactionNo || "无编号"} 的 ¥${statement.amount.toFixed(2)} 属于订单 ${order.orderNo}。`)) return;
     const key = `${statement.id}-${orderId}`;
@@ -7070,6 +7096,7 @@ function PaymentClaimDialog({
   };
 
   const recordCash = async (order: OwnerPaymentClaimData["cashOrders"][number]) => {
+    if (savingKey || !canClaimOrder(order.orderId)) return toast.error("只能登记自己负责的订单，或由管理员处理");
     const amount = Number(cashAmounts[order.orderId] ?? 0);
     if (!Number.isFinite(amount) || amount <= 0) return toast.error("请输入现金收款金额");
     if (!confirmWrite("登记", `登记订单 ${order.orderNo} 的现金收款 ¥${amount.toFixed(2)}，后续由财务核销。`)) return;
@@ -7245,11 +7272,16 @@ export function OrdersView({
     setMobilePage(1);
   };
 
+  const paymentClaimViewerKey = JSON.stringify([activeSiteId, state.user?.username, state.user?.role, state.user?.account, captureNewCustomerSession()?.key]);
+  const paymentClaimViewerRef = useRef(paymentClaimViewerKey); paymentClaimViewerRef.current = paymentClaimViewerKey;
+  useEffect(() => { setPaymentClaimOpen(false); setPaymentClaimData({ candidates: [], cashOrders: [] }); }, [paymentClaimViewerKey]);
   const loadPaymentClaims = useCallback(async (showLoading = false) => {
     if (!permission.canUpdate || personalWorkspace) {
       setPaymentClaimData({ candidates: [], cashOrders: [] });
       return;
     }
+    const session = captureNewCustomerSession();
+    const current = () => paymentClaimViewerRef.current === paymentClaimViewerKey && isNewCustomerSessionCurrent(session, state.user);
     if (showLoading) setPaymentClaimsLoading(true);
     try {
       const response = await fetch(`/api/orders/payment-candidates?siteId=${encodeURIComponent(activeSiteId)}`, {
@@ -7257,16 +7289,17 @@ export function OrdersView({
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      if (!current()) return;
       setPaymentClaimData({
         candidates: Array.isArray(result.candidates) ? result.candidates : [],
         cashOrders: Array.isArray(result.cashOrders) ? result.cashOrders : [],
       });
     } catch (error) {
-      if (showLoading) toast.error(error instanceof Error ? error.message : "待认领收款加载失败");
+      if (showLoading && current()) toast.error(error instanceof Error ? error.message : "待认领收款加载失败");
     } finally {
-      if (showLoading) setPaymentClaimsLoading(false);
+      if (showLoading && current()) setPaymentClaimsLoading(false);
     }
-  }, [activeSiteId, permission.canUpdate, personalWorkspace]);
+  }, [activeSiteId, permission.canUpdate, personalWorkspace, paymentClaimViewerKey]);
 
   useEffect(() => {
     void loadPaymentClaims(false);
@@ -7311,23 +7344,11 @@ export function OrdersView({
     }
   }, [openOrderRequest?.requestId]);
 
-  const currentContactPersonnel = useMemo(() => {
-    const reference = normalizedContactReference(state.user?.username);
-    if (!reference) return undefined;
-    const activeAccounts = (state.personnel ?? []).filter(isPersonnelAccountEnabled);
-    const usernameMatches = activeAccounts.filter((person) =>
-      normalizedContactReference(person.username) === reference
-    );
-    if (usernameMatches.length === 1) return usernameMatches[0];
-    const nameMatches = activeAccounts.filter((person) =>
-      normalizedContactReference(person.name) === reference
-    );
-    return nameMatches.length === 1 ? nameMatches[0] : undefined;
-  }, [state.personnel, state.user?.username]);
-  const isCurrentUserContactOrder = useCallback((order: Order) => {
-    if (!currentContactPersonnel) return false;
-    return resolveOrderContactPersonnel(state.personnel ?? [], order, true)?.id === currentContactPersonnel.id;
-  }, [currentContactPersonnel, state.personnel]);
+  const canManageOrder = useCallback((order: Order) => canManageOrderBusiness(state.user, state.personnel ?? [], order), [state.user, state.personnel]);
+  const isCurrentUserContactOrder = useCallback((order: Order) => isMyOrder(state.user, state.personnel ?? [], order), [state.user, state.personnel]);
+  useEffect(() => {
+    if (deleteOrder && !canManageOrder(state.orders.find(order => order.id === deleteOrder.id) || deleteOrder)) setDeleteOrder(null);
+  }, [state.orders, canManageOrder, deleteOrder]);
   const orderList = useMemo(
     () => state.orders.filter(order => !personalWorkspace || isCurrentUserContactOrder(order)).sort(compareOrdersByCreatedDesc),
     [state.orders, personalWorkspace, isCurrentUserContactOrder]
@@ -7370,10 +7391,8 @@ export function OrdersView({
     followup: followups.loading || followups.error || !followups.rows ? null : [...salesTodoById.values()].filter(value => value.followup).length,
   }), [salesTodoById, followups.loading, followups.error, followups.rows]);
   const scopedPaymentClaimData = useMemo(
-    () => paymentClaimsForOrderScope(paymentClaimData, personalWorkspace
-      ? new Set(orderList.map(order => order.id))
-      : null),
-    [paymentClaimData, personalWorkspace, orderList]
+    () => paymentClaimsForOrderScope(paymentClaimData, new Set(orderList.filter(order => permission.canUpdate && canManageOrder(order)).map(order => order.id))),
+    [paymentClaimData, orderList, permission.canUpdate, canManageOrder]
   );
   const pendingPaymentClaimCount = scopedPaymentClaimData.candidates.length + scopedPaymentClaimData.cashOrders.length;
 
@@ -7571,7 +7590,9 @@ export function OrdersView({
   const doDeleteOrder = async () => {
     if (!deleteOrder) return;
     if (!permission.requirePermission("delete")) return;
-    if (hasPaymentRecords(deleteOrder)) {
+    const currentOrder = state.orders.find(order => order.id === deleteOrder.id);
+    if (!currentOrder || !canManageOrder(currentOrder)) { setDeleteOrder(null); return toast.error("只有当前订单负责人或管理员可以删除此订单"); }
+    if (hasPaymentRecords(currentOrder)) {
       toast.error("该订单已有财务流水，不能删除，请先在财务管理中处理");
       setDeleteOrder(null);
       return;
@@ -7728,7 +7749,7 @@ export function OrdersView({
                     客户
                   </Button>
                 )}
-                {permission.canDelete && (
+                {permission.canDelete && canManageOrder(order) && (
                   <Button
                     type="button"
                     size="sm"
@@ -8012,7 +8033,7 @@ export function OrdersView({
             <Button size="sm" variant="outline" onClick={() => setViewOrder(row)}>
               <Eye className="size-3.5 mr-1" />详情
             </Button>
-	            {permission.canDelete && (
+	            {permission.canDelete && canManageOrder(row) && (
 	              <Button
 		                size="sm"
 		                variant="ghost"
@@ -8104,6 +8125,7 @@ export function OrdersView({
       </Dialog>
 
       <PaymentClaimDialog
+        key={JSON.stringify([paymentClaimViewerKey, scopedPaymentClaimData.cashOrders.map(order => order.orderId), scopedPaymentClaimData.candidates.map(row => row.candidates.map(order => order.orderId))])}
         open={paymentClaimOpen}
         data={scopedPaymentClaimData}
         loading={paymentClaimsLoading}

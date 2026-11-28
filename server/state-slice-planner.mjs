@@ -56,7 +56,7 @@ const GENERIC_STATE_PATCH_DEPENDENCIES = Object.freeze({
     "shipments",
     "customers",
   ],
-  shipments: ["systemSettings", "sites", "stock", "orders", "shipments"],
+  shipments: ["systemSettings", "sites", "personnel", "stock", "orders", "shipments"],
   customers: ["customers", "orders"],
   customerSources: ["customerSources"],
 });

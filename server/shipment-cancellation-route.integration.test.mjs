@@ -15,6 +15,12 @@ const inTankIds = (state) => {
 
 async function setup(t, customize = () => {}, transfer = false) {
   const fixture = transfer ? stockTransferFixture() : crossSiteFulfillmentFixture({ origin: "nanjing", destination: "nanjing" });
+  // Cancellation is an order-owner action; delegated outbound/confirmation is
+  // covered separately. Keep these reconciliation cases owned by their editor.
+  const owner = fixture.state.personnel.find(person => person.id === (transfer ? "dual-editor" : "pricing-editor"));
+  Object.assign(fixture.state.orders.find(order => order.id === "moved-order"), {
+    contactPersonnelId: owner.id, contactPerson: owner.name,
+  });
   fixture.state.tankGroups[0].subTanks.push({ id: "cancel-return-tank", name: "回缸核对缸" });
   fixture.state.operationLogs = [];
   customize(fixture.state);
@@ -42,7 +48,7 @@ async function setup(t, customize = () => {}, transfer = false) {
   return { ...s, tokens, post, preview, saveStock, outbound, cancellation, addDuplicate };
 }
 
-test("stocktake duplicate is merged on cancellation by an ordinary order editor, preserving identity, count, maintenance and audit", async (t) => {
+test("stocktake duplicate is merged on cancellation by the ordinary order owner, preserving identity, count, maintenance and audit", async (t) => {
   const s = await setup(t); const shipmentId = await s.outbound();
   assert.deepEqual(inTankIds(await s.readPersistedState()), ["unrelated-fish"]);
   await s.addDuplicate("stocktake-added-fish", { status: "feeding", subTankId: "cancel-return-tank" });

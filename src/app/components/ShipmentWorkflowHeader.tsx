@@ -70,7 +70,7 @@ export function ShipmentWorkflowHeader({ order, shipment, number, itemCount, sta
           {outbound ? <Camera className="size-4" aria-hidden="true" /> : <PackageCheck className="size-4" aria-hidden="true" />}
           {outbound ? pickup ? "上传照片并确认自提" : "上传照片并发货" : "登记收货结果"}
         </Button>
-        <p className="text-xs leading-5 text-muted-foreground sm:text-right">{outbound ? "至少 2 张：捞鱼照片、封箱前照片。" : "客户收到后登记签收；发现损耗可报损。"}</p>
+        <p className="text-xs leading-5 text-muted-foreground sm:text-right">{outbound ? "至少 2 张：捞鱼照片、封箱前照片。" : canCancel ? "客户收到后登记签收；发现损耗可报损。" : "客户收到后登记签收；损耗请联系订单负责人。"}</p>
       </div>}
     </div>
 

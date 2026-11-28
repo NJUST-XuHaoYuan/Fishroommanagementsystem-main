@@ -520,6 +520,7 @@ export function ShipmentsView() {
   );
 
   const doShip = async (order: Order, data: ShipFormData) => {
+    if (!permission.requirePermission("update")) return false;
     const confirmation = data.shipMethod === "pickup"
       ? `将确认订单 ${order.orderNo} 的所选商品已由客户自提。`
       : `将记录订单 ${order.orderNo} 出库，后续需在订单详情上传打包凭证后确认发货。`;
@@ -747,7 +748,7 @@ export function ShipmentsView() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-right">
-                            <Button size="sm" onClick={() => setShipOrder(o)}>
+                            <Button size="sm" disabled={!permission.canUpdate} onClick={() => setShipOrder(o)}>
                               {o.source === "线下"
                                 ? <MapPin className="size-3.5 mr-1" />
                                 : <Truck className="size-3.5 mr-1" />}
@@ -806,7 +807,7 @@ export function ShipmentsView() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-right">
-                            <Button size="sm" variant="outline" onClick={() => setShipOrder(o)}>
+                            <Button size="sm" variant="outline" disabled={!permission.canUpdate} onClick={() => setShipOrder(o)}>
                               {o.source === "线下"
                                 ? <MapPin className="size-3.5 mr-1" />
                                 : <Truck className="size-3.5 mr-1" />}
@@ -950,7 +951,7 @@ export function ShipmentsView() {
                             </span>
                           ) : (
                             <button
-                              onClick={() => setDeliverShipment(sh)}
+                              disabled={!permission.canUpdate} onClick={() => setDeliverShipment(sh)}
                               title="点击确认签收"
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-blue-100 text-blue-700 hover:bg-emerald-100 hover:text-emerald-700 transition-colors cursor-pointer"
                             >

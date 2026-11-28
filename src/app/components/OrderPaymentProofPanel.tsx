@@ -21,8 +21,8 @@ export type PaymentProofOpenRequest = { key: number; purpose: "order" | "shippin
 type Draft = { purpose: "order" | "shipping_fee"; claimId: string; expectedVersion?: number; amount: string; time: string; paymentMethodId: string; externalTransactionNo: string; notes: string; attachments: NewCustomerEvidenceAttachment[] };
 const blankDraft = (): Draft => ({ purpose: "order", claimId: "", amount: "", time: initialTime(), paymentMethodId: "", externalTransactionNo: "", notes: "", attachments: [] });
 
-export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false, openRequest, presentation = "default", selectedClaimId, onDetailChange }: {
-  orderId: string; onApplied?: (result: { order?: Order; orders?: Order[]; operationLog?: Store["operationLogs"][number] }, session: NewCustomerSession) => void | Promise<void>; reviewOnly?: boolean; openRequest?: PaymentProofOpenRequest;
+export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false, allowSubmit = true, openRequest, presentation = "default", selectedClaimId, onDetailChange }: {
+  orderId: string; onApplied?: (result: { order?: Order; orders?: Order[]; operationLog?: Store["operationLogs"][number] }, session: NewCustomerSession) => void | Promise<void>; reviewOnly?: boolean; allowSubmit?: boolean; openRequest?: PaymentProofOpenRequest;
   presentation?: "default" | "cashier"; selectedClaimId?: string; onDetailChange?: (detail: PaymentProofDetail | null) => void;
 }) {
   const { state } = useStore();
@@ -31,15 +31,16 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   const cashierOrder = order?.orderFormSchemaVersion === 4;
   const shippingSummary = order ? getShippingSettlementSummary(order, state.shipments) : null;
   const newShippingFlow = Boolean(shippingSummary?.enabled);
-  const financialDataKey = JSON.stringify([order?.id, order?.status, order?.contactPersonnelId, order?.shippingFeeMode, order?.shippingFee, order?.shippingSettlementTiming, order?.items, order?.discount, order?.packagingFee, order?.payments, order?.paymentClaims,
+  const financialDataKey = JSON.stringify([order?.id, order?.status, order?.contactPersonnelId, order?.contactPerson, order?.shippingFeeMode, order?.shippingFee, order?.shippingSettlementTiming, order?.items, order?.discount, order?.packagingFee, order?.payments, order?.paymentClaims,
     state.shipments.filter(shipment => shipment.orderId === orderId).map(shipment => [shipment.id, shipment.status, shipment.actualShippingFee, shipment.actualShippingFeeRecordedAt])]);
   const formRef = useRef<HTMLDivElement>(null);
   const submittedRef = useRef<HTMLDivElement>(null);
   const fieldRefs = useRef<Partial<Record<PaymentProofDraftField, HTMLElement | null>>>({});
   const fieldId = useId();
   const handledOpenRequest = useRef<number | null>(null);
-  const identity = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds]);
+  const identity = JSON.stringify([state.user?.username, state.user?.role, state.user?.visibleSiteIds, state.user?.account, captureNewCustomerSession()?.key, order?.contactPersonnelId, order?.contactPerson, allowSubmit]);
   const [detail, setDetail] = useState<PaymentProofDetail | null>(null);
+  const canSubmit = Boolean(detail?.canSubmit && allowSubmit && !reviewOnly);
   const [loading, setLoading] = useState(true);
   const [privateOnly, setPrivateOnly] = useState(false);
   const [error, setError] = useState("");
@@ -67,7 +68,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
     const controller = new AbortController(); pendingLoad.current = controller;
     const session = captureNewCustomerSession();
     setLoading(true); setPrivateOnly(false); setDetail(null); detailSession.current = null; setReviewChoice({}); setReasons({});
-    const current = () => mounted.current && request === seq.current && isNewCustomerSessionCurrent(session, viewer.current);
+    const current = () => mounted.current && request === seq.current && currentContext.current === context && isNewCustomerSessionCurrent(session, viewer.current);
     try {
       const response = await fetch(`/api/orders/payment-proof/detail?orderId=${encodeURIComponent(orderId)}`, { headers: authJsonHeaders(), signal: controller.signal, cache: "no-store" });
       const result = await response.json().catch(() => ({}));
@@ -89,7 +90,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   useEffect(() => { onDetailChange?.(detail); }, [detail, onDetailChange]);
 
   const write = async (path: string, body: unknown) => {
-    if (lock.current || uploading) return;
+    if (lock.current || uploading || (path === "submit" && !canSubmit)) return;
     const session = captureNewCustomerSession();
     const current = () => mounted.current && currentContext.current === context && isNewCustomerSessionCurrent(session, viewer.current);
     if (!isNewCustomerSessionCurrent(session, viewer.current)) { setError("登录状态已变化，请重新打开订单。"); return; }
@@ -118,7 +119,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   useEffect(() => {
     if (!openRequest || handledOpenRequest.current === openRequest.key || !detail || loading || busy || uploading || reviewOnly) return;
     handledOpenRequest.current = openRequest.key;
-    if (!detail.canSubmit) { setError("由当前订单负责人或管理员登记收款。"); return; }
+    if (!canSubmit) { setError("由当前订单负责人或管理员登记收款。"); return; }
     if (formOpen) {
       formRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
       fieldRefs.current.amount?.focus({ preventScroll: true });
@@ -128,7 +129,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
     const summary = order ? getShippingSettlementSummary(order, state.shipments) : detail.shippingSettlement;
     setDraft({ ...blankDraft(), purpose: openRequest.purpose, amount: openRequest.purpose === "shipping_fee" && summary?.toCollect > 0 ? String(summary.toCollect) : "", paymentMethodId: cashierOrder ? "" : detail.paymentMethods[0]?.id || "" });
     setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null);
-  }, [openRequest?.key, detail, loading, busy, uploading, reviewOnly]);
+  }, [openRequest?.key, detail, loading, busy, uploading, reviewOnly, canSubmit]);
 
   useEffect(() => {
     if (formOpen) {
@@ -151,7 +152,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
   }
 
   const submit = () => {
-    if (busy || uploading || lock.current) return;
+    if (busy || uploading || lock.current || !canSubmit) return;
     const issues = validatePaymentProofDraft(draft, detail?.paymentMethods.map(method => method.id) || [], allocationError);
     setError(""); setFieldIssues(issues);
     if (issues.length) { focusField(issues[0].field); return; }
@@ -180,7 +181,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
 
   return <section aria-label="订单付款凭证" aria-busy={loading || busy || uploading} className={presentation === "cashier" ? "min-w-0 space-y-3 border-t pt-4" : "min-w-0 space-y-3 rounded-lg border bg-card p-3 sm:p-4"}>
     <div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold sm:text-base">{presentation === "cashier" ? "收款登记与凭证核验" : "付款凭证与财务核验"}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{reviewOnly ? "核对图片、金额和真实到账后，点击核验通过；无需另行补录同一笔收款。" : "负责人登记实付金额和图片，财务核验真实到账。"}</p></div><Button type="button" variant="ghost" className="min-h-11" disabled={busy || uploading || loading} onClick={() => { setError(""); void load(); }} aria-label="刷新付款凭证"><RefreshCw className="size-4" /></Button></div>
-    {(!formOpen || !detail?.canSubmit || loading || privateOnly || reviewOnly) && error && <p role="alert" className="break-words rounded-md border border-destructive/40 px-3 py-2 text-sm text-destructive">{error}</p>}
+    {(!formOpen || !canSubmit || loading || privateOnly || reviewOnly) && error && <p role="alert" className="break-words rounded-md border border-destructive/40 px-3 py-2 text-sm text-destructive">{error}</p>}
     {submittedAmount !== null && <div ref={submittedRef}><PaymentProofSubmissionFeedback submittedAmount={submittedAmount} /></div>}
     {loading ? <p role="status" className="py-3 text-sm text-muted-foreground">正在加载付款凭证…</p> : privateOnly ? <p className="text-sm leading-6 text-muted-foreground">付款图片仅由当前订单负责人、管理员及有财务核验权限的人员查看。</p> : !detail ? <Button type="button" variant="outline" className="min-h-11" onClick={() => void load()}>重新加载</Button> : <>
       <div className="flex flex-wrap gap-x-5 gap-y-2 rounded-md bg-muted/30 p-3 text-xs leading-5"><span>已确认到账 <strong>{currency(detail.summary.verifiedAmount)}</strong></span><span>凭证待核验 <strong>{currency(detail.summary.pendingProofAmount)}</strong></span><span>未被凭证或到账覆盖 <strong>{currency(detail.summary.creditAmount)}</strong></span></div>
@@ -197,7 +198,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
           <NewCustomerEvidenceGallery payment orderId={orderId} attachments={claim.evidenceAttachments || []} />
           {claim.status === "rejected" && <p className="break-words text-sm text-destructive">驳回原因：{claim.rejectionReason || "请联系财务核对"}</p>}
           {claim.reviewedBy && <p className="text-xs text-muted-foreground">核验人：{claim.reviewedBy} · {String(claim.reviewedAt || "").replace("T", " ")}</p>}
-          {claim.status === "rejected" && detail.canSubmit && !reviewOnly && <Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => { setDraft({ purpose: claim.purpose || "order", claimId: claim.id, expectedVersion: claim.version, amount: String(claim.amount), time: claim.time.slice(0, 16), paymentMethodId: claim.paymentMethodId, externalTransactionNo: claim.externalTransactionNo || "", notes: claim.notes || "", attachments: [] }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}>补充正确凭证并重提</Button>}
+          {claim.status === "rejected" && canSubmit && <Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => { setDraft({ purpose: claim.purpose || "order", claimId: claim.id, expectedVersion: claim.version, amount: String(claim.amount), time: claim.time.slice(0, 16), paymentMethodId: claim.paymentMethodId, externalTransactionNo: claim.externalTransactionNo || "", notes: claim.notes || "", attachments: [] }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}>补充正确凭证并重提</Button>}
           {claim.status === "pending" && detail.canReview && financePermission.canUpdate && <div className="space-y-3 border-t pt-3">
             {choice.mode === "new" && <p className="rounded-md bg-muted/40 p-3 text-sm leading-6"><strong className="block font-medium">核验通过后自动生成收款流水</strong><span className="text-muted-foreground">本笔尚无对应流水，核验后确认到账 {currency(claim.amount)}。</span></p>}
             {choice.mode === "existing" && <div className="rounded-md bg-muted/40 p-3 text-sm leading-6"><p className="font-medium">已匹配现有收款，核验后不会重复入账</p><p className="break-words text-xs text-muted-foreground">{String(eligible[0].time).replace("T", " ")} · {currency(eligible[0].amount)} · {eligible[0].externalTransactionNo || eligible[0].id} · {eligible[0].verificationStatus === "pending" ? "待核验" : "已核验"}</p></div>}
@@ -208,8 +209,8 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
           </div>}
         </article>;
       })}</div>
-      {presentation !== "cashier" && detail.canSubmit && !reviewOnly && !formOpen && <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" onClick={() => { setDraft(current => current.claimId ? { ...blankDraft(), paymentMethodId: cashierOrder ? "" : detail.paymentMethods[0]?.id || "" } : { ...current, paymentMethodId: current.paymentMethodId || (cashierOrder ? "" : detail.paymentMethods[0]?.id || "") }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}><Plus className="size-4" />上传本次付款凭证</Button>}
-      {formOpen && detail.canSubmit && !reviewOnly && <div ref={formRef} className="space-y-4 rounded-md border bg-muted/15 p-3">
+      {presentation !== "cashier" && canSubmit && !formOpen && <Button type="button" variant="outline" className="min-h-11 w-full sm:w-auto" onClick={() => { setDraft(current => current.claimId ? { ...blankDraft(), paymentMethodId: cashierOrder ? "" : detail.paymentMethods[0]?.id || "" } : { ...current, paymentMethodId: current.paymentMethodId || (cashierOrder ? "" : detail.paymentMethods[0]?.id || "") }); setFormOpen(true); setError(""); setFieldIssues([]); setSubmittedAmount(null); }}><Plus className="size-4" />上传本次付款凭证</Button>}
+      {formOpen && canSubmit && <div ref={formRef} className="space-y-4 rounded-md border bg-muted/15 p-3">
         <h4 className="text-sm font-semibold">{draft.claimId ? "补充凭证并重新提交" : draft.purpose === "shipping_fee" ? "登记运费收款" : "登记本次付款"}</h4>
         {newShippingFlow && draft.purpose === "shipping_fee" && <p className="text-sm text-muted-foreground">本笔为历史运费收款，保留原收款用途。</p>}
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
@@ -230,7 +231,7 @@ export function OrderPaymentProofPanel({ orderId, onApplied, reviewOnly = false,
         <PaymentProofSubmissionFeedback issues={fieldIssues} error={error} onFocusField={focusField} />
         <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="min-h-11" disabled={busy || uploading} onClick={() => { setFormOpen(false); setError(""); setFieldIssues([]); }}>取消填写</Button><Button type="button" className="min-h-11" disabled={busy || uploading} onClick={submit}>{busy ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" /> : <Check className="size-4" />}{busy ? "正在提交…" : "提交财务核验"}</Button></div>
       </div>}
-      {!detail.canSubmit && !reviewOnly && <p className="text-xs leading-5 text-muted-foreground">由当前订单负责人上传付款凭证。负责人转交未确认前，仍由原负责人提交。</p>}
+      {!canSubmit && !reviewOnly && <p className="text-xs leading-5 text-muted-foreground">由当前订单负责人上传付款凭证。负责人转交未确认前，仍由原负责人提交。</p>}
     </>}
   </section>;
 }

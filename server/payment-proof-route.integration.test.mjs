@@ -8,10 +8,28 @@ import { shipmentPaymentGate } from "./shipment-payment-rules.mjs";
 import { paymentEvidencePath, PAYMENT_EVIDENCE_DIRECTORY } from "./payment-evidence.mjs";
 import { publicVideoDerivativeProxyPath } from "./video-preview.mjs";
 import { orderCompletionFinancialCheck } from "./order-completion-finance.mjs";
+import { canSubmitPaymentProof } from "./payment-proof-rules.mjs";
 
 const ok = result => assert.equal(result.response.status, 200, JSON.stringify(result.body));
 const denied = result => assert.ok(result.response.status >= 400 && result.response.status < 500, JSON.stringify(result.body));
 const pendingClaim = state => state.orders.find(order => order.id === "proof-order").paymentClaims.at(-1);
+
+test("payment evidence follows the unique effective owner rather than stale names or a pending recipient", () => {
+  const { state } = paymentProofFixture();
+  const order = state.orders[0], owner = state.personnel.find(person => person.id === order.contactPersonnelId);
+  const other = state.personnel.find(person => person.id === "other-owner"), admin = state.personnel.find(person => person.accessRole === "admin");
+  assert.equal(canSubmitPaymentProof(state, order, owner), true);
+  assert.equal(canSubmitPaymentProof(state, { ...order, ownerAssignment: { status: "pending", toPersonnelId: other.id } }, other), false);
+  assert.equal(canSubmitPaymentProof(state, { ...order, contactPersonnelId: "deleted-owner", createdBy: owner.username }, owner), false);
+  assert.equal(canSubmitPaymentProof(state, { ...order, contactPersonnelId: other.id, createdBy: owner.username }, owner), false);
+  const duplicate = { ...state, personnel: [...state.personnel, { ...other, id: owner.id }] };
+  assert.equal(canSubmitPaymentProof(duplicate, order, owner), false);
+  assert.equal(canSubmitPaymentProof(duplicate, order, admin), true);
+  assert.equal(canSubmitPaymentProof(state, { ...order, contactPersonnelId: "" }, owner), true);
+  const sameName = { ...state, personnel: state.personnel.map(person => person.id === other.id ? { ...person, name: owner.name } : person) };
+  assert.equal(canSubmitPaymentProof(sameName, { ...order, contactPersonnelId: "" }, owner), false);
+  assert.equal(canSubmitPaymentProof(state, order, { ...owner, accountEnabled: false }), false);
+});
 async function setup(t, customize = () => {}) {
   const fixture = paymentProofFixture(); customize(fixture.state);
   const s = await startMutableRouteServer(fixture, { env: { PERSONNEL_DATA_KEYRING_JSON: EVIDENCE_TEST_KEYRING } });
@@ -37,6 +55,22 @@ async function setup(t, customize = () => {}) {
   };
   return { ...s, tokens, request, detail, upload, submit, review };
 }
+
+test("an ambiguous owner cannot read or upload evidence while independent finance review stays available", async t => {
+  const s = await setup(t, state => {
+    const owner = state.personnel.find(person => person.id === "pricing-editor");
+    state.personnel.push({ ...structuredClone(owner), username: "ambiguous-owner", name: "同编号合成账号" });
+  });
+  const before = await s.readPersistedState();
+  assert.equal((await s.detail()).response.status, 403);
+  assert.equal((await s.upload()).response.status, 403);
+  const submit = await s.request("/api/orders/payment-proof/submit", { orderId: "proof-order", amount: 100, evidenceIds: [] });
+  assert.equal(submit.response.status, 403);
+  const finance = await s.detail("finance-reviewer"); ok(finance);
+  assert.equal(finance.body.canReview, true); assert.equal(finance.body.canSubmit, false);
+  const admin = await s.detail("pricing-admin"); ok(admin); assert.equal(admin.body.canSubmit, true);
+  assert.deepEqual(await s.readPersistedState(), before);
+});
 
 test("a receipt can be reviewed after an actual refund was registered but before that refund is verified", async t => {
   const s = await setup(t, state => {

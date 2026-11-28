@@ -8,7 +8,7 @@ import {
   evidenceIsBound, evidenceIsExpired, encryptPaymentEvidence, decryptPaymentEvidence, normalizePaymentEvidenceImage,
 } from "./payment-evidence.mjs";
 import { canSubmitPaymentProof, paymentProofDetail, paymentClaims, planPaymentProofSubmission, planPaymentProofReview } from "./payment-proof-rules.mjs";
-import { creditSaleOrderOwner } from "./credit-sale-approval-rules.mjs";
+import { isOrderBusinessMutationOwner, resolveOrderBusinessOwner } from "./order-mutation-ownership.mjs";
 import { isPersonnelAccountEnabled } from "./personnel-rules.mjs";
 
 const list = value => Array.isArray(value) ? value : [];
@@ -56,9 +56,8 @@ export function createPaymentProofHandler(deps) {
   };
   const assertRead = (req, state, order) => {
     const account = req.auth.account;
-    const owner = creditSaleOrderOwner(state.personnel, order);
     if (!hasPermission(account, "finance", "update") && !(hasPermission(account, "orders", "update") &&
-      isPersonnelAccountEnabled(account) && (account.accessRole === "admin" || owner?.id === account.id))) fail("仅订单负责人、管理员或财务核验人员可以查看付款凭证");
+      isOrderBusinessMutationOwner(state, order, account))) fail("仅订单负责人、管理员或财务核验人员可以查看付款凭证");
   };
   const detail = (state, order, req) => ({ ...paymentProofDetail(state, order, req.auth.account, amountDue(order, state.shipments), hasPermission(req.auth.account, "finance", "update")),
     canSubmit: hasPermission(req.auth.account, "orders", "update") && canSubmitPaymentProof(state, order, req.auth.account) });
@@ -67,7 +66,7 @@ export function createPaymentProofHandler(deps) {
     const now = new Date().toISOString();
     const old = list(state.notifications).map(notice => notice.type === "payment_proof" && notice.claimId === claim.id && notice.status === "pending"
       ? { ...notice, status: "completed", resolvedAt: now, resolution: claim.status } : notice);
-    const owner = creditSaleOrderOwner(state.personnel, order);
+    const owner = resolveOrderBusinessOwner(state, order);
     const recipients = reviewing ? owner ? [owner] : [] : list(state.personnel).filter(person =>
       isPersonnelAccountEnabled(person) && hasPermission(person, "finance", "update") && list(visibleState(state, person).orders).some(item => item.id === order.id));
     return [...recipients.map(person => ({ id: createId("notice"), type: "payment_proof", status: reviewing ? "completed" : "pending",

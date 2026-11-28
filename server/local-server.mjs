@@ -22,6 +22,7 @@ import {
   selectWechatAudioStream,
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
+import { assertOrderBusinessMutationOwner, isOrderBusinessMutationOwner } from "./order-mutation-ownership.mjs";
 import { assertCanUploadNewCustomerEvidence, assertNewCustomerCustomerUnchanged, canViewNewCustomerEvidence, newCustomerApprovalDetail, newCustomerApprovalVersion, newCustomerCustomerManagementBlock, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
 import {
   NEW_CUSTOMER_EVIDENCE_DIRECTORY, NEW_CUSTOMER_EVIDENCE_MAX_BYTES, NEW_CUSTOMER_EVIDENCE_DRAFT_TTL,
@@ -6671,6 +6672,7 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentOrder = currentOrdersById.get(orderId);
     if (!currentOrder) throw new Error("新建订单必须通过订单专用接口");
     if (stableJson(currentOrder) === stableJson(nextOrder)) continue;
+    assertOrderBusinessMutationOwner(current, currentOrder, req.auth.account);
     assertOrderAcquisitionTagUnchanged(currentOrder, nextOrder);
     assertNewCustomerCustomerUnchanged(currentOrder, nextOrder);
     assertOrderWholesaleTagUnchanged(currentOrder, nextOrder);
@@ -6723,6 +6725,13 @@ function validateOrderStatePatch(req, current = {}, next = {}, changedKeys = [])
     const currentShipment = currentShipmentsById.get(shipmentId);
     if (!currentShipment) throw new Error("新建发货单必须通过出库专用接口");
     if (stableJson(currentShipment) === stableJson(nextShipment)) continue;
+    const currentRelatedOrder = resolveAuthorizedLockedShipmentTarget(req, current, shipmentId).order;
+    const logisticsFields = new Set(["status", "trackingNo", "carrier", "packingProof", "notes", "shippedAt", "deliveredAt"]);
+    const businessFields = shipment => Object.fromEntries(Object.entries(shipment).filter(([key]) => !logisticsFields.has(key)));
+    if (stableJson(businessFields(currentShipment)) !== stableJson(businessFields(nextShipment)) ||
+        (currentShipment.status !== nextShipment.status && !["shipped", "delivered"].includes(nextShipment.status))) {
+      assertOrderBusinessMutationOwner(current, currentRelatedOrder, req.auth.account);
+    }
     assertFulfillmentCorrectionUnchanged(currentShipment, nextShipment);
     for (const key of ["damageEvents", "damageReplacements", "damageAmount", "damageRefundAmount", "damagedAt"]) {
       if (stableJson(currentShipment[key]) !== stableJson(nextShipment[key])) {
@@ -10528,9 +10537,7 @@ async function handleApi(req, res, url) {
         if (!currentOrder) throw new Error("系统订单不存在，请刷新后重试");
         if (!financeActor) {
           requireOrderPermissionForAuth(req, "update");
-          if (!isCreditSaleOrderOwner(state.personnel, currentOrder, operator)) {
-            throw new Error("只有该订单负责人可以认领这笔流水");
-          }
+          assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
           const candidateIds = new Set(statement.candidates.map((candidate) => String(candidate?.orderId ?? "")));
           if (!candidateIds.has(orderId)) throw new Error("该流水不是此订单的候选收款，请联系财务处理");
         }
@@ -12982,6 +12989,7 @@ async function handleApi(req, res, url) {
       }
       const target = resolveAuthorizedLockedOrderTarget(req, state, body?.orderId);
       currentOrder = target.order;
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       const result = planOrderWholesaleTag(currentOrder, body, req.auth.account);
       if (result.unchanged) {
         await client.query("COMMIT");
@@ -13494,12 +13502,12 @@ async function handleApi(req, res, url) {
       }
       const currentOrder = orderMatches[0];
       if (!currentOrder) throw new Error("订单不存在，请刷新后重试");
+      requireVisibleSiteForAuth(req, state, currentOrder.siteId, "不能修改未授权场地的订单");
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       if (currentOrder.status === "completed") throw new Error("已完成订单不能再编辑");
       if (Object.prototype.hasOwnProperty.call(body, "status") && body.status !== currentOrder.status) {
         throw httpError(409, "订单状态必须通过对应业务入口修改", "ORDER_STATUS_DEDICATED_REQUIRED");
       }
-      requireVisibleSiteForAuth(req, state, currentOrder.siteId, "不能修改未授权场地的订单");
-
       const nextOrderInput = normalizeOrderMutationInput(state, body, currentOrder, {
         visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state),
       });
@@ -13588,9 +13596,7 @@ async function handleApi(req, res, url) {
       const visibleOrders = requestedSiteId === ALL_SITE_ID
         ? (visibleState.orders ?? [])
         : (siteFilteredState(visibleState, requestedSiteId).orders ?? []);
-      const operator = authenticatedOperator(req);
-      const admin = req.auth?.account?.accessRole === "admin";
-      const ownedOrders = visibleOrders.filter((order) => admin || isCreditSaleOrderOwner(state.personnel, order, operator));
+      const ownedOrders = visibleOrders.filter((order) => isOrderBusinessMutationOwner(state, order, req.auth.account));
       const ownedById = new Map(ownedOrders.map((order) => [String(order?.id ?? ""), order]));
       const siteIds = requestedSiteId === ALL_SITE_ID
         ? visibleSiteIdsForAccount(req.auth?.account, state)
@@ -13651,14 +13657,13 @@ async function handleApi(req, res, url) {
     try {
       const body = JSON.parse(await readBody(req) || "{}");
       const operator = authenticatedOperator(req);
-      requireOrderPermissionForAuth(req, "update");
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = rows[0]?.data ?? {};
+      refreshLockedOrderMutationAuth(req, state);
+      requireOrderPermissionForAuth(req, "update");
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
-      if (req.auth?.account?.accessRole !== "admin" && !isCreditSaleOrderOwner(state.personnel, currentOrder, operator)) {
-        throw new Error("只有订单负责人可以登记本单现金收款");
-      }
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       if (normalizePaymentChannel(currentOrder.paymentChannel) !== "cash") throw new Error("只有现金订单需要人工登记收款");
       const profile = financeMatchingOrderProfiles({ ...state, orders: [currentOrder] })[0];
       const amount = normalizeMoney(body.amount, "Cash payment amount");
@@ -14090,6 +14095,7 @@ async function handleApi(req, res, url) {
       requireOrderPermissionForAuth(req, "update");
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, body.orderId);
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       const orderId = String(currentOrder.id ?? "");
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能登记退款");
       const currentPayments = Array.isArray(currentOrder.payments) ? currentOrder.payments : [];
@@ -14186,6 +14192,7 @@ async function handleApi(req, res, url) {
       if (!requestedOrderId || !stockItemId) throw new Error("缺少订单或商品信息");
 
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       const orderId = String(currentOrder.id ?? "");
       if (currentOrder.status === "completed") throw new Error("已完成订单不能退商品");
       if (currentOrder.status === "cancelled") throw new Error("已取消订单不能退商品");
@@ -14303,6 +14310,7 @@ async function handleApi(req, res, url) {
 
       const requestedOrderId = String(body.orderId ?? "").trim();
       const { order: currentOrder, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      assertOrderBusinessMutationOwner(state, currentOrder, req.auth.account);
       const orderId = String(currentOrder.id ?? "");
       for (const shipment of (state.shipments ?? []).filter(item => String(item.orderId) === orderId)) {
         if (shipment.fulfillmentCorrection) assertFulfillmentCorrectionAllowsProgress(shipment);
@@ -14373,6 +14381,7 @@ async function handleApi(req, res, url) {
       requireOrderPermissionForAuth(req, "delete");
       const requestedOrderId = String(body.orderId ?? "").trim();
       const { order, orders } = resolveAuthorizedLockedOrderTarget(req, state, requestedOrderId);
+      assertOrderBusinessMutationOwner(state, order, req.auth.account);
       const orderId = String(order.id ?? "");
       if (Array.isArray(order.paymentCorrections) && order.paymentCorrections.length > 0) throw httpError(409, "该订单留有资金撤销或更正记录，必须保留以供核对，不能删除", "PAYMENT_CORRECTION_AUDIT_RETAINED");
       if (Array.isArray(order.payments) && order.payments.length > 0) throw new Error("该订单已有收款记录，不能删除");
@@ -14710,6 +14719,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
@@ -14806,6 +14816,7 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
@@ -14885,12 +14896,14 @@ async function handleApi(req, res, url) {
       await client.query("BEGIN");
       const { rows } = await client.query("SELECT data FROM app_state WHERE id = $1 FOR UPDATE", [stateId]);
       const state = normalizePickupShipmentsForState(rows[0]?.data ?? {});
+      refreshLockedOrderMutationAuth(req, state);
       requireOrderPermissionForAuth(req, "update");
 
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const resolution = String(body.resolution ?? "").trim();
       if (!["refund", "reship"].includes(resolution)) throw new Error("发货报损必须选择退款或补发处理方式");
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      assertOrderBusinessMutationOwner(state, order, req.auth.account);
       const shipmentId = String(shipment.id ?? "");
       if (shipment.shipMethod === "pickup") throw new Error("上门自取订单不可报损");
       if (!shipmentHasActuallyShipped(shipment)) {
@@ -15100,6 +15113,7 @@ async function handleApi(req, res, url) {
       refreshLockedOrderMutationAuth(req, state);
       requireModulePermissionForAuth(req, "orders", "update");
       const { shipment, order } = resolveAuthorizedLockedShipmentTarget(req, state, url.searchParams.get("shipmentId"));
+      assertOrderBusinessMutationOwner(state, order, req.auth.account);
       const preview = shipmentCancellationReview(state, shipment, order, {
         visibleSiteIds: visibleSiteIdsForAccount(req.auth?.account, state), reviewer: authenticatedOperator(req),
       });
@@ -15126,6 +15140,7 @@ async function handleApi(req, res, url) {
 
       const requestedShipmentId = String(body.shipmentId ?? "").trim();
       const { shipment, shipments, order, orders } = resolveAuthorizedLockedShipmentTarget(req, state, requestedShipmentId);
+      assertOrderBusinessMutationOwner(state, order, req.auth.account);
       const shipmentId = String(shipment.id ?? "");
       if (shipment.status !== "outbound" && shipment.status !== "shipped") {
         throw new Error("只有已出库或运输中的发货单可以取消");
@@ -15292,6 +15307,9 @@ async function handleApi(req, res, url) {
 	      if (!rows[0]) throw new Error("系统状态不存在");
 	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
 	      const current = normalizePickupShipmentsForState(persistedCurrent);
+          if (Object.hasOwn(rawPatch, "orders") || Object.hasOwn(rawPatch, "shipments")) {
+            refreshLockedOrderMutationAuth(req, current);
+          }
 	      if (projectedKeys.includes("products") && Array.isArray(current.products)) {
 	        current.products = current.products.map(withoutLegacyProductVisibility);
 	      }
@@ -15456,7 +15474,9 @@ async function handleApi(req, res, url) {
       });
     } catch (error) {
       await client?.query("ROLLBACK").catch(() => undefined);
-      sendJson(req, res, Number(error?.statusCode ?? 400), { error: `Failed to patch PostgreSQL state: ${error.message}` });
+      sendJson(req, res, Number(error?.statusCode ?? 400), {
+        ...(error?.code ? { code: error.code } : {}), error: `Failed to patch PostgreSQL state: ${error.message}`,
+      });
     } finally {
       client?.release();
     }

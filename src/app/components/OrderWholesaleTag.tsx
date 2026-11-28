@@ -196,7 +196,7 @@ export function OrderWholesaleTag({ order, viewer, canUpdate, onOrderUpdated }: 
       {canUpdate && !wholesaleSource && <Button type="button" variant="outline" className="!min-h-[44px] shrink-0" disabled={pending} onClick={() => void toggle()}>{pending ? <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Tag className="size-4" aria-hidden="true" />}{pending ? "正在保存…" : order.isWholesaleOrder === true ? "取消批发标记" : "标记为批发订单"}</Button>}
     </div>
     {order.wholesaleOrderUpdatedAt && <p className="mt-2 break-words text-xs leading-5 text-muted-foreground">最近{order.isWholesaleOrder === true ? "标记" : "取消"}：{actor} · {formatWholesaleTime(order.wholesaleOrderUpdatedAt)}（北京时间）</p>}
-    {!canUpdate && <p className="mt-2 text-xs text-muted-foreground">当前账号仅可查看，需有订单修改权限才能更改标记。</p>}
+    {!canUpdate && <p className="mt-2 text-xs text-muted-foreground">当前账号仅可查看；由有订单修改权限的负责人或管理员更改标记。</p>}
     {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
     {message && <p role="status" className="mt-2 text-sm">{message}</p>}
   </section>;
