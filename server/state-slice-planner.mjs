@@ -40,7 +40,7 @@ const GENERIC_STATE_PATCH_DEPENDENCIES = Object.freeze({
   products: ["species", "publicCatalogPolicy", "products", "stock", "orders"],
   productOrigins: ["productOrigins"],
   tankGroups: ["sites", "tankGroups"],
-  batches: ["sites", "batches", "stock"],
+  batches: ["personnel", "sites", "batches", "stock"],
   lossRecords: ["sites", "tankGroups", "stock", "lossRecords"],
   logs: ["sites", "tankGroups", "logs"],
   waterQualityRecords: ["sites", "tankGroups", "waterQualityRecords"],

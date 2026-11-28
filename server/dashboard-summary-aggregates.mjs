@@ -351,6 +351,7 @@ export function buildDashboardLossSeries({
         : (lossStockIdsByBatchId.get(batchId)?.size ?? 0),
       bioFee: Number(batch?.bioFee || 0),
       shippingFee: Number(batch?.shippingFee || 0),
+      ...(Number.isFinite(batch?.totalCost) ? { totalCost: batch.totalCost } : {}),
     };
     const rows = batchesByDate.get(date);
     if (rows) rows.push(summary);

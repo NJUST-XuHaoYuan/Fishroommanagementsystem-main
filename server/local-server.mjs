@@ -23,6 +23,7 @@ import {
 } from "./video-upload-rules.mjs";
 import { normalizeLegacyDouyinOrderRequest } from "./order-source-compat.mjs";
 import { assertOrderBusinessMutationOwner, isOrderBusinessMutationOwner } from "./order-mutation-ownership.mjs";
+import { createPurchaseBatchHandler, assertPurchaseBatchCostingPatch } from "./purchase-batch-api.mjs";
 import { assertCanUploadNewCustomerEvidence, assertNewCustomerCustomerUnchanged, canViewNewCustomerEvidence, newCustomerApprovalDetail, newCustomerApprovalVersion, newCustomerCustomerManagementBlock, planNewCustomerRequest, planNewCustomerReview } from "./new-customer-approval.mjs";
 import {
   NEW_CUSTOMER_EVIDENCE_DIRECTORY, NEW_CUSTOMER_EVIDENCE_MAX_BYTES, NEW_CUSTOMER_EVIDENCE_DRAFT_TTL,
@@ -2072,6 +2073,7 @@ function buildDailyLossData(state = {}, dates = [], productById = new Map(), spe
             : (lossStockIdsByBatchId.get(batchId)?.size ?? 0),
           bioFee: Number(batch?.bioFee || 0),
           shippingFee: Number(batch?.shippingFee || 0),
+          ...(Number.isFinite(batch?.totalCost) ? { totalCost: batch.totalCost } : {}),
         };
       });
     return {
@@ -8898,6 +8900,13 @@ const handleOrderFollowupApi = createOrderFollowupHandler({
   requireSite: requireVisibleSiteForAuth, hasPermission: hasModulePermission, normalizeSiteId, nowInChina: nowDatetimeInChina,
 });
 
+const handlePurchaseBatchApi = createPurchaseBatchHandler({
+  pool, stateId, readBody, sendJson, refreshAuth: refreshLockedOrderMutationAuth,
+  requireSite: requireVisibleSiteForAuth, requirePermission: requireModulePermissionForAuth,
+  hasPermission: hasModulePermission, normalizeSiteId, todayInChina, externalizeDataUrls,
+  maxOperationLogs: MAX_OPERATION_LOGS,
+});
+
 async function handleApi(req, res, url) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, jsonHeaders);
@@ -12716,6 +12725,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (await handlePurchaseBatchApi(req, res, url)) return;
   if (await handleTankGroupLegacyHistoryApi(req, res, url)) return;
   if (await stockLossService.handleReason(req, res, url)) return;
   if (await handleMobileMaintenanceHistoryApi(req, res, url)) return;
@@ -15307,7 +15317,7 @@ async function handleApi(req, res, url) {
 	      if (!rows[0]) throw new Error("系统状态不存在");
 	      const persistedCurrent = Object.fromEntries(projectedKeys.map((key) => [key, rows[0][key]]));
 	      const current = normalizePickupShipmentsForState(persistedCurrent);
-          if (Object.hasOwn(rawPatch, "orders") || Object.hasOwn(rawPatch, "shipments")) {
+          if (Object.hasOwn(rawPatch, "orders") || Object.hasOwn(rawPatch, "shipments") || Object.hasOwn(rawPatch, "batches")) {
             refreshLockedOrderMutationAuth(req, current);
           }
 	      if (projectedKeys.includes("products") && Array.isArray(current.products)) {
@@ -15385,6 +15395,7 @@ async function handleApi(req, res, url) {
 	      validateStatePatchActions(req, current, validationState, Object.keys(rawPatch));
 	      validateOrderStatePatch(req, current, validationState, Object.keys(rawPatch));
 	      validateReferenceIntegrity(current, validationState, Object.keys(rawPatch));
+          assertPurchaseBatchCostingPatch(current, validationState, Object.keys(rawPatch));
 	      validateGenericStatePatchSiteScope(req, current, validationState, Object.keys(rawPatch));
 	      const patch = await externalizeDataUrls(rawPatch);
 	      if (Object.prototype.hasOwnProperty.call(patch, "batches") && Array.isArray(patch.batches)) {

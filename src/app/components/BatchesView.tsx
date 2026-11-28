@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, PurchaseBatch, uid } from "../store";
 import { DataTable } from "./common";
 import { Button } from "./ui/button";
@@ -21,6 +21,10 @@ import { MediaPreviewTrigger } from "./MediaPreviewDialog";
 import { authJsonHeaders } from "../utils/authSession";
 import { BatchDetailsView } from "./BatchDetailsView";
 import { BatchInfoSection } from "./BatchInfoSection";
+import { PurchaseBatchEditor, type PurchaseBatchEditorSave } from "./PurchaseBatchEditor";
+import { batchPurchaseTotal, purchaseBasicError } from "../utils/purchaseBatchDisplay";
+import { applyBatchApiResult } from "../utils/purchaseBatchApi";
+import { captureNewCustomerSession, isNewCustomerSessionCurrent } from "../utils/newCustomerEvidence";
 import { BatchValuationListSummary, BatchValuationScopeWarning, BatchValuationValue } from "./BatchStockValuationSection";
 import type { BatchStockValuation } from "../utils/batchStockValuation";
 import { sortBatchesNewestFirst } from "../utils/batchSorting";
@@ -79,7 +83,7 @@ function money(value: number) {
 }
 
 export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesViewProps = {}) {
-  const { state, activeSiteId, saveStateTransform } = useStore();
+  const { state, activeSiteId, setState, saveStateTransform } = useStore();
   const [localDetailRequest, setLocalDetailRequest] = useState<BatchDetailRequest | null>(null);
   const requestedDetail = detailRequest === undefined ? localDetailRequest : detailRequest;
   const openFishDetails = (request: BatchDetailRequest | null) => {
@@ -88,6 +92,14 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
   };
   const [editing, setEditing] = useState<PurchaseBatch | null>(null);
   const [open, setOpen] = useState(false);
+  const [purchaseEditing, setPurchaseEditing] = useState<PurchaseBatch | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const saveBusy = useRef(false);
+  const newBatchId = useRef("");
+  const legacyAttempt = useRef<{ key: string; id: string } | null>(null);
+  const legacyBaseline = useRef("");
+  const baselineLossCount = useRef(0);
   const [del, setDel] = useState<PurchaseBatch | null>(null);
   const [revenueMetrics, setRevenueMetrics] = useState<BatchRevenueMetric[] | null>(null);
   const [loadedRevenueScopeKey, setLoadedRevenueScopeKey] = useState("");
@@ -97,7 +109,25 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
   const [revenueDiagnostics, setRevenueDiagnostics] = useState<BatchRevenueResponse["diagnostics"]>();
   const permission = usePermission("batches");
 
-  const today = new Date().toISOString().slice(0, 10);
+  const contextKey = `${activeSiteId}|${state.user?.username || ""}|${state.user?.role || ""}|${captureNewCustomerSession()?.key || ""}|${permission.canUpdate}|${permission.canCreate}`;
+  const contextRef = useRef(contextKey);
+  contextRef.current = contextKey;
+  useEffect(() => { setOpen(false); setEditing(null); setPurchaseEditing(null); setDel(null); setSaveError(""); }, [contextKey]);
+  const beginEdit = (batch: PurchaseBatch, procurement = false) => {
+    newBatchId.current = batch.id || uid();
+    baselineLossCount.current = batch.lossCount;
+    if (procurement || batch.procurement || !batch.id) { setPurchaseEditing(batch); return; }
+    const copy = { ...batch, lossProof: [...(batch.lossProof || [])] };
+    legacyBaseline.current = JSON.stringify(copy);
+    setEditing(copy); setSaveError(""); setOpen(true);
+  };
+  const closeLegacy = () => {
+    if (saveBusy.current) return;
+    if (editing && JSON.stringify(editing) !== legacyBaseline.current && !window.confirm("当前修改尚未保存，确定关闭吗？")) return;
+    setOpen(false);
+  };
+
+  const today = new Date().toLocaleDateString("en-CA");
   const sortedBatches = useMemo(() => sortBatchesNewestFirst(state.batches), [state.batches]);
 
   const generateBatchNo = () => {
@@ -206,26 +236,39 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
     return money(salesStats(batchId)[key]);
   };
 
+  const submitBatch = async (change: { batch: PurchaseBatch; procurement?: PurchaseBatchEditorSave["procurement"]; mode: "legacy" | "draft" | "confirm"; clientMutationId: string }) => {
+    if (!permission.requirePermission(change.batch.id ? "update" : "create")) throw new Error("当前账号没有保存此批次的权限。");
+    const session = captureNewCustomerSession();
+    const requestContext = contextRef.current;
+    if (!isNewCustomerSessionCurrent(session, state.user)) throw new Error("登录状态已变化，请重新登录。");
+    const { batch } = change;
+    const response = await fetch("/api/batches/save", { method: "POST", headers: authJsonHeaders(), body: JSON.stringify({
+      siteId: activeSiteId, batchId: batch.id || newBatchId.current, expectedRevision: batch.costingRevision ?? 0,
+      clientMutationId: change.clientMutationId, mode: change.mode,
+      ...(batch.lossCount !== baselineLossCount.current ? { expectedLossCount: baselineLossCount.current } : {}),
+      batch: { batchNo: batch.batchNo, supplier: batch.supplier, arrivalDate: batch.arrivalDate, notes: batch.notes,
+        ...(batch.lossCount !== baselineLossCount.current ? { lossCount: batch.lossCount } : {}), lossProof: batch.lossProof, ...(change.mode === "legacy" ? { bioFee: batch.bioFee, shippingFee: batch.shippingFee } : {}) },
+      ...(change.procurement ? { procurement: change.procurement } : {}),
+    }) });
+    const result = await response.json().catch(() => ({}));
+    if (!isNewCustomerSessionCurrent(session, state.user) || contextRef.current !== requestContext) throw new Error("登录或场地已变化，请重新打开批次核对保存结果。");
+    if (!response.ok || !result.ok) throw Object.assign(new Error(result.error || "保存失败，填写内容已保留，请重试。"), { status: response.status, code: result.code });
+    applyBatchApiResult(setState, result, { session: session!, shouldApply: () => contextRef.current === requestContext });
+    setRevenueRetry(value => value + 1);
+  };
+
   const save = async () => {
-    if (!editing) return;
-    if (!permission.requirePermission(editing.id ? "update" : "create")) return;
-    if (!editing.supplier.trim()) return toast.error("请填写供应商");
-    if (!editing.arrivalDate) return toast.error("请选择到货日期");
-    if (editing.arrivalDate > today) return toast.error("到货日期不能晚于今天");
-    if (maxArrivalDate && editing.arrivalDate > maxArrivalDate) return toast.error("到货日期不能晚于该批次最早入库日期");
-    const finalEditing = { ...editing, commissionMultiplier: 100 };
-    if (!confirmWrite(editing.id ? "修改" : "新增", editing.id ? "将保存采购批次的修改。" : "将新增一个采购批次。")) return;
-    const ok = await saveStateTransform((latest) => {
-      const exists = latest.batches.find((b) => b.id === finalEditing.id);
-      if (exists) return { ...latest, batches: latest.batches.map((b) => (b.id === finalEditing.id ? finalEditing : b)) };
-      return {
-        ...latest,
-        batches: [...latest.batches, { ...finalEditing, id: uid(), createdAt: new Date().toISOString() }],
-      };
-    });
-    if (!ok) return toast.error("保存失败，请重试");
-    setOpen(false);
-    toast.success("已保存");
+    if (!editing || saveBusy.current) return;
+    const problem = purchaseBasicError(editing, today, maxArrivalDate);
+    if (problem) { setSaveError(problem); return; }
+    const key = JSON.stringify(editing);
+    if (legacyAttempt.current?.key !== key) legacyAttempt.current = { key, id: `batch-${uid()}-${uid()}` };
+    saveBusy.current = true; setSaving(true); setSaveError("");
+    try {
+      await submitBatch({ batch: editing, mode: "legacy", clientMutationId: legacyAttempt.current.id });
+      setOpen(false); toast.success("批次资料已保存");
+    } catch (cause) { setSaveError(cause instanceof Error ? cause.message : "保存失败，请重试。"); }
+    finally { saveBusy.current = false; setSaving(false); }
   };
 
   const detailVisible = requestedDetail?.siteId === activeSiteId;
@@ -239,7 +282,8 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         batchInfo={selectedBatch && <BatchInfoSection batch={selectedBatch}
           revenue={revenueAvailable ? salesStats(selectedBatch.id) : null}
           loading={revenueLoading} error={revenueError} onRetry={() => setRevenueRetry(value => value + 1)}
-          onEdit={permission.canUpdate ? () => { setEditing({ ...selectedBatch, lossProof: lossProofs(selectedBatch) }); setOpen(true); } : undefined} />}
+          onEdit={permission.canUpdate ? () => beginEdit(selectedBatch) : undefined}
+          onProcurement={permission.canUpdate ? () => beginEdit(selectedBatch, true) : undefined} />}
       /> : <>
       <div>
         <h2>采购批次管理</h2>
@@ -266,7 +310,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
         data={sortedBatches}
         searchKeys={["batchNo", "supplier", "arrivalDate"]}
         searchPlaceholder="搜索批次号、供应商..."
-        onAdd={permission.canCreate ? () => { setEditing(empty()); setOpen(true); } : undefined}
+        onAdd={permission.canCreate ? () => beginEdit(empty(), true) : undefined}
         addLabel="新增批次"
         tableMinWidth="1120px"
         columns={[
@@ -290,9 +334,9 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
             render: (r) => (
               <span
                 className="whitespace-nowrap tabular-nums"
-                title={`生物 ${money(r.bioFee)} · 运输 ${money(r.shippingFee)}`}
+                title={r.procurement?.status === "confirmed" ? "已确认的采购金额及五项费用合计" : r.procurement ? "草稿确认前保留原成本" : `生物 ${money(r.bioFee)} · 运输 ${money(r.shippingFee)}`}
               >
-                {money(r.bioFee + r.shippingFee)}
+                {batchPurchaseTotal(r) === null ? "待确认" : money(batchPurchaseTotal(r)!)}
               </span>
             ),
           },
@@ -365,7 +409,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
               </dl>
               <BatchValuationScopeWarning valuation={stats.valuation} />
               <div className="batch-mobile-three-columns grid grid-cols-3 gap-2 text-xs">
-                <div><span className="text-muted-foreground">采购成本</span><div className="mt-0.5 font-medium tabular-nums">{money(row.bioFee + row.shippingFee)}</div></div>
+                <div><span className="text-muted-foreground">采购成本</span><div className="mt-0.5 font-medium tabular-nums">{batchPurchaseTotal(row) === null ? "待确认" : money(batchPurchaseTotal(row)!)}</div></div>
                 <div><span className="text-muted-foreground">入库</span><div className="mt-0.5 font-medium">{row.stockedCount} 条</div></div>
                 <div><span className="text-muted-foreground">报损</span><div className="mt-0.5 font-medium">{row.lossCount} 条</div></div>
               </div>
@@ -381,7 +425,7 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
                 <Button size="sm" variant="ghost" className="size-8 shrink-0 p-0" aria-label={`更多批次操作 ${row.batchNo}`}><MoreHorizontal aria-hidden="true" className="size-4" /></Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {permission.canUpdate && <DropdownMenuItem className="min-h-10" onSelect={() => { setEditing({ ...row, lossProof: lossProofs(row) }); setOpen(true); }}>编辑批次</DropdownMenuItem>}
+                {permission.canUpdate && <DropdownMenuItem className="min-h-10" onSelect={() => beginEdit(row)}>编辑批次</DropdownMenuItem>}
                 {permission.canDelete && <DropdownMenuItem className="min-h-10" variant="destructive" onSelect={() => setDel(row)}>删除批次</DropdownMenuItem>}
               </DropdownMenuContent>
             </DropdownMenu>}
@@ -392,14 +436,19 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
 
       </>}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      {purchaseEditing && <PurchaseBatchEditor key={`${contextKey}:${purchaseEditing.id || "new"}`} batch={purchaseEditing} products={state.products}
+        arrivalDateMax={purchaseEditing.id && earliestStockInDate(purchaseEditing.id) && earliestStockInDate(purchaseEditing.id)! < today ? earliestStockInDate(purchaseEditing.id)! : today}
+        arrivalDateUnavailable={Boolean(purchaseEditing.id) && (!revenueAvailable || revenueLoading || Boolean(revenueError))}
+        onClose={() => setPurchaseEditing(null)} onSave={async change => { await submitBatch(change); setPurchaseEditing(null); toast.success(change.mode === "draft" ? "采购草稿已保存，正式成本未变" : "采购成本已确认并保存"); }} />}
+
+      <Dialog open={open} onOpenChange={value => !value && closeLegacy()}>
         <DialogContent
           aria-describedby={undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
         >
           <DialogHeader><DialogTitle>{editing?.id ? "编辑批次" : "新增批次"}</DialogTitle></DialogHeader>
           {editing && (
-            <div className="grid gap-4 py-2">
+            <fieldset disabled={saving} className="grid gap-4 py-2">
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-2">
                   <Label>批次号</Label>
@@ -506,11 +555,12 @@ export function BatchesView({ detailRequest, onDetailRequestChange }: BatchesVie
                 <Label>备注</Label>
                 <Textarea rows={2} value={editing.notes} onChange={(e) => setEditing({ ...editing, notes: e.target.value })} />
               </div>
-            </div>
+            </fieldset>
           )}
+          {saveError && <p role="alert" className="text-sm text-red-700">{saveError}</p>}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
-            <Button onClick={save}>保存</Button>
+            <Button variant="outline" disabled={saving} onClick={closeLegacy}>取消</Button>
+            <Button disabled={saving} onClick={save}>{saving ? "保存中…" : "保存资料"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

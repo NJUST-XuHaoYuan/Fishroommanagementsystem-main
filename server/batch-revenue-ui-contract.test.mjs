@@ -8,7 +8,7 @@ const infoSource = await readFile(new URL("../src/app/components/BatchInfoSectio
 const tableSource = await readFile(new URL("../src/app/components/common.tsx", import.meta.url), "utf8");
 
 test("batch page loads aggregate metrics instead of complete order payment records", () => {
-  assert.match(appSource, /batches:\s*\["batches"\]/);
+  assert.match(appSource, /batches:\s*\["batches", "products", "species"\]/);
   assert.doesNotMatch(appSource, /batches:\s*\[[^\]]*"orders"/);
   assert.doesNotMatch(appSource, /batches:\s*\[[^\]]*"shipments"/);
   assert.match(

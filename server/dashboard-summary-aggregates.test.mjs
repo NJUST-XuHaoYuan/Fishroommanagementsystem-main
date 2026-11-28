@@ -14,6 +14,19 @@ function dates(count) {
   return Array.from({ length: count }, (_, index) => `2026-${String(Math.floor(index / 28) + 1).padStart(2, "0")}-${String(index % 28 + 1).padStart(2, "0")}`);
 }
 
+test("batch arrivals retain complete confirmed procurement costs while legacy batches keep their original fee fields", () => {
+  const series = buildDashboardLossSeries({ dates: ["2026-09-01"], batches: [
+    { id: "new", siteId: "nanjing", arrivalDate: "2026-09-01", bioFee: 700, shippingFee: 100, totalCost: 840 },
+    { id: "old", siteId: "nanjing", arrivalDate: "2026-09-01", bioFee: 200, shippingFee: 30 },
+  ] });
+  const [current, legacy] = series[0].batchArrivals;
+  assert.equal(current.totalCost, 840);
+  assert.equal(current.bioFee, 700);
+  assert.equal(current.shippingFee, 100);
+  assert.equal(legacy.totalCost, undefined);
+  assert.equal(legacy.bioFee + legacy.shippingFee, 230);
+});
+
 test("finance compatibility series uses original snapshots and registered receipts, without finance callbacks", () => {
   const chartDates = dates(730);
   const orders = [

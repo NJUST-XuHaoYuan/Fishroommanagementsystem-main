@@ -216,6 +216,9 @@ function appStateRow(sql, values = []) {
     if (/\bAS\s+stock_product\b/i.test(sql)) row.stock_product = list(state.products).find((product) => product.id === item?.productId) ?? null;
   }
   if (/\bAS\s+matching_water_records\b/i.test(sql)) row.matching_water_records = (state.waterQualityRecords ?? []).filter(record => String(record.id ?? "").trim() === String(values[1]));
+  if (/\bAS purchase_batch_stock\b/.test(sql)) row.purchase_batch_stock = (state.stock ?? [])
+    .filter(item => String(item.batchId ?? "") === String(values[1]))
+    .map(({ id, batchId, inDate }) => ({ id, batchId, inDate }));
   if (/\bAS loss_mutation_logs\b/.test(sql)) row.loss_mutation_logs = (state.operationLogs ?? []).filter(record => record.operator === values[1] && record.clientMutationId === values[2]);
   if (/\bAS loss_matching_records\b/.test(sql)) row.loss_matching_records = (state.lossRecords ?? []).filter(record => values[3].includes(record.stockItemId));
   if (/\bAS loss_linked_bio_records\b/.test(sql)) row.loss_linked_bio_records = (state.bioRecords ?? []).filter(record => values[1].includes(record.id));

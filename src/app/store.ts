@@ -166,6 +166,10 @@ export type PurchaseBatch = {
   arrivalDate: string;
   bioFee: number;
   shippingFee: number;
+  /** 服务端确认的全费用采购成本；历史批次无此字段时沿用原两项费用。 */
+  totalCost?: number;
+  costingRevision?: number;
+  procurement?: import("./utils/purchaseBatchTypes").PurchaseProcurement;
   stockedCount: number;
   lossCount: number;
   lossProof: string[];

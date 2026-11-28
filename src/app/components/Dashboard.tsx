@@ -132,6 +132,7 @@ type DailyBatchArrival = {
   lossCount: number;
   bioFee: number;
   shippingFee: number;
+  totalCost?: number;
 };
 
 type DailyLossPoint = {
@@ -1306,6 +1307,7 @@ function AdminDashboard() {
           lossCount: Number(batch.lossCount || 0) || lostStockIds.size,
           bioFee: Number(batch.bioFee || 0),
           shippingFee: Number(batch.shippingFee || 0),
+          ...(Number.isFinite(batch.totalCost) ? { totalCost: batch.totalCost } : {}),
         };
       });
     return {
@@ -2969,7 +2971,7 @@ function AdminDashboard() {
                           <span className="text-xs text-muted-foreground">{batch.arrivalDate}</span>
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          供应商：{batch.supplier || "未填写"} · 入库 {batch.stockedCount} 条 · 已损耗 {batch.lossCount} 条 · 费用 {formatMoney(batch.bioFee + batch.shippingFee)}
+                          供应商：{batch.supplier || "未填写"} · 入库 {batch.stockedCount} 条 · 已损耗 {batch.lossCount} 条 · 费用 {formatMoney(batch.totalCost ?? (batch.bioFee + batch.shippingFee))}
                         </div>
                       </div>
                     ))}
