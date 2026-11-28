@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import pg from "pg";
-import { applyMaintenanceWorkbenchAction, createMaintenanceWorkbenchHandler, emptyMaintenanceWorkbench, ensureMaintenanceWorkbenchSchema, materializeMaintenancePlans } from "./maintenance-workbench.mjs";
+import { applyMaintenanceWorkbenchAction, createMaintenanceWorkbenchHandler, emptyMaintenanceWorkbench, ensureMaintenanceWorkbenchSchema, materializeMaintenancePlans, maintenanceTargetAvailability } from "./maintenance-workbench.mjs";
 
 const now = "2026-11-26T09:30:00", siteId = "nanjing";
 const staff = { id: "staff-id", username: "staff", name: "养护人员", accessRole: "staff", accountEnabled: true,
@@ -9,8 +9,11 @@ const staff = { id: "staff-id", username: "staff", name: "养护人员", accessR
 const fixture = () => ({ sites: [{ id: siteId }, { id: "jiangyin" }], personnel: [structuredClone(staff),
   { ...structuredClone(staff), id: "other-id", username: "other", visibleSiteIds: ["jiangyin"] }],
   tankGroups: [{ id: "tank-nj", name: "南京主缸", siteId, subTanks: [{ id: "sub-nj", name: "子缸1" }] },
-    { id: "tank-jy", siteId: "jiangyin", subTanks: [{ id: "sub-jy" }] }], orders: [{ id: "untouched" }], stock: [{ id: "untouched-fish" }] });
-const task = { title: "记录实际水质", type: "measurement", tankId: "tank-nj", subTankId: "sub-nj", assignedTo: "staff", dueDate: "2026-11-26", dueTime: "10:00", notes: "按实际测量填写，不预设正常值" };
+    { id: "tank-jy", siteId: "jiangyin", subTanks: [{ id: "sub-jy" }] }], orders: [{ id: "untouched" }], products: [{ id: "product", name: "黄金吊" }], stock: [{ id: "fish-1", siteId, subTankId: "sub-nj", productId: "product", code: "F1" }],
+  waterQualityRecords: [{ id: "water-1", siteId, tankGroupId: "tank-nj", scope: "group", measuredAt: "2026-11-26T01:30:00Z", values: [{ parameterId: "ph", value: 8.1 }], operator: "staff", createdBy: "staff" }],
+  logs: [{ id: "drug-1", siteId, tankGroupId: "tank-nj", scope: "group", date: now, action: "下药", notes: "实际药品与用量", operator: "staff", createdBy: "staff" }],
+  bioRecords: [{ id: "fish-record", siteId, stockItemId: "fish-1", subTankId: "sub-nj", date: now, text: "实际鱼只治疗", photos: ["/uploads/fish.jpg"], videos: [], operator: "staff", sourceType: "manual" }] });
+const task = { title: "记录实际水质", type: "measurement", tankId: "tank-nj", targetType: "group", assignedTo: "staff", dueDate: "2026-11-26", dueTime: "10:00", notes: "按实际测量填写，不预设正常值" };
 const create = { action: "create_task", task };
 let id = 0;
 const apply = (data, body, patch = {}) => applyMaintenanceWorkbenchAction(data, body, { state: fixture(), siteId, account: staff, now, createId: prefix => `${prefix}-${++id}`, ...patch });
@@ -21,9 +24,10 @@ test("tasks preserve actual execution, measurements and server-owned actor witho
   const target = pending.tasks[0];
   assert.equal(target.status, "pending"); assert.equal(target.createdBy, "staff"); assert.equal(target.createdAt, now);
   const started = apply(pending, { action: "start_task", taskId: target.id });
-  const completed = apply(started, { action: "complete_task", taskId: target.id, result: "已记录实测，继续观察", measurements: { "温度 ℃": 25.3, pH: 8.1 }, medicineDescription: "未用药" });
+  const completed = apply(started, { action: "complete_task", taskId: target.id, completion: { kind: "waterQualityRecord", recordId: "water-1" } });
   assert.equal(completed.tasks[0].status, "completed"); assert.equal(completed.tasks[0].completedBy, "staff");
-  assert.deepEqual(completed.tasks[0].measurements, { "温度 ℃": 25.3, pH: 8.1 });
+  assert.equal(completed.tasks[0].completion.recordId, "water-1");
+  assert.deepEqual(completed.tasks[0].completion.record.values, state.waterQualityRecords[0].values);
   assert.deepEqual(completed.history.map(entry => entry.action), ["complete_task", "start_task", "create_task"]);
   assert.deepEqual(state, original); assert.equal(pending.tasks[0].status, "pending");
 });
@@ -33,8 +37,8 @@ test("completed or cancelled tasks cannot be executed again and cancellation req
   assert.throws(() => apply(data, { action: "cancel_task", taskId, reason: " " }), /取消原因/);
   const cancelled = apply(data, { action: "cancel_task", taskId, reason: "改由其他缸组统一测量" });
   assert.equal(cancelled.tasks[0].cancelledBy, "staff");
-  for (const closed of [cancelled, apply(data, { action: "complete_task", taskId, result: "测量完成" })]) {
-    for (const action of ["start_task", "complete_task", "cancel_task"]) assert.throws(() => apply(closed, { action, taskId, result: "重复", reason: "重复" }), /已完成或取消/);
+  for (const closed of [cancelled, apply(data, { action: "complete_task", taskId, completion: { kind: "waterQualityRecord", recordId: "water-1" } })]) {
+    for (const action of ["start_task", "complete_task", "cancel_task"]) assert.throws(() => apply(closed, { action, taskId, completion: { kind: "waterQualityRecord", recordId: "water-1" }, reason: "重复" }), /已完成或取消/);
   }
 });
 
@@ -46,29 +50,29 @@ test("task input rejects forged identity, invalid measurements, wrong sites and 
   const inactive = fixture(); inactive.personnel[0].accountEnabled = false;
   assert.throws(() => apply(emptyMaintenanceWorkbench(), create, { state: inactive }), /已停用/);
   const data = apply(emptyMaintenanceWorkbench(), create), taskId = data.tasks[0].id;
-  for (const measurements of [{ pH: "8.1" }, { pH: NaN }, { pH: Infinity }, []]) {
-    assert.throws(() => apply(data, { action: "complete_task", taskId, result: "实测", measurements }), /实测/);
+  for (const completion of [undefined, {}, { kind: "unknown", recordId: "water-1" }, { kind: "waterQualityRecord", recordId: "missing" }]) {
+    assert.throws(() => apply(data, { action: "complete_task", taskId, completion }));
   }
-  assert.throws(() => apply(data, { action: "complete_task", taskId, result: " " }), /执行结果/);
+  assert.throws(() => apply(data, { action: "complete_task", taskId, result: "已完成" }), /无效字段/);
 });
 
 test("daily and weekly occurrences are deterministic and never recreate a completed or cancelled task", () => {
-  let data = apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { title: "每日观察", type: "inspection", frequency: "daily", startDate: "2026-11-26" } });
-  data = apply(data, { action: "create_plan", plan: { title: "每周跟进", type: "treatment", frequency: "weekly", weekdays: [4, 7], startDate: "2026-11-26" } });
+  let data = apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "每日观察", type: "inspection", frequency: "daily", startDate: "2026-11-26" } });
+  data = apply(data, { action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "每周跟进", type: "treatment", frequency: "weekly", weekdays: [4, 7], startDate: "2026-11-26" } });
   const generated = materializeMaintenancePlans(data, siteId, now);
   assert.equal(generated.data.tasks.length, 2);
   assert.deepEqual(materializeMaintenancePlans(data, siteId, now).data.tasks.map(row => row.id), generated.data.tasks.map(row => row.id));
   const repeated = materializeMaintenancePlans(generated.data, siteId, now);
   assert.equal(repeated.changed, false); assert.equal(repeated.data.tasks.length, 2);
   const target = generated.data.tasks.find(row => row.type === "treatment");
-  const completed = apply(generated.data, { action: "complete_task", taskId: target.id, result: "已执行本次治疗，仍需后续观察", medicineDescription: "按现场已确认方案执行，详见记录" });
+  const completed = apply(generated.data, { action: "complete_task", taskId: target.id, completion: { kind: "dailyLog", recordId: "drug-1" } });
   assert.equal(completed.plans.find(row => row.id === target.planId).enabled, true, "one execution must not end a treatment followup plan");
   const future = materializeMaintenancePlans(completed, siteId, "2026-11-29T12:00:00").data;
   assert.equal(future.tasks.length, 6); assert.equal(new Set(future.tasks.map(row => row.id)).size, 6);
 });
 
 test("plan disable preserves tasks, reenable skips disabled dates and prevents duplicate same-day occurrence", () => {
-  let data = apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { title: "观察", type: "inspection", frequency: "daily", startDate: "2026-11-26" } });
+  let data = apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "观察", type: "inspection", frequency: "daily", startDate: "2026-11-26" } });
   data = materializeMaintenancePlans(data, siteId, now).data;
   const planId = data.plans[0].id;
   data = apply(data, { action: "set_plan_enabled", planId, enabled: false });
@@ -81,13 +85,87 @@ test("plan disable preserves tasks, reenable skips disabled dates and prevents d
 });
 
 test("plans never backfill before creation and handoff records enforce task, person and date scope", () => {
-  assert.throws(() => apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { title: "计划", type: "inspection", frequency: "daily", startDate: "2026-11-25" } }), /不能追溯/);
-  for (const weekdays of [[], [0], [8], ["4"]]) assert.throws(() => apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { title: "计划", type: "inspection", frequency: "weekly", weekdays } }), /有效星期/);
+  assert.throws(() => apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "计划", type: "inspection", frequency: "daily", startDate: "2026-11-25" } }), /不能追溯/);
+  for (const weekdays of [[], [0], [8], ["4"]]) assert.throws(() => apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "计划", type: "inspection", frequency: "weekly", weekdays } }), /有效星期/);
   const data = apply(emptyMaintenanceWorkbench(), create), taskId = data.tasks[0].id;
   const handoff = { content: "晚班复测并记录实际情况", assignedTo: "staff", taskId, followUpAt: "2026-11-26T17:30" };
   const next = apply(data, { action: "add_handoff", handoff });
   assert.equal(next.handoffs[0].createdBy, "staff"); assert.equal(next.history[0].detail, handoff.content);
   for (const patch of [{ taskId: "foreign-task" }, { assignedTo: "other" }, { followUpAt: "2026-02-30T17:00" }, { content: "" }]) assert.throws(() => apply(data, { action: "add_handoff", handoff: { ...handoff, ...patch } }));
+});
+
+test("batch targets are fixed, atomic and restricted to whole groups or physical fish", () => {
+  const state = fixture(), initial = emptyMaintenanceWorkbench();
+  const common = { title: "观察", type: "inspection", dueDate: "2026-11-26" };
+  const data = apply(initial, { action: "create_task", task: common, targets: [{ targetType: "group", tankId: "tank-nj" }, { targetType: "fish", stockItemId: "fish-1" }] }, { state });
+  assert.equal(data.tasks.length, 2); assert.equal(data.tasks.find(row => row.targetType === "fish").fishCode, "F1");
+  assert.deepEqual(initial, emptyMaintenanceWorkbench());
+  for (const targets of [[], Array(101).fill({ targetType: "group", tankId: "tank-nj" }), [{ targetType: "group", tankId: "tank-nj" }, { targetType: "group", tankId: "tank-nj" }], [{ targetType: "group", tankId: "tank-nj" }, { targetType: "group", tankId: "tank-jy" }]]) {
+    assert.throws(() => apply(initial, { action: "create_task", task: common, targets }, { state })); assert.deepEqual(initial, emptyMaintenanceWorkbench());
+  }
+  for (const type of ["feeding", "measurement", "water_change"]) assert.throws(() => apply(initial, { action: "create_task", task: { ...common, type, targetType: "fish", stockItemId: "fish-1" } }), /只能选择缸组/);
+  assert.throws(() => apply(initial, { action: "create_task", task: { ...common, tankId: "tank-nj", subTankId: "sub-nj" } }));
+  assert.throws(() => apply(initial, { action: "create_task", task: { ...common, tankId: "tank-nj", type: "media" } }), /单条鱼/);
+});
+
+test("fish tasks follow same-site moves and block transit, loss, outbound and cross-site movement", () => {
+  const state = fixture(); state.tankGroups.push({ id: "tank-nj-2", name: "新缸", siteId, subTanks: [{ id: "sub-nj-2", name: "主缸" }] });
+  const data = apply(emptyMaintenanceWorkbench(), { action: "create_task", task: { title: "拍摄", type: "media", targetType: "fish", stockItemId: "fish-1" } }, { state });
+  const row = data.tasks[0]; state.stock[0].subTankId = "sub-nj-2";
+  assert.equal(maintenanceTargetAvailability(row, state, siteId).currentTankId, "tank-nj-2");
+  assert.equal(row.tankId, "tank-nj");
+  const completed = apply(data, { action: "complete_task", taskId: row.id, completion: { kind: "bioRecord", recordId: "fish-record" } }, { state });
+  assert.equal(completed.tasks[0].completion.record.stockItemId, "fish-1");
+  for (const change of [{ lost: true }, { tankTransfer: { status: "in_transit" } }, { siteId: "jiangyin" }, { subTankId: "deleted" }]) {
+    const changed = structuredClone(state); Object.assign(changed.stock[0], change);
+    assert.equal(maintenanceTargetAvailability(row, changed, siteId).targetUnavailable, true);
+    assert.throws(() => apply(data, { action: "start_task", taskId: row.id }, { state: changed }), error => error.code === "MAINTENANCE_TARGET_UNAVAILABLE");
+  }
+  state.stock[0].sold = true; assert.equal(maintenanceTargetAvailability(row, state, siteId).targetUnavailable, false);
+  state.shipments = [{ status: "outbound", itemStockIds: ["fish-1"] }]; assert.equal(maintenanceTargetAvailability(row, state, siteId).targetUnavailable, true);
+});
+
+test("execution cannot use foreign, stale, inherited, empty or reused records", () => {
+  const data = apply(emptyMaintenanceWorkbench(), create), taskId = data.tasks[0].id;
+  const completion = { kind: "waterQualityRecord", recordId: "water-1" };
+  for (const change of [{ siteId: "jiangyin" }, { createdBy: "other" }, { measuredAt: "2026-11-25T01:00:00Z" }, { tankGroupId: "tank-jy" }, { subTankId: "sub-nj" }, { values: [] }, { inheritedTankGroupIds: ["tank-nj"] }]) {
+    const state = fixture(); Object.assign(state.waterQualityRecords[0], change);
+    assert.throws(() => apply(data, { action: "complete_task", taskId, completion }, { state }));
+  }
+  const completed = apply(data, { action: "complete_task", taskId, completion });
+  const second = apply(completed, create); assert.throws(() => apply(second, { action: "complete_task", taskId: second.tasks[0].id, completion }), error => error.code === "MAINTENANCE_COMPLETION_RECORD_USED");
+  const fish = apply(emptyMaintenanceWorkbench(), { action: "create_task", task: { title: "拍摄", type: "media", targetType: "fish", stockItemId: "fish-1" } });
+  for (const patch of [{ sourceType: "dailyLog" }, { photos: [], videos: [] }, { stockItemId: "wrong" }]) {
+    const state = fixture(); Object.assign(state.bioRecords[0], patch);
+    assert.throws(() => apply(fish, { action: "complete_task", taskId: fish.tasks[0].id, completion: { kind: "bioRecord", recordId: "fish-record" } }, { state }));
+  }
+});
+
+test("plan edits preserve materialized occurrences and single-task edits leave repeat definitions intact", () => {
+  let data = apply(emptyMaintenanceWorkbench(), { action: "create_plan", plan: { title: "原观察", type: "inspection", tankId: "tank-nj", frequency: "daily", startDate: "2026-11-26", dueTime: "10:00" } });
+  data = materializeMaintenancePlans(data, siteId, now).data;
+  const occurrence = structuredClone(data.tasks[0]), planId = data.plans[0].id;
+  const edited = apply(data, { action: "update_plan", planId, plan: { title: "改后观察", type: "inspection", tankId: "tank-nj", frequency: "weekly", weekdays: [5], startDate: "2026-11-26", dueTime: "15:00" } });
+  assert.deepEqual(edited.tasks[0], occurrence); assert.equal(edited.history[0].before.title, "原观察");
+  const future = materializeMaintenancePlans(edited, siteId, "2026-11-27T12:00:00").data;
+  assert.equal(future.tasks[0].title, "改后观察"); assert.equal(future.tasks[0].dueTime, "15:00");
+  const planBefore = structuredClone(future.plans[0]);
+  const single = apply(future, { action: "update_task", taskId: occurrence.id, task: { ...task, title: "仅当次调整" } });
+  assert.deepEqual(single.plans[0], planBefore); assert.equal(single.tasks.find(row => row.id === occurrence.id).title, "仅当次调整");
+});
+
+test("assigned tasks require assignee or admin and unassigned start claims only this occurrence", () => {
+  const data = apply(emptyMaintenanceWorkbench(), create), other = { ...staff, username: "other" };
+  assert.throws(() => apply(data, { action: "start_task", taskId: data.tasks[0].id }, { account: other }), error => error.statusCode === 403);
+  const admin = apply(data, { action: "start_task", taskId: data.tasks[0].id }, { account: { ...other, accessRole: "admin" } });
+  assert.equal(admin.tasks[0].startedBy, "other");
+  const unassigned = apply(emptyMaintenanceWorkbench(), { ...create, task: { ...task, assignedTo: "" } });
+  const started = apply(unassigned, { action: "start_task", taskId: unassigned.tasks[0].id });
+  assert.equal(started.tasks[0].assignedTo, "staff");
+  for (const permissions of [{ create: true, update: false }, { create: false, update: true }]) {
+    const state = fixture(); state.personnel[0].permissions.daily = permissions;
+    assert.throws(() => apply(emptyMaintenanceWorkbench(), create, { state }), /同时具备/);
+  }
 });
 
 // Opt-in real PostgreSQL integration. The URL is restricted to a disposable local
@@ -126,6 +204,7 @@ async function harness(t) {
     },
   });
   const request = async (body, selected = siteId, method = body ? "POST" : "GET") => {
+    if (body && !body.clientMutationId) body = { ...body, clientMutationId: `test-mutation-${++requestCount}` };
     const req = { method, body, auth: { user: { username: "staff" }, account: structuredClone(staff) } }, res = { setHeader() {} };
     await handler(req, res, new URL(`http://localhost/api/maintenance-workbench?siteId=${selected}`));
     return res;
@@ -140,7 +219,7 @@ test("PostgreSQL: save/requery execution and handoff are durable in separate sto
   const empty = await s.request(); assert.equal(empty.status, 200); assert.equal(empty.body.revision, 0); assert.deepEqual(empty.body.tasks, []);
   const created = await s.request({ ...create, siteId, expectedRevision: 0 }); assert.equal(created.status, 200); assert.equal(created.body.revision, 1);
   const taskId = created.body.tasks[0].id;
-  const complete = await s.request({ siteId, expectedRevision: 1, action: "complete_task", taskId, result: "已测量", measurements: { pH: 8.15 } });
+  const complete = await s.request({ siteId, expectedRevision: 1, action: "complete_task", taskId, completion: { kind: "waterQualityRecord", recordId: "water-1" } });
   assert.equal(complete.status, 200); assert.equal(complete.body.tasks[0].completedBy, "staff");
   const handoff = await s.request({ siteId, expectedRevision: 2, action: "add_handoff", handoff: { content: "下一班复查", taskId, assignedTo: "staff" } });
   assert.equal(handoff.status, 200);
@@ -158,9 +237,43 @@ test("PostgreSQL: same revision permits only one concurrent write and replay nev
   assert.deepEqual(await s.read(), s.state);
 });
 
+test("PostgreSQL: mutation IDs replay identical writes, reject changed payloads and complete one real record once", { skip: !databaseUrl }, async t => {
+  const s = await harness(t); await s.request();
+  const payload = { ...create, siteId, expectedRevision: 0, clientMutationId: "same-create-request" };
+  const responses = await Promise.all([s.request(payload), s.request(structuredClone(payload))]);
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+  assert.deepEqual(responses.map(response => Boolean(response.body.replayed)).sort(), [false, true]);
+  const changed = await s.request({ ...payload, task: { ...task, title: "changed" } });
+  assert.equal(changed.status, 409); assert.equal(changed.body.code, "MAINTENANCE_IDEMPOTENCY_CONFLICT");
+  const snapshot = await s.request(), taskId = snapshot.body.tasks[0].id;
+  const empty = await s.request({ siteId, expectedRevision: snapshot.body.revision, action: "complete_task", taskId });
+  assert.equal(empty.status, 400); assert.equal((await s.request()).body.tasks[0].status, "pending");
+  const completion = { siteId, expectedRevision: snapshot.body.revision, clientMutationId: "real-record-completion", action: "complete_task", taskId,
+    completion: { kind: "waterQualityRecord", recordId: "water-1" } };
+  const completed = await s.request(completion); assert.equal(completed.status, 200); assert.equal(completed.body.tasks[0].completion.record.values[0].value, 8.1);
+  const replay = await s.request(completion); assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.history.filter(row => row.action === "complete_task").length, 1);
+  const second = await s.request({ ...create, siteId, expectedRevision: replay.body.revision }); assert.equal(second.status, 200);
+  const reused = await s.request({ ...completion, clientMutationId: "reuse-record-attempt", expectedRevision: second.body.revision, taskId: second.body.tasks[0].id });
+  assert.equal(reused.status, 409); assert.equal(reused.body.code, "MAINTENANCE_COMPLETION_RECORD_USED");
+  assert.deepEqual(await s.read(), s.state);
+});
+
+test("PostgreSQL: batch creation is atomic and response only contains scoped enabled assignees", { skip: !databaseUrl }, async t => {
+  const s = await harness(t); const empty = await s.request();
+  assert.deepEqual(empty.body.assignees, [{ id: "staff-id", username: "staff", name: "养护人员" }]);
+  const body = { siteId, expectedRevision: 0, action: "create_task", task: { title: "目标观察", type: "inspection" },
+    targets: [{ targetType: "group", tankId: "tank-nj" }, { targetType: "fish", stockItemId: "fish-1" }] };
+  const bad = structuredClone(body); bad.targets[1].stockItemId = "missing";
+  assert.equal((await s.request(bad)).status, 409); assert.equal((await s.request()).body.tasks.length, 0);
+  const created = await s.request(body); assert.equal(created.status, 200); assert.equal(created.body.tasks.length, 2);
+  const fish = created.body.tasks.find(row => row.targetType === "fish"); assert.equal(fish.currentSubTankId, "sub-nj");
+  assert.equal(fish.targetUnavailable, false); assert.deepEqual(await s.read(), s.state);
+});
+
 test("PostgreSQL: concurrent materialization is idempotent and does not delete cancelled occurrences", { skip: !databaseUrl }, async t => {
   const s = await harness(t);
-  const created = await s.request({ siteId, expectedRevision: 0, action: "create_plan", plan: { title: "日常观察", type: "inspection", frequency: "daily" } });
+  const created = await s.request({ siteId, expectedRevision: 0, action: "create_plan", plan: { tankId: "tank-nj", targetType: "group", title: "日常观察", type: "inspection", frequency: "daily" } });
   assert.equal(created.status, 200); assert.equal(created.body.tasks.length, 1);
   s.setTime("2026-11-27T09:30:00");
   const results = await Promise.all([s.request(), s.request()]);
@@ -175,7 +288,9 @@ test("PostgreSQL: live daily permission, site and session changes deny writes wi
   const s = await harness(t); await s.request();
   assert.equal((await s.request(undefined, "jiangyin")).status, 403);
   await s.revoke({ permissions: { daily: { create: true, update: false, delete: false } } });
-  const created = await s.request({ ...create, siteId, expectedRevision: 0 }); assert.equal(created.status, 200);
+  const unavailable = await s.request(); assert.deepEqual(unavailable.body.assignees, []);
+  assert.equal((await s.request({ ...create, siteId, expectedRevision: 0 })).status, 400, "a create-only staff member cannot be assigned an unfinishable task");
+  const created = await s.request({ ...create, task: { ...task, assignedTo: "" }, siteId, expectedRevision: 0 }); assert.equal(created.status, 200);
   const taskId = created.body.tasks[0].id;
   for (const action of ["start_task", "complete_task", "cancel_task"]) assert.equal((await s.request({ siteId, expectedRevision: 1, action, taskId, result: "实际完成", reason: "取消" })).status, 403);
   await s.revoke({ permissions: { daily: { create: false, update: false, delete: false } } });

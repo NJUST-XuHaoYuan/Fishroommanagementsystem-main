@@ -1,5 +1,3 @@
-import { GROUP_WATER_ACTIONS } from "./maintenance-scope-rules.mjs";
-
 const list = value => Array.isArray(value) ? value : [];
 const text = value => String(value ?? "").trim();
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -57,22 +55,22 @@ export function createMobileMaintenanceHistoryHandler({ pool, stateId, sendJson,
         own_records AS (
           SELECT 'tank' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'logs', '[]'::jsonb)) AS log_rows(entry)
-          WHERE $8::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
-            AND COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
+          WHERE $7::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
+            AND (COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
+              OR jsonb_typeof(entry -> 'inheritedTankGroupIds') = 'array')
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT grp ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
-              WHERE grp ->> 'id' = entry ->> 'tankGroupId' LIMIT 1), 'nanjing') = $3
+              WHERE grp ->> 'id' = entry ->> 'tankGroupId' OR
+                (grp ->> 'legacyRoomId' = entry ->> 'tankGroupId' AND entry -> 'inheritedTankGroupIds' ? (grp ->> 'id')) LIMIT 1), 'nanjing') = $3
             AND ($6 = '' OR COALESCE(NULLIF(entry ->> 'tankGroupId', ''), (
               SELECT grp ->> 'id' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
               WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(grp -> 'subTanks', '[]'::jsonb)) AS tanks(tank)
-                WHERE tank ->> 'id' = entry ->> 'subTankId') LIMIT 1)) = $6)
-            AND ($4 = '' OR entry ->> 'subTankId' = $4 OR entry ->> 'scope' = 'group'
-              OR btrim(COALESCE(entry ->> 'action', '')) = ANY($7::text[])
-              OR COALESCE(entry ->> 'subTankId', '') = '')
+                WHERE tank ->> 'id' = entry ->> 'subTankId') LIMIT 1)) = $6
+              OR (jsonb_typeof(entry -> 'inheritedTankGroupIds') = 'array' AND entry -> 'inheritedTankGroupIds' ? $6))
           UNION ALL
           SELECT 'fish' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'bioRecords', '[]'::jsonb)) AS bio_rows(entry)
-          WHERE $8::text = '' AND entry ->> 'operator' = $2
+          WHERE $7::text = '' AND entry ->> 'operator' = $2
             AND COALESCE(entry ->> 'sourceType', 'manual') IN ('manual', '')
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT item ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'stock', '[]'::jsonb)) AS fish(item)
@@ -89,28 +87,31 @@ export function createMobileMaintenanceHistoryHandler({ pool, stateId, sendJson,
           UNION ALL
           SELECT 'water' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'waterQualityRecords', '[]'::jsonb)) AS water_rows(entry)
-          WHERE $8::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
-            AND COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
+          WHERE $7::text = '' AND COALESCE(NULLIF(entry ->> 'createdBy', ''), entry ->> 'operator') = $2
+            AND (COALESCE(entry ->> 'tankGroupId', '') NOT IN (SELECT id FROM legacy_room_ids)
+              OR jsonb_typeof(entry -> 'inheritedTankGroupIds') = 'array')
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT grp ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
-              WHERE grp ->> 'id' = entry ->> 'tankGroupId' LIMIT 1), 'nanjing') = $3
-            AND ($6 = '' OR entry ->> 'tankGroupId' = $6)
+              WHERE grp ->> 'id' = entry ->> 'tankGroupId' OR
+                (grp ->> 'legacyRoomId' = entry ->> 'tankGroupId' AND entry -> 'inheritedTankGroupIds' ? (grp ->> 'id')) LIMIT 1), 'nanjing') = $3
+            AND ($6 = '' OR entry ->> 'tankGroupId' = $6
+              OR (jsonb_typeof(entry -> 'inheritedTankGroupIds') = 'array' AND entry -> 'inheritedTankGroupIds' ? $6))
           UNION ALL
           SELECT 'loss' AS kind, entry FROM source,
             LATERAL jsonb_array_elements(COALESCE(data -> 'lossRecords', '[]'::jsonb)) AS loss_rows(entry)
-          WHERE $8::text = 'loss' AND entry ->> 'operator' = $2
+          WHERE $7::text = 'loss' AND entry ->> 'operator' = $2
             AND COALESCE(NULLIF(entry ->> 'siteId', ''), (
               SELECT grp ->> 'siteId' FROM jsonb_array_elements(COALESCE(data -> 'tankGroups', '[]'::jsonb)) AS groups(grp)
               WHERE grp ->> 'id' = entry ->> 'tankGroupId' LIMIT 1), 'nanjing') = $3
             AND ($4 = '' OR entry ->> 'subTankId' = $4)
             AND ($6 = '' OR entry ->> 'tankGroupId' = $6)
-            AND ($9::text = '' OR btrim(COALESCE(entry ->> 'reason', '')) = '')
+            AND ($8::text = '' OR btrim(COALESCE(entry ->> 'reason', '')) = '')
         ), ranked AS (
           SELECT kind, entry, row_number() OVER (PARTITION BY kind
             ORDER BY (COALESCE(entry ->> 'measuredAt', entry ->> 'createdAt', entry ->> 'date', '') ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])([T ]([01][0-9]|2[0-3]):[0-5][0-9])?') DESC,
               COALESCE(entry ->> 'measuredAt', entry ->> 'createdAt', entry ->> 'date') DESC, entry ->> 'id' DESC) AS record_rank
           FROM own_records
-        ) SELECT kind, entry FROM ranked WHERE record_rank <= $5`, [stateId, username, siteId, subTankId, limit + 1, selectedGroupId, GROUP_WATER_ACTIONS, kind, reasonStatus])).rows;
+        ) SELECT kind, entry FROM ranked WHERE record_rank <= $5`, [stateId, username, siteId, subTankId, limit + 1, selectedGroupId, kind, reasonStatus])).rows;
       await client.query("COMMIT");
       // At most (limit + 1) from each of four kinds. Sort actual times in JS so
       // legacy malformed dates cannot make PostgreSQL reject the entire history.

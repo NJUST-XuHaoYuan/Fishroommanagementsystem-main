@@ -379,12 +379,15 @@ export type DailyLog = {
   /** 本地记录时间，精确到秒；兼容历史 YYYY-MM-DD 日期值。 */
   date: string;
   tankGroupId?: string;
-  /** 水体用药等共享水体操作固定归整个缸组。 */
+  /** 所有缸位维护归整个缸组；subTank 仅兼容迁移前数据。 */
   scope?: "group" | "subTank";
-  /** 普通子缸维护的位置；水体操作不以此限定作用范围。 */
+  /** 历史字段，升级后只保留为原登记位置。 */
   subTankId?: string;
   /** 兼容旧记录的原登记位置，不代表独立水体。 */
   recordedFromSubTankId?: string;
+  /** 旧房间记录的一对多历史关联；原记录不复制，不代表新测量。 */
+  inheritedTankGroupIds?: string[];
+  scopeMigration?: { id: string; originalTankGroupId: string; originalSubTankId?: string; originalScope?: string; verifiedHistoricalLocation?: { subTankId: string; tankGroupId: string; evidence: string } };
   action: string;
   operator: string;
   notes: string;
@@ -450,6 +453,8 @@ export type WaterQualityRecord = {
   /** 历史字段，仅表示原登记位置；所有水质记录均属于缸组水体。 */
   subTankId?: string;
   recordedFromSubTankId?: string;
+  inheritedTankGroupIds?: string[];
+  scopeMigration?: { id: string; originalTankGroupId: string; originalSubTankId?: string; originalScope?: string; verifiedHistoricalLocation?: { subTankId: string; tankGroupId: string; evidence: string } };
   values: WaterQualityMeasurement[];
   operator: string;
   notes: string;

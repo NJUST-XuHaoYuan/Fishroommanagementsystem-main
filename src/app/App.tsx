@@ -17,6 +17,7 @@ import { TankGroupsView } from "./components/TankGroupsView";
 import { BatchesView } from "./components/BatchesView";
 import { StockInView } from "./components/StockInView";
 import { DailyView } from "./components/DailyView";
+import { MaintenancePlansView } from "./components/MaintenancePlansView";
 import { LossRecordsView } from "./components/LossRecordsView";
 import { OrdersView } from "./components/OrdersView";
 import { retainNewerWholesaleOrderTags } from "./components/OrderWholesaleTag";
@@ -111,6 +112,7 @@ const VIEW_STATE_KEYS: Record<ViewKey, PersistedKey[]> = {
   batches: ["batches", "products", "species"],
   stockIn: ["species", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   daily: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments", "logs", "waterQualityRecords", "personnel"],
+  maintenancePlans: ["systemSettings", "products", "tankGroups", "batches", "stock", "orders", "shipments"],
   lossRecords: ["lossRecords", "stock", "products", "species", "batches", "tankGroups"],
   customers: ["customers", "customerSources", "orders", "shipments"],
   orders: ["systemSettings", "orders", "customers", "customerSources", "stock", "products", "species", "tankGroups", "shipments", "personnel"],
@@ -2227,6 +2229,7 @@ function AdminApp() {
         />
       );
       case "lossRecords": return <LossRecordsView />;
+      case "maintenancePlans": return <MaintenancePlansView key={`${currentUserKey}:${scopedSiteId}`} />;
       case "customers":  return <CustomersView />;
       case "orders":     return (
         <OrdersView

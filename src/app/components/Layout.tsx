@@ -51,6 +51,7 @@ export type ViewKey =
   | "batches"
   | "stockIn"
   | "daily"
+  | "maintenancePlans"
   | "lossRecords"
   | "customers"
   | "orders"
@@ -90,6 +91,7 @@ const NAV: NavSection[] = [
     icon: Wrench,
     items: [
       { key: "daily", label: "日常管理" },
+      { key: "maintenancePlans", label: "维护计划" },
       { key: "lossRecords", label: "损耗记录" },
     ],
   },

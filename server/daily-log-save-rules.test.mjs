@@ -48,6 +48,33 @@ test("plans a compact create delta using the stored group site and authenticated
   assert.equal(plan.log.action, "喂食");
 });
 
+test("feeding, water changes, observation and custom actions always save at group scope", () => {
+  for (const action of ["喂食", "换水", "观察", "清洗滤棉", "其他"]) {
+    const log = { ...current, id: `group-${action}`, action, scope: "subTank", subTankId: "tank-nj-1", photos: ["/uploads/tank.jpg"] };
+    const options = { change: { log, createOnly: true }, tankGroups: groups, operator: "staff-a", now: "2026-08-19T10:00:00" };
+    const plan = planDailyLogSave(options);
+    assert.equal(plan.log.scope, "group");
+    assert.equal(plan.log.subTankId, undefined);
+    assert.equal(plan.log.recordedFromSubTankId, "tank-nj-1");
+    assert.deepEqual(plan.log.photos, log.photos);
+    const retry = planDailyLogSave({ ...options, matchingLogs: [plan.log] });
+    assert.equal(retry.idempotent, true);
+    const legacyRetry = planDailyLogSave({ ...options, matchingLogs: [{ ...log, createdBy: "staff-a" }] });
+    assert.equal(legacyRetry.idempotent, true);
+  }
+});
+
+test("editing a legacy observation retains its original position, attachments and migration audit", () => {
+  const legacy = { ...current, action: "观察", subTankId: "removed", photos: ["/uploads/old.jpg"], videos: ["/uploads/old.mp4"],
+    scopeMigration: { id: "migration", originalTankGroupId: "old" } };
+  const plan = planDailyLogSave({ change: { log: { ...current, action: "观察", notes: "修正文字" } }, matchingLogs: [legacy], tankGroups: groups, operator: "staff-b", now: "2026-08-19T10:00:00" });
+  assert.equal(plan.log.scope, "group"); assert.equal(plan.log.subTankId, undefined);
+  assert.equal(plan.log.recordedFromSubTankId, "removed");
+  assert.deepEqual(plan.log.photos, legacy.photos); assert.deepEqual(plan.log.videos, legacy.videos);
+  assert.deepEqual(plan.log.scopeMigration, legacy.scopeMigration);
+  assert.equal(plan.log.createdBy, "staff-a");
+});
+
 test("daily timeline sync fails closed for duplicate stock and bio identities", () => {
   assertRuleError(() => assertDailyLogSyncIdentity({
     targetStock: [{ id: "fish-1" }, { id: "fish-1" }],

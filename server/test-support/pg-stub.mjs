@@ -377,19 +377,20 @@ function runQuery(query, values = []) {
     return result(scoped);
   }
   if (/\bown_records AS/.test(sql)) {
-    const [, username, siteId, subTankId, limit, tankGroupId = "", sharedActions = [], kind = "", reasonStatus = ""] = values;
+    const [, username, siteId, subTankId, limit, tankGroupId = "", kind = "", reasonStatus = ""] = values;
     const groupForSub = id => (state.tankGroups ?? []).find(group => (group.subTanks ?? []).some(tank => tank.id === id))?.id;
     const legacyIds = new Set((state.tankGroups ?? []).map(group => group.legacyRoomId).filter(Boolean));
-    const tank = (state.logs ?? []).filter(entry => !legacyIds.has(entry.tankGroupId) && (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId &&
-      (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId)) === tankGroupId) &&
-      (!subTankId || entry.subTankId === subTankId || entry.scope === "group" || sharedActions.includes(String(entry.action ?? "").trim()) || !entry.subTankId)).map(entry => ({ kind: "tank", entry }));
+    const inherited = entry => Array.isArray(entry.inheritedTankGroupIds) ? entry.inheritedTankGroupIds : [];
+    const entrySite = entry => entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId || group.legacyRoomId === entry.tankGroupId && inherited(entry).includes(group.id))?.siteId || "nanjing";
+    const tank = (state.logs ?? []).filter(entry => (!legacyIds.has(entry.tankGroupId) || Array.isArray(entry.inheritedTankGroupIds)) && (entry.createdBy || entry.operator) === username && entrySite(entry) === siteId &&
+      (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId)) === tankGroupId || inherited(entry).includes(tankGroupId))).map(entry => ({ kind: "tank", entry }));
     const fish = (state.bioRecords ?? []).filter(entry => {
       const item = (state.stock ?? []).find(stock => stock.id === entry.stockItemId);
       return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId) &&
         (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId || item?.subTankId)) === tankGroupId);
     }).map(entry => ({ kind: "fish", entry }));
-    const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => !legacyIds.has(entry.tankGroupId) && (entry.createdBy || entry.operator) === username &&
-      (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!tankGroupId || entry.tankGroupId === tankGroupId)).map(entry => ({ kind: "water", entry })) : [];
+    const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => (!legacyIds.has(entry.tankGroupId) || Array.isArray(entry.inheritedTankGroupIds)) && (entry.createdBy || entry.operator) === username &&
+      entrySite(entry) === siteId && (!tankGroupId || entry.tankGroupId === tankGroupId || inherited(entry).includes(tankGroupId))).map(entry => ({ kind: "water", entry })) : [];
     const loss = kind === "loss" ? (state.lossRecords ?? []).filter(entry => entry.operator === username && (entry.siteId || (state.tankGroups ?? []).find(group=>group.id===entry.tankGroupId)?.siteId || "nanjing") === siteId &&
       (!subTankId || entry.subTankId === subTankId) && (!tankGroupId || entry.tankGroupId === tankGroupId) && (!reasonStatus || !String(entry.reason ?? "").trim())).map(entry=>({kind:"loss",entry})) : [];
     const collections = kind === "loss" ? [loss] : [tank, fish, water];

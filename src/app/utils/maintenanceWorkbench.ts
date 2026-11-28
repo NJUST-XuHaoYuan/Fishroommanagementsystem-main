@@ -1,6 +1,6 @@
 export const MAINTENANCE_TYPES = {
   inspection: "观察巡检", feeding: "喂食", water_change: "换水清洁",
-  measurement: "测水质", treatment: "治疗跟进", other: "其他",
+  measurement: "测水质", treatment: "下药 / 治疗", other: "其他", media: "鱼只照片视频",
 } as const;
 export type MaintenanceType = keyof typeof MAINTENANCE_TYPES;
 export type MaintenanceStatus = "pending" | "in_progress" | "completed" | "cancelled";
@@ -9,6 +9,7 @@ export const MAINTENANCE_STATUS: Record<MaintenanceStatus, string> = {
 };
 export type MaintenanceTask = {
   id: string; siteId: string; title: string; type: MaintenanceType;
+  targetType?: "group" | "fish"; stockItemId?: string; fishCode?: string; productName?: string;
   tankId?: string; subTankId?: string; tankName?: string; subTankName?: string; assignedTo?: string; dueDate: string; dueTime: string;
   status: MaintenanceStatus; notes?: string; planId?: string;
   createdAt: string; createdBy: string; createdByName?: string;
@@ -16,10 +17,14 @@ export type MaintenanceTask = {
   completedAt?: string; completedBy?: string; completedByName?: string;
   cancelledAt?: string; cancelledBy?: string; cancelledByName?: string;
   result?: string; measurements?: Record<string, number>; medicineDescription?: string; reason?: string;
+  updatedAt?: string; updatedBy?: string;
+  completion?: { kind: "dailyLog" | "waterQualityRecord" | "bioRecord"; recordId: string; record: Record<string, unknown> };
+  targetUnavailable?: boolean; targetUnavailableReason?: string;
+  currentTankId?: string; currentTankName?: string; currentSubTankId?: string; currentSubTankName?: string;
 };
-export type MaintenancePlan = Pick<MaintenanceTask, "id" | "title" | "type" | "tankId" | "subTankId" | "assignedTo" | "notes" | "dueTime"> & {
+export type MaintenancePlan = Pick<MaintenanceTask, "id" | "siteId" | "title" | "type" | "targetType" | "stockItemId" | "fishCode" | "productName" | "tankId" | "tankName" | "subTankId" | "assignedTo" | "notes" | "dueTime" | "targetUnavailable" | "targetUnavailableReason" | "currentTankId" | "currentTankName" | "currentSubTankId" | "currentSubTankName"> & {
   enabled: boolean; frequency: "daily" | "weekly"; weekdays: number[]; startDate: string;
-  createdAt: string; createdBy: string; createdByName?: string;
+  createdAt: string; createdBy: string; createdByName?: string; updatedAt?: string; updatedBy?: string;
 };
 export type MaintenanceHandoff = {
   id: string; content: string; assignedTo?: string; followUpAt?: string; taskId?: string;
@@ -28,12 +33,20 @@ export type MaintenanceHandoff = {
 export type MaintenanceHistory = {
   id: string; action: string; taskId?: string; planId?: string; title: string;
   operator: string; operatorName?: string; at: string; detail?: string;
+  before?: Record<string, unknown>; after?: Record<string, unknown>;
 };
 export type MaintenanceSnapshot = {
   ok: true; siteId: string; revision: number; tasks: MaintenanceTask[];
   plans: MaintenancePlan[]; handoffs: MaintenanceHandoff[]; history: MaintenanceHistory[];
   permissions: { canCreate: boolean; canUpdate: boolean; canDelete: boolean };
+  assignees?: { id: string; username: string; name: string }[];
+  materializationPending?: boolean; replayed?: boolean;
 };
+export type MaintenanceTarget = { targetType: "group"; tankId: string } | { targetType: "fish"; stockItemId: string; tankId?: string };
+export type MaintenanceCompletion = { kind: "dailyLog" | "waterQualityRecord" | "bioRecord"; recordId: string };
+export function maintenanceTypesForTarget(target: "group" | "fish"): MaintenanceType[] {
+  return target === "fish" ? ["inspection", "treatment", "media", "other"] : ["inspection", "feeding", "water_change", "measurement", "treatment", "other"];
+}
 export type MeasurementDraft = { name: string; value: string };
 
 export function maintenanceToday(now = new Date()): string {

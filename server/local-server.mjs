@@ -4837,12 +4837,11 @@ function activeStockItemsInTankGroup(state = {}, tankGroupId, subTankId = "") {
 function dailyLogRecordText(log = {}) {
   const action = String(log?.action ?? "").trim();
   const notes = String(log?.notes ?? "").trim();
-  return `${log.subTankId ? "子缸养护" : "缸组养护"}：${action}${notes ? `；备注：${notes}` : ""}`;
+  return `缸组养护：${action}${notes ? `；备注：${notes}` : ""}`;
 }
 
 function dailyLogScopeNormalized(previous, next, previousGroupId) {
-  return Boolean(previous && previousGroupId === next?.tankGroupId && previous.subTankId && !next?.subTankId &&
-    (previous.scope === "group" || isSharedWaterAction(previous.action)));
+  return Boolean(previous && previousGroupId === next?.tankGroupId && previous.subTankId && !next?.subTankId);
 }
 
 function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingRecord = null, groupChanged = false) {
@@ -8067,7 +8066,7 @@ async function backfillDailyLogBioRecords() {
     let nextBioRecords = bioRecords;
     let changed = false;
     const nextLogs = logs.map((log) => {
-      if (isLegacyRoomId(state.tankGroups, log?.tankGroupId)) return log;
+      if (isLegacyRoomId(state.tankGroups, log?.tankGroupId) || log?.inheritedTankGroupIds?.length) return log;
       if (Array.isArray(log?.syncedStockItemIds)) return log;
       const tankGroupId = dailyLogGroupId(state, log);
       if (!tankGroupId || !log?.date || !log?.action || !log?.operator) return log;
@@ -16807,8 +16806,8 @@ async function handleApi(req, res, url) {
             requireVisibleSiteForAuth(req, projectedState, plan.currentSiteId, "不能修改未授权场地的养护日志");
           }
           requireVisibleSiteForAuth(req, projectedState, plan.siteId, "不能修改未授权场地的养护日志");
-          if (isLegacyRoomId(projectedState.tankGroups, plan.current?.tankGroupId) || isLegacyRoomId(projectedState.tankGroups, plan.log?.tankGroupId)) {
-            throw httpError(409, "原房间养护记录仅供历史查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
+          if (plan.current?.inheritedTankGroupIds?.length || isLegacyRoomId(projectedState.tankGroups, plan.current?.tankGroupId) || isLegacyRoomId(projectedState.tankGroups, plan.log?.tankGroupId)) {
+            throw httpError(409, "继承的历史养护记录仅供查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
           }
           if (plan.mode === "update" && plan.currentSiteId !== plan.siteId) {
             const error = new Error("不能通过修改养护日志变更所属场地");
@@ -17166,8 +17165,8 @@ async function handleApi(req, res, url) {
           const currentGroup = current ? state.tankGroups.find(group => String(group.id) === String(current.tankGroupId)) : null;
           if (current) requireVisibleSiteForAuth(req, state, normalizeSiteId(current.siteId ?? currentGroup?.siteId), "不能操作未授权场地的水质记录");
           const groupId = String(input?.tankGroupId ?? current?.tankGroupId ?? "").trim();
-          if (isLegacyRoomId(state.tankGroups, current?.tankGroupId) || isLegacyRoomId(state.tankGroups, groupId)) {
-            throw httpError(409, "原房间水质记录仅供历史查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
+          if (current?.inheritedTankGroupIds?.length || isLegacyRoomId(state.tankGroups, current?.tankGroupId) || isLegacyRoomId(state.tankGroups, groupId)) {
+            throw httpError(409, "继承的历史水质记录仅供查阅，不能新增、修改或删除", "LEGACY_ROOM_HISTORY_READ_ONLY");
           }
           const groups = state.tankGroups.filter(group => String(group.id) === groupId);
           if (!deleteId && groups.length !== 1) throw httpError(404, "缸组不存在或编号重复");

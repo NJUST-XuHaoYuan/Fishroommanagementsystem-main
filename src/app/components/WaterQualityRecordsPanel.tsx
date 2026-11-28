@@ -1,4 +1,4 @@
-import { legacyRoomIds } from "../utils/legacyRoomHistory";
+import { isInheritedMaintenanceHistory, maintenanceHistoryGroupIds, maintenanceHistoryScopeLabel } from "../utils/maintenanceGroupHistory";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DailyLog,
@@ -56,8 +56,8 @@ type WaterQualityRecordsPanelProps = {
 };
 
 type UnifiedTankRecord =
-  | { kind: "maintenance"; id: string; tankGroupId: string; timestamp: number; log: DailyLog }
-  | { kind: "water"; id: string; tankGroupId: string; timestamp: number; record: WaterQualityRecord };
+  | { kind: "maintenance"; id: string; tankGroupId: string; groupIds: string[]; timestamp: number; log: DailyLog }
+  | { kind: "water"; id: string; tankGroupId: string; groupIds: string[]; timestamp: number; record: WaterQualityRecord };
 
 function localDate(value: string) {
   return isoToDatetimeLocal(value).slice(0, 10);
@@ -86,9 +86,9 @@ export function waterQualityDraftParameters(parameters: WaterQualityParameterSet
   });
 }
 
-function WaterRecordMedia({ record }: { record: WaterQualityRecord }) {
+function TankRecordMedia({ record }: { record: Pick<WaterQualityRecord, "photos" | "videos"> }) {
   if (!record.photos?.length && !record.videos?.length) return null;
-  return <div className="mt-2 flex flex-wrap gap-2">{(record.photos ?? []).map((src, index) => <MediaPreviewTrigger key={`photo-${src}`} src={src} mediaType="image" title="水质记录照片" ariaLabel={`预览水质照片 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">照片 {index + 1}</MediaPreviewTrigger>)}{(record.videos ?? []).map((src, index) => <MediaPreviewTrigger key={`video-${src}`} src={src} mediaType="video" title="水质记录视频" ariaLabel={`预览水质视频 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">视频 {index + 1}</MediaPreviewTrigger>)}</div>;
+  return <div className="mt-2 flex flex-wrap gap-2">{(record.photos ?? []).map((src, index) => <MediaPreviewTrigger key={`photo-${src}`} src={src} mediaType="image" title="维护记录照片" ariaLabel={`预览维护照片 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">照片 {index + 1}</MediaPreviewTrigger>)}{(record.videos ?? []).map((src, index) => <MediaPreviewTrigger key={`video-${src}`} src={src} mediaType="video" title="维护记录视频" ariaLabel={`预览维护视频 ${index + 1}`} className="inline-flex min-h-11 items-center rounded-md border px-3 text-xs">视频 {index + 1}</MediaPreviewTrigger>)}</div>;
 }
 
 export function WaterQualityRecordsPanel({
@@ -134,35 +134,32 @@ export function WaterQualityRecordsPanel({
     () => new Map(state.tankGroups.map((group) => [group.id, group])),
     [state.tankGroups]
   );
-  const recordScope = (record: Pick<WaterQualityRecord, "tankGroupId" | "subTankId" | "recordedFromSubTankId">) => {
-    const group = groupById.get(record.tankGroupId);
-    const sourceId = record.recordedFromSubTankId || record.subTankId;
-    const source = sourceId ? group?.subTanks.find(tank => tank.id === sourceId)?.name || "已删除子缸" : "";
-    return `${group?.name ?? "已删除缸组"} / 共用水体${source ? `（原登记位置：${source}）` : ""}`;
-  };
-  const archivedRoomIds = useMemo(() => legacyRoomIds(state.tankGroups), [state.tankGroups]);
+  const recordScope = (record: DailyLog | WaterQualityRecord) => maintenanceHistoryScopeLabel(record, state.tankGroups, groupFilter);
   const filteredRecords = useMemo<UnifiedTankRecord[]>(() => {
-    const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.filter(record => !archivedRoomIds.has(record.tankGroupId)).map((record) => ({
+    const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.filter(record => maintenanceHistoryGroupIds(record, state.tankGroups).length > 0).map((record) => ({
       kind: "water",
       id: record.id,
       tankGroupId: record.tankGroupId,
+      groupIds: maintenanceHistoryGroupIds(record, state.tankGroups),
       timestamp: Date.parse(record.measuredAt) || 0,
       record,
     }));
     const logRecords: UnifiedTankRecord[] = maintenanceLogs.flatMap((log) => {
       const tankGroupId = getMaintenanceGroupId(log);
-      if (!tankGroupId || archivedRoomIds.has(tankGroupId)) return [];
+      const groupIds = maintenanceHistoryGroupIds(log, state.tankGroups, tankGroupId);
+      if (groupIds.length === 0) return [];
       return [{
         kind: "maintenance" as const,
         id: log.id,
         tankGroupId,
+        groupIds,
         timestamp: Date.parse(normalizeBioRecordTime(log.date)) || 0,
         log,
       }];
     });
     return [...waterRecords, ...logRecords]
       .filter((item) => {
-        if (groupFilter !== "all" && item.tankGroupId !== groupFilter) return false;
+        if (groupFilter !== "all" && !item.groupIds.includes(groupFilter)) return false;
         if (recordTypeFilter !== "all" && item.kind !== recordTypeFilter) return false;
         const date = item.kind === "water"
           ? localDate(item.record.measuredAt)
@@ -172,7 +169,7 @@ export function WaterQualityRecordsPanel({
         return true;
       })
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [archivedRoomIds, state.waterQualityRecords, maintenanceLogs, getMaintenanceGroupId, groupFilter, recordTypeFilter, startDate, endDate]);
+  }, [state.tankGroups, state.waterQualityRecords, maintenanceLogs, getMaintenanceGroupId, groupFilter, recordTypeFilter, startDate, endDate]);
 
   const draftParameters = useMemo(() => {
     if (!draft?.tankGroupId) return [];
@@ -421,11 +418,11 @@ export function WaterQualityRecordsPanel({
                   <span className="text-xs text-muted-foreground">
                     {item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}
                   </span>
-                  {item.kind === "water" && <span className="text-xs text-muted-foreground">{recordScope(item.record)}</span>}
+                  <span className="text-xs text-muted-foreground">{recordScope(item.kind === "water" ? item.record : item.log)}</span>
                 </div>
                 {canManage && (
                   <div className="flex shrink-0 gap-2 sm:justify-end">
-                    {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                    {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
                       <Button
                         type="button"
                         size="sm"
@@ -437,7 +434,7 @@ export function WaterQualityRecordsPanel({
                         编辑
                       </Button>
                     )}
-                    {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                    {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
                       <Button
                         type="button"
                         size="sm"
@@ -467,7 +464,7 @@ export function WaterQualityRecordsPanel({
               {(item.kind === "water" ? item.record.notes : item.log.notes) && (
                 <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
               )}
-              {item.kind === "water" && <WaterRecordMedia record={item.record} />}
+              <TankRecordMedia record={item.kind === "water" ? item.record : item.log} />
             </div>
           ))}
         </div>
@@ -494,7 +491,7 @@ export function WaterQualityRecordsPanel({
                 <td className="px-4 py-3 text-sm tabular-nums">
                   {item.kind === "water" ? formatMeasuredAt(item.record.measuredAt) : formatBioRecordTime(item.log.date)}
                 </td>
-                <td className="px-4 py-3 text-sm font-medium">{item.kind === "water" ? recordScope(item.record) : groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</td>
+                <td className="px-4 py-3 text-sm font-medium">{recordScope(item.kind === "water" ? item.record : item.log)}</td>
                 <td className="px-4 py-3">
                   <Badge variant="secondary" className={item.kind === "water" ? "gap-1 bg-cyan-50 text-cyan-800" : "gap-1"}>
                     {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
@@ -513,14 +510,14 @@ export function WaterQualityRecordsPanel({
                   ) : (
                     <div className="text-sm font-medium">{item.log.action || "未填写操作"}</div>
                   )}
-                  {item.kind === "water" && <WaterRecordMedia record={item.record} />}
+                  <TankRecordMedia record={item.kind === "water" ? item.record : item.log} />
                 </td>
                 <td className="px-4 py-3 text-sm">{item.kind === "water" ? item.record.operator || "—" : item.log.operator || "—"}</td>
                 <td className="px-4 py-3 text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes || "—" : item.log.notes || "—"}</td>
                 {canManage && (
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-1">
-                      {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                      {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
                         <Button
                           type="button"
                           size="icon"
@@ -532,7 +529,7 @@ export function WaterQualityRecordsPanel({
                           <Pencil className="size-4" />
                         </Button>
                       )}
-                      {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                      {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
                         <Button
                           type="button"
                           size="icon"
@@ -562,7 +559,7 @@ export function WaterQualityRecordsPanel({
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
-                  <div className="text-sm font-semibold">{item.kind === "water" ? recordScope(item.record) : groupById.get(item.tankGroupId)?.name ?? "已删除缸组"}</div>
+                  <div className="text-sm font-semibold">{recordScope(item.kind === "water" ? item.record : item.log)}</div>
                   <Badge variant="secondary" className={item.kind === "water" ? "shrink-0 gap-1 bg-cyan-50 text-cyan-800" : "shrink-0 gap-1"}>
                     {item.kind === "water" ? <FlaskConical className="size-3" /> : <ClipboardList className="size-3" />}
                     {item.kind === "water" ? "水质" : "养护"}
@@ -574,12 +571,12 @@ export function WaterQualityRecordsPanel({
               </div>
               {canManage && (
                 <div className="flex shrink-0 gap-1">
-                  {permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
+                  {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canUpdate && (item.kind === "water" || onEditMaintenance) && (
                     <Button type="button" size="icon" variant="ghost" onClick={() => item.kind === "water" ? openEditRecord(item.record) : onEditMaintenance?.(item.log)} disabled={isRecordSaving} title={item.kind === "water" ? "编辑水质记录" : "编辑养护日志"}>
                       <Pencil className="size-4" />
                     </Button>
                   )}
-                  {permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
+                  {!isInheritedMaintenanceHistory(item.kind === "water" ? item.record : item.log) && permission.canDelete && (item.kind === "water" || onDeleteMaintenance) && (
                     <Button type="button" size="icon" variant="ghost" className="text-red-600" onClick={() => item.kind === "water" ? void deleteRecord(item.record) : onDeleteMaintenance?.(item.log)} disabled={isRecordSaving} title={item.kind === "water" ? "删除水质记录" : "删除养护日志"}>
                       <Trash2 className="size-4" />
                     </Button>
@@ -605,7 +602,7 @@ export function WaterQualityRecordsPanel({
             {(item.kind === "water" ? item.record.notes : item.log.notes) && (
               <div className="whitespace-pre-wrap text-sm text-muted-foreground">{item.kind === "water" ? item.record.notes : item.log.notes}</div>
             )}
-            {item.kind === "water" && <WaterRecordMedia record={item.record} />}
+            <TankRecordMedia record={item.kind === "water" ? item.record : item.log} />
           </div>
         ))}
       </div>
@@ -690,7 +687,7 @@ export function WaterQualityRecordsPanel({
                 <Label>备注</Label>
                 <Textarea rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
               </div>
-              {draft.original && <WaterRecordMedia record={draft.original} />}
+              {draft.original && <TankRecordMedia record={draft.original} />}
             </fieldset>
           )}
           <DialogFooter>

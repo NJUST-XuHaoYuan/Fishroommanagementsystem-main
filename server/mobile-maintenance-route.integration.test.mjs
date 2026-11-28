@@ -22,20 +22,20 @@ async function setup(t, mutate = () => {}) {
 }
 const log = (id,extra={})=>({id,date,tankGroupId:"group-n",subTankId:"tank-n",action:"观察",notes:"本次维护",photos:["/uploads/tank.jpg"],videos:["/uploads/tank.mp4"],operator:"forged",...extra});
 
-test("sub-tank log syncs only its fish and retains photos plus creator; legacy whole group remains supported",async t=>{
+test("any tank log covers the group, retains its entry position, media and creator, and keeps fish media separate",async t=>{
  const s=await setup(t); ok(await s.log(log("sub")));
  let state=await s.readPersistedState(); const saved=state.logs.find(r=>r.id==="sub");
- assert.equal(saved.subTankId,"tank-n"); assert.equal(saved.operator,"pricing-editor"); assert.equal(saved.createdBy,"pricing-editor");
+ assert.equal(saved.subTankId,undefined); assert.equal(saved.scope,"group"); assert.equal(saved.recordedFromSubTankId,"tank-n"); assert.equal(saved.operator,"pricing-editor"); assert.equal(saved.createdBy,"pricing-editor");
  const linked=state.bioRecords.filter(r=>r.sourceLogId==="sub"); assert.ok(linked.length>0);
- assert.ok(linked.every(r=>r.subTankId==="tank-n")); assert.ok(!linked.some(r=>["other-tank","lost","shipment-shipped"].includes(r.stockItemId)));
+ assert.ok(linked.some(r=>r.stockItemId==="other-tank")); assert.ok(!linked.some(r=>["lost","shipment-shipped","in-transit"].includes(r.stockItemId)));
  assert.deepEqual(saved.photos,["/uploads/tank.jpg"]); assert.deepEqual(saved.videos,["/uploads/tank.mp4"]);
  assert.ok(linked.every(record=>record.photos.length===0 && record.videos.length===0),"tank media must not become individual fish thumbnails");
  ok(await s.log(log("whole",{subTankId:""})));
  state=await s.readPersistedState(); assert.ok(state.bioRecords.some(r=>r.sourceLogId==="whole"&&r.stockItemId==="other-tank"));
- // Old desktop forms omit new fields: an edit must not silently broaden the scope or delete media.
+ // Old desktop forms may omit position and media; keep the original snapshots.
  const oldEditor={id:"sub",date,tankGroupId:"group-n",action:"观察",notes:"更正"};
  ok(await s.log(oldEditor,"admin",{createOnly:false})); state=await s.readPersistedState();
- const edited=state.logs.find(r=>r.id==="sub"); assert.equal(edited.subTankId,"tank-n"); assert.equal(edited.createdBy,"pricing-editor"); assert.deepEqual(edited.photos,["/uploads/tank.jpg"]);
+ const edited=state.logs.find(r=>r.id==="sub"); assert.equal(edited.subTankId,undefined); assert.equal(edited.recordedFromSubTankId,"tank-n"); assert.equal(edited.createdBy,"pricing-editor"); assert.deepEqual(edited.photos,["/uploads/tank.jpg"]);
  assert.equal((await s.log(log("bad",{subTankId:"tank-j"}))).response.status,404);
  assert.equal((await s.log(log("bad-media",{photos:["javascript:alert(1)"]}))).response.status,400);
  assert.equal((await s.log(log("cross",{tankGroupId:"group-j",subTankId:"tank-j"}))).response.status,403);
@@ -50,9 +50,9 @@ test("create-only retries need no update right and never overwrite another user'
  assert.equal((await s.log(log("retry"),"admin")).response.status,409);
 });
 
-test("water medication and tests force group scope and sync every physically present fish without copying tank media", async t => {
+test("all maintenance actions force group scope and sync every physically present fish without copying tank media", async t => {
  const s=await setup(t);
- for (const [i,action] of ["下药","水体下药","治疗","下药治疗","水质","测水质","水质测试","水质检测"].entries()) {
+ for (const [i,action] of ["下药","水体下药","治疗","下药治疗","水质","测水质","水质测试","水质检测","喂食","换水","观察","其他"].entries()) {
    const id=`shared-${i}`; const request=log(id,{action,scope:"subTank"}); const response=await s.log(request);ok(response);
    assert.equal(response.body.changedLog.scope,"group");assert.equal(response.body.changedLog.subTankId,undefined);
    assert.equal(response.body.changedLog.recordedFromSubTankId,"tank-n");
@@ -64,10 +64,10 @@ test("water medication and tests force group scope and sync every physically pre
  }
  const shared=await s.log(log("explicit-group",{action:"观察",scope:"group"}));ok(shared);assert.equal(shared.body.changedLog.subTankId,undefined);
  assert.equal((await s.log(log("wrong-source",{action:"下药",subTankId:"tank-j"}))).response.status,404);
- const h=await s.history("&subTankId=tank-n2");ok(h);assert.equal(h.body.logs.length,9);
+ const h=await s.history("&subTankId=tank-n2");ok(h);assert.equal(h.body.logs.length,13);
 });
 
-test("group history shares legacy water operations across compartments while other logs and single-fish treatment stay local",async t=>{
+test("group history shares every tank operation across compartments while single-fish treatment stays local",async t=>{
  const legacy={...log("legacy-drug",{action:"下药",operator:"pricing-editor",subTankId:"removed-compartment"}),syncedStockItemIds:["follower"]};
  const s=await setup(t,state=>{
    state.logs=[legacy];
@@ -77,7 +77,7 @@ test("group history shares legacy water operations across compartments while oth
  assert.deepEqual(await s.readPersistedState(),before);
  ok(await s.log(log("sub-observation")));ok(await s.bio("follower"));
  ok(await s.log(log("other-group",{tankGroupId:"group-other",subTankId:"tank-other",action:"下药"})));
- const sub=await s.history("&subTankId=tank-n2");ok(sub);assert.deepEqual(sub.body.logs.map(r=>r.id),["legacy-drug"]);assert.equal(sub.body.bioRecords.length,0);
+ const sub=await s.history("&subTankId=tank-n2");ok(sub);assert.deepEqual(new Set(sub.body.logs.map(r=>r.id)),new Set(["legacy-drug","sub-observation"]));assert.equal(sub.body.bioRecords.length,0);
  const group=await s.history("&tankGroupId=group-n");ok(group);assert.equal(group.body.tankGroupId,"group-n");
  assert.deepEqual(new Set(group.body.logs.map(r=>r.id)),new Set(["legacy-drug","sub-observation"]));assert.equal(group.body.bioRecords.length,1);
  assert.equal((await s.history("&tankGroupId=group-other&subTankId=tank-n")).response.status,404);
@@ -86,12 +86,12 @@ test("group history shares legacy water operations across compartments while oth
  assert.equal(changed.body.changedLog.scope,"group");assert.equal(changed.body.changedLog.subTankId,undefined);
  assert.equal(changed.body.changedLog.recordedFromSubTankId,"removed-compartment");
  const state=await s.readPersistedState();assert(!state.bioRecords.some(r=>r.sourceLogId===legacy.id&&r.stockItemId==="other-tank"),"normalizing an old entry must not add today's fish to past treatment");
- assert.equal(state.logs.find(r=>r.id==="sub-observation").subTankId,"tank-n");
+ assert.equal(state.logs.find(r=>r.id==="sub-observation").subTankId,undefined);
 });
 
-test("editing legacy compartment medication preserves its original moved, lost and removed fish history instead of treating new arrivals",async t=>{
+test("editing legacy compartment observation preserves its original moved, lost and removed fish history without adding new arrivals",async t=>{
  const ids=["follower","lost","removed-fish"];
- const old=log("old-treatment",{action:"下药",operator:"pricing-editor",syncedStockItemIds:ids});
+ const old=log("old-treatment",{action:"观察",operator:"pricing-editor",syncedStockItemIds:ids});
  const s=await setup(t,state=>{
    state.logs=[old];
    state.tankGroups.push({id:"group-new",siteId:"nanjing",name:"转入水体",subTanks:[{id:"tank-new",name:"New"}]});
@@ -108,8 +108,8 @@ test("editing legacy compartment medication preserves its original moved, lost a
  assert.deepEqual(after.bioRecords.filter(r=>r.sourceLogId!==old.id),before.bioRecords.filter(r=>r.sourceLogId!==old.id));
 });
 
-test("legacy medication without a target list or prior fish history never backfills today's inventory on edit",async t=>{
- const old=log("legacy-no-targets",{action:"下药",operator:"pricing-editor"});
+test("legacy feeding without a target list or prior fish history never backfills today's inventory on edit",async t=>{
+ const old=log("legacy-no-targets",{action:"喂食",operator:"pricing-editor"});
  const s=await setup(t);await s.insertTestLegacyDailyLog(old);
  const before=await s.readPersistedState();assert.equal(before.logs[0].syncedStockItemIds,undefined);
  const result=await s.log({...old,notes:"只改旧备注"},"admin",{createOnly:false});ok(result);
@@ -148,6 +148,29 @@ test("personal history is site-and-owner scoped, excludes synchronized duplicate
  assert.equal((await s.history("","viewer")).response.status,403);
  assert.equal((await s.request("/api/mobile-maintenance/history?siteId=jiangyin",{token:s.tokens.editor})).response.status,403);
  await s.patchTestPersonnel("pricing-editor",{accountEnabled:false}); assert.equal((await s.history()).response.status,401);
+});
+
+test("inherited room records appear in each associated group history once globally, remain read-only and never synchronize new fish", async t => {
+ const original=log("room-original",{siteId:"nanjing",tankGroupId:"old-room",subTankId:undefined,scope:"group",operator:"pricing-editor",createdBy:"pricing-editor",inheritedTankGroupIds:["group-n","group-peer"],syncedStockItemIds:[]});
+ const water={id:"room-water",siteId:"nanjing",tankGroupId:"old-room",scope:"group",measuredAt:date,operator:"pricing-editor",inheritedTankGroupIds:["group-n","group-peer"],values:[{parameterId:"ph",value:8.1,unit:"pH",parameterName:"pH",precision:2}],photos:["/uploads/water.jpg"]};
+ const s=await setup(t,state=>{
+   state.tankGroups[0].legacyRoomId="old-room";
+   state.tankGroups.push({id:"group-peer",siteId:"nanjing",name:"独立水体",legacyRoomId:"old-room",subTanks:[{id:"peer-sub",name:"主缸"}]});
+   state.logs=[original, {...original,id:"other-operator",operator:"other-user",createdBy:"other-user"}, {...original,id:"foreign-record",siteId:"jiangyin"}];
+   state.waterQualityRecords=[water];
+ });
+ const before=await s.readPersistedState();
+ for(const query of ["&tankGroupId=group-n","&tankGroupId=group-peer","&subTankId=peer-sub","&subTankId=tank-n2",""]){
+   const history=await s.history(query);ok(history);
+   assert.deepEqual(history.body.logs.map(record=>record.id),["room-original"]);
+   assert.deepEqual(history.body.waterQualityRecords.map(record=>record.id),["room-water"]);
+   assert.deepEqual(history.body.logs[0].photos,original.photos);assert.equal(history.body.logs[0].tankGroupId,"old-room");
+ }
+ const bounded=await s.history("&limit=1");ok(bounded);assert.equal(bounded.body.logs.length+bounded.body.waterQualityRecords.length,1);assert.equal(bounded.body.truncated,true);
+ const deleted=await s.request("/api/daily-logs/save",{token:s.tokens.admin,body:{deleteId:original.id}});assert.equal(deleted.response.status,409,JSON.stringify(deleted.body));
+ const edited=await s.log({...original,tankGroupId:"group-n",notes:"篡改共享历史"},"admin",{createOnly:false});assert.equal(edited.response.status,409,JSON.stringify(edited.body));
+ assert.deepEqual(await s.readPersistedState(),before);
+ assert(!before.bioRecords.some(record=>record.sourceLogId===original.id));
 });
 
 

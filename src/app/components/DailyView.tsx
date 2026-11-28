@@ -33,7 +33,7 @@ import { StockStatusHistoryPanel } from "./StockStatusHistoryPanel";
 import { StockOrderReleaseDetails, StockOrderReleaseLoadState, stockOrderReleaseTimelineEvents, useStockOrderReleaseHistory, type StockOrderReleaseEvent } from "./StockOrderReleaseHistory";
 import { buildPublicSelectionCode, parsePublicSelectionCode } from "../utils/publicSelectionCode";
 import { WaterQualityRecordsPanel } from "./WaterQualityRecordsPanel";
-import { LegacyRoomHistoryButton } from "./LegacyRoomHistory";
+import { isInheritedMaintenanceHistory, maintenanceHistoryGroupIds } from "../utils/maintenanceGroupHistory";
 import { PreciseDateTimeInput } from "./PreciseDateTimeInput";
 import { StockTransferDialog, StockTransferPoolButton, notifyStockTransfersChanged, stockTransferRecordLabel, type StockTransferTarget } from "./StockTransferDialog";
 import { useRecordMediaUpload } from "../utils/useRecordMediaUpload";
@@ -252,9 +252,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
   const logsByGroup = useMemo(() => {
     const map = new Map<string, DailyLog[]>();
     for (const log of state.logs ?? []) {
-      const gid = logGroupId(log);
-      if (!gid) continue;
-      map.set(gid, [...(map.get(gid) ?? []), log]);
+      for (const gid of maintenanceHistoryGroupIds(log, state.tankGroups, logGroupId(log))) {
+        map.set(gid, [...(map.get(gid) ?? []), log]);
+      }
     }
     for (const [gid, logs] of map) {
       map.set(gid, logs.sort((a, b) => b.date.localeCompare(a.date)));
@@ -264,13 +264,15 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
   const waterRecordsByGroup = useMemo(() => {
     const map = new Map<string, typeof state.waterQualityRecords>();
     for (const record of state.waterQualityRecords ?? []) {
-      map.set(record.tankGroupId, [...(map.get(record.tankGroupId) ?? []), record]);
+      for (const gid of maintenanceHistoryGroupIds(record, state.tankGroups)) {
+        map.set(gid, [...(map.get(gid) ?? []), record]);
+      }
     }
     for (const [groupId, records] of map) {
       map.set(groupId, records.sort((a, b) => b.measuredAt.localeCompare(a.measuredAt)));
     }
     return map;
-  }, [state.waterQualityRecords]);
+  }, [state.waterQualityRecords, state.tankGroups]);
 
   const formatWaterSummary = (values: (typeof state.waterQualityRecords)[number]["values"]) => {
     const visibleValues = values.slice(0, 4).map((measurement) => {
@@ -1395,9 +1397,9 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
             )}
             {visibleGroups.map((g) => {
               const groupLogs = logsByGroup.get(g.id) ?? [];
-              const latestLog = groupLogs[0];
+              const latestLog = groupLogs.find(log => !isInheritedMaintenanceHistory(log));
               const groupWaterRecords = waterRecordsByGroup.get(g.id) ?? [];
-              const latestWaterRecord = groupWaterRecords[0];
+              const latestWaterRecord = groupWaterRecords.find(record => !isInheritedMaintenanceHistory(record));
               const isGroupExpanded = expandedGroupIds.has(g.id);
               const subTanks = visibleSubTanks(g);
               const visibleStockCount = subTanks.reduce((sum, t) => sum + stockBySub(t.id).length, 0);
@@ -1711,7 +1713,6 @@ export function DailyView({ allOrders, allShipments, onOpenOrder }: DailyViewPro
               <div className="text-left text-sm text-muted-foreground">{viewRecordGroup.location}</div>
             )}
           </DialogHeader>
-          {viewRecordGroupId && <div><LegacyRoomHistoryButton tankGroupId={viewRecordGroupId} className="min-h-11" /></div>}
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             {viewRecordGroupId && (
               <WaterQualityRecordsPanel

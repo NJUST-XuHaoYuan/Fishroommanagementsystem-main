@@ -1,6 +1,6 @@
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
 import { isDeepStrictEqual } from "node:util";
-import { comparableMaintenanceLocation, isSharedWaterAction, maintenanceRecordLocation } from "./maintenance-scope-rules.mjs";
+import { comparableMaintenanceLocation, maintenanceRecordLocation } from "./maintenance-scope-rules.mjs";
 
 export class DailyLogSaveError extends Error {
   constructor(message, { statusCode = 400, code = "DAILY_LOG_SAVE_INVALID" } = {}) {
@@ -85,8 +85,9 @@ function normalizedLog(log, { id, group, operator, now, current }) {
   if (date > normalizeLocalDateTime(now)) {
     throw new DailyLogSaveError("养护日志时间不能晚于当前时间");
   }
-  // Old desktop editors omit these fields. Preserve their scope and attachments.
-  const location = maintenanceRecordLocation(log, { current, group, forceGroup: isSharedWaterAction(action) });
+  // All tank actions belong to the group; retain the original entry compartment
+  // for history without treating it as a separate maintenance scope.
+  const location = maintenanceRecordLocation(log, { current, group });
   return {
     id,
     siteId: text(group.siteId),
