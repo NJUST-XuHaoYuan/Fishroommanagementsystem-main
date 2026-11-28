@@ -21,7 +21,6 @@ Page({
     showCustomerTools,
     serviceWechatId,
     copyingServiceWechat: false,
-    serviceCopyMessage: "",
     loading: true,
     refreshing: false,
     error: "",
@@ -199,11 +198,21 @@ Page({
 
   onCopyServiceWechat() {
     if (this.data.copyingServiceWechat || !this.data.serviceWechatId) return;
-    this.setData({ copyingServiceWechat: true, serviceCopyMessage: "" });
+    this.setData({ copyingServiceWechat: true });
     wx.setClipboardData({
       data: this.data.serviceWechatId,
-      success: () => this.setData({ serviceCopyMessage: "已复制，请到微信「添加朋友」中搜索" }),
-      fail: () => this.setData({ serviceCopyMessage: "复制失败，可长按微信号手动复制" }),
+      success: () => wx.showToast({
+        title: "已复制，可到微信添加朋友",
+        icon: "none",
+        duration: 2200,
+        mask: false
+      }),
+      fail: () => wx.showToast({
+        title: "复制失败，请长按微信号复制",
+        icon: "none",
+        duration: 2500,
+        mask: false
+      }),
       complete: () => this.setData({ copyingServiceWechat: false })
     });
   },

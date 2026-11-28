@@ -48,13 +48,6 @@ page,
   background: var(--brand-soft);
 }
 
-.catalog-service-feedback {
-  padding-bottom: 8px;
-  color: var(--ink-soft);
-  font-size: 12px;
-  line-height: 18px;
-}
-
 .major-list {
   display: flex;
   flex-direction: column;

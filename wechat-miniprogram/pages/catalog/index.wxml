@@ -67,7 +67,6 @@
         disabled="{{copyingServiceWechat}}" aria-label="复制客服微信号 {{serviceWechatId}}"
         bindtap="onCopyServiceWechat">{{copyingServiceWechat ? '复制中' : '复制'}}</button>
     </view>
-    <view wx:if="{{serviceCopyMessage}}" class="catalog-service-feedback" aria-role="status">{{serviceCopyMessage}}</view>
   </view>
 
   <view wx:if="{{loading}}" class="catalog-loading">
