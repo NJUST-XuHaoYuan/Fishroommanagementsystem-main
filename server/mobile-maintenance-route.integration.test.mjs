@@ -108,6 +108,28 @@ test("editing legacy compartment medication preserves its original moved, lost a
  assert.deepEqual(after.bioRecords.filter(r=>r.sourceLogId!==old.id),before.bioRecords.filter(r=>r.sourceLogId!==old.id));
 });
 
+test("legacy medication without a target list or prior fish history never backfills today's inventory on edit",async t=>{
+ const old=log("legacy-no-targets",{action:"下药",operator:"pricing-editor"});
+ const s=await setup(t);await s.insertTestLegacyDailyLog(old);
+ const before=await s.readPersistedState();assert.equal(before.logs[0].syncedStockItemIds,undefined);
+ const result=await s.log({...old,notes:"只改旧备注"},"admin",{createOnly:false});ok(result);
+ const after=await s.readPersistedState();assert.deepEqual(after.logs.find(r=>r.id===old.id).syncedStockItemIds,[]);
+ assert.deepEqual(after.bioRecords,before.bioRecords);assert.deepEqual(after.stock,before.stock);
+});
+
+test("legacy medication without target IDs retains only fish found in its original history",async t=>{
+ const old=log("legacy-history-targets",{action:"下药",operator:"pricing-editor"});
+ const s=await setup(t);
+ const historical=["lost","removed-fish"].map(stockItemId=>({id:`old-bio-${stockItemId}`,sourceType:"dailyLog",sourceLogId:old.id,stockItemId,siteId:"nanjing",tankGroupId:"group-n",subTankId:"tank-n",date,operator:"pricing-editor",text:"历史用药",photos:[],videos:[]}));
+ await s.insertTestLegacyDailyLog(old,historical);
+ const before=await s.readPersistedState();assert.equal(before.logs[0].syncedStockItemIds,undefined);
+ ok(await s.log({...old,notes:"更正无目标名单的历史记录"},"admin",{createOnly:false}));
+ const after=await s.readPersistedState();const updated=after.bioRecords.filter(r=>r.sourceLogId===old.id);
+ assert.deepEqual(new Set(updated.map(r=>r.stockItemId)),new Set(["lost","removed-fish"]));
+ assert(updated.every(r=>r.text.includes("更正无目标名单的历史记录")&&r.subTankId==="tank-n"));
+ assert.deepEqual(after.stock,before.stock);
+});
+
 test("single fish record rejects stale tank, loss/outbound/transfer, and retries a stable id only once",async t=>{
  const s=await setup(t); ok(await s.bio("follower")); const retry=await s.bio("follower");ok(retry);assert.equal(retry.body.idempotent,true);
  const state=await s.readPersistedState();assert.equal(state.bioRecords.filter(r=>r.id==="mobile-bio").length,1);assert.equal(state.bioRecords.find(r=>r.id==="mobile-bio").subTankId,"tank-n");

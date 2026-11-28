@@ -75,5 +75,14 @@ export async function startMutableRouteServer(fixture, { port: requestedPort = 0
     };
     child.on("message", receive); child.send({ type: "fishroom-test-personnel-patch", requestId, personnelId, patch });
   });
-  return { child, baseUrl, uploadDir, stop, request, login, readPersistedState, patchTestPersonnel, get output() { return output; } };
+  const insertTestLegacyDailyLog = (log, bioRecords = []) => new Promise((resolve, reject) => {
+    const requestId = ++readId;
+    const timer = setTimeout(() => { child.off("message", receive); reject(new Error("Test legacy daily insert timed out")); }, 2_000);
+    const receive = message => {
+      if (message?.type !== "fishroom-test-legacy-daily-inserted" || message.requestId !== requestId) return;
+      clearTimeout(timer); child.off("message", receive); resolve();
+    };
+    child.on("message", receive); child.send({ type: "fishroom-test-legacy-daily-insert", requestId, log, bioRecords });
+  });
+  return { child, baseUrl, uploadDir, stop, request, login, readPersistedState, patchTestPersonnel, insertTestLegacyDailyLog, get output() { return output; } };
 }

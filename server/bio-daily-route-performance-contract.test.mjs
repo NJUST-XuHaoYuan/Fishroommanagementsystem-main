@@ -51,6 +51,19 @@ test("daily-log mutations release large JSONB temporaries between statements and
   assert.match(block, /if \(existingBioRecords.length > 0 \|\| bioRecordUpdates.length > 0\)/);
 });
 
+test("legacy daily-log synchronization scans large fish history once and reuses only its small matched set", () => {
+  const block = routeBlock("/api/daily-logs/save");
+  const query = block.match(/`(WITH outbound_stock_ids AS MATERIALIZED[\s\S]*?AS existing_bio_records)`/)[1];
+  assert.match(query, /prior_bio_records AS MATERIALIZED \([\s\S]*?sourceLogId[\s\S]*?= \$2/);
+  assert.match(query, /prior_synced_stock_ids AS MATERIALIZED \([\s\S]*?FROM prior_bio_records/);
+  assert.match(query, /IN \(\s*SELECT stock_id FROM prior_synced_stock_ids\s*\)/);
+  assert.match(query, /FROM prior_bio_records AS bio_row/);
+  assert.equal((query.match(/jsonb_array_elements\(COALESCE\(source\.data -> 'bioRecords'/g) ?? []).length, 1,
+    "one filtered materialized scan, never a full history scan per stock item");
+  const inventoryScan = query.slice(query.indexOf("SELECT jsonb_agg(stock_row.item"));
+  assert.doesNotMatch(inventoryScan, /jsonb_array_elements\([^]*?bioRecords/);
+});
+
 test("bio-record save never materializes full stock, history, order, shipment or audit arrays in Node", () => {
   const block = routeBlock("/api/bio-records/save");
   const lockIndex = block.indexOf("SELECT 1 FROM app_state WHERE id = $1 FOR UPDATE");

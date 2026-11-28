@@ -17,6 +17,13 @@ if (persistWrites && typeof process.send === "function") process.on("message", (
     revision = String(Number(revision) + 1);
     process.send({ type: "fishroom-test-personnel-patched", requestId: message.requestId });
   }
+  // Model a pre-upgrade row after startup migrations have already run.
+  if (message?.type === "fishroom-test-legacy-daily-insert") {
+    state.logs = [...(state.logs ?? []), message.log];
+    state.bioRecords = [...(state.bioRecords ?? []), ...(message.bioRecords ?? [])];
+    revision = String(Number(revision) + 1);
+    process.send({ type: "fishroom-test-legacy-daily-inserted", requestId: message.requestId });
+  }
 });
 const settlements = Array.isArray(fixture.platformSettlements)
   ? fixture.platformSettlements

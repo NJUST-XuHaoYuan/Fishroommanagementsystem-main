@@ -16881,6 +16881,18 @@ async function handleApi(req, res, url) {
                  AND COALESCE(order_row.item ->> 'status', '') = 'completed'
                  AND btrim(COALESCE(order_item.item ->> 'inventoryRemovedAt', '')) = ''
                  AND btrim(COALESCE(order_item.item ->> 'stockItemId', '')) <> ''
+             ), prior_bio_records AS MATERIALIZED (
+               SELECT bio_row.item, bio_row.ordinality
+               FROM app_state source,
+                    jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb))
+                      WITH ORDINALITY AS bio_row(item, ordinality)
+               WHERE source.id = $1
+                 AND COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
+                 AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
+             ), prior_synced_stock_ids AS MATERIALIZED (
+               SELECT DISTINCT btrim(COALESCE(item ->> 'stockItemId', '')) AS stock_id
+               FROM prior_bio_records
+               WHERE $6::boolean AND btrim(COALESCE(item ->> 'stockItemId', '')) <> ''
              )
              SELECT
                COALESCE((
@@ -16891,10 +16903,8 @@ async function handleApi(req, res, url) {
                  WHERE source.id = $1
                    AND (
                      ($3::boolean AND (btrim(COALESCE(stock_row.item ->> 'id', '')) = ANY($4::text[])
-                       OR ($6::boolean AND EXISTS (
-                         SELECT 1 FROM jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb)) AS prior(item)
-                         WHERE prior.item ->> 'sourceType' = 'dailyLog' AND prior.item ->> 'sourceLogId' = $2
-                           AND prior.item ->> 'stockItemId' = stock_row.item ->> 'id'
+                       OR ($6::boolean AND btrim(COALESCE(stock_row.item ->> 'id', '')) IN (
+                         SELECT stock_id FROM prior_synced_stock_ids
                        ))))
                      OR
                      (NOT $3::boolean
@@ -16910,12 +16920,7 @@ async function handleApi(req, res, url) {
                ), '[]'::jsonb) AS target_stock,
                COALESCE((
                  SELECT jsonb_agg(bio_row.item ORDER BY bio_row.ordinality)
-                 FROM app_state source,
-                      jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb))
-                        WITH ORDINALITY AS bio_row(item, ordinality)
-                 WHERE source.id = $1
-                   AND COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
-                   AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
+                 FROM prior_bio_records AS bio_row
                ), '[]'::jsonb) AS existing_bio_records`,
             [stateId, targetId, preserveSyncedStockIds, preservedStockIds, targetSubTankIds, preserveLegacyTargets]
           );
