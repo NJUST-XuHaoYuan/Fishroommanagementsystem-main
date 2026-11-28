@@ -1,7 +1,8 @@
 const { fetchCatalog } = require("../../utils/api");
 const { showCustomerTools } = require("../../utils/config");
-const { buildViewModel } = require("../../utils/catalog");
+const { buildViewModel, filterProducts } = require("../../utils/catalog");
 const { getNavigationMetrics } = require("../../utils/navigation");
+const { handleCardImageError } = require("../../utils/card-video-preview");
 const { SITE_OPTIONS, getSiteSelection, setSiteSelection } = require("../../utils/site-filter");
 const {
   beginPublicCatalogRequest,
@@ -10,12 +11,21 @@ const {
   stopPublicCatalogRefresh
 } = require("../../utils/public-catalog-refresh");
 
+function decodeKeyword(value) {
+  try { return decodeURIComponent(value || "").slice(0, 80); }
+  catch (_) { return String(value || "").slice(0, 80); }
+}
+
 Page({
   data: {
     showCustomerTools,
     loading: true,
     refreshing: false,
     error: "",
+    keyword: "",
+    searching: false,
+    searchResults: [],
+    searchProductCount: 0,
     majorGroups: [],
     totalProducts: 0,
     totalSpecimens: 0,
@@ -28,6 +38,7 @@ Page({
   onLoad(options = {}) {
     const site = getSiteSelection(options.siteId);
     this.setData({ selectedSiteId: site.id, selectedSiteName: site.label });
+    this.applySearch(decodeKeyword(options.keyword));
     this.loadCatalog();
   },
 
@@ -91,10 +102,13 @@ Page({
       app.globalData.loadedAt = 0;
       this.catalog = null;
       this.fullViewModel = null;
+      this.viewModel = null;
       this.setData({
         loading: false,
         refreshing: false,
         error: error && error.message || "公开目录加载失败",
+        searchResults: [],
+        searchProductCount: 0,
         majorGroups: [],
         totalProducts: 0,
         totalSpecimens: 0
@@ -109,11 +123,46 @@ Page({
     const viewModel = this.data.selectedSiteId === "all"
       ? this.fullViewModel
       : buildViewModel(this.catalog, this.data.selectedSiteId);
+    this.viewModel = viewModel;
     this.setData({
       majorGroups: viewModel.majorGroups,
       totalProducts: viewModel.totalProducts,
       totalSpecimens: viewModel.totalSpecimens
     });
+    this.applySearch(this.data.keyword);
+  },
+
+  applySearch(keyword) {
+    const value = String(keyword || "").slice(0, 80);
+    const query = value.trim();
+    const searchResults = query && this.viewModel
+      ? filterProducts(this.viewModel, "", query).map((item) => ({
+        ...item,
+        unit: this.viewModel.categories.find((category) => category.key === item.category)?.unit || "条"
+      }))
+      : [];
+    this.setData({ keyword: value, searching: Boolean(query), searchResults, searchProductCount: searchResults.length });
+  },
+
+  onSearchInput(event) {
+    this.applySearch(event.detail.value);
+  },
+
+  onClearSearch() {
+    this.applySearch("");
+  },
+
+  onSearchProductTap(event) {
+    if (this.data.loading || this.data.refreshing || this.data.error) return;
+    const product = this.data.searchResults.find((item) => item.id === event.currentTarget.dataset.id);
+    if (!product) return;
+    wx.navigateTo({
+      url: `/pages/specimens/index?productId=${encodeURIComponent(product.id)}&siteId=${encodeURIComponent(this.data.selectedSiteId)}&from=catalog`
+    });
+  },
+
+  onSearchImageError(event) {
+    handleCardImageError(this, event, "searchResults");
   },
 
   onSiteTap(event) {
@@ -146,9 +195,10 @@ Page({
   },
 
   onShareAppMessage() {
+    const query = this.data.keyword.trim();
     return {
-      title: `海洋森林 · 生物选购${this.data.selectedSiteId === "all" ? "" : " · " + this.data.selectedSiteName}`,
-      path: `/pages/catalog/index?siteId=${encodeURIComponent(this.data.selectedSiteId)}`
+      title: `海洋森林 · ${query ? "搜索「" + query + "」" : "生物选购"}${this.data.selectedSiteId === "all" ? "" : " · " + this.data.selectedSiteName}`,
+      path: `/pages/catalog/index?siteId=${encodeURIComponent(this.data.selectedSiteId)}${query ? "&keyword=" + encodeURIComponent(query) : ""}`
     };
   }
 });

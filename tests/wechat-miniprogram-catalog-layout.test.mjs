@@ -81,3 +81,61 @@ test("category tap preserves the existing product route and encodes category key
   definition.onMinorCategoryTap({ currentTarget: { dataset: {} } });
   assert.equal(routes.length, 1);
 });
+
+const templateTags = [...template.matchAll(/<[a-z][\w-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/g)].map((match) => ({
+  index: match.index,
+  attributes: Object.fromEntries([...match[0].matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+    .map((attribute) => [attribute[1], attribute[2] ?? attribute[3]]))
+}));
+const expression = (value) => value?.match(/^\{\{([\s\S]+)\}\}$/)?.[1].trim();
+
+test("home search binds typed and confirmed queries, with an accessible clear action", () => {
+  const inputs = templateTags.filter(({ attributes }) => attributes.bindinput === "onSearchInput");
+  assert.equal(inputs.length, 1);
+  const input = inputs[0].attributes;
+  assert.equal(expression(input.value), "keyword");
+  assert.equal(input.bindconfirm, "onSearchInput");
+  assert.equal(input["confirm-type"], "search");
+  assert.ok(input["aria-label"]?.trim());
+  const clear = templateTags.find(({ attributes }) => attributes.bindtap === "onClearSearch"
+    && expression(attributes["wx:if"]) === "keyword");
+  assert.ok(clear, "a nonempty query must expose the clear action");
+  assert.ok(clear.attributes["aria-label"]?.trim());
+});
+
+test("home search results follow loading and errors, precede categories, and expose empty-result recovery", () => {
+  const loading = templateTags.find(({ attributes }) => expression(attributes["wx:if"]) === "loading");
+  const error = templateTags.find(({ attributes }) => expression(attributes["wx:elif"]) === "error");
+  const search = templateTags.find(({ attributes }) => expression(attributes["wx:elif"]) === "searching");
+  const categories = templateTags.find(({ attributes }) => expression(attributes["wx:elif"]) === "majorGroups.length");
+  assert.ok(loading && error && search && categories, "search must share the existing loading/error/category state chain");
+  assert.ok(loading.index < error.index && error.index < search.index && search.index < categories.index);
+  const searchTags = templateTags.filter(({ index }) => index > search.index && index < categories.index);
+  assert.ok(searchTags.some(({ attributes }) => expression(attributes["wx:if"]) === "searchResults.length"));
+  assert.ok(searchTags.some(({ attributes }) => attributes.bindtap === "onClearSearch"),
+    "zero results must offer a route back to categories");
+  const searchTemplate = template.slice(search.index, categories.index);
+  assert.match(searchTemplate, /\{\{\s*searchProductCount\s*\}\}/);
+});
+
+test("home search result identity, stock units and image-error bindings reach the real handlers", () => {
+  const result = templateTags.find(({ attributes }) => expression(attributes["wx:for"]) === "searchResults");
+  assert.ok(result, "results must render the current searchResults array");
+  assert.equal(result.attributes["wx:key"], "id");
+  assert.equal(expression(result.attributes["data-id"]), "item.id");
+  assert.equal(result.attributes.bindtap, "onSearchProductTap");
+  assert.equal(result.attributes.role, "button");
+  assert.equal(expression(result.attributes["aria-disabled"]), "refreshing");
+  assert.match(result.attributes["aria-label"], /\{\{\s*item\.name\s*\}\}/);
+  const image = templateTags.find(({ attributes }) => attributes.binderror === "onSearchImageError");
+  assert.ok(image, "a failed search image must reach the existing fallback handler");
+  assert.equal(expression(image.attributes["data-id"]), "item.id");
+  assert.equal(expression(image.attributes.src), "item.image");
+  assert.equal(image.attributes["data-src"], image.attributes.src);
+  const searchEnd = templateTags.find(({ attributes }) => expression(attributes["wx:elif"]) === "majorGroups.length");
+  const resultTemplate = template.slice(result.index, searchEnd.index);
+  for (const binding of ["item.name", "item.priceText", "item.specimenCount", "item.unit"]) {
+    assert.ok([...resultTemplate.matchAll(/\{\{([\s\S]+?)\}\}/g)].some((match) => match[1].trim() === binding),
+      "search results must display " + binding);
+  }
+});

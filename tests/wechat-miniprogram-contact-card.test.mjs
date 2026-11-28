@@ -41,6 +41,7 @@ test("customer tools are disabled in real page data and hide every consultation 
     "../../utils/config": config,
     "../../utils/api": {},
     "../../utils/catalog": {},
+    "../../utils/card-video-preview": {},
     "../../utils/navigation": { getNavigationMetrics: () => ({}) },
     "../../utils/site-filter": siteFilter,
     "../../utils/public-catalog-refresh": {},

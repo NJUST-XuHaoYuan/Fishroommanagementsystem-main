@@ -69,7 +69,9 @@ function environment(initialCatalog = fixture(), preferredSite) {
   const dependencies = {
     "../../utils/api": { async fetchCatalog(...args) {
       state.requests.push(args);
-      return state.pending ? await state.pending : state.catalog;
+      if (state.pending) return await state.pending;
+      if (state.catalog instanceof Error) throw state.catalog;
+      return state.catalog;
     } },
     "../../utils/catalog": catalog,
     "../../utils/config": load(sources["utils/config.js"]),
@@ -417,4 +419,247 @@ test("inner empty-state recovery reuses home without changing city, including de
       }
     }
   }
+});
+
+
+const search = (page, keyword) => page.onSearchInput({ detail: { value: keyword } });
+const tapSearchProduct = (page, id) => page.onSearchProductTap({ currentTarget: { dataset: { id } } });
+
+function searchFixture() {
+  const data = fixture();
+  Object.assign(data.species[0], { scientificName: "Acanthurus leucosternon", commonNames: ["surgeonfish", "海水生物"] });
+  Object.assign(data.species[1], { scientificName: "Acropora millepora", commonNames: ["鹿角", "海水生物"] });
+  data.products[0].size = "8–10 cm";
+  data.products.push({ id: "out-of-stock", speciesId: "reef", name: "Retired tang" });
+  return data;
+}
+
+test("home search spans categories and matches product, species, common name, scientific name, size and origin", async () => {
+  const data = searchFixture();
+  const original = JSON.stringify(data);
+  const h = environment(data);
+  const page = await h.open("catalog");
+  const full = h.app.globalData.catalogViewModel;
+  const cachedBefore = JSON.stringify(full);
+  for (const [query, expected] of [
+    ["Blue tang", ["shared"]], ["Coral", ["j-only"]], ["鹿角", ["j-only"]],
+    ["ACROPORA MILLEPORA", ["j-only"]], ["8–10 cm", ["shared"]], ["Indonesia", ["shared"]],
+    ["  bLuE  ", ["shared"]], ["海水生物", ["j-only", "n-only", "shared"]],
+    ["Retired tang", []], ["not-present", []],
+  ]) {
+    search(page, query);
+    assert.deepEqual(ids(page.data.searchResults), expected, query);
+    assert.equal(page.data.searchProductCount, expected.length, "counts products rather than individual fish");
+    assert.equal(page.data.searching, true);
+    assert.equal(page.data.error, "");
+  }
+  search(page, "海水生物");
+  assert.deepEqual(plain(Object.fromEntries(page.data.searchResults.map((item) => [item.id, item.unit]))),
+    { "j-only": "件", "n-only": "条", shared: "条" });
+  assert.equal(h.state.requests.length, 1, "typing never requests the API");
+  assert.equal(h.app.globalData.catalogViewModel, full);
+  assert.equal(JSON.stringify(full), cachedBefore);
+  assert.equal(JSON.stringify(data), original);
+});
+
+test("empty home searches retain the category directory without exposing an unfiltered product list", async () => {
+  const h = environment(searchFixture());
+  const page = await h.open("catalog", { siteId: "nanjing" });
+  const categories = plain(page.data.majorGroups);
+  for (const query of ["", "  ", "\t\n", "\u3000"]) {
+    search(page, query);
+    assert.equal(page.data.searching, false);
+    assert.deepEqual(plain(page.data.searchResults), []);
+    assert.equal(page.data.searchProductCount, 0);
+    assert.deepEqual(plain(page.data.majorGroups), categories);
+  }
+  search(page, "blue");
+  assert.deepEqual(ids(page.data.searchResults), ["shared"]);
+  page.onClearSearch();
+  assert.equal(page.data.keyword, "");
+  assert.equal(page.data.searching, false);
+  assert.deepEqual(plain(page.data.searchResults), []);
+  assert.equal(page.data.searchProductCount, 0);
+  assert.deepEqual(plain(page.data.majorGroups), categories);
+  assert.equal(page.data.selectedSiteId, "nanjing");
+  assert.equal(h.state.requests.length, 1);
+});
+
+test("home search follows immediate city switches, local prices and empty matches without polluting the full cache", async () => {
+  const h = environment(searchFixture());
+  const page = await h.open("catalog");
+  const full = h.app.globalData.catalogViewModel;
+  const before = JSON.stringify(full);
+  search(page, "海水生物");
+  select(page, "nanjing");
+  assert.deepEqual(ids(page.data.searchResults), ["n-only", "shared"]);
+  assert.equal(page.data.searchProductCount, 2);
+  assert.equal(page.data.searchResults.find((item) => item.id === "shared").price, 180);
+  assert.equal(page.data.searchResults.find((item) => item.id === "shared").specimenCount, 2);
+  select(page, "jiangyin");
+  assert.equal(page.data.keyword, "海水生物");
+  assert.deepEqual(ids(page.data.searchResults), ["j-only", "shared"]);
+  assert.equal(page.data.searchResults.find((item) => item.id === "shared").price, 260);
+  assert.equal(page.data.searchResults.find((item) => item.id === "shared").specimenCount, 1);
+  search(page, "Yellow");
+  assert.equal(page.data.searching, true);
+  assert.deepEqual(plain(page.data.searchResults), []);
+  assert.equal(page.data.error, "");
+  select(page, "nanjing");
+  assert.deepEqual(ids(page.data.searchResults), ["n-only"]);
+  page.onClearSearch();
+  assert.equal(page.data.totalSpecimens, 3);
+  assert.equal(h.app.globalData.catalogViewModel, full);
+  assert.equal(JSON.stringify(full), before);
+  assert.equal(h.state.requests.length, 1);
+  assert.equal(h.app.globalData.siteId, "all");
+});
+
+test("typing and changing city during the initial load uses the latest input once data arrives", async () => {
+  const h = environment(searchFixture());
+  const deferred = pending();
+  h.state.pending = deferred.promise;
+  const page = h.createPage("catalog");
+  page.onLoad({ siteId: "nanjing" });
+  page.onShow();
+  search(page, "Yellow");
+  search(page, "Blue");
+  select(page, "jiangyin");
+  assert.equal(page.data.loading, true);
+  assert.equal(page.data.searching, true);
+  assert.deepEqual(plain(page.data.searchResults), []);
+  tapSearchProduct(page, "shared");
+  assert.deepEqual(h.state.navigations, []);
+  deferred.resolve(searchFixture());
+  await page.lastLoad;
+  assert.equal(page.data.loading, false);
+  assert.equal(page.data.selectedSiteId, "jiangyin");
+  assert.equal(page.data.keyword, "Blue");
+  assert.deepEqual(ids(page.data.searchResults), ["shared"]);
+  assert.equal(page.data.searchResults[0].price, 260);
+  assert.equal(h.state.requests.length, 1);
+});
+
+test("overlapping home refreshes cannot restore an old query, city or catalog snapshot", async () => {
+  const h = environment(searchFixture());
+  const page = await h.open("catalog", { siteId: "nanjing" });
+  search(page, "Blue");
+  const old = pending();
+  h.state.pending = old.promise;
+  const oldLoad = page.loadCatalog({ force: true, refreshing: true });
+  select(page, "jiangyin");
+  search(page, "Red coral");
+  tapSearchProduct(page, "j-only");
+  assert.deepEqual(h.state.navigations, [], "results cannot be opened while their stock is being refreshed");
+  const current = pending();
+  h.state.pending = current.promise;
+  const currentLoad = page.loadCatalog({ force: true, refreshing: true });
+  const fresh = searchFixture();
+  fresh.stock.find((item) => item.id === "j-coral").basePrice = 115;
+  current.resolve(fresh);
+  await currentLoad;
+  old.resolve(searchFixture());
+  await oldLoad;
+  assert.equal(page.data.keyword, "Red coral");
+  assert.equal(page.data.selectedSiteId, "jiangyin");
+  assert.deepEqual(ids(page.data.searchResults), ["j-only"]);
+  assert.equal(page.data.searchResults[0].price, 115);
+  assert.equal(page.data.refreshing, false);
+  assert.equal(h.app.globalData.catalog.stock.find((item) => item.id === "j-coral").basePrice, 115);
+  const clearing = pending();
+  h.state.pending = clearing.promise;
+  const clearLoad = page.loadCatalog({ force: true, refreshing: true });
+  page.onClearSearch();
+  clearing.resolve(fresh);
+  await clearLoad;
+  assert.equal(page.data.searching, false);
+  assert.deepEqual(plain(page.data.searchResults), []);
+  assert.equal(page.data.keyword, "");
+});
+
+test("a failed home refresh clears searchable inventory and retry reapplies the preserved keyword", async () => {
+  const h = environment(searchFixture());
+  const page = await h.open("catalog", { siteId: "nanjing" });
+  search(page, "Blue");
+  h.state.catalog = new Error("catalog unavailable");
+  await page.loadCatalog({ force: true, refreshing: true });
+  assert.equal(page.data.error, "catalog unavailable");
+  assert.equal(page.data.searchProductCount, 0);
+  assert.deepEqual(plain(page.data.searchResults), []);
+  assert.equal(h.app.globalData.catalog, null);
+  assert.equal(h.app.globalData.catalogViewModel, null);
+  search(page, "Yellow");
+  tapSearchProduct(page, "n-only");
+  assert.deepEqual(plain(page.data.searchResults), [], "changing input cannot resurrect failed cached stock");
+  assert.deepEqual(h.state.navigations, []);
+  h.state.catalog = searchFixture();
+  page.onRetry();
+  await page.lastLoad;
+  assert.equal(page.data.error, "");
+  assert.equal(page.data.keyword, "Yellow");
+  assert.equal(page.data.selectedSiteId, "nanjing");
+  assert.deepEqual(ids(page.data.searchResults), ["n-only"]);
+});
+
+test("opening a valid home result returns to the same searched homepage with its keyword and city intact", async () => {
+  const data = searchFixture();
+  data.products[0].id = "shared & blue/红";
+  data.stock.forEach((item) => { if (item.productId === "shared") item.productId = "shared & blue/红"; });
+  const h = environment(data);
+  const home = await h.open("catalog", { siteId: "jiangyin" });
+  search(home, "Blue");
+  for (const invalidId of ["j-only", "not-public", ""]) tapSearchProduct(home, invalidId);
+  assert.deepEqual(h.state.navigations, [], "only IDs in the current result set can navigate");
+  tapSearchProduct(home, "shared & blue/红");
+  const route = new URL(h.state.navigations.at(-1), "https://fish.example");
+  assert.equal(route.pathname, "/pages/specimens/index");
+  assert.equal(route.searchParams.get("productId"), "shared & blue/红");
+  assert.equal(route.searchParams.get("siteId"), "jiangyin");
+  assert.equal(route.searchParams.get("from"), "catalog");
+  home.onHide();
+  const specimens = await h.open("specimens", Object.fromEntries(route.searchParams));
+  assert.equal(specimens.data.filteredSpecimenCount, 1);
+  specimens.onBackTap();
+  assert.deepEqual(h.state.navigations.at(-1), { back: 1 });
+  assert.equal(h.state.pages.at(-1), home, "the existing homepage is reused rather than losing its search state");
+  home.onShow();
+  await home.lastLoad;
+  assert.equal(home.data.keyword, "Blue");
+  assert.equal(home.data.selectedSiteId, "jiangyin");
+  assert.deepEqual(ids(home.data.searchResults), ["shared & blue/红"]);
+  const direct = environment(data, "jiangyin");
+  const linked = await direct.open("specimens", Object.fromEntries(route.searchParams));
+  linked.onBackTap();
+  assert.equal(direct.state.navigations.at(-1), "/pages/catalog/index", "a direct link has a safe home fallback");
+  assert.equal(direct.site.getSiteSelection().id, "jiangyin");
+});
+
+test("home shares encode keyword and city separately and safely restore bounded or malformed queries", async () => {
+  const keyword = "蓝吊 & siteId=jiangyin + 珊瑚 50% #?";
+  const data = searchFixture();
+  data.products[0].name = keyword;
+  const h = environment(data);
+  const page = await h.open("catalog", { siteId: "nanjing" });
+  search(page, `  ${keyword}  `);
+  const message = page.onShareAppMessage();
+  const shared = new URL(message.path, "https://fish.example");
+  assert.equal(shared.pathname, "/pages/catalog/index");
+  assert.deepEqual([...shared.searchParams.keys()], ["siteId", "keyword"]);
+  assert.equal(shared.searchParams.get("siteId"), "nanjing");
+  assert.equal(shared.searchParams.get("keyword"), keyword);
+  assert.ok(message.title.includes(keyword));
+  const recipient = environment(data, "jiangyin");
+  const restored = await recipient.open("catalog", { siteId: "nanjing", keyword: encodeURIComponent(keyword) });
+  assert.equal(restored.data.keyword, keyword);
+  assert.equal(restored.data.selectedSiteId, "nanjing");
+  assert.deepEqual(ids(restored.data.searchResults), ["shared"]);
+  page.onClearSearch();
+  assert.equal(new URL(page.onShareAppMessage().path, "https://fish.example").searchParams.has("keyword"), false);
+  for (const value of ["%E0%A4%A", "海".repeat(100)]) {
+    const incoming = await environment().open("catalog", { keyword: value });
+    assert.equal(incoming.data.keyword, value.slice(0, 80));
+    assert.equal(incoming.data.error, "");
+  }
+  search(page, "海".repeat(100));
+  assert.equal(page.data.keyword.length, 80);
 });

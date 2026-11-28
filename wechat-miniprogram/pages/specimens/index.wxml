@@ -1,7 +1,7 @@
 <view class="safe-page specimens-page">
   <view class="page-back-row">
-    <button class="page-back-button" size="mini" bindtap="onBackTap" aria-label="返回商品列表">
-      <text class="page-back-arrow" aria-hidden="true">‹</text><text>返回商品列表</text>
+    <button class="page-back-button" size="mini" bindtap="onBackTap" aria-label="{{fromCatalog ? '返回搜索结果' : '返回商品列表'}}">
+      <text class="page-back-arrow" aria-hidden="true">‹</text><text>{{fromCatalog ? '返回搜索结果' : '返回商品列表'}}</text>
     </button>
   </view>
   <view wx:if="{{loading}}" class="state-panel">
