@@ -1,4 +1,5 @@
 import { normalizeMaintenanceMedia } from "./daily-log-save-rules.mjs";
+import { maintenanceRecordLocation } from "./maintenance-scope-rules.mjs";
 
 export const DEFAULT_WATER_QUALITY_PARAMETERS = [
   { id: "temperature", name: "温度", unit: "°C", precision: 1 },
@@ -158,16 +159,13 @@ export function normalizeWaterQualityRecord(input, context = {}) {
   if (values.length === 0) throw new Error("请至少填写一项水质测量值");
 
   const current = context.existingRecord;
-  const subTankId = String(Object.hasOwn(input, "subTankId") ? input.subTankId ?? "" : current?.subTankId ?? "").trim();
-  if (subTankId && (context.group?.subTanks ?? []).filter(tank => String(tank?.id ?? "").trim() === subTankId).length !== 1) {
-    throw Object.assign(new Error("所选子缸不存在或不属于当前缸组"), { statusCode: 404 });
-  }
+  const location = maintenanceRecordLocation(input, { current, group: context.group, forceGroup: true });
   return {
     id: String(input?.id || context.existingRecord?.id || context.createId?.() || "").trim(),
     siteId: String(context.siteId ?? input?.siteId ?? context.group?.siteId ?? "").trim(),
     measuredAt: new Date(measuredTime).toISOString(),
     tankGroupId: String(context.group?.id ?? input?.tankGroupId ?? "").trim(),
-    ...(subTankId ? { subTankId } : {}),
+    ...location,
     values,
     photos: normalizeMaintenanceMedia(Object.hasOwn(input, "photos") ? input.photos : current?.photos, "照片"),
     videos: normalizeMaintenanceMedia(Object.hasOwn(input, "videos") ? input.videos : current?.videos, "视频"),

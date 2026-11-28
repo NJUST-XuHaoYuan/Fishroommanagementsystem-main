@@ -206,6 +206,7 @@ import {
   resolveUniqueShipmentMutationTarget,
 } from "./order-shipment-mutation-targets.mjs";
 import { assertDailyLogSyncIdentity, planDailyLogSave } from "./daily-log-save-rules.mjs";
+import { comparableMaintenanceLocation, isSharedWaterAction } from "./maintenance-scope-rules.mjs";
 import {
   isSafePublicMediaMime,
   publicMediaCacheMaxAgeSeconds,
@@ -4833,6 +4834,11 @@ function dailyLogRecordText(log = {}) {
   return `${log.subTankId ? "子缸养护" : "缸组养护"}：${action}${notes ? `；备注：${notes}` : ""}`;
 }
 
+function dailyLogScopeNormalized(previous, next, previousGroupId) {
+  return Boolean(previous && previousGroupId === next?.tankGroupId && previous.subTankId && !next?.subTankId &&
+    (previous.scope === "group" || isSharedWaterAction(previous.action)));
+}
+
 function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingRecord = null, groupChanged = false) {
   const found = findSubTank(state, stockItem.subTankId);
   const group = (Array.isArray(state.tankGroups) ? state.tankGroups : [])
@@ -4868,7 +4874,9 @@ function syncedDailyLogRecord(state = {}, log = {}, stockItem = {}, existingReco
 }
 
 function syncDailyLogToBioRecords(state = {}, bioRecords = [], normalizedLog = {}, previousLog = null) {
-  const groupChanged = previousLog && (dailyLogGroupId(state, previousLog) !== normalizedLog.tankGroupId || String(previousLog.subTankId ?? "") !== String(normalizedLog.subTankId ?? ""));
+  const previousGroupId = dailyLogGroupId(state, previousLog);
+  const scopeNormalized = dailyLogScopeNormalized(previousLog, normalizedLog, previousGroupId);
+  const groupChanged = previousLog && (previousGroupId !== normalizedLog.tankGroupId || !scopeNormalized && String(previousLog.subTankId ?? "") !== String(normalizedLog.subTankId ?? ""));
   const existingForLog = (Array.isArray(bioRecords) ? bioRecords : [])
     .filter((record) => record?.sourceType === "dailyLog" && String(record?.sourceLogId ?? "") === String(normalizedLog.id));
   const existingByStockId = new Map(existingForLog.map((record) => [String(record.stockItemId), record]));
@@ -16822,11 +16830,13 @@ async function handleApi(req, res, url) {
           }
 
           const currentGroupId = plan.current ? dailyLogGroupId(projectedState, plan.current) : "";
-          const groupChanged = Boolean(plan.current && (currentGroupId !== String(plan.log?.tankGroupId ?? "") || String(plan.current.subTankId ?? "") !== String(plan.log?.subTankId ?? "")));
+          const scopeNormalized = dailyLogScopeNormalized(plan.current, plan.log, currentGroupId);
+          const groupChanged = Boolean(plan.current && (currentGroupId !== String(plan.log?.tankGroupId ?? "") || !scopeNormalized && String(plan.current.subTankId ?? "") !== String(plan.log?.subTankId ?? "")));
           const preserveSyncedStockIds = Boolean(
-            plan.mode === "update" && !groupChanged && Array.isArray(plan.current?.syncedStockItemIds)
+            plan.mode === "update" && !groupChanged && (Array.isArray(plan.current?.syncedStockItemIds) || scopeNormalized)
           );
-          const preservedStockIds = preserveSyncedStockIds
+          const preserveLegacyTargets = preserveSyncedStockIds && !Array.isArray(plan.current?.syncedStockItemIds);
+          const preservedStockIds = preserveSyncedStockIds && !preserveLegacyTargets
             ? plan.current.syncedStockItemIds.map((id) => String(id ?? "").trim()).filter(Boolean)
             : [];
           const targetGroup = plan.log
@@ -16880,7 +16890,12 @@ async function handleApi(req, res, url) {
                         WITH ORDINALITY AS stock_row(item, ordinality)
                  WHERE source.id = $1
                    AND (
-                     ($3::boolean AND btrim(COALESCE(stock_row.item ->> 'id', '')) = ANY($4::text[]))
+                     ($3::boolean AND (btrim(COALESCE(stock_row.item ->> 'id', '')) = ANY($4::text[])
+                       OR ($6::boolean AND EXISTS (
+                         SELECT 1 FROM jsonb_array_elements(COALESCE(source.data -> 'bioRecords', '[]'::jsonb)) AS prior(item)
+                         WHERE prior.item ->> 'sourceType' = 'dailyLog' AND prior.item ->> 'sourceLogId' = $2
+                           AND prior.item ->> 'stockItemId' = stock_row.item ->> 'id'
+                       ))))
                      OR
                      (NOT $3::boolean
                        AND btrim(COALESCE(stock_row.item ->> 'subTankId', '')) = ANY($5::text[])
@@ -16902,7 +16917,7 @@ async function handleApi(req, res, url) {
                    AND COALESCE(bio_row.item ->> 'sourceType', '') = 'dailyLog'
                    AND btrim(COALESCE(bio_row.item ->> 'sourceLogId', '')) = $2
                ), '[]'::jsonb) AS existing_bio_records`,
-            [stateId, targetId, preserveSyncedStockIds, preservedStockIds, targetSubTankIds]
+            [stateId, targetId, preserveSyncedStockIds, preservedStockIds, targetSubTankIds, preserveLegacyTargets]
           );
           const targetStock = Array.isArray(syncRows[0]?.target_stock) ? syncRows[0].target_stock : [];
           const existingBioRecords = Array.isArray(syncRows[0]?.existing_bio_records) ? syncRows[0].existing_bio_records : [];
@@ -16916,13 +16931,27 @@ async function handleApi(req, res, url) {
                 groupChanged
               ))
             : [];
+          if (plan.log && preserveSyncedStockIds) {
+            // A later loss, transfer or removal must not erase the original
+            // treatment history when only its wording/scope metadata is edited.
+            const updatedStockIds = new Set(bioRecordUpdates.map(record => String(record.stockItemId)));
+            for (const previous of existingBioRecords) {
+              if (!updatedStockIds.has(String(previous.stockItemId))) {
+                bioRecordUpdates.push(syncedDailyLogRecord(projectedState, plan.log,
+                  { id: previous.stockItemId, subTankId: previous.subTankId }, previous, false));
+              }
+            }
+          }
           const deletedBioRecordIds = existingBioRecords
             .map((record) => String(record?.id ?? "").trim())
             .filter(Boolean);
           const storedLog = plan.log
             ? {
                 ...plan.log,
-                syncedStockItemIds: targetStock.map((item) => String(item?.id ?? "").trim()).filter(Boolean),
+                syncedStockItemIds: [...new Set([
+                  ...(preserveSyncedStockIds ? preservedStockIds : []),
+                  ...bioRecordUpdates.map(record => String(record.stockItemId ?? "").trim()),
+                ].filter(Boolean))],
                 syncedAt: new Date().toISOString(),
               }
             : null;
@@ -17149,15 +17178,20 @@ async function handleApi(req, res, url) {
           const changedRecord = input ? normalizeWaterQualityRecord({ ...input, id: targetId }, {
             parameters: normalizeWaterQualityParameters(state.systemSettings.waterQualityParameters), group, existingRecord: current, operator, siteId,
           }) : null;
-          if (changedRecord?.subTankId && state.tankGroups.flatMap(item => (item.subTanks ?? []).filter(tank => String(tank.id) === changedRecord.subTankId)).length !== 1)
-            throw httpError(409, "子缸编号重复，请管理员核对后再记录");
-          if (current && changedRecord && String(current.subTankId ?? "") !== String(changedRecord.subTankId ?? "")) throw httpError(409, "不能修改水质记录所属子缸");
+          const recordedFromSubTankId = changedRecord?.recordedFromSubTankId;
+          if (recordedFromSubTankId) {
+            const matches = state.tankGroups.flatMap(item => (item.subTanks ?? []).filter(tank => String(tank.id) === recordedFromSubTankId)).length;
+            const historicalSource = String(current?.recordedFromSubTankId || current?.subTankId || "");
+            if (matches > 1 || matches === 0 && recordedFromSubTankId !== historicalSource)
+              throw httpError(409, "子缸编号不存在或重复，请管理员核对后再记录");
+          }
           if (body.createOnly === true && current) {
-            const keys = ["measuredAt", "tankGroupId", "subTankId", "values", "notes", "photos", "videos"];
+            const keys = ["measuredAt", "tankGroupId", "values", "notes", "photos", "videos"];
             const empty = key => ["values", "photos", "videos"].includes(key) ? [] : "";
             // PostgreSQL jsonb reorders object keys; retry equality must compare
             // measurement content while retaining the order of value/media arrays.
-            const same = keys.every(key => isDeepStrictEqual(current[key] ?? empty(key), changedRecord[key] ?? empty(key)));
+            const same = isDeepStrictEqual(comparableMaintenanceLocation(current, { forceGroup: true }), comparableMaintenanceLocation(changedRecord, { forceGroup: true })) &&
+              keys.every(key => isDeepStrictEqual(current[key] ?? empty(key), changedRecord[key] ?? empty(key)));
             if (!same || String(current.createdBy || current.operator) !== operator) throw httpError(409, "该记录编号已使用且内容不同，请刷新后重新记录");
             await client.query("COMMIT");
             sendJson(req, res, 200, { ok: true, idempotent: true, siteId, tankGroupId: groupId, changedRecord: current });

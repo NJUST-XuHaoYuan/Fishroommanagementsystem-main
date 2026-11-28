@@ -370,8 +370,12 @@ export type DailyLog = {
   /** 本地记录时间，精确到秒；兼容历史 YYYY-MM-DD 日期值。 */
   date: string;
   tankGroupId?: string;
-  /** 指定时只记录这个子缸；省略时兼容整缸组养护。 */
+  /** 水体用药等共享水体操作固定归整个缸组。 */
+  scope?: "group" | "subTank";
+  /** 普通子缸维护的位置；水体操作不以此限定作用范围。 */
   subTankId?: string;
+  /** 兼容旧记录的原登记位置，不代表独立水体。 */
+  recordedFromSubTankId?: string;
   action: string;
   operator: string;
   notes: string;
@@ -433,7 +437,10 @@ export type WaterQualityRecord = {
   siteId?: string;
   measuredAt: string;
   tankGroupId: string;
+  scope?: "group";
+  /** 历史字段，仅表示原登记位置；所有水质记录均属于缸组水体。 */
   subTankId?: string;
+  recordedFromSubTankId?: string;
   values: WaterQualityMeasurement[];
   operator: string;
   notes: string;

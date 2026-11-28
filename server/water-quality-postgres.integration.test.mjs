@@ -46,12 +46,12 @@ test('real PostgreSQL executes locked target projection, create/update/delete an
     PREPARE water_read(text,text) AS ${projection};
     PREPARE water_mutation(text,text,jsonb,text) AS ${mutation};
     PREPARE water_audit(text,jsonb,integer) AS ${audit};
-    PREPARE own_history(text,text,text,text,integer) AS ${history};
+    PREPARE own_history(text,text,text,text,integer,text,text[]) AS ${history};
     EXECUTE water_mutation('test','water',${literal(JSON.stringify(record))}::jsonb,'create');
     EXECUTE water_read('test','water');
     EXECUTE water_mutation('test','water',${literal(JSON.stringify(changed))}::jsonb,'update');
     EXECUTE water_audit('test','{"id":"water-audit"}'::jsonb,5);
-    EXECUTE own_history('test','u','nanjing','s',2);
+    EXECUTE own_history('test','u','nanjing','s',2,'g',ARRAY['下药','治疗','水质']);
     SELECT jsonb_build_object('marker','before_delete','data',data) FROM app_state WHERE id='test';
     EXECUTE water_mutation('test','water','null'::jsonb,'delete');
     SELECT jsonb_build_object('marker','after_delete','data',data) FROM app_state WHERE id='test';

@@ -52,3 +52,15 @@ export function mobileWaterTimestamp(localValue: string) {
   const time = new Date(localValue);
   return Number.isFinite(time.getTime()) ? time.toISOString() : "";
 }
+
+/** A sub-tank on an old water reading is the recording location, never its water scope. */
+export function mobileWaterHistoryLocation(groupName?: string, recordedFromSubTankId?: string, subTankName?: string) {
+  return {
+    location: `${groupName || "原缸组"} · 整个缸组 / 共用水体`,
+    sourceLocation: recordedFromSubTankId ? subTankName || recordedFromSubTankId : undefined,
+  };
+}
+
+export function isMobileSharedWaterLog(log: { scope?: string; action?: string; subTankId?: string }) {
+  return log.scope === "group" || !log.subTankId || ["下药", "水体下药", "治疗", "下药治疗", "水质", "测水质", "水质测试", "水质检测"].includes((log.action || "").trim());
+}

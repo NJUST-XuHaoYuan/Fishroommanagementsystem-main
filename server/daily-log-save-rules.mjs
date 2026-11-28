@@ -1,4 +1,6 @@
 import { normalizeLocalDateTime } from "./local-datetime-utils.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { comparableMaintenanceLocation, isSharedWaterAction, maintenanceRecordLocation } from "./maintenance-scope-rules.mjs";
 
 export class DailyLogSaveError extends Error {
   constructor(message, { statusCode = 400, code = "DAILY_LOG_SAVE_INVALID" } = {}) {
@@ -84,16 +86,13 @@ function normalizedLog(log, { id, group, operator, now, current }) {
     throw new DailyLogSaveError("养护日志时间不能晚于当前时间");
   }
   // Old desktop editors omit these fields. Preserve their scope and attachments.
-  const subTankId = text(Object.hasOwn(log, "subTankId") ? log.subTankId : current?.subTankId);
-  if (subTankId) exactlyOne(group.subTanks, subTankId, {
-    label: "所选子缸", notFoundCode: "DAILY_LOG_SUB_TANK_NOT_IN_GROUP", duplicateCode: "DAILY_LOG_SUB_TANK_CONFLICT",
-  });
+  const location = maintenanceRecordLocation(log, { current, group, forceGroup: isSharedWaterAction(action) });
   return {
     id,
     siteId: text(group.siteId),
     date,
     tankGroupId: text(group.id),
-    ...(subTankId ? { subTankId } : {}),
+    ...location,
     action,
     operator: normalizedOperator,
     notes: text(log?.notes),
@@ -154,8 +153,9 @@ export function planDailyLogSave({
   });
   const log = normalizedLog(change.log, { id, group, operator, now, current });
   if (change.createOnly && current) {
-    const keys = ["date", "tankGroupId", "subTankId", "action", "notes", "photos", "videos"];
-    const equal = keys.every(key => JSON.stringify(current[key] ?? (["photos", "videos"].includes(key) ? [] : "")) === JSON.stringify(log[key] ?? (["photos", "videos"].includes(key) ? [] : "")));
+    const keys = ["date", "tankGroupId", "action", "notes", "photos", "videos"];
+    const equal = isDeepStrictEqual(comparableMaintenanceLocation(current), comparableMaintenanceLocation(log)) &&
+      keys.every(key => isDeepStrictEqual(current[key] ?? (["photos", "videos"].includes(key) ? [] : ""), log[key] ?? (["photos", "videos"].includes(key) ? [] : "")));
     if (text(current.createdBy || current.operator) !== text(operator) || !equal) {
       throw new DailyLogSaveError("这条记录已存在且内容不同，请刷新后核对，不能覆盖", { statusCode: 409, code: "DAILY_LOG_CREATE_CONFLICT" });
     }

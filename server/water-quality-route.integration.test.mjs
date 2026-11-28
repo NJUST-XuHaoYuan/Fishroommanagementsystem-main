@@ -32,7 +32,8 @@ test('mobile saves signed structured parameter snapshots, media and sub-tank wit
   const s = await setup(t); const before = await s.readPersistedState();
   const result = await s.save(record('water')); ok(result); const r = result.body.changedRecord;
   assert.equal(result.body.siteId, 'nanjing'); assert.equal(result.body.tankGroupId, 'group-n'); assert.equal(result.body.waterQualityRecords, undefined);
-  assert.equal(r.operator, 'pricing-editor'); assert.equal(r.createdBy, 'pricing-editor'); assert.equal(r.subTankId, 'tank-n');
+  assert.equal(r.operator, 'pricing-editor'); assert.equal(r.createdBy, 'pricing-editor'); assert.equal(r.subTankId, undefined);
+  assert.equal(r.scope, 'group'); assert.equal(r.recordedFromSubTankId, 'tank-n');
   assert.deepEqual(r.values, [{ parameterId: 'ph', value: 8.12, parameterName: 'pH', unit: 'pH', precision: 2, testMethod: '测试笔' }]);
   assert.deepEqual(r.photos, ['/uploads/water.jpg']); assert.deepEqual(r.videos, ['/uploads/water.mp4']);
   const after = await s.readPersistedState(); assert.deepEqual(after.logs, before.logs); assert.deepEqual(after.bioRecords, before.bioRecords);
@@ -85,6 +86,31 @@ test('create-only retry accepts jsonb-reordered measurement keys but rejects cha
   assert.deepEqual(await s.readPersistedState(), before);
 });
 
+test('water is always shared by its group; legacy source positions and retries are preserved without rewriting history', async t => {
+  const old = record('old-compartment', { subTankId: 'removed-compartment', measuredAt: '2026-11-01T02:00:00.000Z', operator: 'pricing-editor', createdBy: 'pricing-editor',
+    values: [{ unit: 'pH', value: 8.12, testMethod: '测试笔', precision: 2, parameterName: 'pH', parameterId: 'ph' }] });
+  const s = await setup(t, state => {
+    state.waterQualityRecords = [old];
+    state.tankGroups.push({ id: 'group-n-other', siteId: 'nanjing', name: '另一水体', subTanks: [{ id: 'tank-n-other', name: 'Other' }] });
+  });
+  const before = await s.readPersistedState();
+  const retry = await s.save(old); ok(retry); assert.equal(retry.body.idempotent, true); assert.deepEqual(await s.readPersistedState(), before);
+  for (const sub of ['tank-n', 'tank-n2']) {
+    const h = await s.history(`&subTankId=${sub}`); ok(h); assert.equal(h.body.waterQualityRecords[0].id, old.id);
+  }
+  const outside = await s.history('&tankGroupId=group-n-other'); ok(outside); assert.equal(outside.body.waterQualityRecords.length, 0);
+  assert.equal((await s.history('&tankGroupId=group-n-other&subTankId=tank-n')).response.status, 404);
+  const edited = await s.save({ ...old, notes: '只改备注' }, 'admin', { createOnly: false }); ok(edited);
+  assert.equal(edited.body.changedRecord.scope, 'group'); assert.equal(edited.body.changedRecord.subTankId, undefined);
+  assert.equal(edited.body.changedRecord.recordedFromSubTankId, 'removed-compartment');
+  assert.deepEqual(edited.body.changedRecord.values, old.values);
+  assert.deepEqual((await s.readPersistedState()).logs, before.logs);
+  assert.equal((await s.save({ ...old, id: 'new-with-deleted-source' })).response.status, 404);
+  const forced = await s.save(record('forged-sub-scope', { scope: 'subTank' })); ok(forced);
+  assert.equal(forced.body.changedRecord.scope, 'group'); assert.equal(forced.body.changedRecord.subTankId, undefined);
+  assert.equal((await s.save(record('foreign-source', { recordedFromSubTankId: 'tank-n-other', subTankId: undefined }))).response.status, 404);
+});
+
 test('sub-tank ownership, site authorization and live account revocation are enforced before writes', async t => {
   const s = await setup(t); const before = await s.readPersistedState();
   assert.equal((await s.save(record('wrong-tank', { subTankId: 'tank-j' }))).response.status, 404);
@@ -106,7 +132,7 @@ test('administrator configuration preserves custom parameters and historical sna
   const edited = await s.save({ id: old.id, tankGroupId: old.tankGroupId, measuredAt: old.measuredAt, values: [{ parameterId: 'ph', value: 8.345, parameterName: 'forged', unit: 'fake' }], notes: '备注修正' }, 'admin', { createOnly: false }); ok(edited);
   assert.deepEqual(edited.body.changedRecord.values[0], { ...old.values[0], value: 8.35 });
   assert.equal(edited.body.changedRecord.createdBy, 'pricing-editor'); assert.equal(edited.body.changedRecord.operator, 'pricing-admin');
-  assert.equal(edited.body.changedRecord.subTankId, 'tank-n'); assert.deepEqual(edited.body.changedRecord.photos, old.photos);
+  assert.equal(edited.body.changedRecord.subTankId, undefined); assert.equal(edited.body.changedRecord.recordedFromSubTankId, 'tank-n'); assert.deepEqual(edited.body.changedRecord.photos, old.photos);
   const newer = await s.save(record('new', { values: [{ parameterId: 'ph', value: 8.345, testMethod: '新仪器' }] })); ok(newer);
   assert.equal(newer.body.changedRecord.values[0].parameterName, '新pH名称'); assert.equal(newer.body.changedRecord.values[0].unit, '新版单位'); assert.equal(newer.body.changedRecord.values[0].precision, 1);
   const state = await s.readPersistedState(); assert.equal(state.systemSettings.unrelatedSetting, 'keep'); assert(state.systemSettings.waterQualityParameters.some(p => p.id === 'copper'));
@@ -121,10 +147,10 @@ test('personal history mixes chronological water/tank/fish records and does not 
   ok(await s.save(record('water-own'))); ok(await s.save(record('water-other'), 'admin'));
   ok(await s.save(record('water-sub2', { subTankId: 'tank-n2' })));
   ok(await s.save(record('water-private', { siteId: 'jiangyin', tankGroupId: 'group-j', subTankId: 'tank-j' }), 'admin'));
-  const h = await s.history('&subTankId=tank-n&limit=1'); ok(h); assert.equal(h.body.waterQualityRecords[0].id, 'water-own'); assert.equal(h.body.logs.length + h.body.bioRecords.length, 0); assert.equal(h.body.truncated, true);
-  const all = await s.history('&subTankId=tank-n'); ok(all); assert.deepEqual(all.body.waterQualityRecords.map(r => r.id), ['water-own']);
+  const h = await s.history('&subTankId=tank-n&limit=1'); ok(h); assert.equal(h.body.waterQualityRecords[0].id, 'water-sub2'); assert.equal(h.body.logs.length + h.body.bioRecords.length, 0); assert.equal(h.body.truncated, true);
+  const all = await s.history('&subTankId=tank-n'); ok(all); assert.deepEqual(all.body.waterQualityRecords.map(r => r.id), ['water-sub2', 'water-own']);
   assert.deepEqual(all.body.bioRecords.map(r => r.id), ['bio-own']); assert.deepEqual(all.body.logs.map(r => r.id), ['legacy-water-text']);
-  const sub2 = await s.history('&subTankId=tank-n2'); ok(sub2); assert.deepEqual(sub2.body.waterQualityRecords.map(r => r.id), ['water-sub2']);
+  const sub2 = await s.history('&subTankId=tank-n2'); ok(sub2); assert.deepEqual(sub2.body.waterQualityRecords.map(r => r.id), ['water-sub2', 'water-own']);
   assert.equal((await s.history('&subTankId=tank-j')).response.status, 404);
 });
 

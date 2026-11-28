@@ -57,3 +57,22 @@ test("UTC water records and local maintenance logs use the same local display an
     assert.equal(water.mobileWaterTimestamp("2026-11-27T16:00:00"), "2026-11-27T08:00:00.000Z");
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
 });
+
+test("old sub-tank water readings retain only their source position, with a shared group scope", () => {
+  assert.deepEqual(water.mobileWaterHistoryLocation("测试缸", "sub-1", "上格"), {
+    location: "测试缸 · 整个缸组 / 共用水体", sourceLocation: "上格",
+  });
+  assert.deepEqual(water.mobileWaterHistoryLocation("测试缸"), {
+    location: "测试缸 · 整个缸组 / 共用水体", sourceLocation: undefined,
+  });
+  assert.equal(water.mobileWaterHistoryLocation(undefined, "removed-sub").sourceLocation, "removed-sub");
+});
+
+test("legacy daily water and dosing actions share a group while ordinary sub-tank logs keep their location", () => {
+  for (const action of [" 下药 ", "水质", "测水质", "水质检测", "下药", "水体下药", "治疗", "下药治疗"]) {
+    assert.equal(water.isMobileSharedWaterLog({ action, subTankId: "sub-1" }), true);
+  }
+  assert.equal(water.isMobileSharedWaterLog({ action: "观察", subTankId: "sub-1" }), false);
+  assert.equal(water.isMobileSharedWaterLog({ action: "换水", subTankId: "sub-1" }), false);
+  assert.equal(water.isMobileSharedWaterLog({ action: "喂食", scope: "group" }), true);
+});

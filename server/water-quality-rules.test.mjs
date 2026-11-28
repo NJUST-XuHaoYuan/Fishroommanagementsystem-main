@@ -131,7 +131,7 @@ test("historical names, units, precision and method survive config changes and s
   const input = { measuredAt: "2026-08-04T10:00:00Z", values: [{ parameterId: "ammonia", value: 0.1234, parameterName: "forged", unit: "forged", precision: 0 }] };
   const record = normalizeWaterQualityRecord(input, context);
   assert.deepEqual(record.values[0], { ...old.values[0], value: 0.123 }); assert.equal(record.createdBy, "creator"); assert.equal(record.operator, "editor");
-  assert.equal(record.subTankId, "sub"); assert.deepEqual(record.photos, old.photos);
+  assert.equal(record.subTankId, undefined); assert.equal(record.scope, "group"); assert.equal(record.recordedFromSubTankId, "sub"); assert.deepEqual(record.photos, old.photos);
   assert.throws(() => normalizeWaterQualityRecord({ ...input, values: [{ parameterId: "ammonia", value: 1, testMethod: "伪造方法" }] }, context), /已配置/);
   assert.equal(normalizeWaterQualityRecord({ ...input, values: [{ parameterId: "ammonia", value: 1, testMethod: "新试剂" }] }, context).values[0].testMethod, "新试剂");
 });

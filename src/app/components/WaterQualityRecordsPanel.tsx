@@ -133,9 +133,11 @@ export function WaterQualityRecordsPanel({
     () => new Map(state.tankGroups.map((group) => [group.id, group])),
     [state.tankGroups]
   );
-  const recordScope = (record: Pick<WaterQualityRecord, "tankGroupId" | "subTankId">) => {
+  const recordScope = (record: Pick<WaterQualityRecord, "tankGroupId" | "subTankId" | "recordedFromSubTankId">) => {
     const group = groupById.get(record.tankGroupId);
-    return `${group?.name ?? "已删除缸组"} / ${record.subTankId ? group?.subTanks.find(tank => tank.id === record.subTankId)?.name || "已删除子缸" : "整组"}`;
+    const sourceId = record.recordedFromSubTankId || record.subTankId;
+    const source = sourceId ? group?.subTanks.find(tank => tank.id === sourceId)?.name || "已删除子缸" : "";
+    return `${group?.name ?? "已删除缸组"} / 共用水体${source ? `（原登记位置：${source}）` : ""}`;
   };
   const filteredRecords = useMemo<UnifiedTankRecord[]>(() => {
     const waterRecords: UnifiedTankRecord[] = state.waterQualityRecords.map((record) => ({
@@ -236,6 +238,9 @@ export function WaterQualityRecordsPanel({
       id: draft.id || draft.newId || `water-${uid()}`,
       siteId: draft.original?.siteId || groupById.get(draft.tankGroupId)?.siteId,
       tankGroupId: draft.tankGroupId,
+      scope: "group",
+      subTankId: undefined,
+      recordedFromSubTankId: draft.original?.recordedFromSubTankId || draft.original?.subTankId,
       measuredAt: new Date(draft.measuredAt).toISOString(),
       values: values.map(({ parameterId, value }) => {
         const parameter = draftParameters.find((item) => item.id === parameterId)!;
@@ -619,7 +624,7 @@ export function WaterQualityRecordsPanel({
           </DialogHeader>
           {draft && (
             <fieldset disabled={saving} className="grid min-w-0 gap-4 py-2">
-              {draft.original && <p className="text-sm text-muted-foreground">记录范围：{recordScope(draft.original)}。已有测量沿用当时的名称、单位和小数位数。</p>}
+              <p className="text-sm text-muted-foreground">水质记录属于整个缸组的共用水体。{draft.original && <>原记录：{recordScope(draft.original)}。已有测量沿用当时的名称、单位和小数位数。</>}</p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label>缸组<span className="ml-0.5 text-red-500">*</span></Label>

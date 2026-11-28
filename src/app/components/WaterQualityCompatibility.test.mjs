@@ -75,13 +75,13 @@ test('legacy scoped save responses only update the requested record and do not e
   assert.strictEqual(store.mergeWaterQualityRecordSave(current, { changedRecord: record('wrong') }, { record: edited }), current);
 });
 
-test('PC history labels the sub-tank, historical method and attachment previews; settings are admin-only', () => {
+test('PC water history belongs to the shared water body, retaining the old entry location and attachments', () => {
   const state = { ...store.initialState, user: { username: 'reviewer', role: 'admin' },
     tankGroups: [{ id: 'group', name: '鱼D', location: '', subTanks: [{ id: 'sub', name: 'D2-2' }] }],
     waterQualityRecords: [record('one', { subTankId: 'sub', photos: ['/uploads/photo.jpg'], values: [{ parameterId: 'ammonia', parameterName: '旧氨氮', value: 0.2, unit: 'mg/L', precision: 3, testMethod: '历史方法' }] })] };
   const value = { ...store.StoreContext._currentValue, state, activeSiteId: 'nanjing' };
   const html = renderToStaticMarkup(createElement(store.StoreContext.Provider, { value }, createElement(panel.WaterQualityRecordsPanel)));
-  for (const pattern of [/鱼D \/ D2-2/, /旧氨氮/, /0\.200/, /mg\/L/, /历史方法/, /预览水质照片 1/]) assert.match(html, pattern);
+  for (const pattern of [/鱼D \/ 共用水体/, /原登记位置：D2-2/, /旧氨氮/, /0\.200/, /mg\/L/, /历史方法/, /预览水质照片 1/]) assert.match(html, pattern);
   const denied = renderToStaticMarkup(createElement(store.StoreContext.Provider, { value: { ...value, state: { ...state, user: { username: 'staff', role: 'staff' } } } }, createElement(settings.WaterQualitySettingsView)));
   assert.match(denied, /无权访问/); assert.doesNotMatch(denied, /保存配置/);
   const admin = renderToStaticMarkup(createElement(store.StoreContext.Provider, { value }, createElement(settings.WaterQualitySettingsView)));

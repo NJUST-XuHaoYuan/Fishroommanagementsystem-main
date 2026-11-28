@@ -169,7 +169,7 @@ function appStateRow(sql, values = []) {
   if (/\bAS target_stock\b/.test(sql) && /\bAS existing_bio_records\b/.test(sql)) {
     const out = new Set((state.shipments ?? []).filter(shipment => shipment.status !== "preparing").flatMap(shipment => shipment.itemStockIds ?? []));
     for (const order of state.orders ?? []) if (order.status === "completed") for (const item of order.items ?? []) if (!item.inventoryRemovedAt) out.add(item.stockItemId);
-    row.target_stock = (state.stock ?? []).filter(item => values[2] ? values[3].includes(item.id) : values[4].includes(item.subTankId) && !item.lost && item.tankTransfer?.status !== "in_transit" && !out.has(item.id));
+    row.target_stock = (state.stock ?? []).filter(item => values[2] ? values[3].includes(item.id) || values[5] && (state.bioRecords ?? []).some(record => record.sourceType === "dailyLog" && record.sourceLogId === values[1] && record.stockItemId === item.id) : values[4].includes(item.subTankId) && !item.lost && item.tankTransfer?.status !== "in_transit" && !out.has(item.id));
     row.existing_bio_records = (state.bioRecords ?? []).filter(record => record.sourceType === "dailyLog" && record.sourceLogId === values[1]);
   }
   if (/\bAS stock_id_counts\b/.test(sql)) {
@@ -355,14 +355,18 @@ function runQuery(query, values = []) {
     return result(scoped);
   }
   if (/\bown_records AS/.test(sql)) {
-    const [, username, siteId, subTankId, limit] = values;
-    const tank = (state.logs ?? []).filter(entry => (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!subTankId || entry.subTankId === subTankId)).map(entry => ({ kind: "tank", entry }));
+    const [, username, siteId, subTankId, limit, tankGroupId = "", sharedActions = []] = values;
+    const groupForSub = id => (state.tankGroups ?? []).find(group => (group.subTanks ?? []).some(tank => tank.id === id))?.id;
+    const tank = (state.logs ?? []).filter(entry => (entry.createdBy || entry.operator) === username && (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId &&
+      (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId)) === tankGroupId) &&
+      (!subTankId || entry.subTankId === subTankId || entry.scope === "group" || sharedActions.includes(String(entry.action ?? "").trim()) || !entry.subTankId)).map(entry => ({ kind: "tank", entry }));
     const fish = (state.bioRecords ?? []).filter(entry => {
       const item = (state.stock ?? []).find(stock => stock.id === entry.stockItemId);
-      return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId);
+      return entry.operator === username && ["manual", ""].includes(entry.sourceType ?? "manual") && (entry.siteId || item?.siteId || "nanjing") === siteId && (!subTankId || (entry.subTankId || item?.subTankId) === subTankId) &&
+        (!tankGroupId || (entry.tankGroupId || groupForSub(entry.subTankId || item?.subTankId)) === tankGroupId);
     }).map(entry => ({ kind: "fish", entry }));
     const water = /SELECT 'water' AS kind/.test(sql) ? (state.waterQualityRecords ?? []).filter(entry => (entry.createdBy || entry.operator) === username &&
-      (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!subTankId || entry.subTankId === subTankId)).map(entry => ({ kind: "water", entry })) : [];
+      (entry.siteId || (state.tankGroups ?? []).find(group => group.id === entry.tankGroupId)?.siteId || "nanjing") === siteId && (!tankGroupId || entry.tankGroupId === tankGroupId)).map(entry => ({ kind: "water", entry })) : [];
     const timestamp = row => { const value = row.kind === "water" ? row.entry.measuredAt : row.entry.date; return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}+08:00`); };
     if (/record_rank/.test(sql)) {
       const valid = row => /^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[T ]([01][0-9]|2[0-3]):[0-5][0-9]/.test(row.entry.measuredAt || row.entry.date);
