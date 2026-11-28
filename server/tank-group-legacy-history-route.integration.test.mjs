@@ -66,8 +66,12 @@ test("legacy reader enforces current daily and site permissions and excludes for
 
 test("legacy reader caps each collection and reports truncation without copying records", async t => {
   const s = await setup(t, state => {
-    state.logs = Array.from({ length: 205 }, (_, i) => oldLog({ id: `log-${String(i).padStart(3, "0")}`, syncedStockItemIds: [] }));
-    state.waterQualityRecords = Array.from({ length: 202 }, (_, i) => oldWater({ id: `water-${String(i).padStart(3, "0")}` }));
+    // This fixture is passed through one environment value; keep it below
+    // Linux's per-string exec limit while retaining both pagination boundaries.
+    state.logs = Array.from({ length: 205 }, (_, i) => ({ id: `log-${String(i).padStart(3, "0")}`, siteId: "nanjing", tankGroupId: "old-room",
+      date: "2026-11-01T10:00:00", action: "观察", operator: "pricing-editor", syncedStockItemIds: [] }));
+    state.waterQualityRecords = Array.from({ length: 202 }, (_, i) => ({ id: `water-${String(i).padStart(3, "0")}`, siteId: "nanjing", tankGroupId: "old-room",
+      measuredAt: "2026-11-01T02:00:00Z", operator: "pricing-editor", values: [] }));
   });
   const before = await s.readPersistedState(); const result = await s.history(); ok(result);
   assert.equal(result.body.limit, 200); assert.equal(result.body.logs.length, 200); assert.equal(result.body.waterQualityRecords.length, 200);
