@@ -15,6 +15,82 @@ export function batchPurchaseTotal(batch: Pick<PurchaseBatch, "bioFee" | "shippi
   return Number(batch.bioFee || 0) + Number(batch.shippingFee || 0);
 }
 
+const BATCH_COST_ROWS = [
+  { key: "purchase", label: "生物采购金额", centsKey: "purchaseCents" },
+  { key: "internationalFreight", label: "国际运费", centsKey: "internationalFreightCents" },
+  { key: "documentFee", label: "文件费", centsKey: "documentFeeCents" },
+  { key: "domesticFreight", label: "国内运费", centsKey: "domesticFreightCents" },
+  { key: "miscFee", label: "杂费", centsKey: "miscFeeCents" },
+  { key: "importTax", label: "进口税金", centsKey: "importTaxCents" },
+] as const;
+
+export type BatchCostBreakdown = {
+  mode: "confirmed" | "draft" | "legacy";
+  rows: { key: typeof BATCH_COST_ROWS[number]["key"]; label: string; amount: number | null }[];
+  total: number | null;
+};
+type BatchCostInput = Pick<PurchaseBatch, "bioFee" | "shippingFee" | "totalCost" | "procurement">;
+
+function validCostCents(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return null;
+  return Math.round(value / 100 * 100) === value ? value : null;
+}
+function amountCents(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  const cents = Math.round(value * 100);
+  return Math.abs(value * 100 - cents) <= 0.000001 ? validCostCents(cents) : null;
+}
+function sumCostCents(values: (number | null)[]): number | null {
+  let sum = 0;
+  for (const value of values) {
+    if (value === null) return null;
+    sum += value;
+    if (!Number.isSafeInteger(sum)) return null;
+  }
+  return validCostCents(sum);
+}
+
+/** Distinguishes confirmed allocations, unfinished estimates and unitemized history. */
+export function batchCostBreakdown(batch: BatchCostInput): BatchCostBreakdown {
+  const procurement = batch.procurement;
+  const mode = !procurement ? "legacy" : procurement.status === "confirmed" ? "confirmed" : "draft";
+  let values: (number | null)[];
+  let totalCents: number | null;
+  if (mode === "confirmed") {
+    const totals = procurement?.allocation?.totals;
+    values = BATCH_COST_ROWS.map(row => validCostCents(totals?.[row.centsKey]));
+    const allocatedTotal = validCostCents(totals?.totalCents);
+    const savedTotal = amountCents(batch.totalCost);
+    // Do not conceal missing/corrupt allocations with old two-category totals.
+    totalCents = allocatedTotal !== null && sumCostCents(values) === allocatedTotal && savedTotal === allocatedTotal
+      ? allocatedTotal : null;
+  } else if (mode === "draft") {
+    const validDraft = procurement?.status === "draft";
+    const lines = validDraft && Array.isArray(procurement.lines) ? procurement.lines : [];
+    const purchaseCents = lines.length ? sumCostCents(lines.map(line => {
+      if (!line || !Number.isSafeInteger(line.quantity) || line.quantity <= 0) return null;
+      const unitCents = amountCents(line.unitPrice);
+      return unitCents === null ? null : validCostCents(unitCents * line.quantity);
+    })) : null;
+    values = BATCH_COST_ROWS.map(row => row.key === "purchase" ? purchaseCents
+      : validDraft ? amountCents(procurement.fees?.[row.key]) : null);
+    totalCents = sumCostCents(values);
+  } else {
+    values = [amountCents(batch.bioFee), amountCents(batch.shippingFee), null, null, null, null];
+    const legacyTotal = amountCents(batchPurchaseTotal(batch));
+    // An explicit historical total is authoritative; incomplete component fields
+    // must not silently turn into zero when no total was ever recorded.
+    totalCents = amountCents(batch.totalCost) !== null || values[0] !== null && values[1] !== null ? legacyTotal : null;
+  }
+  return {
+    mode,
+    rows: BATCH_COST_ROWS.map((row, index) => ({ key: row.key,
+      label: mode === "legacy" && row.key === "internationalFreight" ? "运输费用" : row.label,
+      amount: values[index] === null ? null : values[index]! / 100 })),
+    total: totalCents === null ? null : totalCents / 100,
+  };
+}
+
 export function emptyPurchaseProcurement(): PurchaseProcurement {
   return { schemaVersion: 1, currency: "CNY", status: "draft", lines: [], boxes: [], fees: {
     internationalFreight: 0, documentFee: 0, domesticFreight: 0, miscFee: 0, importTax: 0,

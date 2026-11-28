@@ -18,7 +18,8 @@ test("the batch list has one detail entry and non-wrapping overflow actions", ()
 test("batch facts and fish records live in the same page without suppressing the edit dialog", () => {
   assert.match(batches, /batchInfo=\{selectedBatch && <><BatchInfoSection/);
   assert.match(details, /\{batchInfo\}/);
-  assert.match(info, /费用、数量、凭证与备注/);
+  assert.match(info, /aria-label="批次费用构成"/);
+  assert.match(info, /数量、凭证与备注/);
   assert.match(info, /报损凭证/);
   assert.match(batches, /<Dialog open=\{open\}/);
   assert.doesNotMatch(batches, /return <BatchDetailsView/);
