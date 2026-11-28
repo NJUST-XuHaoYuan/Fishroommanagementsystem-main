@@ -39,6 +39,7 @@ Page({
     speciesId: "",
     context: null,
     parentCategory: "",
+    fromCatalog: false,
     unit: "条",
     specimens: [],
     filteredSpecimenCount: 0,
@@ -51,6 +52,7 @@ Page({
   onLoad(options = {}) {
     const site = getSiteSelection(decodeOption(options.siteId));
     this.setData({
+      fromCatalog: options.from === "catalog",
       productId: decodeOption(options.productId),
       speciesId: decodeOption(options.speciesId),
       selectedSiteId: site.id,
@@ -193,6 +195,10 @@ Page({
   },
 
   onBackTap() {
+    if (this.data.fromCatalog) {
+      returnToParent("pages/catalog/index");
+      return;
+    }
     const category = this.data.parentCategory;
     returnToParent(category ? "pages/products/index" : "pages/catalog/index", category ? { category } : {});
   },

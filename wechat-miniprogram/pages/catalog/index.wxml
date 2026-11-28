@@ -34,6 +34,14 @@
     </button>
   </view>
 
+  <view class="catalog-search">
+    <view class="catalog-search-icon" aria-hidden="true"></view>
+    <input class="catalog-search-input" value="{{keyword}}" placeholder="搜索名称、俗名或学名"
+      placeholder-class="catalog-search-placeholder" aria-label="搜索所有分类的生物名称、俗名、学名、规格或产地"
+      maxlength="80" confirm-type="search" bindinput="onSearchInput" bindconfirm="onSearchInput" />
+    <button wx:if="{{keyword}}" class="catalog-search-clear" size="mini" bindtap="onClearSearch" aria-label="清空搜索，返回分类目录">清空</button>
+  </view>
+
   <view class="catalog-site-filter">
     <text class="catalog-site-label">所在地</text>
     <view class="catalog-site-options">
@@ -62,6 +70,39 @@
     <view class="empty-title">公开鱼单暂时无法加载</view>
     <view class="empty-text">{{error}}</view>
     <button class="primary-button" bindtap="onRetry">重新加载</button>
+  </view>
+
+  <view wx:elif="{{searching}}" class="catalog-search-results">
+    <view class="search-results-heading">
+      <text class="search-results-title">搜索结果</text>
+      <text class="search-results-summary">{{searchProductCount}} 款 · {{selectedSiteId === 'all' ? '全部所在地' : selectedSiteName}}</text>
+    </view>
+    <view wx:if="{{searchResults.length}}" class="search-result-list">
+      <button wx:for="{{searchResults}}" wx:key="id" class="search-result" size="mini" disabled="{{refreshing}}" hover-class="search-result-hover"
+        role="button" aria-disabled="{{refreshing}}" aria-label="查看{{item.name}}，{{item.size}}，{{item.specimenCount}}{{item.unit}}可选"
+        data-id="{{item.id}}" bindtap="onSearchProductTap">
+        <view class="search-result-media">
+          <image wx:if="{{item.image}}" class="search-result-image" src="{{item.image}}" mode="aspectFit" lazy-load
+            data-id="{{item.id}}" data-src="{{item.image}}" binderror="onSearchImageError" />
+          <text wx:else class="search-result-placeholder">暂无图片</text>
+        </view>
+        <view class="search-result-copy">
+          <view class="search-result-name">{{item.name}}</view>
+          <view class="search-result-species">{{item.speciesName}}</view>
+          <view class="search-result-spec">{{item.size}} · {{item.origin}}</view>
+          <view class="search-result-footer">
+            <view class="search-result-price">{{item.priceText}}<text wx:if="{{item.priceNote}}" class="search-result-price-note">{{item.priceNote}}</text></view>
+            <text class="search-result-count">{{item.specimenCount}} {{item.unit}}可选</text>
+          </view>
+        </view>
+        <text class="search-result-arrow" aria-hidden="true">›</text>
+      </button>
+    </view>
+    <view wx:else class="state-panel compact">
+      <view class="empty-title">{{selectedSiteId === 'all' ? '没有找到匹配的生物' : selectedSiteName + '没有匹配的生物'}}</view>
+      <view class="empty-text">试试名称中的几个字、俗名或学名{{selectedSiteId === 'all' ? '。' : '，也可以切换上方所在地。'}}</view>
+      <button class="primary-button" bindtap="onClearSearch">清空搜索，查看分类</button>
+    </view>
   </view>
 
   <view wx:elif="{{majorGroups.length}}" class="major-list">
